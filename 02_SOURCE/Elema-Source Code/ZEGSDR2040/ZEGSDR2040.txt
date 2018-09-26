@@ -1,0 +1,631 @@
+*&---------------------------------------------------------------------*
+*& プログラムID : ZEGSDR2010
+*& 作成者       : iSiD Chen
+*& 作成日       : 2014/12/01
+*& 処理概要     : 1.抽出条件を元に会社間入出庫伝票を取得する
+*&                2.販売側出庫確認したデータに対して、購買側の入庫処理
+*&                  を自動的に行い入出庫連携アドオンテーブルに登録する
+*&                3.販売側出庫取消したデータに対して、購買側の入庫取消
+*&                  す処理を自動的に行い、入出庫連携アドオンテーブルに
+*&                  登録する
+*&                4.購買側入庫取消したデータに対して、販売側の出庫取消
+*&                  す処理を自動的に行い、入出庫連携アドオンテーブルに
+*&                  登録する
+*&                5.エラーデータをエラーファイルに保存し、自動的に
+*&                  メール通知する
+*&                6.エラーデータをリカバリするため、オンラインALVで
+*&                  登録済とエラー一覧を確認する
+*&                7.エラー一覧のデータを削除及び再取込むことができる
+*&---------------------------------------------------------------------*
+*& 改定履歴
+*& No   DATE       MODIFYED BY   SUMMARY
+*& 1    2015/03/03 ISID11        InvoiceNoを入庫処理の納品書に連携する
+*&                               ・本社の場合
+*&                                   出荷伝票ヘッダテキストInvoice No.
+*&                               ・海外の場合、貿易テーブルのInvoiceNo.
+*&                               1出庫伝票N明細　⇒　N入庫1明細の対応
+*&                               洋上在庫対応
+*&                               ジョブログとオンラインメッセージに
+*&                               件数情報を追加する
+*&                               エラーファイルに共通ヘッダ情報を
+*&                               追加する
+*&                               海外拠点かつ直送以外の場合は、
+*&                               洋上在庫にする
+*& 2    2015/03/11 ISID11        検索条件追加
+*& 3    2015/03/26 ISID11        バグ対応
+*& 4    2015/03/27 ISID11        バグ対応
+*& 5    2015/03/30 ISID11        画面変更
+*& 6    2015/04/24 iSiD 11     メッセージ変数追加対応
+*& 7    2015/07/03 iSiD Ren    本社の連携入庫の在庫タイプは、
+*&                             在庫保留する
+*&                             入出庫連携ジョブ処理後、
+*&                             連携されたデータをバックグランドALVに
+*&                             出力する
+*&                             不具合対応
+*&                            （※出庫取消されたデータが対象外にする。）
+*& 8    2015/07/31 iSiD Ren    印刷パラメータ変更
+*& 9    2015/08/13 iSiD Ren    品目読替え対応
+*& 10   2015/09/10 ISID21　海外直送の場合も洋上保管場所に優先入庫する。
+*& 　　　　　　　　　　　　　　　　本社のInvoicNoを取得できない場合、社内用備考から取る。
+*& 　　　　　　　　　　　　　　　　納品書番号がブランクの場合はエラーにする。
+*& 11   2015/10/08 ISID21　返品の場合はInvoice番号なくても、入庫させる。
+*& 　　　　　　　　　　　　　　　　2重計上回避のため、Invoiceチェックを追加する。
+*& 12   2015/11/15 ISID21　ロット対応
+*& 13   2016/01/15 ISID19　2重計上回避のため、Invoiceチェックの変更。
+*& 14  2016/05/05 ISID21　購買発注/明細/Invoiceの2重チェックに変更。
+*&---------------------------------------------------------------------*
+REPORT  ZEGSDR2040 NO STANDARD PAGE HEADING.
+
+*&----------------------------------------------------------------------
+* 定数の宣言
+*&----------------------------------------------------------------------
+CONSTANTS:
+CNS_RNG_SIGN    TYPE DDSIGN VALUE 'I',
+CNS_RNG_OPTION  TYPE DDOPTION VALUE 'EQ',
+CNS_MSG_E       TYPE SY-MSGTY VALUE 'E',
+CNS_MSG_A       TYPE SY-MSGTY VALUE 'A',
+CNS_MSG_S       TYPE SY-MSGTY VALUE 'S',
+CNS_FLG_ON      TYPE FLAG     VALUE 'X',
+CNS_DEBIT         TYPE MSEG-SHKZG VALUE 'S',
+CNS_PF_STATUS   TYPE SLIS_FORMNAME VALUE 'SET_STATUS',
+CNS_USER_CMD    TYPE SLIS_FORMNAME VALUE 'USER_COMMAND',
+CNS_REEXCUTE    TYPE SY-UCOMM      VALUE 'RE-EXEC',
+CNS_DELETE      TYPE SY-UCOMM      VALUE 'DELETE',
+CNS_DETAIL      TYPE SY-UCOMM      VALUE 'DETAIL',
+CNS_DOUBLE      TYPE SY-UCOMM      VALUE '&IC1',
+**** START ADD BY ISID REN 2015/07/03 ****
+CNS_WBSTA_C     TYPE VBUP-WBSTA    VALUE 'C', "処理完了
+CNS_INSMK_3     TYPE MSEG-INSMK    VALUE '3', "在庫保留
+CNS_STATUS_C    TYPE ZSEGSD0019-STATUS VALUE 'C', "完了
+CNS_BSART_ZB    TYPE EKKO-BSART VALUE 'ZB',  "返品
+**** END ADD BY ISID REN 2015/07/03 ****
+CNS_ZKBUNCC_1   TYPE ZTEGSDT206-ZKBUNCC VALUE '1', "出庫確認連携データ
+CNS_ZKBUNCC_2   TYPE ZTEGSDT206-ZKBUNCC VALUE '2', "出庫取消連携データ
+CNS_ZKBUNCC_3   TYPE ZTEGSDT206-ZKBUNCC VALUE '3', "入庫取消連携データ
+CNS_TIME_MAX    TYPE ZTEGSDT202-JOB_TIME VALUE '235959'.   "実行時刻
+
+*&----------------------------------------------------------------------
+* 型定義
+*&----------------------------------------------------------------------
+TYPES:
+TYP_RD_BUKRS   TYPE RANGE OF T001-BUKRS,         "ITAB:対象会社コード
+TYP_RD_DWERKS  TYPE RANGE OF V_T001K_ASSIGN-WERKS, "ITAB:出荷プラント
+TYP_RD_RWERKS  TYPE RANGE OF V_T001K_ASSIGN-WERKS, "ITAB:入庫プラント
+TYP_RD_ZKBUNCC TYPE RANGE OF ZTEGSDT206-ZKBUNCC,   "処理区分
+
+BEGIN OF TYP_BUKRS,
+BUKRS TYPE T001-BUKRS,                  "会社コード
+END OF TYP_BUKRS,
+
+BEGIN OF TYP_DWERKS,
+WERKS TYPE V_T001K_ASSIGN-WERKS,        "出荷プラント
+END OF TYP_DWERKS,
+
+BEGIN OF TYP_STOCK,
+**** START ADD 2015/03/03 ISID11 ****
+EBELN_SKEY TYPE ZTEGSDT203-EBELN,       "Sort購買伝票番号
+EBELP_SKEY TYPE ZTEGSDT203-EBELP,       "Sort購買伝票の明細番号
+MBLNR_SKEY TYPE MSEG-MBLNR,             "Sort入出庫伝票番号
+MJAHR_SKEY TYPE MSEG-MJAHR,             "Sort入出庫伝票年
+**** END ADD 2015/03/03 ISID11 ****
+MBLNR      TYPE MSEG-MBLNR,             "入出庫伝票番号(Outbound)
+MJAHR      TYPE MSEG-MJAHR,             "入出庫伝票年(Outbound)
+ZEILE      TYPE MSEG-ZEILE,             "入出庫伝票の明細(Outbound)
+BUKRS      TYPE MSEG-BUKRS,             "会社コード(Inbound)
+WERK_OUTB  TYPE MSEG-WERKS,             "出荷プラント
+SMBLN      TYPE MSEG-SMBLN,     "取消元の入出庫伝票番号(Outbound)
+SJAHR      TYPE MSEG-SJAHR,     "取消元の入出庫伝票年(Outbound)
+SMBLP      TYPE MSEG-SMBLP,     "取消元の入出庫伝票の明細(Outbound)
+MBLNR_INB  TYPE ZTEGSDT206-MBLNR_INB,
+"取消元の入出庫伝票番号(Inbound)
+MJAHR_INB  TYPE ZTEGSDT206-MJAHR_INB,
+"取消元の入出庫伝票年(Inbound)
+ZEILE_INB  TYPE MSEG-ZEILE,     "取消元の入出庫伝票の明細(Outbound)
+MBLNR_NEW  TYPE ZTEGSDT206-MBLNR_INB,
+"入出庫伝票番号(Inbound)
+MJAHR_NEW  TYPE ZTEGSDT206-MJAHR_INB,
+"入出庫伝票年(Inbound)
+VBELN_IM   TYPE MSEG-VBELN_IM,          "出荷伝票
+VBELP_IM   TYPE MSEG-VBELP_IM,          "出荷明細
+BUDAT_MKPF TYPE MSEG-BUDAT_MKPF,        "伝票の転記日付
+**** START UPD BY ISID REN 2015/08/13 ****
+*    MATNR      TYPE MSEG-MATNR,             "品目コード
+MATNR      TYPE EKPO-MATNR,             "品目コード
+MEINS      TYPE EKPO-MEINS,             "発注単位
+ERFMG      TYPE MSEG-ERFMG,             "入出庫数量
+ERFME      TYPE MSEG-ERFME,             "販売数量単位
+CHARG     TYPE MSEG-CHARG,            "ロット番号
+**** END UPD BY ISID REN 2015/08/13 ****
+MENGE      TYPE MSEG-MENGE,             "入出庫数量
+VGBEL      TYPE LIPS-VGBEL,             "受注伝票番号 KDAUF
+VGPOS      TYPE LIPS-VGPOS,             "受注明細番号
+EBELN      TYPE ZTEGSDT203-EBELN,       "購買伝票番号
+EBELP      TYPE ZTEGSDT203-EBELP,       "購買伝票の明細番号
+**** START ADD 2015/03/30 ISID11 ****
+BUKRS_INB  TYPE EKPO-BUKRS,             "会社コード(Outbound)
+**** END ADD 2015/03/30 ISID11 ****
+WERK_INB   TYPE EKPO-WERKS,             "入庫プラント
+LGORT      TYPE EKPO-LGORT,             "入庫保管場所
+**** START ADD 2015/03/03 ISID11 ****
+EVERS      TYPE EKPO-EVERS,             "出荷指示
+ZFLGHEADOFFICE TYPE ZTEGSDT204-ZFLGHEADOFFICE, "本社フラグ
+ZFLGINBSINGLE  TYPE ZTEGSDT204-ZFLGINBSINGLE,  "入庫伝票単一明細FLG
+Z_INVOICE_NO   TYPE ZTEGSDT001-Z_INVOICE_NO,   "納品書番号
+**** END ADD 2015/03/03 ISID11 ****
+INSMK      TYPE MSEG-INSMK,             "在庫タイプ
+ZKBUNCC    TYPE ZTEGSDT206-ZKBUNCC,     "処理区分
+STATUS     TYPE ZTEGSDT206-STATUS,      "更新区分
+KNTTP      TYPE ZTEGSDT203-KNTTP,       "勘定設定カテゴリ
+VBTYP      TYPE LIKP-VBTYP,             "販売管理伝票カテゴリ
+**** START DEL BY ISID REN 2015/08/14 ****
+*    MEINS      TYPE MSEG-MEINS,             "基本数量単位
+**** END DEL BY ISID REN 2015/08/14 ****
+MSGTX      TYPE ZTEGSDT206-MSGTX,       "メッセージテキスト(Message)
+ERNAM      TYPE ZTEGSDT206-Z_CRE_USERID, "登録者(Create User)
+Z_CRE_YMD  TYPE ZTEGSDT206-Z_CRE_YMD,   "ジョブ実行日付(Job Date)
+Z_CRE_HMS  TYPE ZTEGSDT206-Z_CRE_HMS,   "ジョブ実行時刻(Job Time)
+VKORG      TYPE VBAK-VKORG,             "販売組織 (Sales Org.)
+VTWEG      TYPE VBAK-VTWEG,             "流通チャネル (Channel)
+SPART      TYPE VBAK-SPART,             "製品部門 (Devision)
+VKGRP      TYPE VBAK-VKGRP,             "営業グループ (Sales Group)
+VKBUR      TYPE VBAK-VKBUR,             "営業所 (Sales Office)
+VTEXT      TYPE TVKOT-VTEXT,            "販売組織名称 (Name)
+EKORG      TYPE EKKO-EKORG,             "購買組織 (Purch Org.)
+EKGRP      TYPE EKKO-EKGRP,             "購買グループ (Purch Grp.)
+EKOTX      TYPE T024E-EKOTX,            "購買組織名称 (Name)
+MATNR_SD TYPE MARA-MATNR,            "販売側の品目コード
+MENEFLG    TYPE FLAG,                   "受発注単位違いフラグ
+END OF TYP_STOCK,
+
+* ITAB:出庫確認連携データ
+TYP_TD_STOCK TYPE STANDARD TABLE OF TYP_STOCK,
+
+BEGIN OF TYP_LIPS,
+VBELN      TYPE LIPS-VBELN,             "出荷伝票
+POSNR      TYPE LIPS-POSNR,             "出荷明細
+VGBEL      TYPE LIPS-VGBEL,             "受注伝票番号
+VGPOS      TYPE LIPS-VGPOS,             "受注明細番号
+END OF TYP_LIPS,
+
+* ITAB:販売出荷明細データ
+TYP_TD_LIPS TYPE STANDARD TABLE OF TYP_LIPS,
+
+BEGIN OF TYP_ZTEGSDT203,
+VBELN      TYPE ZTEGSDT203-VBELN,       "受注伝票番号
+POSNR      TYPE ZTEGSDT203-POSNR,       "受注明細番号
+EBELN      TYPE ZTEGSDT203-EBELN,       "購買伝票番号
+EBELP      TYPE ZTEGSDT203-EBELP,       "購買伝票の明細番号
+KNTTP      TYPE ZTEGSDT203-KNTTP,       "勘定設定カテゴリ
+**** START ADD 2015/03/26 ISID11 ****
+**** START UPD 2015/03/30 ISID11 ****
+*    VKBUR      TYPE ZTEGSDT203-VKBUR,       "購買グループ
+VKGRP      TYPE ZTEGSDT203-VKGRP,       "購買グループ
+**** END UPD 2015/03/30 ISID11 ****
+EKGRP      TYPE ZTEGSDT203-EKGRP,       "購買グループ
+**** END ADD 2015/03/26 ISID11 ****
+**** START ADD BY ISID REN 2015/07/29 ****
+BUKRS      TYPE ZTEGSDT203-BUKRS,       "会社コード
+**** END ADD BY ISID REN 2015/07/29 ****
+END OF TYP_ZTEGSDT203,
+
+* ITAB:Sales Data From Purch Order
+TYP_TD_ZTEGSDT203 TYPE STANDARD TABLE OF TYP_ZTEGSDT203,
+
+BEGIN OF TYP_EKPO,
+EBELN      TYPE EKPO-EBELN,             "購買伝票番号
+EBELP      TYPE EKPO-EBELP,             "購買伝票の明細番号
+**** START ADD 2015/03/03 ISID11 ****
+BUKRS      TYPE EKPO-BUKRS,             "会社コード
+**** END ADD 2015/03/03 ISID11 ****
+WERKS      TYPE EKPO-WERKS,             "入庫プラント
+LGORT      TYPE EKPO-LGORT,             "入庫保管場所
+**** START ADD 2015/03/03 ISID11 ****
+EVERS      TYPE EKPO-EVERS,             "出荷指示
+**** END ADD 2015/03/03 ISID11 ****
+**** START ADD BY ISID REN 2015/08/13 ****
+MATNR      TYPE EKPO-MATNR,             "品目コード
+MEINS      TYPE EKPO-MEINS,             "発注単位
+**** END ADD BY ISID REN 2015/08/13 ****
+END OF TYP_EKPO,
+
+* ITAB:購買伝票明細
+TYP_TD_EKPO  TYPE STANDARD TABLE OF TYP_EKPO,
+
+**** START DEL 2015/03/03 ISID11 ****
+*  BEGIN OF TYP_LAND1,
+*    VBELN      TYPE LIKP-VBELN,             "出荷伝票
+*    LAND1      TYPE KNA1-LAND1,             "国コード
+*  END OF TYP_LAND1,
+
+** ITAB:出荷先の国コード
+*  TYP_TD_LAND1  TYPE STANDARD TABLE OF TYP_LAND1,
+*
+*  BEGIN OF TYP_T001W,
+*    WERKS      TYPE T001W-WERKS,            "プラント
+*    LAND1      TYPE T001W-LAND1,            "国コード
+*  END OF TYP_T001W,
+*
+** ITAB:プラント/支店
+*  TYP_TD_T001W  TYPE STANDARD TABLE OF TYP_T001W,
+*
+*  BEGIN OF TYP_ZTEGSDT207,
+*    LAND1      TYPE ZTEGSDT207-LAND1,       "国コード
+*    ZLAND      TYPE ZTEGSDT207-ZLAND,       "関連国コード
+*  END OF TYP_ZTEGSDT207,
+*
+** ITAB:CountryCodeRelationshipMaster
+*  TYP_TD_ZTEGSDT207 TYPE STANDARD TABLE OF TYP_ZTEGSDT207,
+**** END DEL 2015/03/03 ISID11 ****
+
+BEGIN OF TYP_ZTEGSDT206,
+KDAUF       TYPE ZTEGSDT206-KDAUF,      "受注伝票番号
+MBLNR_OUTB  TYPE ZTEGSDT206-MBLNR_OUTB, "入出庫伝票番号(Outbound)
+MJAHR_OUTB  TYPE ZTEGSDT206-MJAHR_OUTB, "入出庫伝票年(Outbound)
+EBELN       TYPE ZTEGSDT206-EBELN,      "購買伝票番号
+MBLNR_INB   TYPE ZTEGSDT206-MBLNR_INB,  "入出庫伝票番号(Inbound)
+MJAHR_INB   TYPE ZTEGSDT206-MJAHR_INB,  "入出庫伝票年(Inbound)
+STATUS      TYPE ZTEGSDT206-STATUS,     "処理ステータス
+VBELN       TYPE ZTEGSDT206-VBELN,      "出荷伝票
+VBTYP       TYPE LIKP-VBTYP,            "販売管理伝票カテゴリ
+END OF TYP_ZTEGSDT206,
+
+* ITAB:StockLinkageBetweenCrossCompany
+TYP_TD_ZTEGSDT206 TYPE STANDARD TABLE OF TYP_ZTEGSDT206,
+
+BEGIN OF TYP_ERROR,
+KDAUF       TYPE ZTEGSDT206-KDAUF,      "受注伝票番号
+MBLNR_OUTB  TYPE ZTEGSDT206-MBLNR_OUTB, "入出庫伝票番号(Outbound)
+MJAHR_OUTB  TYPE ZTEGSDT206-MJAHR_OUTB, "入出庫伝票年(Outbound)
+EBELN       TYPE ZTEGSDT206-EBELN,      "購買伝票番号
+MBLNR_INB   TYPE ZTEGSDT206-MBLNR_INB,  "入出庫伝票番号(Inbound)
+MJAHR_INB   TYPE ZTEGSDT206-MJAHR_INB,  "入出庫伝票年(Inbound)
+WERK_INB    TYPE ZTEGSDT206-WERK_INB,   "入庫プラント
+WERK_OUTB   TYPE ZTEGSDT206-WERK_OUTB,  "出荷プラント
+VBELN       TYPE ZTEGSDT206-VBELN,      "出荷伝票
+ZKBUNCC     TYPE ZTEGSDT206-ZKBUNCC,    "処理区分
+STATUS      TYPE ZTEGSDT206-STATUS,     "更新区分
+MSGID       TYPE ZTEGSDT206-MSGID,      "メッセージクラス
+MSGNO       TYPE ZTEGSDT206-MSGNO,      "メッセージNo
+**** START ADD 2015/04/24 ISID11 ****
+MSGV1      TYPE ZTEGSDT203-MSGV1,  "メッセージ変数
+MSGV2      TYPE ZTEGSDT203-MSGV2,  "メッセージ変数
+MSGV3      TYPE ZTEGSDT203-MSGV3,  "メッセージ変数
+MSGV4      TYPE ZTEGSDT203-MSGV4,  "メッセージ変数
+**** END ADD 2015/04/24 ISID11 ****
+MSGTX       TYPE ZTEGSDT206-MSGTX,      "メッセージテキスト
+LOCKFLG     TYPE FLAG,                  "ロック失敗フラグ
+**** START ADD 2015/03/26 ISID11 ****
+**** START UPD 2015/03/30 ISID11 ****
+*    VKBUR       TYPE ZTEGSDT203-VKBUR,      "購買グループ
+VKGRP       TYPE ZTEGSDT203-VKGRP,      "営業グループ
+**** END UPD 2015/03/30 ISID11 ****
+EKGRP       TYPE ZTEGSDT203-EKGRP,      "購買グループ
+**** END ADD 2015/03/26 ISID11 ****
+END OF TYP_ERROR,
+
+* ITAB:入出庫連携エラーデータ
+TYP_TD_ERROR TYPE STANDARD TABLE OF TYP_ERROR,
+
+**** START ADD 2015/03/03 ISID11 ****
+BEGIN OF TYP_BUKRS_FLG,
+BUKRS          TYPE ZTEGSDT204-BUKRS,          "会社コード
+ZFLGHEADOFFICE TYPE ZTEGSDT204-ZFLGHEADOFFICE, "本社フラグ
+ZFLGINBSINGLE  TYPE ZTEGSDT204-ZFLGINBSINGLE,  "入庫伝票単一明細FLG
+END OF TYP_BUKRS_FLG,
+
+* ITAB:明細基準
+TYP_TD_BUKRS_FLG TYPE STANDARD TABLE OF TYP_BUKRS_FLG,
+
+BEGIN OF TYP_ZTEGSDT001,
+VBELN          TYPE ZTEGSDT001-VBELN,          "出荷伝票
+**** START ADD 2015/03/03 ISID11 ****
+ERDAT          TYPE ZTEGSDT001-ERDAT,          "レコード登録日
+**** END ADD 2015/03/03 ISID11 ****
+Z_INVOICE_NO   TYPE ZTEGSDT001-Z_INVOICE_NO,   "納品書番号
+END OF TYP_ZTEGSDT001,
+
+TYP_TD_ZTEGSDT001 TYPE STANDARD TABLE OF TYP_ZTEGSDT001,
+
+BEGIN OF TYP_ZTEGSDT208,
+BUKRS          TYPE ZTEGSDT208-BUKRS,          "会社コード
+LGORT          TYPE ZTEGSDT208-LGORT,          "保管場所
+END OF TYP_ZTEGSDT208,
+
+TYP_TD_ZTEGSDT208 TYPE STANDARD TABLE OF TYP_ZTEGSDT208,
+
+BEGIN OF TYP_WERK_INB,
+MBLNR          TYPE MSEG-MBLNR,       "入出庫伝票番号
+MJAHR          TYPE MSEG-MJAHR,       "入出庫伝票年
+ZEILE          TYPE MSEG-ZEILE,       "入出庫伝票の明細
+WERKS          TYPE MSEG-WERKS,       "プラント
+END OF TYP_WERK_INB,
+
+TYP_TD_WERK_INB  TYPE STANDARD TABLE OF TYP_WERK_INB,
+
+BEGIN OF TYP_COUNT,
+TOTAL        TYPE I,                  "対象件数
+NORMAL       TYPE I,                  "成功件数
+ERROR        TYPE I,                  "エラー件数
+OTHERS       TYPE I,                  "対象外件数
+END OF TYP_COUNT,
+**** END ADD 2015/03/03 ISID11 ****
+
+* ITAB:StockLinkageBetweenCrossCompany
+TYP_TD_ZTEGSDT206_INSERT TYPE STANDARD TABLE OF ZTEGSDT206,
+
+**** START DEL 2015/03/03 ISID11 ****
+** エラーテーブル
+*  TYP_TD_FILE   TYPE STANDARD TABLE OF ZSEGSD0020,
+**** END DEL 2015/03/03 ISID11 ****
+
+* ALV
+TYP_TD_ALV TYPE STANDARD TABLE OF ZSEGSD0019,
+
+* 販売組織情報
+BEGIN OF TYP_VBAK,
+VBELN   TYPE VBAK-VBELN,    "受注伝票番号(Sales Doc.)
+VKORG   TYPE VBAK-VKORG,    "販売組織 (Sales Org.)
+VTWEG   TYPE VBAK-VTWEG,    "流通チャネル (Channel)
+SPART   TYPE VBAK-SPART,    "製品部門 (Devision)
+VKGRP   TYPE VBAK-VKGRP,    "営業グループ (Sales Group)
+VKBUR   TYPE VBAK-VKBUR,    "営業所 (Sales Office)
+VTEXT   TYPE TVKOT-VTEXT,   "販売組織名称 (Name)
+END OF TYP_VBAK,
+
+TYP_TD_VBAK TYPE STANDARD TABLE OF TYP_VBAK,
+
+* 購買組織情報
+BEGIN OF TYP_EKKO,
+EBELN   TYPE EKKO-EBELN,    "購買伝票番号(Purch.Doc.)
+EKORG   TYPE EKKO-EKORG,    "購買組織 (Purch Org.)
+EKGRP   TYPE EKKO-EKGRP,    "購買グループ (Purch Grp.)
+EKOTX   TYPE T024E-EKOTX,   "購買組織名称 (Name)
+END OF TYP_EKKO,
+
+TYP_TD_EKKO TYPE STANDARD TABLE OF TYP_EKKO,
+
+**** START ADD 2015/04/24 ISID11 ****
+* リカバリリスト
+BEGIN OF TYP_RECOVERY_LIST,
+KDAUF  TYPE   ZTEGSDT206-KDAUF,    "受注伝票番号
+VBELN   TYPE   ZTEGSDT206-KDAUF,   "出荷伝票
+MBLNR_OUTB  TYPE   ZTEGSDT206-MBLNR_OUTB,   "販売の入出庫伝票
+EBELN   TYPE   ZTEGSDT206-EBELN,  "購買伝票番号
+MBLNR_INB TYPE  ZTEGSDT206-MBLNR_INB,  "購買の入出庫伝票
+STATUS  TYPE ZTEGSDT206-STATUS,      "ステータス
+MSGID       TYPE ZTEGSDT206-MSGID,  "メッセージ ID
+MSGNO      TYPE ZTEGSDT206-MSGNO,  "システムメッセージ番号
+MSGV1      TYPE ZTEGSDT206-MSGV1,  "メッセージ変数
+MSGV2      TYPE ZTEGSDT206-MSGV2,  "メッセージ変数
+MSGV3      TYPE ZTEGSDT206-MSGV3,  "メッセージ変数
+MSGV4      TYPE ZTEGSDT206-MSGV4,  "メッセージ変数
+MSGTX   TYPE ZTEGSDT206-MSGTX,    "メッセージテキスト
+Z_CRE_USERID TYPE ZTEGSDT206-Z_CRE_USERID, "登録者
+Z_CRE_YMD  TYPE ZTEGSDT206-Z_CRE_YMD,  "ジョブ実行日付
+Z_CRE_HMS  TYPE ZTEGSDT206-Z_CRE_HMS,  "ジョブ実行時刻
+MJAHR_OUTB  TYPE ZTEGSDT206-MJAHR_OUTB,  "販売の入出庫伝票年
+WERK_OUTB  TYPE ZTEGSDT206-WERK_OUTB,  "出荷プラント
+MJAHR_INB TYPE ZTEGSDT206-MJAHR_INB,    "購買の入出庫伝票年
+WERK_INB   TYPE ZTEGSDT206-WERK_INB,  "入庫プラント
+ZKBUNCC   TYPE ZTEGSDT206-ZKBUNCC,  "処理区分
+END     OF TYP_RECOVERY_LIST,
+**** END ADD 2015/04/24 ISID11 ****
+
+**** START ADD 2015/10/08 ISID21 ****
+BEGIN OF TYP_MSEG_INVCHECK,
+EBELN TYPE MSEG-EBELN,      "購買発注番号
+EBELP TYPE MSEG-EBELP,      "購買伝票の明細番号
+MENGE TYPE MSEG-MENGE,    "数量
+SHKZG TYPE MSEG-SHKZG,     "借方/貸方フラグ
+**** START ADD 2016/01/15 ISID19 ****
+XBLNR_MKPF TYPE MSEG-XBLNR_MKPF,"参照伝票番号
+**** END ADD 2016/01/15 ISID19 ****
+END    OF TYP_MSEG_INVCHECK,
+
+TYP_TD_MSEG_INVCHECK TYPE STANDARD TABLE OF TYP_MSEG_INVCHECK.
+**** END ADD 2015/10/21 ISID21 ****
+
+*&----------------------------------------------------------------------
+* グローバル変数
+*&----------------------------------------------------------------------
+DATA:
+W_BUKRS        TYPE T001-BUKRS,                "Company Code
+**** START UPD 2015/03/03 ISID11 ****
+*  W_DWERKS       TYPE ZEDWERKS,                  "Delivering Plant
+*  W_VBELN        TYPE ZEOUTVBELN,                "Outbound Delivery
+*  W_OMBLNR       TYPE ZEOUTMBLNR,                "Outbound Mat.Doc.
+*  W_RWERKS       TYPE ZERECWERKS,                "Receiving Plant
+*  W_IMBLNR       TYPE ZEINBELNR,                 "Inbound Mat.Doc.
+W_DWERKS       TYPE ZSEGZZ0001-DWERKS,          "Delivering Plant
+W_VBELN        TYPE ZSEGZZ0001-VBELN,           "Outbound Delivery
+W_OMBLNR       TYPE ZSEGZZ0001-OMBLNR,          "Outbound Mat.Doc.
+W_RWERKS       TYPE ZSEGZZ0001-RWERKS,          "Receiving Plant
+W_IMBLNR       TYPE ZSEGZZ0001-IMBLNR,          "Inbound Mat.Doc.
+**** END UPD 2015/03/03 ISID11 ****
+W_CPUDT        TYPE MSEG-CPUDT_MKPF,           "Create Date
+W_CPUTM        TYPE MSEG-CPUTM_MKPF,           "Create Time
+W_STATUS       TYPE ZTEGSDT206-STATUS,         "Status
+**** START UPD 2015/03/03 ISID11 ****
+*  W_CREYMD       TYPE ZEZCREYMD,                 "Job Date
+*  W_CREHMS       TYPE ZEZCREHMS,                 "Job Time
+W_CREYMD       TYPE ZSEGSD0019-Z_CRE_YMD,      "Job Date
+W_CREHMS       TYPE ZSEGSD0019-Z_CRE_HMS,      "Job Time
+**** END UPD 2015/03/03 ISID11 ****
+**** START ADD 2015/03/03 ISID11 ****
+ST_COUNT       TYPE TYP_COUNT.                 "件数
+**** END ADD 2015/03/03 ISID11 ****
+
+*&----------------------------------------------------------------------
+* 内部テーブル
+*&----------------------------------------------------------------------
+DATA:
+RD_BUKRS       TYPE TYP_RD_BUKRS,              "ITAB:対象会社コード
+RD_DWERKS      TYPE TYP_RD_DWERKS,             "ITAB:出荷プラント
+RD_RWERKS      TYPE TYP_RD_RWERKS,             "ITAB:入庫プラント
+TD_ALV         TYPE TYP_TD_ALV.                "ITAB:ALV
+
+TYPES:
+TYP_RH_BUKRS  LIKE LINE OF RD_BUKRS,
+TYP_RH_DWERKS LIKE LINE OF RD_DWERKS,
+TYP_RH_RWERKS LIKE LINE OF RD_RWERKS,
+TYP_TD_GM_ITEM TYPE TABLE OF  BAPI2017_GM_ITEM_CREATE,
+TYP_TD_BDCDATA TYPE TABLE OF BDCDATA.
+
+*&----------------------------------------------------------------------
+* SELECTION-SCREEN
+*&----------------------------------------------------------------------
+SELECTION-SCREEN BEGIN OF BLOCK BK_1.
+
+SELECTION-SCREEN BEGIN OF LINE.
+* Process Type
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: RB_1 RADIOBUTTON GROUP GP1 DEFAULT 'X' USER-COMMAND SEL.
+SELECTION-SCREEN COMMENT 37(15) TEXT-S01 FOR FIELD RB_1.
+
+SELECTION-SCREEN POSITION 54.
+PARAMETERS: RB_2 RADIOBUTTON GROUP GP1.
+SELECTION-SCREEN COMMENT 56(20) TEXT-S02 FOR FIELD RB_2.
+
+SELECTION-SCREEN END OF LINE.
+
+SELECT-OPTIONS:
+S_BUKRS     FOR W_BUKRS,                        "Company Code
+S_DWERKS    FOR W_DWERKS,                       "Delivering Plant
+S_VBELN     FOR W_VBELN,                        "Outbound Delivery
+S_OMBLNR    FOR W_OMBLNR,                       "Outbound Mat.Doc.
+S_RWERKS    FOR W_RWERKS,                       "Receiving Plant
+S_IMBLNR    FOR W_IMBLNR,                       "Inbound Mat.Doc.
+S_CPUDT     FOR W_CPUDT NO-EXTENSION,           "Create Date
+S_CPUTM     FOR W_CPUTM NO-EXTENSION.           "Create Time
+
+PARAMETERS:
+P_ERROR     TYPE ZEFILENAME.                    "Error File
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN POSITION 1.
+SELECTION-SCREEN COMMENT 1(33) TEXT-S03 FOR FIELD CB_ISSUE
+**** START ADD 2015/03/30 ISID11 ****
+MODIF ID M1.
+**** END ADD 2015/03/30 ISID11 ****
+PARAMETERS:
+CB_ISSUE    TYPE CHAR1 AS CHECKBOX DEFAULT 'X'  "Delivery Issue
+**** START ADD 2015/03/30 ISID11 ****
+MODIF ID M1.
+**** END ADD 2015/03/30 ISID11 ****
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN POSITION 1.
+SELECTION-SCREEN COMMENT 1(33) TEXT-S04 FOR FIELD CB_REVER MODIF ID M1.
+PARAMETERS:
+CB_REVER    TYPE CHAR1 AS CHECKBOX
+**** START UPD 2015/03/30 ISID11 ****
+*                                     DEFAULT 'X'. "Delivery Reverse
+MODIF ID M1 DEFAULT SPACE. "Delivery Reverse
+**** END UPD 2015/03/30 ISID11 ****
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN POSITION 1.
+SELECTION-SCREEN COMMENT 1(33) TEXT-S05 FOR FIELD CB_CANCE MODIF ID M1.
+PARAMETERS:
+CB_CANCE    TYPE CHAR1 AS CHECKBOX
+**** START UPD 2015/03/30 ISID11 ****
+*                                     DEFAULT 'X'. "Receiving Cancel
+MODIF ID M1 DEFAULT SPACE. "Receiving Cancel
+**** END UPD 2015/03/30 ISID11 ****
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS:
+S_STATUS    FOR W_STATUS,                           "Status
+S_CREYMD    FOR W_CREYMD,                           "Job Date
+S_CREHMS    FOR W_CREHMS.                           "Job Time
+
+SELECTION-SCREEN END OF BLOCK BK_1.
+
+*----------------------------------------------------------------------*
+* INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+* Create Date Time Control
+PERFORM CONTROL_SELECT_OPTIONS.
+
+**** START ADD 2015/03/30 ISID11 ****
+*----------------------------------------------------------------------*
+* AT SELECTION-SCREEN OUTPUT
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN OUTPUT.
+* 画面変更
+PERFORM MODIFY_SCREEN.
+**** END ADD 2015/03/30 ISID11 ****
+
+*----------------------------------------------------------------------*
+* AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* 初期処理
+PERFORM INIT_SCREEN_CHK CHANGING RD_BUKRS     "ITAB:対象会社コード
+RD_DWERKS    "ITAB:出荷プラント
+RD_RWERKS.   "ITAB:入庫プラント
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+IF RB_1 IS NOT INITIAL.
+
+*   ジョブ処理
+PERFORM EXCUTE_JOB.
+**** START DEL 2015/03/03 ISID11 ****
+*                       USING RD_BUKRS        "ITAB:対象会社コード
+*                             RD_DWERKS       "ITAB:出荷プラント
+*                             RD_RWERKS.      "ITAB:入庫プラント
+**** END DEL 2015/03/03 ISID11 ****
+
+ELSE.
+
+*   リカバリー
+PERFORM EXCUTE_RECOVERY.
+**** START DEL 2015/03/03 ISID11 ****
+*                            USING RD_DWERKS  "ITAB:出荷プラント
+*                                  RD_RWERKS. "ITAB:入庫プラント
+**** END DEL 2015/03/03 ISID11 ****
+
+ENDIF.
+
+*----------------------------------------------------------------------*
+* 処理内容
+*----------------------------------------------------------------------*
+INCLUDE ZEGSDR2040_F01.
+*Text symbol text・
+*B01:Delete
+*B02:YES
+*B03:NO
+*S01:Job
+*S02:Online recovery
+*S03:Delivery Issue
+*S04:Delivery Reverse
+*S05:Receiving Cancel
+*W01:PG-ID/Name:
+*W02:Run Date/Time/User:
+*W03:Total
+*W04:Normal
+*W05:Error
+*W06:Records Info:
+*W07:/
+*Selection text・
+*P_ERROR:D       .
+*S_BUKRS:D       .
+*S_CPUDT:D       .
+*S_CPUTM:D       .
+*S_CREHMS:D       .
+*S_CREYMD:D       .
+*S_DWERKS:D       .
+*S_IMBLNR:D       .
+*S_OMBLNR:D       .
+*S_RWERKS:D       .
+*S_STATUS:D       .
+*S_VBELN:D       .

@@ -1,0 +1,530 @@
+************************************************************************
+*  プログラムＩＤ：  ZF020400
+*  プログラム名称：  仕入先決済BDC
+*　機能　　　　　：  請求書と検収照合済の未決済として残っている買掛金の
+* 　　　　　　　 ：  未決済明細の自動決済(消し込み)をする
+*  作成日　　　　：　2004/05/25
+*  作成者　　　　：　DMC(K.FURUYA)
+*  変更履歴　　　：　2004/08/05 DMC(K.ABE)
+*                    入力画面の文言変更、注意書きの追加
+*                      転記日付→決済対象日、決済日付→転記日付
+*& YYYY/MM/DD  Programar         Description
+*& 2012/09/05  ISID              ES-UP
+************************************************************************
+REPORT ZF020400  MESSAGE-ID Y1
+LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+************************************************************************
+*TABLES定義
+************************************************************************
+TABLES: LFA1,    "仕入先マスタ：一般データ
+LFM1,    "仕入先マスタ購買組織データ
+LFB1,    "仕入先マスタ (会社コ－ド)
+BSIK.    "仕入先の二次索引
+************************************************************************
+*TYPES定義
+************************************************************************
+* 仕入先取得用
+TYPES: BEGIN OF TYP_LFA1,
+LIFNR TYPE LFA1-LIFNR,   "仕入先コード
+WAERS TYPE LFM1-WAERS,   "通貨コード
+ZTERM TYPE LFB1-ZTERM,   "支払条件
+END OF TYP_LFA1.
+* 未決済金額取得用
+TYPES: BEGIN OF TYP_BSIK,
+LIFNR TYPE BSIK-LIFNR,   "仕入先コード
+BELNR TYPE BSIK-BELNR,   "会計伝票番号
+SHKZG TYPE BSIK-SHKZG,   "貸借フラグ
+WRBTR TYPE BSIK-WRBTR,   "未決済金額
+END OF TYP_BSIK.
+* 伝票番号退避用
+TYPES: BEGIN OF TYP_DPNO,
+LIFNR TYPE BSIK-LIFNR,   "仕入先コード
+BELNR TYPE BSIK-BELNR,   "会計伝票番号
+END OF TYP_DPNO.
+* 金額集計用
+TYPES: BEGIN OF TYP_SUM,
+LIFNR     TYPE LFA1-LIFNR,    "仕入先コード
+WRBTR     TYPE BSIK-WRBTR,    "集計金額
+WAERS     TYPE LFM1-WAERS,    "通貨コード
+END OF TYP_SUM.
+* 出力用
+TYPES: BEGIN OF TYP_OUT,
+LIFNR(10)    TYPE C,           "仕入先コード
+MSG          LIKE MESSAGE,     "メッセージ内容
+END   OF TYP_OUT.
+************************************************************************
+*DATA定義
+************************************************************************
+DATA: GW_LFA1 TYPE          TYP_LFA1,
+GT_LFA1 TYPE TABLE OF TYP_LFA1.
+DATA: GW_BSIK TYPE          TYP_BSIK,
+GT_BSIK TYPE TABLE OF TYP_BSIK.
+DATA: GW_DPNO TYPE          TYP_DPNO,
+GT_DPNO TYPE TABLE OF TYP_DPNO.
+DATA: GW_SUM  TYPE          TYP_SUM,
+GT_SUM  TYPE TABLE OF TYP_SUM.
+DATA: G_MSG(100)  TYPE C.                 "エラーメッセージ用
+DATA: G_TXT       LIKE BSEG-SGTXT.        "テキスト用
+DATA: G_TENKI     LIKE BSIK-BSCHL.        "転記キー
+DATA: GW_BDC      LIKE          BDCDATA,  "バッチ用
+GT_BDC      LIKE TABLE OF GW_BDC.
+DATA: G_CNT    TYPE I,                    "読込件数
+G_OKCNT  TYPE I,                    "登録件数
+G_ERRCNT TYPE I.                    "エラー件数
+DATA: GW_OUT   TYPE          TYP_OUT,
+GT_OUT   TYPE TABLE OF TYP_OUT.
+DATA: G_KINGAKU(13) TYPE C.               "金額変換
+DATA: G_MODE TYPE C.                      "BDCモード
+DATA: G_UPD  TYPE C.                      "BDUUPD
+
+************************************************************************
+*CONSTANTS定義
+************************************************************************
+CONSTANTS: CNS_ERR1(100) TYPE C VALUE '仕入先マスタが存在しません',
+CNS_ERR2(100) TYPE C VALUE '処理データは存在しません'.
+CONSTANTS: CNS_C001(4)   TYPE C VALUE 'C001'.
+CONSTANTS: CNS_S                VALUE 'S',
+CNS_H                VALUE 'H'.
+CONSTANTS: CNS_KR(2)     TYPE C VALUE '25',
+CNS_KS(2)     TYPE C VALUE '34'.
+CONSTANTS: CNS_X                VALUE 'X'.
+CONSTANTS: CNS_M                VALUE 'M'.
+CONSTANTS: CNS_N                VALUE 'N'.
+CONSTANTS: CNS_W                VALUE 'W'.
+CONSTANTS: CNS_1000(4)   TYPE C VALUE '1000',
+CNS_10(2)     TYPE C VALUE '10'.
+CONSTANTS: CNS_0001(4)   TYPE C VALUE '0001'.
+CONSTANTS: CNS_1                VALUE '1'.
+CONSTANTS: CNS_2                VALUE '2'.
+CONSTANTS: CNS_BK               VALUE ''.
+CONSTANTS: CNS_TXT1(20)  TYPE C VALUE '未決済明細の一括決済',
+CNS_TXT2(2)   TYPE C VALUE '件',
+CNS_TXT3(9)   TYPE C VALUE '読込件数=',
+CNS_TXT4(9)   TYPE C VALUE '登録件数=',
+CNS_TXT5(9)   TYPE C VALUE 'ｴﾗｰ 件数=',
+CNS_TXT6(10)  TYPE C VALUE '仕入先',
+CNS_TXT7(140) TYPE C VALUE 'メッセージ',
+CNS_TXT8(40) TYPE C VALUE '* * *  仕入先決済ＢＤＣ結果リスト  * * *',
+CNS_TXT9       TYPE C VALUE '(',
+CNS_TXT10      TYPE C VALUE ')',
+CNS_TXT11(2)   TYPE C VALUE '頁',
+CNS_TXT12(8)   TYPE C VALUE '正常処理',
+CNS_TXT13(8)   TYPE C VALUE '仕入先：',
+CNS_TXT14(12)  TYPE C VALUE '決済対象日：',
+CNS_TXT15(10)  TYPE C VALUE '転記日付：',
+CNS_TXT16(2)   TYPE C VALUE '～',
+CNS_TXT17      TYPE C VALUE '/'.
+************************************************************************
+* 選択画面定義
+************************************************************************
+DATA: G_LIFNR TYPE LFA1-LIFNR.
+SELECT-OPTIONS: S_LIFNR FOR G_LIFNR OBLIGATORY.   "仕入先コード
+PARAMETERS: P_BUDAT TYPE SY-DATUM OBLIGATORY.     "決済対象日
+PARAMETERS: P_AUGDT TYPE SY-DATUM OBLIGATORY.     "転記日付
+* 2004/08/05 ADD-S
+SELECTION-SCREEN SKIP 1.
+* 注意
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(06) TEXT-001.
+SELECTION-SCREEN END OF LINE.
+* 決済対象日注意書き
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(71) TEXT-002.
+SELECTION-SCREEN END OF LINE.
+* 転記日付注意書き
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(56) TEXT-003.
+SELECTION-SCREEN END OF LINE.
+* 2004/08/05 ADD-E
+
+************************************************************************
+*INITIALIZATION.
+************************************************************************
+INITIALIZATION.
+* 決済日にシステム日付セット
+P_AUGDT = SY-DATUM.
+* 項目初期化
+CLEAR: GW_LFA1,
+GT_LFA1,
+GW_BSIK,
+GT_BSIK,
+GW_DPNO,
+GT_DPNO,
+GW_SUM,
+GT_SUM,
+G_MSG,
+G_TXT,
+G_TENKI,
+GW_BDC,
+GT_BDC,
+G_CNT,
+G_OKCNT,
+G_ERRCNT,
+GW_OUT,
+GT_OUT,
+G_KINGAKU.
+*BDCモードセット
+G_MODE = CNS_N.
+G_UPD  = CNS_S.
+***********************************************************************
+*AT SELECTION-SCREEN.
+***********************************************************************
+AT SELECTION-SCREEN.
+IF ( SY-UCOMM = 'ONLI' ).  "実行ボタン押下時
+PERFORM FRM_POPUP.
+ENDIF.
+************************************************************************
+*START-OF-SELECTION.
+************************************************************************
+START-OF-SELECTION.
+PERFORM FRM_MAIN.
+************************************************************************
+*END-OF-SELECTION.
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+*TOP-OF-PAGE.
+************************************************************************
+TOP-OF-PAGE.
+PERFORM FRM_TOP.
+*&---------------------------------------------------------------------*
+*&      Form  frm_main
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM FRM_MAIN.
+PERFORM FRM_CHECK_DATA.   "データ存在チェック
+PERFORM FRM_GET_BSIK.     "未決済明細集計
+PERFORM FRM_BDC.          "バッチインプット
+PERFORM FRM_OUT.          "出力
+ENDFORM.                    " frm_main
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_data
+*&---------------------------------------------------------------------*
+*       存在チェックと仕入先コード取得
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_DATA.
+SELECT A~LIFNR B~WAERS C~ZTERM
+FROM LFA1 AS A
+INNER JOIN LFM1 AS B
+ON A~LIFNR = B~LIFNR
+INNER JOIN LFB1 AS C
+ON A~LIFNR = C~LIFNR
+INTO TABLE GT_LFA1
+WHERE A~LIFNR IN S_LIFNR
+AND A~KTOKK = CNS_0001
+AND B~EKORG = CNS_1000
+AND C~BUKRS = CNS_C001.
+IF ( SY-SUBRC <> 0 ).
+G_MSG = CNS_ERR1.
+MESSAGE I400 WITH G_MSG.
+STOP.
+ENDIF.
+ENDFORM.                    " frm_check_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_bsik
+*&---------------------------------------------------------------------*
+*       未決済金額取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_BSIK.
+LOOP AT GT_LFA1 INTO GW_LFA1.
+SELECT LIFNR BELNR SHKZG WRBTR
+FROM BSIK
+INTO TABLE GT_BSIK
+WHERE BUKRS  = CNS_C001
+AND LIFNR  = GW_LFA1-LIFNR
+AND BUDAT <= P_BUDAT
+AND UMSKS  = CNS_BK.
+
+IF ( SY-SUBRC = 0 ).
+GW_SUM-LIFNR = GW_LFA1-LIFNR.
+GW_SUM-WAERS = GW_LFA1-WAERS.
+LOOP AT GT_BSIK INTO GW_BSIK.
+IF ( GW_BSIK-SHKZG = CNS_S ).
+GW_SUM-WRBTR = GW_SUM-WRBTR + GW_BSIK-WRBTR.
+ELSE.
+GW_SUM-WRBTR = GW_SUM-WRBTR + GW_BSIK-WRBTR * -1.
+ENDIF.
+GW_DPNO-LIFNR = GW_BSIK-LIFNR.
+GW_DPNO-BELNR = GW_BSIK-BELNR.
+APPEND GW_DPNO TO GT_DPNO.   "伝票番号退避
+CLEAR: GW_DPNO.
+ENDLOOP.
+APPEND GW_SUM TO GT_SUM.       "金額集計
+ENDIF.
+CLEAR: GW_SUM.
+CLEAR: GW_BSIK,GT_BSIK.
+ENDLOOP.
+* 件数チェック
+DESCRIBE TABLE GT_SUM LINES G_CNT.
+IF ( G_CNT = 0 ).
+G_MSG = CNS_ERR2.
+MESSAGE I400 WITH G_MSG.
+STOP.
+ENDIF.
+ENDFORM.                    " frm_get_bsik
+*&---------------------------------------------------------------------*
+*&      Form  frm_bdc
+*&---------------------------------------------------------------------*
+*       バッチインプット
+*----------------------------------------------------------------------*
+FORM FRM_BDC.
+SORT GT_SUM BY LIFNR ASCENDING.
+SORT GT_DPNO BY LIFNR BELNR ASCENDING.
+DELETE ADJACENT DUPLICATES FROM GT_DPNO COMPARING ALL FIELDS.
+CONCATENATE CNS_TXT1 P_BUDAT INTO G_TXT.
+LOOP AT GT_SUM INTO GW_SUM.
+* 転記キーセット
+IF ( GW_SUM-WRBTR > 0 ).
+G_TENKI = CNS_KR.
+ELSEIF ( GW_SUM-WRBTR < 0 ).
+GW_SUM-WRBTR = GW_SUM-WRBTR * -1.
+G_TENKI = CNS_KS.
+ENDIF.
+* 通貨変換
+WRITE: GW_SUM-WRBTR TO G_KINGAKU CURRENCY GW_SUM-WAERS NO-GROUPING.
+* 支払条件読込
+CLEAR: GW_LFA1.
+READ TABLE GT_LFA1 INTO GW_LFA1 WITH KEY LIFNR = GW_SUM-LIFNR.
+
+** ヘッダ処理 *********************************************************
+* 仕入先決済：ヘッダデータ
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPMF05A'         '0131',              "
+' '  'RF05A-AGKON'      GW_SUM-LIFNR,        "仕入先コード
+' '  'BKPF-BUDAT'       P_AUGDT,             "決済日付
+' '  'BKPF-BUKRS'       'C001',              "会社コード
+' '  'RF05A-XNOPS'      'X',                 "標準未決済明細
+' '  'RF05A-XPOS1(04)'  'X',                 "伝票番号
+' '  'BKPF-WAERS'       GW_SUM-WAERS,        "通貨コード
+' '  'BDC_OKCODE'       '=PA'.               "未決済明細処理
+* 仕入先決済：選択基準入力
+LOOP AT GT_DPNO INTO GW_DPNO WHERE LIFNR = GW_SUM-LIFNR.
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPMF05A'         '0731',
+' '  'RF05A-SEL01(01)'  GW_DPNO-BELNR,        "伝票番号
+' '  'BDC_OKCODE'       '/00'.                "Enter
+ENDLOOP.
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPMF05A'         '0731',
+' '  'BDC_OKCODE'       '=PA'.                "未決済明細処理
+** 明細処理1 ***********************************************************
+IF ( GW_SUM-WRBTR <> 0 ).
+* 仕入先決済:未決済明細処理
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPDF05X'         '3100',              "
+' '  'BDC_OKCODE'       '=KMD'.              "差額処理
+* 仕入先決済:照会　概要
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPMF05A'         '0700',              "
+' '  'RF05A-NEWBS'      G_TENKI,             "転記キー
+' '  'RF05A-NEWKO'      GW_SUM-LIFNR,        "勘定コード
+' '  'BDC_OKCODE'       '/00'.               "Enter
+* 仕入先決済:追加　仕入先明細
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPMF05A'         '0302',              "
+' '  'BSEG-WRBTR'       G_KINGAKU,           "金額
+' '  'BKPF-XMWST'       'X',                 "税額計算
+' '  'BSEG-SGTXT'       G_TXT.               "テキスト
+
+IF ( GW_LFA1-ZTERM+0(1) = CNS_W ).
+PERFORM FRM_DYNPRO USING:
+' ' 'BSEG-ZFBDT'       P_AUGDT.             "支払基準日
+ENDIF.
+
+PERFORM FRM_DYNPRO USING:
+' '  'BDC_OKCODE'       '=BS'.               "シミュレート
+** 明細処理2 ***********************************************************
+ELSE.
+* 仕入先決済:未決済明細処理
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPDF05X'         '3100',              "
+' '  'BDC_OKCODE'       '=BS'.               "シミュレート
+ENDIF.
+************************************************************************
+* 仕入先決済:照会 概要
+PERFORM FRM_DYNPRO USING:
+'X'  'SAPMF05A'         '0700',              "
+
+' '  'BDC_OKCODE'       'BU'.                "保存
+PERFORM SRM_CALL_TRAN.                     "CALL TRANSACTION処理
+CLEAR: GW_SUM,G_KINGAKU.
+CLEAR: GT_BDC.
+ENDLOOP.
+ENDFORM.                    " frm_bdc
+*&---------------------------------------------------------------------*
+*&      Form  frm_dynpro
+*&---------------------------------------------------------------------*
+*       バッチインプット用テーブル更新
+*----------------------------------------------------------------------*
+*      -->P_DYNBEGIN   DYNPRO開始フラグ
+*      -->P_NAME       項目名
+*      -->P_VALUE      項目値
+*----------------------------------------------------------------------*
+FORM FRM_DYNPRO USING    P_DYNBEGIN
+P_NAME
+P_VALUE.
+IF ( P_DYNBEGIN = CNS_X ).
+CLEAR GW_BDC.
+MOVE: P_NAME  TO GW_BDC-PROGRAM,
+P_VALUE TO GW_BDC-DYNPRO,
+CNS_X   TO GW_BDC-DYNBEGIN.
+APPEND GW_BDC TO GT_BDC.
+ELSE.
+CLEAR GW_BDC.
+MOVE: P_NAME  TO GW_BDC-FNAM,
+P_VALUE TO GW_BDC-FVAL.
+APPEND GW_BDC TO GT_BDC.
+ENDIF.
+ENDFORM.                    " frm_dynpro
+*&---------------------------------------------------------------------*
+*&      Form  srm_call_tran
+*&---------------------------------------------------------------------*
+*       CALL TRANSACTION処理
+*----------------------------------------------------------------------*
+FORM SRM_CALL_TRAN.
+
+CALL TRANSACTION 'F-44'   USING    GT_BDC
+MODE     G_MODE
+UPDATE   G_UPD.
+IF ( SY-SUBRC = 0 ).
+G_OKCNT = G_OKCNT + 1.
+GW_OUT-LIFNR = GW_SUM-LIFNR.
+GW_OUT-MSG = CNS_TXT12.
+APPEND GW_OUT TO GT_OUT.
+CLEAR  GW_OUT.
+ELSE.
+G_ERRCNT = G_ERRCNT + 1.                  "決済エラー件数
+GW_OUT-LIFNR = GW_SUM-LIFNR.
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID  = SY-MSGID
+MSGNO  = SY-MSGNO
+MSGTY  = SY-MSGTY
+MSGV1  = SY-MSGV1
+MSGV2  = SY-MSGV2
+MSGV3  = SY-MSGV3
+MSGV4  = SY-MSGV4
+MSGV5  = SY-MSGV4
+IMPORTING
+MESSG  = GW_OUT-MSG
+EXCEPTIONS
+OTHERS = 1.
+APPEND GW_OUT TO GT_OUT.
+CLEAR  GW_OUT.
+ENDIF.
+ENDFORM.                    " srm_call_tran
+*&---------------------------------------------------------------------*
+*&      Form  frm_out
+*&---------------------------------------------------------------------*
+*       出力
+*----------------------------------------------------------------------*
+FORM FRM_OUT.
+MESSAGE I402 WITH CNS_TXT3 G_CNT    CNS_TXT2.  "読込件数
+MESSAGE I402 WITH CNS_TXT4 G_OKCNT  CNS_TXT2.  "登録件数
+MESSAGE I402 WITH CNS_TXT5 G_ERRCNT CNS_TXT2.  "エラー件数
+* ログ出力
+LOOP AT GT_OUT INTO GW_OUT.
+WRITE: /1(10) GW_OUT-LIFNR,
+13(140) GW_OUT-MSG.
+ENDLOOP.
+ENDFORM.                    " frm_out
+*&---------------------------------------------------------------------*
+*&      Form  frm_top
+*&---------------------------------------------------------------------*
+*       ヘッダ出力
+*----------------------------------------------------------------------*
+FORM FRM_TOP.
+DATA: L_LOW(10)  TYPE C,
+L_HIGH(10) TYPE C.
+
+L_LOW  = S_LIFNR-LOW.
+L_HIGH = S_LIFNR-HIGH.
+
+SKIP.
+ULINE.
+WRITE: /51  CNS_TXT8,   "
+135 CNS_TXT9,   "
+136 SY-DATUM,   "システム日付
+149 SY-UZEIT,   "システム時間
+157 CNS_TXT10,  "
+160 SY-PAGNO,   "頁数
+165 CNS_TXT11.  "
+SKIP.
+WRITE: /32      CNS_TXT9,
+34      CNS_TXT13,
+42(10)  L_LOW,
+53      CNS_TXT16,
+56(10)  L_HIGH,
+* Mod ES-UP 2012/09/05 -->
+*          68      CNS_TXT14,
+68(10)  CNS_TXT14(5),
+* Mod ES-UP 2012/09/05 <--
+78      P_BUDAT+0(4),
+82      CNS_TXT17,
+83      P_BUDAT+4(2),
+85      CNS_TXT17,
+86      P_BUDAT+6(2),
+* 2004/08/05 MOD-S
+*          90      CNS_TXT15,
+*          100     P_AUGDT+0(4),
+*          104     CNS_TXT17,
+*          105     P_AUGDT+4(2),
+*          107     CNS_TXT17,
+*          108     P_AUGDT+6(2),
+*          111     CNS_TXT10.
+92      CNS_TXT15,
+102     P_AUGDT+0(4),
+106     CNS_TXT17,
+107     P_AUGDT+4(2),
+109     CNS_TXT17,
+110     P_AUGDT+6(2),
+113     CNS_TXT10.
+* 2004/08/05 MOD-S
+ULINE.
+WRITE: /1(10) CNS_TXT6,
+13(140) CNS_TXT7.
+ULINE.
+ENDFORM.                    " frm_top
+*&---------------------------------------------------------------------*
+*&      Form  frm_popup
+*&---------------------------------------------------------------------*
+*       実行確認ポップアップ出力
+*----------------------------------------------------------------------*
+FORM FRM_POPUP.
+DATA:L_ANS TYPE C.
+
+IF ( SY-BATCH <> CNS_X ).  "バッチ処理ではないときに実行
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+TITLEBAR                    = '決済処理実行確認'
+TEXT_QUESTION               =
+'決済処理を実行してよろしいですか？'
+* 2004/08/05 MOD-S
+*       TEXT_BUTTON_1               = 'はい'(001)
+*       TEXT_BUTTON_2               = 'いいえ'(002)
+TEXT_BUTTON_1               = 'はい'
+TEXT_BUTTON_2               = 'いいえ'
+* 2004/08/05 MOD-E
+DEFAULT_BUTTON              = '1'
+DISPLAY_CANCEL_BUTTON       = ' '
+*   USERDEFINED_F1_HELP         = ' '
+*   START_COLUMN                = 25
+*   START_ROW                   = 6
+POPUP_TYPE                  = 'ICON_MESSAGE_QUESTION'
+IMPORTING
+ANSWER                  = L_ANS
+EXCEPTIONS
+TEXT_NOT_FOUND              = 1
+OTHERS                      = 2.
+
+IF SY-SUBRC <> 0.
+ENDIF.
+
+IF ( L_ANS = CNS_2 ).      "'いいえ'が選択された場合
+STOP.
+ENDIF.
+ENDIF.
+ENDFORM.                    " frm_popup

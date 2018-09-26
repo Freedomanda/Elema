@@ -1,0 +1,1926 @@
+*&---------------------------------------------------------------------*
+*&  REPORT YN010100
+*&         外部データ取込
+*&---------------------------------------------------------------------*
+*&  機能     ： 外部データ取込
+*&  作成日   ： 2006/06/07
+*&  作成者   ： NDSC
+*&  変更履歴 ： 2007/02/28 Vertion2
+*&  変更内容 ： Version2 (2007/02/28 R.Tomoeda)
+*&           ：  ・複数ファイル取込み可能
+*&           ：  ・エラーファイル指定可能
+*&           ：  ・外部数量単位の利用
+*&           ：  ・得意先/仕入先品目コードを一覧表示項目へ変更
+*&  変更履歴 ： 2007/04/19 s.iwaki
+*&  変更内容 ： ユニコード対応
+*&              (固定長ファイル読込時のバイト数チェックを変更)
+*&  変更履歴 ： 2009/01/13
+*&  変更内容 ： テンプレート改善ＰＪ (2009/01/13 OODUCHI)
+*&           ：・パフォーマンス改善
+*&  変更履歴 ： conversion 対応
+*&  変更内容 ： ECC6.0→4.6C (2010/12/13 K.Onoda)
+*&           ： ・コンバージョン作業
+*&  変更履歴 ： 2011/12/08、2012/01/23
+*&  変更内容 ： elematec様用仕様対応
+*&  変更履歴 ： 2012/03/22
+*&  変更内容 ： ファイルオープン時のモードをバイナリモードより
+*&              テキストモードに変更
+*&  変更履歴 ： 2012/04/09
+*&  変更内容 ： YN形式の仕入ファイルで、プラントブランクの時処理を追加
+*&  変更履歴 ： 2012/05/15
+*&  変更内容 ： YN形式のファイルで、税額、税抜額、税込額で、マイナス値を
+*&　　　　　　　許容していない不具合
+*&  変更履歴 ： 2012/05/21
+*&  変更内容 ： EIAJ形式でも、数量、金額、税額にマイナス値を許可する。
+*&           ： Table EDSDCより組織が取得できない場合、選択画面の組織を
+*&　            利用する。
+*&           ： EIAJ1102形式の場合、計上月度、売掛日が、初期値の時
+*&              出荷日を利用して、計上締日を算出する。
+*&           ： コック区分　J の場合、処理対象外レコードとする。
+*&  変更履歴 ： 2012/07/04
+*&  変更内容 ： EIAJ1101形式の場合、得意先発注番号が初期値でも
+*&           ： 取込実施する。
+*&           ： EIAJ1102形式の場合、発注番号が初期値でも取込実施
+*&  　　　　 ： プラントは、PS00 を設定する。
+*&  変更履歴 ： 2012/07/09
+*&  変更内容 ： EIAJ形式のデータのみ、計上締日と照合期間が不整合で
+*&　　　　　　　あっても、計上締日を有効な締日にずらして、取込をする。
+*&　　　　　　　計上締日と検収日（請求日）の関係性より、検収日（請求日）
+*&　　　　　　　は、照合終了日の翌日とする。
+*&　　　　　　　検収日（請求日）の修正を行うので、本来セットするデータは
+*&　　　　　　　コメントに格納する。なお、YN形式は、本処理を施さない。
+*&  変更履歴 ： 2012/07/17
+*&  変更内容 ： EIAJ形式のデータの場合、計上月度に、0 がセットされる
+*&              ケースがある、日付チェックの対象外とする。
+*&  変更履歴 ： 2012/10/24
+*&  変更内容 ： 単位変換エラー時は単位をブランクに設定する
+*&　　　　　　　(BI連携エラー対応)　　　　　　　
+*&[改定履歴]
+*& YYYY/MM/DD  Programar         Description
+*& 2012/11/07  ISID              ES-UP
+*&---------------------------------------------------------------------*
+REPORT  YN010100       MESSAGE-ID   YN01.
+
+* 内部テーブル
+DATA: TBL_CSV TYPE STANDARD TABLE OF STRING WITH HEADER LINE,
+TBL_BK_CSV TYPE STANDARD TABLE OF STRING,
+TBL_CSV_ERR TYPE STANDARD TABLE OF STRING WITH HEADER LINE.
+
+DATA: BEGIN OF TBL_ERRLOG OCCURS 0,     " エラーログ
+LINE_NO    TYPE I,              " 行番号
+VRFCTON(10) TYPE C,             " 取引先コード
+BUKRS(4)    TYPE C,             " 会社コード
+ERR(128)    TYPE C,             " ERR
+END OF TBL_ERRLOG.
+
+* 変数定義
+DATA: G_READ_COUNT    TYPE I,           " 読込件数
+G_INSERT_COUNT  TYPE I,           " 登録件数
+G_UPDATE_COUNT  TYPE I,           " 更新件数
+G_DELETE_COUNT  TYPE I,           " 削除件数
+G_ERR_COUNT     TYPE I,           " エラー件数
+G_ERR_FLG       TYPE C,           " エラーフラグ
+G_TBLID(5)      TYPE C.           " 処理テーブル
+
+DATA: G_BKFILE  TYPE STRING,
+G_ERRFILE TYPE STRING.
+*&Ver2 対応 2007/02/28 >>>
+TYPES: BEGIN OF TY_FILE,
+DIRNAME(75) TYPE C, " NAME OF DIRECTORY. (POSSIBLY TRUNCATED.)
+NAME(75)    TYPE C, " NAME OF ENTRY. (POSSIBLY TRUNCATED.)
+TYPE(10)    TYPE C,            " TYPE OF ENTRY.
+LEN(8)      TYPE P,            " LENGTH IN BYTES.
+OWNER(8)    TYPE C,            " OWNER OF THE ENTRY.
+MTIME(6)    TYPE P, "AST MODIFIC. DATE, SECONDS SINCE 1970
+MODE(9)     TYPE C, "LIKE "RWX-R-X--X": PROTECTION MODE.
+USEABLE(1)  TYPE C,
+SUBRC(4)    TYPE C,
+ERRNO(3)    TYPE C,
+ERRMSG(40)  TYPE C,
+MOD_DATE    TYPE D,
+MOD_TIME(8) TYPE C,            " HH:MM:SS
+SEEN(1)     TYPE C,
+CHANGED(1)  TYPE C,
+END OF TY_FILE.
+
+DATA LS_FILE      TYPE TY_FILE.
+DATA: BEGIN OF FILE_TABL OCCURS 0,
+LINE(70),
+END OF FILE_TABL.
+DATA: W_DIRECTORY TYPE STRING,
+W_FILENAME(128) TYPE C.
+*&Ver2 対応 2007/02/28 <<<
+* 定数定義(CONSTANTS)
+CONSTANTS:
+GC_INFILE(128)   TYPE C VALUE 'C:\*.*',
+GC_BKFILE(128)   TYPE C VALUE 'C:\*.*',
+*&Ver2 対応 2007/02/28 >>>
+GC_ERFILE(128)   TYPE C VALUE 'C:\*.*'.
+*elematec 対応 INSERT START 2012/01/23
+DATA A078_KSCHL TYPE A078-KSCHL.
+DATA G_TAX      TYPE C.
+DATA W_NUMC(22) TYPE N.
+DATA W_AMOUNT2  LIKE BAPICURR-BAPICURR.
+DATA W_DECS(2)  TYPE P.
+TYPES:BEGIN OF TYP_TCURX,
+CURRKEY    TYPE SYCURR,     "通貨コード
+CURRDEC    TYPE CURRDEC,    "小数点以下桁数
+END   OF TYP_TCURX.
+DATA: T_TCURX TYPE SORTED TABLE OF TYP_TCURX
+WITH UNIQUE KEY CURRKEY.
+
+CONSTANTS:
+CNS_J(1)          TYPE C VALUE 'J',
+CNS_JP(2)         TYPE C VALUE 'JP',
+CNS_MWST(4)       TYPE C VALUE 'MWST',
+CNS_MWSU(4)       TYPE C VALUE 'MWSU',
+CNS_MWSD(4)       TYPE C VALUE 'MWSD',
+CNS_E(1)          TYPE C VALUE 'E',
+*** 2012/07/09 INSERT START ***
+CNS_ON(1)         TYPE C VALUE 'X'.
+*** 2012/07/09 INSERT END
+*elematec 対応 INSERT END   2012/01/23
+* Add ES-UP 2012/10/11 -->
+constants cns_sjis type string value `shift_jis`.
+* Add ES-UP 2012/10/11 <--
+DATA: GT_DIR TYPE STANDARD TABLE OF STRING,
+G_DIR  TYPE STRING,
+G_LCNT TYPE I,
+G_INFILENAME(128) TYPE C,
+L_DIR_TBL  LIKE SDOKPATH OCCURS 0 WITH HEADER LINE,
+L_FILE_TBL LIKE SDOKPATH OCCURS 0 WITH HEADER LINE,
+GK_DEVIDE  TYPE C VALUE '\'.
+
+*&Ver2 対応 2007/02/28 <<<
+DATA: GC_09 TYPE C,
+GC_CR TYPE C,
+GC_LF TYPE C,
+GC_CRLF(2) TYPE C,
+L_INFILE TYPE STRING,
+L_RC TYPE I.
+*&---------------------------------------------------------------------*
+*&   画面項目定義
+*&---------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK BK1 WITH FRAME TITLE TEXT-S01.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:P_SALES RADIOBUTTON GROUP RAD1 DEFAULT 'X'
+USER-COMMAND RADIO1.
+SELECTION-SCREEN COMMENT 4(18) TEXT-S02.                " 売上照合
+PARAMETERS:P_PRCHS RADIOBUTTON GROUP RAD1.
+SELECTION-SCREEN COMMENT 26(18) TEXT-S03.               " 仕入照合
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK BK1.
+
+SELECTION-SCREEN BEGIN OF BLOCK BK2 WITH FRAME TITLE TEXT-S04.
+PARAMETERS:P_TBNAME LIKE DD02V-TABNAME.      " 構造名
+SELECTION-SCREEN END OF BLOCK BK2.
+
+SELECTION-SCREEN BEGIN OF BLOCK BK3 WITH FRAME TITLE TEXT-S05.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:P_LOCAL RADIOBUTTON GROUP RAD2 DEFAULT 'X'
+USER-COMMAND RADIO2.
+SELECTION-SCREEN COMMENT 4(18) TEXT-S06.                " ローカル
+PARAMETERS:P_SERVER RADIOBUTTON GROUP RAD2.
+SELECTION-SCREEN COMMENT 26(18) TEXT-S07.               " サーバ
+SELECTION-SCREEN END OF LINE.
+*&Ver2 対応 2007/02/28 >>>
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(28) TEXT-S17.
+PARAMETERS:P_INFILE(128) TYPE C LOWER CASE.   " 入力ファイル名
+* conversion 対応 2010/12/13 DEL >>>
+*  SELECTION-SCREEN COMMENT 77(7) TEXT-S18.
+* conversion 対応 2010/12/13 DEL <<<
+PARAMETERS:P_EXTNS1(4) OBLIGATORY LOWER CASE DEFAULT '.txt'.
+SELECTION-SCREEN END OF LINE.
+*
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(28) TEXT-S19.
+PARAMETERS:P_BKFILE(128) TYPE C LOWER CASE.   " バックアップファイル名
+* conversion 対応 2010/12/13 DEL >>>
+*  SELECTION-SCREEN COMMENT 77(7) TEXT-S18.
+* conversion 対応 2010/12/13 DEL <<<
+PARAMETERS:P_EXTNS2(4) OBLIGATORY LOWER CASE DEFAULT '.bak'.
+SELECTION-SCREEN END OF LINE.
+*
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(28) TEXT-S20.
+PARAMETERS:P_ERFILE(128) TYPE C LOWER CASE.   " エラーファイル名
+* conversion 対応 2010/12/13 UPD >>>
+*  SELECTION-SCREEN COMMENT 77(7) TEXT-S18.
+* conversion 対応 2010/12/13 UPD <<<
+PARAMETERS:P_EXTNS3(4) OBLIGATORY LOWER CASE DEFAULT '.err'.
+SELECTION-SCREEN END OF LINE.
+*&Ver2 対応 2007/02/28 <<<
+SELECTION-SCREEN BEGIN OF BLOCK BK4 WITH FRAME TITLE TEXT-S08.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:P_TAB RADIOBUTTON GROUP RAD3 DEFAULT 'X'
+USER-COMMAND RADIO3.
+SELECTION-SCREEN COMMENT 4(18) TEXT-S09.          " タブ区切り
+PARAMETERS:P_FIX RADIOBUTTON GROUP RAD3.
+SELECTION-SCREEN COMMENT 26(18) TEXT-S10.         " 固定長
+PARAMETERS:P_PAUSE RADIOBUTTON GROUP RAD3.
+SELECTION-SCREEN COMMENT 48(18) TEXT-S11.         " その他の区切り
+PARAMETERS:P_PAUSEC(3) TYPE C.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK BK4.
+SELECTION-SCREEN END OF BLOCK BK3.
+
+SELECTION-SCREEN BEGIN OF BLOCK BK5 WITH FRAME TITLE TEXT-S12.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:P_CRT RADIOBUTTON GROUP RAD4 DEFAULT 'X'
+USER-COMMAND RADIO4.
+SELECTION-SCREEN COMMENT 4(18) TEXT-S13.          " 登録
+PARAMETERS:P_UPD RADIOBUTTON GROUP RAD4.
+SELECTION-SCREEN COMMENT 26(18) TEXT-S14.         " 変更
+PARAMETERS:P_DLT RADIOBUTTON GROUP RAD4.
+SELECTION-SCREEN COMMENT 48(18) TEXT-S15.         " 削除
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF BLOCK BK6 WITH FRAME TITLE TEXT-S16.
+PARAMETERS:P_TEST AS CHECKBOX .                   " テスト実行
+SELECTION-SCREEN END OF BLOCK BK6.
+SELECTION-SCREEN END OF BLOCK BK5.
+*
+*elematec 対応 INSERT START 2011/12/08
+PARAMETERS P_BUKRS TYPE T001-BUKRS OBLIGATORY MEMORY ID BUK. "会社コード
+*elematec 対応 INSERT END   2011/12/08
+
+*elematec 対応 INSERT START 2011/12/08
+SELECTION-SCREEN BEGIN OF BLOCK BK7 WITH FRAME TITLE TEXT-S21.
+PARAMETERS:P_EKORG  TYPE LFM1-EKORG OBLIGATORY, "購買組織
+P_PARVWL TYPE WYT3-PARVW OBLIGATORY, "請求先取引先機能
+P_KAPPLL TYPE A044-KAPPL OBLIGATORY, "アプリケーション
+P_KSCHLL TYPE A044-KSCHL OBLIGATORY. "条件タイプ
+SELECTION-SCREEN END OF BLOCK BK7.
+*
+SELECTION-SCREEN BEGIN OF BLOCK BK8 WITH FRAME TITLE TEXT-S22.
+PARAMETERS:P_VKORG  TYPE KNVV-VKORG OBLIGATORY, "販売組織
+P_VTWEG  TYPE KNVV-VTWEG OBLIGATORY, "流通チャネル
+P_SPART  TYPE KNVV-SPART OBLIGATORY, "製品部門
+P_PARVWK TYPE KNVP-PARVW OBLIGATORY, "支払人取引先機能
+P_KAPPLK TYPE A078-KAPPL OBLIGATORY. "アプリケーション
+SELECT-OPTIONS:
+S_KSCHLL FOR  A078_KSCHL NO INTERVALS. "条件タイプ
+
+SELECTION-SCREEN END OF BLOCK BK8.
+*elematec 対応 INSERT END 2011/12/08
+
+INCLUDE YN01_YN010100_0000.
+*&---------------------------------------------------------------------*
+*&   Event INITIALIZATION
+*&---------------------------------------------------------------------*
+INITIALIZATION.
+*&Ver2 対応 2007/02/28 >>>
+*  PERFORM SET_SPECIAL_CHAR USING    9
+*                           CHANGING GC_09.
+*  PERFORM SET_SPECIAL_CHAR USING    13
+*                           CHANGING GC_CR.
+*  PERFORM SET_SPECIAL_CHAR USING    10
+*                           CHANGING GC_LF.
+*  CONCATENATE GC_CR GC_LF INTO GC_CRLF.
+*&Ver2 対応 2007/02/28 <<<
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_TBNAME.
+* 構造名の検索ヘルプ
+PERFORM F4HELP_P_TBNAME.
+
+*&--------------------------------------------------------------------
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_INFILE
+*&--------------------------------------------------------------------
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_INFILE.
+* 入力ファイル名の検索ヘルプ
+PERFORM F4HELP_P_INFILE.
+
+*&--------------------------------------------------------------------
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_BKFILE
+*&--------------------------------------------------------------------
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_BKFILE.
+* バックアップファイル名の検索ヘルプ
+PERFORM F4HELP_P_BKFILE.
+
+*&Ver2 対応 2007/02/28 >>>
+*&--------------------------------------------------------------------
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_BKFILE
+*&--------------------------------------------------------------------
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_ERFILE.
+* エラーファイル名の検索ヘルプ
+PERFORM F4HELP_P_ERFILE.
+*&Ver2 対応 2007/02/28 <<<
+
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* 「構造」の入力チェック
+PERFORM CHECK_P_TBNAME.
+* 「入力ファイル名」の入力チェック
+PERFORM CHECK_P_INFILE.
+* 「バックアップファイル名」の入力チェック
+PERFORM CHECK_P_BKFILE.
+*&Ver2 対応 2007/02/28 >>>
+PERFORM CHECK_P_ERFILE.
+PERFORM CHECK_P_EXTENSION.
+*&Ver2 対応 2007/02/28 <<<
+* 「その他の区切り」の入力チェック
+PERFORM CHECK_P_PAUSEC.
+*elematec 対応 INSERT START 2012/01/23
+PERFORM CHECK_TBNAME.                "構造体チェック
+PERFORM CHECK_BUKRS USING P_BUKRS.   "会社コードチェック
+PERFORM AUTHOR_CHECK USING P_BUKRS.  "権限チェック
+*elematec 対応 INSERT ENDT  2012/01/23
+*
+*&---------------------------------------------------------------------*
+*&   Event START-OF-SELECTION
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+*&Ver2 対応 2007/02/28 >>>
+REFRESH FILE_TABL.
+IF P_SERVER = 'X'.
+
+CALL 'C_DIR_READ_FINISH'           " JUST TO BE SURE
+ID 'ERRNO'  FIELD LS_FILE-ERRNO
+ID 'ERRMSG' FIELD LS_FILE-ERRMSG.
+
+PERFORM GET_FILE_NAME_S.
+ENDIF.
+IF P_LOCAL = 'X'.
+PERFORM GET_FILE_NAME_L.
+ENDIF.
+LOOP AT FILE_TABL.
+CLEAR W_FILENAME.
+CONCATENATE W_DIRECTORY FILE_TABL-LINE INTO W_FILENAME.
+PERFORM MAIN.
+ENDLOOP.
+*&Ver2 対応 2007/02/28 <<<
+*&---------------------------------------------------------------------*
+*       FORM MAIN   ～Ver2 対応 2007/02/28  ADD～
+*---------------------------------------------------------------------*
+*       メイン処理                                                    *
+*---------------------------------------------------------------------*
+FORM MAIN.
+*
+*elematec 対応 INSERT START 2012/01/23
+REFRESH:TBL_KNVV_KNVI,TBL_KNVP_KNVV,TBL_YNX30,
+TBL_ZN004,TBL_LFM1_WYT3,TBL_ZN001.
+CLEAR  :G_TAX.
+*elematec 対応 INSERT END   2012/01/23
+*
+*&Ver2 対応 2007/02/28 >>>
+REFRESH:TBL_CSV,
+TBL_ERRLOG,
+TBL_EXIT,
+TBL_YN110,
+TBL_YN210,
+TBL_BUKRS,
+TBL_T001,
+TBL_VRFCTON,
+TBL_XXB1,
+TBL_YNX30,
+TBL_TCURC,
+TBL_CEPC,
+TBL_PRCTR.
+
+CLEAR  :TBL_CSV,
+TBL_ERRLOG,
+TBL_EXIT,
+TBL_YN110,
+TBL_YN210,
+TBL_BUKRS,
+TBL_T001,
+TBL_VRFCTON,
+TBL_XXB1,
+TBL_YNX30,
+TBL_TCURC,
+TBL_CEPC,
+TBL_PRCTR,
+G_READ_COUNT,
+G_INSERT_COUNT,
+G_UPDATE_COUNT,
+G_DELETE_COUNT,
+G_ERR_COUNT,
+G_BKFILE,
+G_ERRFILE.
+*&Ver2 対応 2007/02/28 <<<
+IF P_LOCAL = 'X'.
+* ローカルファイルの取得
+PERFORM GET_LOCAL_FILE.
+* バックアップファイルの存在チェック
+PERFORM CHECK_BKFILE_L.
+ENDIF.
+IF P_SERVER = 'X'.
+* サーバファイルの取得
+PERFORM GET_SERVER_FILE.
+* バックアップファイルの存在チェック
+PERFORM CHECK_BKFILE_S.
+ENDIF.
+
+* STRUCTUR処理
+PERFORM CASE_STRUCTUR .
+
+* コミット
+IF P_TEST <> 'X'.
+COMMIT WORK.
+ENDIF.
+
+*&Ver2 対応 2007/02/28 >>>
+IF P_TEST <> 'X' AND G_ERR_COUNT = 0 .
+*&Ver2 対応 2007/02/28 <<<
+* バックアップファイルの出力
+IF P_LOCAL = 'X'.
+PERFORM OUT_LOCAL_BKFILE.
+ENDIF.
+IF P_SERVER = 'X'.
+PERFORM OUT_SERVER_BKFILE.
+ENDIF.
+
+* 入力ファイルの削除
+IF P_LOCAL = 'X'.
+*
+L_INFILE = W_FILENAME.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_DELETE
+EXPORTING
+FILENAME             =  L_INFILE
+CHANGING
+RC = L_RC
+EXCEPTIONS
+FILE_DELETE_FAILED   =  1
+CNTL_ERROR           =  2
+ERROR_NO_GUI         =  3
+FILE_NOT_FOUND       =  4
+ACCESS_DENIED        =  5
+UNKNOWN_ERROR        =  6.
+IF SY-SUBRC <> '0'.
+MESSAGE I793 WITH TEXT-M13. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+*
+ENDIF.
+IF P_SERVER = 'X'.
+*      DELETE DATASET P_INFILE.  "2007/02/28 DEL
+DELETE DATASET W_FILENAME. "2007/02/28 ADD
+IF SY-SUBRC <> 0.
+MESSAGE I793 WITH TEXT-M13. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+ENDIF.
+ENDIF.
+
+* エラーファイルの出力
+IF G_ERR_COUNT > 0.
+IF P_LOCAL = 'X'.
+PERFORM OUT_LOCAL_ERRFILE.
+ENDIF.
+IF P_SERVER = 'X'.
+PERFORM OUT_SERVER_ERRFILE.
+ENDIF.
+ENDIF.
+
+* 結果出力
+PERFORM WRITE_LOG .
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F4HELP_P_TBNAME
+*&---------------------------------------------------------------------*
+*       構造名の検索ヘルプ
+*----------------------------------------------------------------------*
+FORM F4HELP_P_TBNAME .
+
+DATA: BEGIN OF TBL_DD02V OCCURS 0,
+TABNAME LIKE DD02V-TABNAME,           " テーブル名
+DDTEXT LIKE DD02V-DDTEXT,             " テキスト
+END OF TBL_DD02V.
+DATA: L_REPID LIKE SY-REPID.
+
+SELECT
+TABNAME                              " テーブル名
+DDTEXT                               " テキスト
+INTO CORRESPONDING FIELDS OF TABLE TBL_DD02V
+FROM DD02V
+WHERE TABCLASS = 'INTTAB'
+AND DDLANGUAGE = SY-LANGU
+AND ( TABNAME LIKE 'Z%'
+OR TABNAME LIKE 'Y%' ).
+
+* 検索ヘルプの表示
+L_REPID = SY-REPID.
+CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+EXPORTING
+RETFIELD               = 'TABNAME'
+DYNPPROG               = L_REPID
+DYNPNR                 = SY-DYNNR
+DYNPROFIELD            = 'P_TBNAME'
+VALUE_ORG              = 'S'
+TABLES
+VALUE_TAB              = TBL_DD02V
+EXCEPTIONS
+PARAMETER_ERROR        = 1
+NO_VALUES_FOUND        = 2
+OTHERS                 = 3.
+
+IF SY-SUBRC <> 0.
+REFRESH TBL_DD02V.
+*   エラー処理
+EXIT.
+ENDIF.
+REFRESH TBL_DD02V.
+
+ENDFORM.                    " F4HELP_P_TBNAME
+*&---------------------------------------------------------------------*
+*&      Form  F4HELP_P_INFILE
+*&---------------------------------------------------------------------*
+*       入力ファイル名の検索ヘルプ
+*----------------------------------------------------------------------*
+FORM F4HELP_P_INFILE .
+
+* ローカル
+IF P_LOCAL = 'X'.
+PERFORM CHOOSE_LOCAL_FILE USING P_INFILE
+GC_INFILE
+P_EXTNS1.
+*                                    '*.*'.
+ENDIF.
+* サーバ
+IF P_SERVER = 'X'.
+PERFORM CHOOSE_SERVER_FILE USING P_INFILE.
+ENDIF.
+
+ENDFORM.                    " F4HELP_P_INFILE
+*&---------------------------------------------------------------------*
+*&      Form  F4HELP_P_BKFILE
+*&---------------------------------------------------------------------*
+*       バックアップファイル名の検索ヘルプ
+*----------------------------------------------------------------------*
+FORM F4HELP_P_BKFILE .
+* ローカル
+IF P_LOCAL = 'X'.
+PERFORM CHOOSE_LOCAL_FILE USING P_BKFILE
+GC_BKFILE
+'*.*'.
+ENDIF.
+* サーバ
+IF P_SERVER = 'X'.
+PERFORM CHOOSE_SERVER_FILE USING P_BKFILE.
+ENDIF.
+ENDFORM.                    " F4HELP_P_BKFILE
+*&---------------------------------------------------------------------*
+*&      Form  F4HELP_P_ERFILE ～Ver2対応 2007/02/28 ～
+*&---------------------------------------------------------------------*
+*       エラーファイル名の検索ヘルプ
+*----------------------------------------------------------------------*
+FORM F4HELP_P_ERFILE .
+* ローカル
+IF P_LOCAL = 'X'.
+PERFORM CHOOSE_LOCAL_FILE USING P_ERFILE
+GC_ERFILE
+'*.*'.
+ENDIF.
+* サーバ
+IF P_SERVER = 'X'.
+PERFORM CHOOSE_SERVER_FILE USING P_ERFILE.
+ENDIF.
+ENDFORM.                    " F4HELP_P_ERFILE
+
+*&---------------------------------------------------------------------*
+*&      Form  CHOOSE_LOCAL_FILE
+*&---------------------------------------------------------------------*
+*       ローカルCSVファイルをオープンする
+*----------------------------------------------------------------------*
+FORM CHOOSE_LOCAL_FILE USING P_FILE
+P_PATH
+P_FILTER.
+DATA: L_IT_FNAME     TYPE FILETABLE,
+L_SUBRC        TYPE I,
+INIT_DIRECTORY TYPE STRING,
+WINDOW_TITLE   TYPE STRING,
+FILE_FILTER    TYPE STRING,
+L_PATH         TYPE STRING.
+
+FILE_FILTER = P_FILTER.
+L_PATH = P_PATH.
+REFRESH : L_IT_FNAME.
+MOVE 'C:\' TO INIT_DIRECTORY.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+EXPORTING  WINDOW_TITLE            =  WINDOW_TITLE
+DEFAULT_FILENAME        =  L_PATH
+FILE_FILTER             =  FILE_FILTER
+INITIAL_DIRECTORY       =  INIT_DIRECTORY
+MULTISELECTION          =  ABAP_FALSE
+CHANGING   FILE_TABLE              =  L_IT_FNAME
+RC                      =  L_SUBRC
+EXCEPTIONS FILE_OPEN_DIALOG_FAILED =  1
+CNTL_ERROR              =  2
+ERROR_NO_GUI            =  3
+OTHERS                  =  4
+.
+IF SY-SUBRC <> 0.
+ELSE.
+IF L_SUBRC = 1.
+READ TABLE L_IT_FNAME INTO P_FILE INDEX 1.
+ENDIF.
+ENDIF.
+ENDFORM.                    " CHOOSE_LOCAL_FILE
+*&---------------------------------------------------------------------*
+*&      Form  CHOOSE_SERVER_FILE
+*&---------------------------------------------------------------------*
+*       サーバCSVファイルをオープンする
+*----------------------------------------------------------------------*
+FORM CHOOSE_SERVER_FILE  USING  P_BKFILE.
+DATA: L_PATH LIKE DXFIELDS-LONGPATH,
+L_ABEND_FLG LIKE DXFIELDS-ABENDFLAG.
+
+CALL FUNCTION 'F4_DXFILENAME_TOPRECURSION'
+EXPORTING  I_LOCATION_FLAG      =  'A'
+I_SERVER             =  ''
+I_PATH               =  ''
+FILEMASK             = '*.*'
+FILEOPERATION        =  'R'
+IMPORTING  O_PATH               =  L_PATH
+ABEND_FLAG           =  L_ABEND_FLG
+EXCEPTIONS RFC_ERROR            =  1
+ERROR_WITH_GUI       =  2
+OTHERS               =  3.
+IF L_ABEND_FLG <> 'X'.
+P_BKFILE = L_PATH.
+ENDIF.
+
+
+ENDFORM.                    " CHOOSE_SERVER_FILE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_P_TBNAME
+*&---------------------------------------------------------------------*
+*       構造のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_P_TBNAME .
+DATA: L_TABNAME LIKE DD02V-TABNAME.
+IF P_TBNAME = ''.
+SET CURSOR FIELD 'P_TBNAME'.
+MESSAGE E600.
+ENDIF.
+
+SELECT SINGLE  TABNAME                              " テーブル名
+INTO L_TABNAME
+FROM DD02V
+WHERE TABCLASS = 'INTTAB'
+AND DDLANGUAGE = SY-LANGU
+AND TABNAME = P_TBNAME.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_TBNAME'.
+MESSAGE E601.
+ENDIF.
+ENDFORM.                    " CHECK_P_TBNAME
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_P_INFILE
+*&---------------------------------------------------------------------*
+*       入力ファイル名のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_P_INFILE .
+
+IF P_INFILE = ''.
+SET CURSOR FIELD 'P_INFILE'.
+MESSAGE E600.
+ENDIF.
+
+ENDFORM.                    " CHECK_P_INFILE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_P_BKFILE
+*&---------------------------------------------------------------------*
+*       バックアップファイル名のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_P_BKFILE .
+
+DATA: L_PATH TYPE STRING.
+DATA: LT_DIR TYPE STANDARD TABLE OF STRING,
+L_DIR TYPE STRING,
+L_DIR_S LIKE BTCH0000-TEXT80,
+L_LINES TYPE I.
+DATA: L_COUNT TYPE I,
+L_RC TYPE I.
+* 未入力チェック
+IF P_BKFILE = ''.
+SET CURSOR FIELD 'P_BKFILE'.
+MESSAGE E600.
+ENDIF.
+* ディレクトリを入力しているかのチェック
+IF NOT P_BKFILE CS GK_DEVIDE.
+SET CURSOR FIELD 'P_BKFILE'.
+MESSAGE E603.
+ENDIF.
+* 入力されたバックアップファイル出力先をワークへ移す
+L_PATH = P_BKFILE.
+
+L_COUNT = STRLEN( L_PATH ) - 1.
+IF L_PATH+L_COUNT(1) <> GK_DEVIDE.
+SET CURSOR FIELD 'P_BKFILE'.
+MESSAGE E604 WITH GK_DEVIDE.
+ENDIF.
+
+*&Ver2 対応 delete 2007/02/28 >>>
+*  SPLIT L_PATH AT GK_DEVIDE INTO TABLE LT_DIR.
+*  CLEAR L_PATH.
+*  DESCRIBE TABLE LT_DIR LINES L_LINES.
+*  LOOP AT LT_DIR INTO L_DIR.
+*    IF SY-TABIX = L_LINES.
+*      EXIT.
+*    ELSEIF SY-TABIX = 1.
+*      L_PATH = L_DIR.
+*    ELSE.
+*      CONCATENATE L_PATH L_DIR INTO L_PATH SEPARATED BY GK_DEVIDE.
+*    ENDIF.
+*  ENDLOOP.
+*&Ver2 対応 delete 2007/02/28 <<<
+
+IF P_LOCAL = 'X'.
+
+CONCATENATE L_PATH SY-REPID INTO L_PATH.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>DIRECTORY_CREATE
+EXPORTING
+DIRECTORY                   = L_PATH
+CHANGING
+RC                          = L_RC
+EXCEPTIONS
+CNTL_ERROR                  = 1
+DIRECTORY_CREATE_FAILED     = 2
+ERROR_NO_GUI                = 3
+PATH_NOT_FOUND              = 4
+DIRECTORY_ACCESS_DENIED     = 5
+DIRECTORY_ALREADY_EXISTS    = 6
+UNKNOWN_ERROR               = 7
+OTHERS                      = 8.
+CASE SY-SUBRC.
+WHEN 0.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>DIRECTORY_DELETE
+EXPORTING
+DIRECTORY                   = L_PATH
+CHANGING
+RC                          = L_RC
+EXCEPTIONS
+OTHERS                      = 0.
+WHEN 4.
+SET CURSOR FIELD 'P_BKFILE'.
+MESSAGE E602.
+WHEN 6.
+WHEN OTHERS.
+SET CURSOR FIELD 'P_BKFILE'.
+MESSAGE E602.
+ENDCASE.
+
+ENDIF.
+
+IF P_SERVER = 'X'.
+
+L_DIR_S = L_PATH.
+CALL FUNCTION 'PFL_CHECK_DIRECTORY'
+EXPORTING
+DIRECTORY                         = L_DIR_S
+EXCEPTIONS
+PFL_DIR_NOT_EXIST                 = 1
+PFL_PERMISSION_DENIED             = 2
+PFL_CANT_BUILD_DATASET_NAME       = 3
+PFL_FILE_NOT_EXIST                = 4
+OTHERS                            = 5
+.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BKFILE'.
+MESSAGE E602.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_P_BKFILE
+*&Ver2 対応 2007/02/28 >>>
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_P_ERFILE
+*&---------------------------------------------------------------------*
+*       エラーファイル名のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_P_ERFILE .
+
+DATA: L_PATH TYPE STRING.
+DATA: LT_DIR TYPE STANDARD TABLE OF STRING,
+L_DIR TYPE STRING,
+L_DIR_S LIKE BTCH0000-TEXT80,
+L_LINES TYPE I.
+DATA: L_COUNT TYPE I,
+L_RC TYPE I.
+* 未入力チェック
+IF P_ERFILE = ''.
+SET CURSOR FIELD 'P_ERFILE'.
+MESSAGE E600.
+ENDIF.
+* ディレクトリを入力しているかのチェック
+IF NOT P_ERFILE CS GK_DEVIDE.
+SET CURSOR FIELD 'P_ERFILE'.
+MESSAGE E603.
+ENDIF.
+
+* 入力されたエラーファイル出力先をワークへ移す
+L_PATH = P_ERFILE.
+*
+L_COUNT = STRLEN( L_PATH ) - 1.
+IF L_PATH+L_COUNT(1) <> GK_DEVIDE.
+SET CURSOR FIELD 'P_ERFILE'.
+MESSAGE E604 WITH GK_DEVIDE.
+ENDIF.
+
+IF P_LOCAL = 'X'.
+
+CONCATENATE L_PATH SY-REPID INTO L_PATH.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>DIRECTORY_CREATE
+EXPORTING
+DIRECTORY                   = L_PATH
+CHANGING
+RC                          = L_RC
+EXCEPTIONS
+CNTL_ERROR                  = 1
+DIRECTORY_CREATE_FAILED     = 2
+ERROR_NO_GUI                = 3
+PATH_NOT_FOUND              = 4
+DIRECTORY_ACCESS_DENIED     = 5
+DIRECTORY_ALREADY_EXISTS    = 6
+UNKNOWN_ERROR               = 7
+OTHERS                      = 8.
+CASE SY-SUBRC.
+WHEN 0.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>DIRECTORY_DELETE
+EXPORTING
+DIRECTORY                   = L_PATH
+CHANGING
+RC                          = L_RC
+EXCEPTIONS
+OTHERS                      = 0.
+WHEN 4.
+SET CURSOR FIELD 'P_ERFILE'.
+MESSAGE E607.
+WHEN 6.
+WHEN OTHERS.
+SET CURSOR FIELD 'P_ERFILE'.
+MESSAGE E607.
+ENDCASE.
+
+ENDIF.
+
+IF P_SERVER = 'X'.
+
+L_DIR_S = L_PATH.
+CALL FUNCTION 'PFL_CHECK_DIRECTORY'
+EXPORTING
+DIRECTORY                         = L_DIR_S
+EXCEPTIONS
+PFL_DIR_NOT_EXIST                 = 1
+PFL_PERMISSION_DENIED             = 2
+PFL_CANT_BUILD_DATASET_NAME       = 3
+PFL_FILE_NOT_EXIST                = 4
+OTHERS                            = 5
+.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_ERFILE'.
+MESSAGE E602.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_P_ERFILE
+*&Ver2 対応 2007/02/28 <<<
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_P_PAUSEC
+*&---------------------------------------------------------------------*
+*       「その他の区切り」の入力チェック
+*----------------------------------------------------------------------*
+FORM CHECK_P_PAUSEC .
+
+IF P_PAUSEC = '' AND P_PAUSE = 'X'.
+SET CURSOR FIELD 'P_PAUSEC'.
+MESSAGE E600.
+ENDIF.
+
+ENDFORM.                    " CHECK_P_PAUSEC
+*&---------------------------------------------------------------------*
+*&      Form  GET_LOCAL_FILE
+*&---------------------------------------------------------------------*
+*       ローカルファイルの取得
+*----------------------------------------------------------------------*
+FORM GET_LOCAL_FILE .
+
+DATA: L_INFILE  TYPE STRING,
+L_LINES TYPE I.
+* Add ES-UP 2012/11/07 -->
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+* Add ES-UP 2012/11/07 <--
+L_INFILE = W_FILENAME.
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                      = L_INFILE
+* Add ES-UP 2012/11/07 -->
+codepage                = l_codepage
+* Add ES-UP 2012/11/07 <--
+TABLES
+DATA_TAB                      = TBL_CSV
+EXCEPTIONS
+FILE_OPEN_ERROR               = 1
+FILE_READ_ERROR               = 2
+NO_BATCH                      = 3
+GUI_REFUSE_FILETRANSFER       = 4
+INVALID_TYPE                  = 5
+NO_AUTHORITY                  = 6
+UNKNOWN_ERROR                 = 7
+BAD_DATA_FORMAT               = 8
+HEADER_NOT_ALLOWED            = 9
+SEPARATOR_NOT_ALLOWED         = 10
+HEADER_TOO_LONG               = 11
+UNKNOWN_DP_ERROR              = 12
+ACCESS_DENIED                 = 13
+DP_OUT_OF_MEMORY              = 14
+DISK_FULL                     = 15
+DP_TIMEOUT                    = 16
+OTHERS                        = 17
+.
+IF SY-SUBRC <> 0.
+* 入力ファイルオープンエラー
+MESSAGE I766 WITH TEXT-M23. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+DESCRIBE TABLE TBL_CSV LINES L_LINES.
+IF L_LINES = 0.
+*データがありません
+MESSAGE I767. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+
+ENDFORM.                    " GET_LOCAL_FILE
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SERVER_FILE
+*&---------------------------------------------------------------------*
+*       サーバファイルの取得
+*----------------------------------------------------------------------*
+FORM GET_SERVER_FILE .
+
+DATA: L_CSV_LINE TYPE STRING,
+L_STR TYPE STRING,
+L_BUFFER TYPE STRING,
+L_LEN TYPE I,
+L_POS TYPE I,
+L_LINES TYPE I,
+L_SUBRC LIKE SY-SUBRC.
+
+FIELD-SYMBOLS: <FS> TYPE C.
+*&Ver2 対応 2007/02/28>>>
+*  OPEN DATASET W_FILENAME FOR INPUT IN BINARY MODE.
+* UPDATE 2007/04/20 IWAKI(DMC) {
+*  OPEN DATASET W_FILENAME FOR INPUT IN TEXT MODE ENCODING DEFAULT
+*  IGNORING CONVERSION ERRORS.
+
+* conversion 対応 2010/12/13 UPD >>>
+*DATA: L_BOM      TYPE SYCHAR01,
+*      L_ENCODING TYPE SYCHAR01.
+*  CL_ABAP_FILE_UTILITIES=>CHECK_UTF8( EXPORTING FILE_NAME = W_FILENAME
+*                                      IMPORTING BOM       = L_BOM
+*                                                ENCODING  = L_ENCODING
+*).
+*  IF L_ENCODING = 'U'.  "UTF-8のとき
+*    OPEN DATASET W_FILENAME FOR INPUT IN TEXT MODE ENCODING
+*    UTF-8 SKIPPING BYTE-ORDER MARK.
+*  ELSE.
+*    OPEN DATASET W_FILENAME FOR INPUT IN TEXT MODE ENCODING DEFAULT
+*    IGNORING CONVERSION ERRORS.
+*  ENDIF.
+*** 2012/03/22 MOD START ***
+*  OPEN DATASET W_FILENAME FOR INPUT IN BINARY MODE.
+* Mod ES-UP 2012/11/07 -->
+*  OPEN DATASET W_FILENAME FOR INPUT IN TEXT MODE.
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+open dataset w_filename for input
+in legacy text mode code page l_codepage
+ignoring conversion errors.
+* Mod ES-UP 2012/11/07 <--
+*** 2012/03/22 MOD END ***
+* conversion 対応 2010/12/13 UPD <<<
+
+* } UPDATE 2007/04/19 IWAKI(DMC)
+*&Ver2 対応 2007/02/28<<<
+IF SY-SUBRC <> 0.
+MESSAGE I766 WITH TEXT-M23. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+CLEAR L_STR.
+DO.
+*&Ver2 対応 2007/02/28>>>
+*    READ DATASET W_FILENAME INTO L_BUFFER LENGTH L_LEN.
+READ DATASET W_FILENAME INTO L_CSV_LINE.
+L_SUBRC = SY-SUBRC.
+*&Ver2 対応 2007/02/28<<<
+*    CONCATENATE L_STR L_BUFFER INTO L_STR.
+*    WHILE L_STR CS GC_CRLF.
+*      L_POS = SY-FDPOS + 2.
+*      L_CSV_LINE = L_STR+0(SY-FDPOS).
+*      APPEND L_CSV_LINE TO TBL_CSV.
+*      L_STR = L_STR+L_POS.
+*    ENDWHILE.
+*    IF L_SUBRC = 4.
+*      IF NOT L_STR IS INITIAL.
+*        APPEND L_STR TO TBL_CSV.
+*      ENDIF.
+*      EXIT.
+*    ENDIF.
+IF L_SUBRC <> 0.
+EXIT.
+* 入力ファイルオープンエラー
+*      MESSAGE I766 WITH TEXT-M23. " DISPLAY LIKE 'E'
+*      STOP.
+ELSE.
+APPEND L_CSV_LINE TO TBL_CSV.
+ENDIF.
+ENDDO.
+*&Ver2 対応 2007/02/28 >>>
+CLOSE DATASET W_FILENAME.
+*&Ver2 対応 2007/02/28 <<<
+
+DESCRIBE TABLE TBL_CSV LINES L_LINES.
+IF L_LINES = 0.
+* データがありません
+MESSAGE I767. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+
+ENDFORM.                    " GET_SERVER_FILE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BKFILE_L
+*&---------------------------------------------------------------------*
+*       バックアップファイルの存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_BKFILE_L .
+
+DATA: L_BKFILE  TYPE STRING.
+
+DATA: L_PF_FILE LIKE DRAW-FILEP,
+L_PFX_FILE LIKE DRAW-FILEP,
+L_PFX_EXT(10) TYPE C.
+*
+DATA: L_PFX_DOTEXT(10) TYPE C.
+
+DATA: LT_DIR TYPE STANDARD TABLE OF STRING,
+L_DIR TYPE STRING,
+L_LINES TYPE I.
+DATA: W_ERFILE TYPE STRING.
+* Add ES-UP 2012/11/07 -->
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+* Add ES-UP 2012/11/07 <--
+*&Ver2 対応 2007/02/28 >>>
+SPLIT FILE_TABL-LINE AT '.' INTO L_PFX_FILE L_PFX_EXT.
+
+L_PF_FILE = P_BKFILE.
+
+*  PERFORM SPLIT_FILE USING L_PF_FILE
+*                     CHANGING  L_PFX_FILE
+*                               L_PFX_EXT
+*                               L_PFX_DOTEXT.
+*&Ver2 対応 2007/02/28 <<<
+CONCATENATE L_PF_FILE
+L_PFX_FILE
+'_'
+SY-DATUM
+SY-UZEIT
+P_EXTNS2
+INTO G_BKFILE.
+*  CONCATENATE L_PFX_FILE '_' SY-DATUM SY-UZEIT '.bak' INTO G_BKFILE.
+L_BKFILE = G_BKFILE.
+
+L_PF_FILE = P_ERFILE.
+*  CALL FUNCTION 'CV120_SPLIT_FILE'
+*    EXPORTING
+*      PF_FILE                = L_PF_FILE
+*    IMPORTING
+*      PFX_FILE               = L_PFX_FILE
+*      PFX_EXTENSION          = L_PFX_EXT .
+CONCATENATE L_PF_FILE
+L_PFX_FILE
+'_'
+SY-DATUM
+SY-UZEIT
+P_EXTNS3
+INTO G_ERRFILE.
+*  CONCATENATE L_PFX_FILE '_' SY-DATUM SY-UZEIT '.err' INTO G_ERRFILE.
+
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                      = L_BKFILE
+* Add ES-UP 2012/11/07 -->
+codepage                = l_codepage
+* Add ES-UP 2012/11/07 <--
+TABLES
+DATA_TAB                      = TBL_BK_CSV
+EXCEPTIONS
+FILE_OPEN_ERROR               = 1
+FILE_READ_ERROR               = 2
+NO_BATCH                      = 3
+GUI_REFUSE_FILETRANSFER       = 4
+INVALID_TYPE                  = 5
+NO_AUTHORITY                  = 6
+UNKNOWN_ERROR                 = 7
+BAD_DATA_FORMAT               = 8
+HEADER_NOT_ALLOWED            = 9
+SEPARATOR_NOT_ALLOWED         = 10
+HEADER_TOO_LONG               = 11
+UNKNOWN_DP_ERROR              = 12
+ACCESS_DENIED                 = 13
+DP_OUT_OF_MEMORY              = 14
+DISK_FULL                     = 15
+DP_TIMEOUT                    = 16
+OTHERS                        = 17
+.
+IF SY-SUBRC = 0.
+MESSAGE I768. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+
+ENDFORM.                    " CHECK_BKFILE_L
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BKFILE_S
+*&---------------------------------------------------------------------*
+*       バックアップファイルの存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_BKFILE_S .
+
+DATA: L_BKFILE  TYPE STRING,
+L_LEN     TYPE I.
+
+DATA: L_PF_FILE LIKE DRAW-FILEP,
+L_PFX_FILE LIKE DRAW-FILEP,
+L_PFX_EXT(10) TYPE C.
+**&Ver2 対応 2007/02/28 >>>
+DATA: L_PFX_DOTEXT(10) TYPE C.
+
+DATA: LT_DIR TYPE STANDARD TABLE OF STRING,
+L_DIR TYPE STRING,
+L_LINES TYPE I.
+DATA: W_ERFILE TYPE STRING.
+*&Ver2 対応 2007/02/28 <<<
+CLEAR:L_PF_FILE.
+L_PF_FILE = P_BKFILE.
+*&Ver2 対応 2007/02/28 >>>
+SPLIT FILE_TABL-LINE AT '.' INTO L_PFX_FILE L_PFX_EXT.
+
+*  PERFORM SPLIT_FILE USING L_PF_FILE
+*                     CHANGING  L_PFX_FILE
+*                               L_PFX_EXT
+*                               L_PFX_DOTEXT.
+*&Ver2 対応 2007/02/28 <<<
+CONCATENATE L_PF_FILE
+L_PFX_FILE
+'_'
+SY-DATUM
+SY-UZEIT
+P_EXTNS2
+INTO G_BKFILE.
+L_BKFILE = G_BKFILE.
+*&Ver2 対応 2007/02/28 >>>
+*エラーファイル名の作成
+L_PF_FILE = P_ERFILE.
+*  CALL FUNCTION 'CV120_SPLIT_FILE'
+*    EXPORTING
+*      PF_FILE                = L_PF_FILE
+*    IMPORTING
+*      PFX_FILE               = L_PFX_FILE
+*      PFX_EXTENSION          = L_PFX_EXT .
+CONCATENATE L_PF_FILE
+L_PFX_FILE
+'_'
+SY-DATUM
+SY-UZEIT
+P_EXTNS3
+INTO G_ERRFILE.
+*  REFRESH:LT_DIR.
+*
+*  CLEAR:LT_DIR,
+*        L_DIR,
+*        L_LINES,
+*        W_ERFILE.
+*
+*  W_ERFILE = P_ERFILE.
+*  SPLIT W_ERFILE AT GK_DEVIDE INTO TABLE LT_DIR.
+*
+*  CLEAR W_ERFILE.
+*  DESCRIBE TABLE LT_DIR LINES L_LINES.
+*  LOOP AT LT_DIR INTO L_DIR.
+*    IF SY-TABIX = L_LINES.
+*      EXIT.
+*    ELSEIF SY-TABIX = 1.
+*      W_ERFILE = L_DIR.
+*    ELSE.
+*      CONCATENATE W_ERFILE L_DIR INTO W_ERFILE SEPARATED BY GK_DEVIDE.
+*    ENDIF.
+*  ENDLOOP.
+*
+*      CONCATENATE W_ERFILE GK_DEVIDE FILE_TABL-LINE INTO W_ERFILE.
+*
+*  L_PF_FILE = W_ERFILE.
+*
+*  PERFORM SPLIT_FILE USING L_PF_FILE
+*                     CHANGING  L_PFX_FILE
+*                               L_PFX_EXT
+*                               L_PFX_DOTEXT.
+*
+*  CONCATENATE L_PFX_FILE '_' SY-DATUM SY-UZEIT '.err' INTO G_ERRFILE.
+*&Ver2 対応 2007/02/28 <<<
+
+OPEN DATASET L_BKFILE FOR INPUT IN BINARY MODE.
+IF SY-SUBRC = 0.
+MESSAGE I768. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+CLOSE DATASET L_BKFILE.
+
+ENDFORM.                    " CHECK_BKFILE_S
+
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_LOG
+*&---------------------------------------------------------------------*
+*       結果出力
+*----------------------------------------------------------------------*
+FORM WRITE_LOG .
+
+DATA: L_LINE    TYPE I.
+
+SKIP.
+ULINE.
+
+WRITE: /4  TEXT-S17,
+20 ':',
+23 W_FILENAME.
+ULINE.
+
+IF G_ERR_COUNT > 0.
+*   行番号  取引先コード  会社コード  エラー内容
+WRITE: /4(6) TEXT-001,12(14) TEXT-002, 26(10) TEXT-003,
+38(10) TEXT-004.
+ULINE.
+ENDIF.
+
+SORT  TBL_ERRLOG BY LINE_NO.
+LOOP AT TBL_ERRLOG.
+WRITE:/4(6)    TBL_ERRLOG-LINE_NO,
+12(10)  TBL_ERRLOG-VRFCTON,
+26(6)   TBL_ERRLOG-BUKRS,
+38(128) TBL_ERRLOG-ERR.
+L_LINE = SY-TABIX MOD 33.
+IF L_LINE = 0.
+NEW-PAGE.
+ENDIF.
+ENDLOOP.
+
+IF G_ERR_COUNT > 0.
+SKIP.
+ENDIF.
+SKIP.
+* 処理テーブル:
+WRITE:/4(14) TEXT-M22,G_TBLID.
+SKIP.
+
+* 読込件数:  件
+DESCRIBE TABLE TBL_CSV LINES G_READ_COUNT.
+*  G_READ_COUNT = LINES( TBL_CSV ).
+
+WRITE:/4(10) TEXT-005, 29(8) G_READ_COUNT  , TEXT-010.
+* 登録件数:  件
+WRITE:/4(10) TEXT-006, 29(8) G_INSERT_COUNT, TEXT-010.
+* 変更件数:  件
+WRITE:/4(10) TEXT-007, 29(8) G_UPDATE_COUNT, TEXT-010.
+* 削除件数:  件
+WRITE:/4(10) TEXT-011, 29(8) G_DELETE_COUNT, TEXT-010.
+* エラー件数:  件
+WRITE:/4(12) TEXT-008, 29(8) G_ERR_COUNT   , TEXT-010.
+* エラーファイル名:
+IF G_ERR_COUNT > 0.
+WRITE:/4(20) TEXT-009, 35(128) G_ERRFILE.
+ENDIF.
+IF G_ERR_COUNT > 0.
+MESSAGE I759.
+STOP.
+ENDIF.
+
+ENDFORM.                    " WRITE_LOG
+
+*&---------------------------------------------------------------------*
+*&      Form  SET_ERRLOG
+*&---------------------------------------------------------------------*
+*       SET ERROR LOG
+*----------------------------------------------------------------------*
+*      -->P_LINE_NO 行番号
+*      -->P_VRFCTON 得意先コード
+*      -->P_BUKRS   会社コード
+*      -->P_ERR     ERR
+*----------------------------------------------------------------------*
+FORM SET_ERRLOG  USING    P_LINE_NO
+P_VRFCTON
+P_BUKRS
+P_ERR.
+
+DATA: LW_ERRLOG LIKE TBL_ERRLOG.
+
+LW_ERRLOG-LINE_NO = P_LINE_NO.
+LW_ERRLOG-VRFCTON = P_VRFCTON.
+LW_ERRLOG-BUKRS   = P_BUKRS.
+LW_ERRLOG-ERR     = P_ERR.
+
+APPEND LW_ERRLOG TO TBL_ERRLOG.
+
+ENDFORM.                    " SET_ERRLOG
+*&---------------------------------------------------------------------*
+*&      Form  OUT_LOCAL_BKFILE
+*&---------------------------------------------------------------------*
+*       バックアップファイルの出力
+*----------------------------------------------------------------------*
+FORM OUT_LOCAL_BKFILE .
+
+DATA: L_SOURCE TYPE STRING.
+L_SOURCE = W_FILENAME.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_COPY
+EXPORTING  SOURCE             =  L_SOURCE
+DESTINATION        =  G_BKFILE
+EXCEPTIONS CNTL_ERROR           =  1
+ERROR_NO_GUI         =  2
+WRONG_PARAMETER      =  3
+DISK_FULL            =  4
+ACCESS_DENIED        =  5
+FILE_NOT_FOUND       =  6
+DESTINATION_EXISTS   =  7
+UNKNOWN_ERROR        =  8
+PATH_NOT_FOUND       =  9
+DISK_WRITE_PROTECT   =  10
+DRIVE_NOT_READY      =  11.
+
+
+ENDFORM.                    " OUT_LOCAL_BKFILE
+*&---------------------------------------------------------------------*
+*&      Form  OUT_SERVER_BKFILE
+*&---------------------------------------------------------------------*
+*       バックアップファイルの出力
+*----------------------------------------------------------------------*
+FORM OUT_SERVER_BKFILE .
+
+*  OPEN DATASET G_BKFILE FOR OUTPUT IN BINARY MODE.
+* conversion 対応 2010/12/13 UPD >>>
+*  OPEN DATASET G_BKFILE FOR OUTPUT IN TEXT MODE
+*  ENCODING DEFAULT  IGNORING CONVERSION ERRORS.
+*** 2012/03/22 MOD START ***
+*  OPEN DATASET G_BKFILE FOR OUTPUT IN BINARY MODE.
+* Mod ES-UP 2012/11/07 -->
+*  OPEN DATASET G_BKFILE FOR OUTPUT IN TEXT MODE.
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+open dataset g_bkfile for output
+in legacy text mode code page l_codepage
+ignoring conversion errors.
+* Mod ES-UP 2012/11/07 <--
+*** 2012/03/22 MOD END ***
+* conversion 対応 2010/12/13 UPD <<<
+IF SY-SUBRC <> 0.
+* バックアップファイルオープンエラー
+MESSAGE I766 WITH TEXT-M24. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+
+LOOP AT TBL_CSV.
+TRANSFER TBL_CSV TO G_BKFILE.
+IF SY-SUBRC <> 0.
+STOP.
+ENDIF.
+ENDLOOP.
+CLOSE DATASET G_BKFILE.
+IF SY-SUBRC <> 0.
+MESSAGE I789 WITH TEXT-M12. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+
+ENDFORM.                    " OUT_SERVER_BKFILE
+*&---------------------------------------------------------------------*
+*&      Form  SET_ERRFILE
+*&---------------------------------------------------------------------*
+*       ERR FILE
+*----------------------------------------------------------------------*
+FORM SET_ERRFILE  USING   P_CUR_LIEN
+P_L_ERR_MSG.
+
+DATA: L_SEPARATOR TYPE STRING.
+* Del ES-UP 2012/11/07 -->
+** conversion 対応 2010/12/13 ADD >>>
+*  DATA: L_TAB TYPE X.
+*  L_TAB = '09'.
+** conversion 対応 2010/12/13 ADD <<<
+* Del ES-UP 2012/11/07 <--
+IF P_TAB = 'X'.
+* conversion 対応 2010/12/13 UPD >>>
+*    L_SEPARATOR = CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+*    L_SEPARATOR = L_TAB.
+* Mod ES-UP 2012/11/07 -->
+l_separator = cl_abap_char_utilities=>horizontal_tab.
+* Mod ES-UP 2012/11/07 <--
+* conversion 対応 2010/12/13 UPD <<<
+ENDIF.
+IF P_FIX = 'X'.
+L_SEPARATOR = ''.
+ENDIF.
+IF P_PAUSE = 'X'.
+L_SEPARATOR = P_PAUSEC.
+ENDIF.
+
+CONCATENATE P_CUR_LIEN P_L_ERR_MSG INTO TBL_CSV_ERR
+SEPARATED BY L_SEPARATOR.
+APPEND TBL_CSV_ERR.
+
+ENDFORM.                    " SET_ERRFILE
+*&---------------------------------------------------------------------*
+*&      Form  OUT_LOCAL_ERRFILE
+*&---------------------------------------------------------------------*
+*       エラーファイルの出力
+*----------------------------------------------------------------------*
+FORM OUT_LOCAL_ERRFILE .
+* Add ES-UP 2012/11/07 -->
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+* Add ES-UP 2012/11/07 <--
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+FILENAME                      = G_ERRFILE
+* Add ES-UP 2012/11/07 -->
+codepage                  = l_codepage
+* Add ES-UP 2012/11/07 <--
+TABLES
+DATA_TAB                      = TBL_CSV_ERR
+EXCEPTIONS
+FILE_WRITE_ERROR              = 1
+NO_BATCH                      = 2
+GUI_REFUSE_FILETRANSFER       = 3
+INVALID_TYPE                  = 4
+NO_AUTHORITY                  = 5
+UNKNOWN_ERROR                 = 6
+HEADER_NOT_ALLOWED            = 7
+SEPARATOR_NOT_ALLOWED         = 8
+FILESIZE_NOT_ALLOWED          = 9
+HEADER_TOO_LONG               = 10
+DP_ERROR_CREATE               = 11
+DP_ERROR_SEND                 = 12
+DP_ERROR_WRITE                = 13
+UNKNOWN_DP_ERROR              = 14
+ACCESS_DENIED                 = 15
+DP_OUT_OF_MEMORY              = 16
+DISK_FULL                     = 17
+DP_TIMEOUT                    = 18
+FILE_NOT_FOUND                = 19
+DATAPROVIDER_EXCEPTION        = 20
+CONTROL_FLUSH_ERROR           = 21
+OTHERS                        = 22
+.
+IF SY-SUBRC <> 0.
+MESSAGE I789 WITH TEXT-M14. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+
+ENDFORM.                    " OUT_LOCAL_ERRFILE
+*&---------------------------------------------------------------------*
+*&      Form  OUT_SERVER_ERRFILE
+*&---------------------------------------------------------------------*
+*       エラーファイルの出力
+*----------------------------------------------------------------------*
+FORM OUT_SERVER_ERRFILE .
+
+* conversion 対応 2010/12/13 UPD >>>
+*  OPEN DATASET G_ERRFILE FOR OUTPUT IN TEXT MODE
+*  ENCODING DEFAULT  IGNORING CONVERSION ERRORS.
+*** 2012/03/22 MOD START ***
+*  OPEN DATASET G_ERRFILE FOR OUTPUT IN BINARY MODE.
+* Mod ES-UP 2012/11/07 -->
+*  OPEN DATASET G_ERRFILE FOR OUTPUT IN TEXT MODE.
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+open dataset g_errfile for output
+in legacy text mode code page l_codepage
+ignoring conversion errors.
+* Mod ES-UP 2012/11/07 <--
+*** 2012/03/22 MOD END ***
+* conversion 対応 2010/12/13 UPD <<<
+
+LOOP AT TBL_CSV_ERR.
+TRANSFER TBL_CSV_ERR TO G_ERRFILE.
+IF SY-SUBRC <> 0.
+MESSAGE I789 WITH TEXT-M14. " DISPLAY LIKE 'E'
+STOP.
+ENDIF.
+ENDLOOP.
+CLOSE DATASET G_ERRFILE.
+
+ENDFORM.                    " OUT_SERVER_ERRFILE
+*&---------------------------------------------------------------------*
+*&      Form  SET_SPECIAL_CHAR
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM SET_SPECIAL_CHAR USING P_ASCII
+CHANGING P_CHAR.
+
+DATA: L_X(4) TYPE X.
+
+FIELD-SYMBOLS: <FS> TYPE C.
+L_X = P_ASCII.
+ASSIGN L_X TO <FS> CASTING TYPE C.
+MOVE <FS>+3(1) TO P_CHAR.
+
+ENDFORM.                    " SET_SPECIAL_CHAR
+*&---------------------------------------------------------------------*
+*&      Form  SPLIT_FILE
+*&---------------------------------------------------------------------*
+*       拡張子の削除
+*----------------------------------------------------------------------*
+FORM SPLIT_FILE USING    PF_FILE          LIKE DRAW-FILEP
+CHANGING PFX_FILE         LIKE DRAW-FILEP
+PFX_EXTENSION    TYPE C
+PFX_DOTEXTENSION TYPE C.
+
+
+
+DATA: BEGIN OF LT_HLP OCCURS 0,
+STR LIKE DRAW-FILEP.
+DATA: END OF LT_HLP.
+
+DATA: LF_EXT(10)     TYPE C,
+LF_DOT_EXT(10) TYPE C.
+DATA: LF_STR LIKE DRAW-FILEP,
+LF_ANZ TYPE I,
+LF_LEN TYPE I.
+
+REFRESH LT_HLP.
+CLEAR: PFX_EXTENSION,
+PFX_DOTEXTENSION,
+PFX_FILE.
+
+** Split the whole file at '.'
+SPLIT PF_FILE AT '.' INTO TABLE LT_HLP.
+
+** get the extenstion from the last line of table
+DESCRIBE TABLE LT_HLP LINES LF_ANZ.
+IF LF_ANZ <= 1.
+PFX_FILE = PF_FILE.
+EXIT.
+ENDIF.
+
+READ TABLE LT_HLP INDEX LF_ANZ.
+PFX_EXTENSION = LT_HLP-STR.
+LF_EXT =  LT_HLP-STR.
+IF NOT LF_EXT IS INITIAL.
+CONCATENATE '.' LF_EXT INTO LF_DOT_EXT.
+ENDIF.
+PFX_DOTEXTENSION = LF_DOT_EXT.
+
+** get only the filename
+LF_LEN = STRLEN( PF_FILE ) - STRLEN( LF_DOT_EXT ).
+IF LF_LEN > 0.
+PFX_FILE = PF_FILE(LF_LEN).
+ENDIF.
+
+
+ENDFORM.                    " SPLIR_FILE
+*&---------------------------------------------------------------------*
+*&      FORM  GET_FILE_NAME   ～Ver2 対応 2007/02/28 ～
+*&---------------------------------------------------------------------*
+*       ファイル名の取得
+*----------------------------------------------------------------------*
+FORM GET_FILE_NAME_S.
+
+DATA: W_HEAD(50) TYPE C,
+W_END(10)  TYPE C VALUE '.txt'.
+
+DATA: LV_DIRNAME(75)     TYPE C,   " NAME OF DIRECTORY.
+LV_GENERICNAME(75) TYPE C,   " NAME OF ENTRY. (MAY END WITH *)
+LV_SAP_NO          TYPE C,
+LV_SAP_YES         TYPE C VALUE 'X',
+LV_ERRCNT          TYPE I.
+
+DATA:W_INIT TYPE I,
+LIN    TYPE I.
+DATA:FIL_DEL LIKE IBIPPARMS-PATH,
+FIL_COP LIKE IBIPPARMS-PATH,
+FIL_MOV LIKE IBIPPARMS-PATH.
+
+DATA: LT_DIR TYPE STANDARD TABLE OF STRING,
+L_DIR TYPE STRING,
+L_DIR_S LIKE BTCH0000-TEXT80,
+L_LINES TYPE I.
+DATA: L_COUNT TYPE I,
+L_RC TYPE I.
+
+
+W_DIRECTORY = P_INFILE.
+SPLIT W_DIRECTORY AT GK_DEVIDE INTO TABLE LT_DIR.
+
+CLEAR W_DIRECTORY.
+DESCRIBE TABLE LT_DIR LINES L_LINES.
+*
+CLEAR:L_COUNT.
+L_COUNT = STRLEN( P_INFILE ).
+L_COUNT = L_COUNT - 1.
+*
+LOOP AT LT_DIR INTO L_DIR.
+IF SY-TABIX = L_LINES.
+IF P_INFILE+L_COUNT(1) = GK_DEVIDE.
+CONCATENATE W_DIRECTORY L_DIR INTO W_DIRECTORY
+SEPARATED BY GK_DEVIDE.
+ELSE.
+W_HEAD = L_DIR .
+ENDIF.
+EXIT.
+ELSEIF SY-TABIX = 1.
+W_DIRECTORY = L_DIR.
+ELSE.
+CONCATENATE W_DIRECTORY L_DIR INTO W_DIRECTORY
+SEPARATED BY GK_DEVIDE.
+ENDIF.
+ENDLOOP.
+
+CONCATENATE W_DIRECTORY GK_DEVIDE INTO W_DIRECTORY.
+
+
+
+
+* START READING A DIRECTORY
+IF W_DIRECTORY IS INITIAL.
+MOVE '.\' TO LV_DIRNAME.
+ELSE.
+MOVE W_DIRECTORY TO LV_DIRNAME.
+ENDIF.
+CALL 'C_DIR_READ_START' ID 'DIR'    FIELD LV_DIRNAME
+ID 'FILE'   FIELD LV_GENERICNAME
+ID 'ERRNO'  FIELD LS_FILE-ERRNO
+ID 'ERRMSG' FIELD LS_FILE-ERRMSG.
+IF SY-SUBRC <> 0.
+MESSAGE E204(S1) WITH LS_FILE-ERRMSG SPACE LV_DIRNAME INTO
+FILE_TABL-LINE.
+APPEND FILE_TABL.  "GLOBAL TABLE
+ENDIF.
+
+* READ ALL ENTRIES IN A LOOP
+DO.
+CLEAR LS_FILE.
+CALL 'C_DIR_READ_NEXT'
+ID 'TYPE'   FIELD LS_FILE-TYPE
+ID 'NAME'   FIELD LS_FILE-NAME
+ID 'NAME'   FIELD LS_FILE-NAME
+ID 'LEN'    FIELD LS_FILE-LEN
+ID 'OWNER'  FIELD LS_FILE-OWNER
+ID 'MTIME'  FIELD LS_FILE-MTIME
+ID 'MODE'   FIELD LS_FILE-MODE
+ID 'ERRNO'  FIELD LS_FILE-ERRNO
+ID 'ERRMSG' FIELD LS_FILE-ERRMSG.
+LS_FILE-DIRNAME = LV_DIRNAME.
+MOVE SY-SUBRC TO LS_FILE-SUBRC.
+* FOUND AN ENTRY
+CASE SY-SUBRC.
+WHEN 0.
+CLEAR: LS_FILE-ERRNO, LS_FILE-ERRMSG.
+CASE LS_FILE-TYPE(1).
+WHEN 'F'.                    " NORMAL FILE.
+MOVE LV_SAP_YES TO LS_FILE-USEABLE.
+WHEN 'f'.                    " NORMAL FILE.
+MOVE LV_SAP_YES TO LS_FILE-USEABLE.
+WHEN OTHERS. " DIRECTORY, DEVICE, FIFO, SOCKET,...
+MOVE LV_SAP_NO  TO LS_FILE-USEABLE.
+ENDCASE.
+IF LS_FILE-LEN = 0.
+MOVE LV_SAP_NO TO LS_FILE-USEABLE.
+ENDIF.
+* END OF DIRECTORY
+WHEN 1.
+EXIT.
+* SOME KIND OF ERROR OCCURED
+WHEN OTHERS.                     " SY-SUBRC >= 2
+ADD 1 TO LV_ERRCNT.
+IF LV_ERRCNT > 10.
+EXIT.
+ENDIF.
+IF SY-SUBRC = 5.
+MOVE: '???' TO LS_FILE-TYPE,
+'???' TO LS_FILE-OWNER,
+'???' TO LS_FILE-MODE.
+ENDIF.
+MOVE LV_SAP_NO TO LS_FILE-USEABLE.
+ENDCASE.
+
+W_INIT = STRLEN( W_HEAD ).
+
+IF LS_FILE-USEABLE NE LV_SAP_NO.
+MOVE LS_FILE-NAME(70) TO FILE_TABL-LINE.
+IF FILE_TABL-LINE CS P_EXTNS1. "
+IF W_HEAD IS INITIAL.     "先頭文字の指定なし
+APPEND FILE_TABL.
+ELSE.
+IF FILE_TABL-LINE(W_INIT) = W_HEAD. "W_HEADと先頭文字が一致
+APPEND FILE_TABL.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+
+ENDDO.
+DESCRIBE TABLE FILE_TABL LINES LIN.
+IF LIN IS INITIAL.
+MESSAGE I767.
+STOP.
+ENDIF.
+
+ENDFORM.                    "GET_FILE_NAME
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_P_EXTENSION
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM CHECK_P_EXTENSION .
+IF P_EXTNS1 = P_EXTNS2 OR
+P_EXTNS1 = P_EXTNS3 OR
+P_EXTNS2 = P_EXTNS3.
+MESSAGE E606.
+ENDIF.
+ENDFORM.                    " CHECK_P_EXTENSION
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_NAME_L
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM GET_FILE_NAME_L .
+DATA:WK_INIT TYPE I,
+G_INDIRECTORY TYPE SDOK_CHTRD.
+* 入力ファイル名取得
+CLEAR:GT_DIR,G_DIR,G_LCNT,G_INFILENAME,W_DIRECTORY.
+SPLIT P_INFILE AT GK_DEVIDE INTO TABLE GT_DIR.
+DESCRIBE TABLE GT_DIR LINES G_LCNT.
+*
+CLEAR:WK_INIT.
+WK_INIT = STRLEN( P_INFILE ).
+WK_INIT = WK_INIT - 1.
+*入力ファイル名よりディレクトリとファイル名とに分割
+LOOP AT GT_DIR INTO G_DIR.
+IF SY-TABIX = G_LCNT.
+IF P_INFILE+WK_INIT(1) = GK_DEVIDE.
+CONCATENATE W_DIRECTORY G_DIR INTO W_DIRECTORY
+SEPARATED BY GK_DEVIDE.
+ELSE.
+G_INFILENAME = G_DIR.
+ENDIF.
+EXIT.
+ELSEIF SY-TABIX = 1.
+W_DIRECTORY = G_DIR.
+ELSE.
+CONCATENATE W_DIRECTORY G_DIR INTO W_DIRECTORY
+SEPARATED BY GK_DEVIDE.
+ENDIF.
+ENDLOOP.
+CONCATENATE W_DIRECTORY GK_DEVIDE INTO W_DIRECTORY.
+*
+REFRESH L_FILE_TBL.CLEAR:G_INDIRECTORY.
+G_INDIRECTORY = W_DIRECTORY.
+*実行画面にて指定されたディレクトリにあるファイル名を取得
+CALL FUNCTION 'TMP_GUI_DIRECTORY_LIST_FILES'
+EXPORTING
+DIRECTORY        = G_INDIRECTORY
+*     FILTER           = '*.*'
+TABLES
+FILE_TABLE       = L_FILE_TBL
+DIR_TABLE        = L_DIR_TBL
+EXCEPTIONS
+CNTL_ERROR       = 1
+OTHERS           = 2  .
+IF SY-SUBRC <> 0.
+REFRESH L_FILE_TBL.
+MESSAGE I767.
+STOP.
+ENDIF.
+*対象ファイル名を内部テーブルにセットする
+CLEAR:WK_INIT.
+WK_INIT = STRLEN( G_INFILENAME ).
+LOOP AT L_FILE_TBL.
+MOVE L_FILE_TBL-PATHNAME(70) TO FILE_TABL-LINE.
+IF L_FILE_TBL-PATHNAME CS P_EXTNS1. "
+IF G_INFILENAME IS INITIAL.     "先頭文字の指定なし
+APPEND FILE_TABL.
+ELSE.
+IF L_FILE_TBL-PATHNAME(WK_INIT) = G_INFILENAME.
+APPEND FILE_TABL.
+CLEAR:FILE_TABL.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDLOOP.
+* 対象ファイル存在チェック
+CLEAR:WK_INIT.
+DESCRIBE TABLE FILE_TABL LINES WK_INIT.
+IF WK_INIT IS INITIAL.
+MESSAGE I767.
+STOP.
+ENDIF.
+
+ENDFORM.                    " GET_FILE_NAME_L
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_TBNAME
+*&---------------------------------------------------------------------*
+*       構造体と処理区分のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_TBNAME.
+*
+CASE P_TBNAME.
+WHEN 'YNEIAJ1101'.
+IF P_SALES <> 'X'.
+*指定されたレイアウトは処理できません
+MESSAGE E771.
+ENDIF.
+WHEN 'YNEIAJ1102'.
+IF P_PRCHS <> 'X'.
+*指定されたレイアウトは処理できません
+MESSAGE E771.
+ENDIF.
+WHEN 'YNYN110'.
+IF P_SALES <> 'X'.
+*指定されたレイアウトは処理できません
+MESSAGE E771.
+ENDIF.
+WHEN 'YNYN210'.
+IF P_PRCHS <> 'X'.
+*指定されたレイアウトは処理できません
+MESSAGE E771.
+ENDIF.
+WHEN OTHERS.
+*指定されたレイアウトは処理できません
+MESSAGE E771.
+ENDCASE.
+*
+ENDFORM.                    " CHECK_TBNAME
+*Text symbol text・
+*001:Row No.
+*002:Partner
+*003:Company
+*004:Error Text
+*005:Read:
+*006:Created:
+*007:Updatad:
+*008:Errors:
+*009:Error File Name
+*011:Deleted:
+*M01:YN120
+*M02:YN220
+*M03:Terms of Payment
+*M04:Date
+*M05:Fiscal Year
+*M06:Currency Code
+*M07:Out Number
+*M08:Change
+*M09:Delete
+*M10:YN110
+*M11:YN210
+*M12:Buckup File
+*M13:Entried File
+*M14:Error File
+*M15:Quantity
+*M16:Unit Price
+*M17:Consumption Tax
+*M18:w/ Tax
+*M19:w/o Tax
+*M20:Fiscal Year
+*M21:Data
+*M22:Process Table:
+*M23:Entried File
+*M24:Buckup File
+*S01:Sales/Purchase
+*S02:Sales Checking
+*S03:Purchase Checking
+*S04:Entried File Layout
+*S05:File Selection
+*S06:Local
+*S07:Server
+*S08:File Types
+*S09:Tab delimited
+*S10:Fixed length
+*S11:Others
+*S12:Process Types
+*S13:Create
+*S14:Change
+*S15:Delete
+*S16:Process Option
+*S17:Entry File
+*S18:Ext.
+*S19:Backup File
+*S20:Error File
+*Selection text・
+*P_BKFILE:        Backup File
+*P_ERFILE:        Error File
+*P_INFILE:        Entry File
+*P_TBNAME:        Layout Name
+*P_TEST:        Test Execution

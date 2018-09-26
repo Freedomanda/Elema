@@ -1,0 +1,1437 @@
+************************************************************************
+* [プログラム名]
+*        ZYTD5040  供給元一覧
+* [処理概要]
+* ・ ローカル、またはサーバより移行ファイルを読込み、Ｒ／３供給元マ
+*    にＢＤＣでデータを登録する。
+* ・ ＢＤＣの前に入力データに対し存在チェックをし、正常データのみで
+*    Ｃを実行する。
+* ・ ＢＤＣ終了後、結果レポートを表示する。
+* [改定履歴]
+*　YYYY/MM/DD   Programar           Description
+*  2002/01/31   PSD K.IGARASHI      新規開発
+*  2002/05/09   NDSC K.KAJISA       件数出力法の変更
+*  2010/09/24   SOLFIS M.MURATA     更新方法変更
+*  2012/08/08   ISID                ES-UP
+*  2014/08/29   ISID18              コードページを"UTF-8"に修正
+*  2015/01/13   ISID11              アップロード時のBOMロジック改修
+*  2015/02/04   ISID11              コードページ処理の再修正
+***********************************************************************
+REPORT   ZYTD5040
+MESSAGE-ID Y1
+LINE-SIZE 155
+NO STANDARD PAGE HEADING.
+***********************************************************************
+*   TYPES
+***********************************************************************
+TABLES : EORD .
+* ＢＤＣ実行内部ＴＢＬ型
+*TYPES: BEGIN OF TYP_IFILE,
+*        MATNR(18) TYPE C,               "仕入先コード
+*        WERKS(4)  TYPE C,               "プラント
+*        VDATU(8)  TYPE C,               "有効開始日
+*        BDATU(8)  TYPE C,               "有効終了日
+*        LIFNR(10) TYPE C,               "仕入先
+*        EKORG(4)  TYPE C,               "購買組織
+*        FESKZ(1)  TYPE C,               "固定供給元
+*       END OF TYP_IFILE.
+*
+* Del Start 2010/09/24
+*TYPES: BEGIN OF typ_ifile,
+*        matnr LIKE eord-matnr ,         "品目コード
+*        werks LIKE eord-werks ,         "プラント
+*        vdatu LIKE eord-vdatu ,         "有効開始日
+*        bdatu LIKE eord-bdatu ,         "有効終了日
+*        lifnr LIKE eord-lifnr ,         "仕入先
+*        ekorg LIKE eord-ekorg ,         "購買組織
+*        flifn LIKE eord-flifn ,         "固定供給元
+*       END OF typ_ifile.
+* Del End   2010/09/24
+
+* 帳票出力項目ＴＢＬ型
+TYPES: BEGIN OF TYP_WRITE,
+MATNR(18)    TYPE C,            "仕入先コード
+WERKS(4)     TYPE C,            "プラント
+VDATU(8)     TYPE C,            "有効開始日
+BDATU(8)     TYPE C,            "有効終了日
+LIFNR(10)    TYPE C,            "仕入先
+EKORG(4)     TYPE C,            "購買組織
+FLIFN(1)     TYPE C,            "固定供給元
+MESSAGE(100) TYPE C,            "メッセージ
+ERR_FLG      TYPE C,            "エラーフラグ
+END OF TYP_WRITE.
+* Add Start 2010/09/24
+TYPES: BEGIN OF TYP_HEADER,
+MATNR TYPE EORD-MATNR,         "品目コード
+WERKS TYPE EORD-WERKS,         "プラント
+END OF TYP_HEADER,
+
+* チェック用
+BEGIN OF TYP_CHK_MAT,
+MATNR TYPE EORD-MATNR,         "品目コード
+ERR   TYPE C,                  "エラーフラグ
+END OF TYP_CHK_MAT,
+
+BEGIN OF TYP_CHK_WER,
+WERKS TYPE EORD-WERKS,         "プラント
+END OF TYP_CHK_WER,
+
+BEGIN OF TYP_CHK_LIF,
+LIFNR TYPE EORD-LIFNR,         "仕入先
+ERR   TYPE C,                  "エラーフラグ
+END OF TYP_CHK_LIF.
+* Add End   2010/09/24
+***********************************************************************
+*   DATA
+***********************************************************************
+* 読込みファイル格納用内部ＴＢＬ
+* Del Start 2010/09/24
+*DATA: gf_ifile TYPE typ_ifile,
+*      gt_ifile LIKE TABLE OF gf_ifile.
+*
+** 正常データ用内部ＴＢＬ
+*DATA: gf_ofile TYPE typ_ifile,
+*      gt_ofile LIKE TABLE OF gf_ofile.
+* Del End   2010/09/24
+* Add Start 2010/09/24
+DATA: GT_IFILE TYPE TABLE OF EORD,
+GF_IFILE TYPE EORD,
+
+GT_OFILE TYPE TABLE OF EORD,
+GF_OFILE TYPE EORD.
+* Add End   2010/09/24
+
+* 帳票出力用内部ＴＢＬ
+DATA: GF_WRITE TYPE TYP_WRITE,
+GT_WRITE LIKE TABLE OF GF_WRITE.
+
+* 入力ファイル読込み用内部ＴＢＬ(READ)
+DATA: GF_FILEDATA(80) TYPE C,
+GT_FILEDATA LIKE TABLE OF GF_FILEDATA.
+
+* 更新処理用内部テーブル
+DATA: GT_BDCDATA LIKE BDCDATA OCCURS 0 WITH HEADER LINE.
+
+* バッチインプット処理システムメッセージ用内部ＴＢＬ
+DATA: GT_MSGTAB LIKE BDCMSGCOLL OCCURS 0 WITH HEADER LINE,
+GF_MSGTAB LIKE GT_MSGTAB.
+
+* WRITE_MESSAGE変換済みメッセージ用内部ＴＢＬ
+DATA: GT_BDCMSG LIKE MESSAGE OCCURS 0 WITH HEADER LINE.
+
+* フラグ
+DATA: G_FLG_ERR TYPE P VALUE 0,          "チェック処理用エラーフラグ
+G_FLG_MSG TYPE P VALUE 0.          "メッセージ選別用フラグ
+
+* カウンタ
+DATA: G_CNT_IFILE    TYPE P VALUE 0,     "ＢＤＣ実行用内部ＴＢＬレコード
+G_CNT_WRITE    TYPE P VALUE 0,     "帳票用内部ＴＢＬレコード数
+G_CNT_FILEDATA TYPE P VALUE 0,     "読込み件数
+G_CNT_INSERT   TYPE P VALUE 0,     "登録件数
+G_CNT_ERR      TYPE P VALUE 0.     "エラー件数
+
+* 実行結果ポップアップ表示用項目
+DATA: CM_IFILE TYPE P VALUE 0,           "入力ファイル読込件数
+CM_INS   TYPE P VALUE 0,           "登録件数
+CM_ERR   TYPE P VALUE 0.           "エラー件数
+
+DATA G_BDC_MODE TYPE C VALUE 'N'.
+
+*** 汎用モジュール WS_FILENAME_GET ***
+DATA: W_MASK(22)        TYPE C VALUE
+',*.TXT,*.TXT,*.*,*.*.'.               "ファイルの種類
+DATA: G_FILENM_GET      LIKE RLGRAP-FILENAME.       "ファイル名
+DATA: W_DEF_FILENM(255) TYPE C.                     "ＰＣファイル名
+
+* Add Start 2010/09/24
+DATA: IT_EORD TYPE TABLE OF EORD,
+ST_EORD TYPE EORD,
+* バッチインプット用
+IT_HEADER TYPE TABLE OF TYP_HEADER,
+ST_HEADER TYPE TYP_HEADER,
+* チェック用
+IT_CHK_MAT TYPE TABLE OF TYP_CHK_MAT,
+ST_CHK_MAT TYPE TYP_CHK_MAT,
+
+IT_CHK_WER TYPE TABLE OF TYP_CHK_WER,
+
+IT_CHK_LIF TYPE TABLE OF TYP_CHK_LIF,
+ST_CHK_LIF TYPE TYP_CHK_LIF.
+* Add End   2010/09/24
+
+***********************************************************************
+*   CONSTANTS
+***********************************************************************
+CONSTANTS: CNS_MOD_001(15) TYPE C VALUE 'WS_FILENAME_GET',
+CNS_MOD_002(9)  TYPE C VALUE 'WS_UPLOAD'.
+CONSTANTS: CNS_TBL_001(4)  TYPE C VALUE 'MARA',
+CNS_TBL_002(5)  TYPE C VALUE 'T001W',
+CNS_TBL_003(4)  TYPE C VALUE 'LFA1',
+CNS_TBL_004(4)  TYPE C VALUE 'EINA'.
+CONSTANTS: CNS_NULL_X      TYPE X VALUE '00'.
+
+***********************************************************************
+*   選択画面
+***********************************************************************
+* データ抽出用品目ファイル
+SELECTION-SCREEN : BEGIN OF BLOCK 1 WITH FRAME TITLE TEXT-029.
+PARAMETERS: P_FILE AS CHECKBOX ,
+FNAMEIN(128) TYPE C .
+SELECTION-SCREEN : END OF BLOCK 1.
+SELECTION-SCREEN SKIP 1.
+* 選択条件
+SELECTION-SCREEN : BEGIN OF BLOCK 2 WITH FRAME TITLE TEXT-030.
+SELECT-OPTIONS : P_MATNR FOR EORD-MATNR .
+*PARAMETERS : I_WERKS LIKE EORD-WERKS  OBLIGATORY.
+SELECT-OPTIONS : I_WERKS FOR EORD-WERKS .
+PARAMETERS : I_LIFNR LIKE EORD-LIFNR  OBLIGATORY.
+SELECTION-SCREEN : END OF BLOCK 2.
+SELECTION-SCREEN SKIP 1.
+* 拡張プラント
+SELECTION-SCREEN : BEGIN OF BLOCK 3 WITH FRAME TITLE TEXT-031.
+*PARAMETERS : P_WERKS LIKE EORD-WERKS OBLIGATORY.
+PARAMETERS : P_LIFNR LIKE EORD-LIFNR OBLIGATORY.
+SELECTION-SCREEN : END OF BLOCK 3.
+* チェックのみ
+PARAMETERS C_CHK AS CHECKBOX DEFAULT 'X'.
+************************************************************************
+* ＡＴ　ＳＥＬＥＣＴＩＯＮ－ＳＣＲＥＥＮ　入力ファイルヘルプ
+************************************************************************
+*AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_IFILE.   "入力ヘルプ
+*
+*  CALL FUNCTION 'WS_FILENAME_GET'
+*     EXPORTING
+*         DEF_FILENAME           = W_DEF_FILENM
+*         MASK                   = W_MASK
+*         TITLE                  = '保管場所'
+*     IMPORTING
+*         FILENAME               = G_FILENM_GET
+*     EXCEPTIONS
+*         INV_WINSYS             = 1
+*         NO_BATCH               = 2
+*         SELECTION_CANCEL       = 3
+*         SELECTION_ERROR        = 4
+*         OTHERS                 = 5.
+*
+*  IF SY-SUBRC = 0.
+*      P_IFILE = G_FILENM_GET.
+*  ELSEIF SY-SUBRC = 3.
+*      MESSAGE ID '00' TYPE 'S' NUMBER '208' WITH '処理中断'.
+*      STOP.
+*  ELSE.
+*      MESSAGE I502 WITH CNS_MOD_001 SY-SUBRC.
+*      STOP.
+*  ENDIF.
+************************************************************************
+*   ＳＴＡＲＴ－ＯＦ－ＳＥＬＥＣＴＩＯＮ
+************************************************************************
+START-OF-SELECTION.
+
+* 入力ファイルの読み込み
+PERFORM FRM_IFILE_GET.
+PERFORM DATA_GET.
+
+DESCRIBE TABLE GT_IFILE LINES G_CNT_FILEDATA."ファイル読込み件数
+
+* ＢＤＣ実行用内部テーブル作成
+LOOP AT GT_IFILE INTO GF_IFILE.
+CLEAR G_FLG_ERR.
+
+*--- データチェック処理
+PERFORM FRM_DATA_CHECK.
+
+*--- 正常用内部ＴＢＬの作成
+IF G_FLG_ERR = 0.
+PERFORM FRM_SET_GT_IFILE.
+ENDIF.
+
+ENDLOOP.
+
+* Del Start 2010/09/24
+*  DESCRIBE TABLE gt_ofile LINES g_cnt_ifile.  "正常データ件数
+* Del End   2010/09/24
+
+* 更新処理(バッチインプット)、帳票作成処理
+IF C_CHK <> 'X'.
+PERFORM FRM_BACHI.
+ENDIF.
+
+* 帳票出力処理
+PERFORM FRM_WRITE.
+
+* 処理結果ポップアップ出力処理
+PERFORM FRM_POPUP_MESSAGE.
+
+************************************************************************
+*   ＴＯＰ－ＯＦ－ＰＡＧＥ
+************************************************************************
+TOP-OF-PAGE.
+
+WRITE: SY-ULINE,
+0       TEXT-006, SY-REPID,    "プログラムID
+40      TEXT-007,              "表題
+95      TEXT-008, SY-DATUM,    "日付
+115     TEXT-009, SY-UZEIT,    "時間
+130     SY-PAGNO, TEXT-010,    "貢
+SY-ULINE,
+/0(18)  TEXT-015,              "品目コード
+20(8)   TEXT-016,              "プラント
+30(10)  TEXT-017,              "有効開始日
+42(10)  TEXT-018,              "有効終了日
+54(10)  TEXT-019,              "仕入先
+66(8)   TEXT-020,              "購買組織
+76(10)  TEXT-021,              "固定供給元
+88(100) TEXT-022,              "メッセージ
+SY-ULINE.
+************************************************************************
+*   ＦＯＲＭ
+************************************************************************
+*&--------------------------------------------------------------------&*
+*&      Form  frm_ifile_get                                           &*
+*&--------------------------------------------------------------------&*
+*       入力ファイル読込み処理
+*----------------------------------------------------------------------*
+FORM FRM_IFILE_GET.
+IF P_FILE  EQ 'X' .
+PERFORM READ_FILE  .
+ENDIF .
+*--- ローカルより実行選択時
+*  IF R_R1 = 'X'.
+*    PERFORM frm_file_uplode.
+*
+**--- サーバより実行選択時
+*  ELSEIF R_R2 = 'X'.
+*    PERFORM frm_file_read.
+*
+*  ENDIF.
+
+ENDFORM.                    " frm_ifile_get
+*&--------------------------------------------------------------------&*
+*&      Form  frm_file_uplode                                         &*
+*&--------------------------------------------------------------------&*
+*       ローカルより実行選択時のファイルの読込み
+*----------------------------------------------------------------------*
+FORM FRM_FILE_UPLODE.
+
+*--- 入力FILEOPEN
+*  CALL FUNCTION 'WS_UPLOAD'
+*      EXPORTING
+*          FILENAME                      = P_IFILE
+*          FILETYPE                      = 'DAT'
+*      TABLES
+*          DATA_TAB                      = GT_IFILE
+*      EXCEPTIONS
+*          CONVERSION_ERROR              = 1
+*          FILE_OPEN_ERROR               = 2
+*          FILE_READ_ERROR               = 3
+*          INVALID_TYPE                  = 4
+*          NO_BATCH                      = 5
+*          UNKNOWN_ERROR                 = 6
+*          INVALID_TABLE_WIDTH           = 7
+*          GUI_REFUSE_FILETRANSFER       = 8
+*          CUSTOMER_ERROR                = 9
+*          OTHERS                        = 10.
+*
+*    IF SY-SUBRC = 0.
+*    ELSEIF SY-SUBRC = 2.
+*        MESSAGE S614 WITH text-002.
+*        STOP.
+*    ELSE.
+*        MESSAGE I502 WITH CNS_MOD_002 SY-SUBRC.
+*        STOP.
+*    ENDIF.
+*
+** ゼロ件ファイルチェック
+*  IF GT_IFILE IS INITIAL.
+*    MESSAGE I621.
+*    STOP.
+*  ENDIF.
+*
+ENDFORM.                    " frm_file_uplode
+*&--------------------------------------------------------------------&*
+*&      Form  frm_file_read                                           &*
+*&--------------------------------------------------------------------&*
+*       サーバより実行選択時のファイル読込み
+*----------------------------------------------------------------------*
+FORM FRM_FILE_READ.
+
+DATA: L_FDATA_X TYPE X,
+L_TAB_X   TYPE X.
+
+L_TAB_X = '09'.
+
+* 入力ファイルオープン
+*  OPEN DATASET P_IFILE FOR INPUT IN TEXT MODE.
+*
+*    IF SY-SUBRC <> 0.
+*      MESSAGE I306 WITH TEXT-002 P_IFILE.
+*      CLOSE DATASET P_IFILE.
+*      STOP.
+*    ENDIF.
+*
+** 入力ファイル読込み
+*  DO.
+*    READ DATASET P_IFILE INTO GF_FILEDATA.
+*      IF SY-SUBRC = 0.
+*        SPLIT GF_FILEDATA AT L_TAB_X INTO GF_IFILE-MATNR
+*                                          GF_IFILE-WERKS
+*                                          GF_IFILE-VDATU
+*                                          GF_IFILE-BDATU
+*                                          GF_IFILE-LIFNR
+*                                          GF_IFILE-EKORG
+*                                          GF_IFILE-FESKZ.
+*        PERFORM CONV_LIFNR.               "仕入先ゼロ埋め 2002/05/24
+*        APPEND GF_IFILE TO GT_IFILE.
+*      ELSEIF SY-SUBRC = 4.
+*        L_FDATA_X = GF_FILEDATA+0(1).
+*        IF L_FDATA_X <> CNS_NULL_X.
+*          SPLIT GF_FILEDATA AT L_TAB_X INTO GF_IFILE-MATNR
+*                                            GF_IFILE-WERKS
+*                                            GF_IFILE-VDATU
+*                                            GF_IFILE-BDATU
+*                                            GF_IFILE-LIFNR
+*                                            GF_IFILE-EKORG
+*                                            GF_IFILE-FESKZ.
+*          PERFORM CONV_LIFNR.               "仕入先ゼロ埋め  2002/05/24
+*          APPEND GF_IFILE TO GT_IFILE.
+*        ENDIF.
+*        CLOSE DATASET P_IFILE.
+*        EXIT.
+*      ENDIF.
+*  ENDDO.
+*
+* ゼロ件ファイルチェック
+*  IF GT_IFILE IS INITIAL.
+*    MESSAGE I621.
+*    STOP.
+*  ENDIF.
+*
+ENDFORM.                    " frm_file_read
+*&--------------------------------------------------------------------&*
+*&      Form  frm_data_check                                          &*
+*&--------------------------------------------------------------------&*
+*       データチェック処理
+*----------------------------------------------------------------------*
+FORM FRM_DATA_CHECK.
+
+* 品目存在チェック
+PERFORM FRM_CHECK_MATNR.
+
+* プラント存在チェック
+IF G_FLG_ERR = 0.
+PERFORM FRM_CHECK_WERKS.
+ENDIF.
+
+* 仕入先存在チェック
+IF G_FLG_ERR = 0.
+PERFORM FRM_CHECK_LIFNR.
+ENDIF.
+
+* 購買組織存在チェック
+IF G_FLG_ERR = 0.
+PERFORM FRM_CHECK_PORG.
+ENDIF.
+
+* Add Start 2010/09/24
+* 同一仕入先重複登録チェック＋データ件数チェック
+IF G_FLG_ERR = 0.
+PERFORM FRM_CHECK_DUPLICATE_VENDOR.
+ENDIF.
+
+* 有効終了日が過去日付
+IF G_FLG_ERR = 0.
+IF GF_IFILE-BDATU < SY-DATUM.
+IF GF_IFILE-LIFNR = P_LIFNR.
+G_FLG_MSG = 9.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+ENDIF.
+G_FLG_ERR = 1.
+ENDIF.
+ENDIF.
+* Add End   2010/09/24
+ENDFORM.                    " frm_data_check
+*&--------------------------------------------------------------------&*
+*&      Form  frm_check_1                                             &*
+*&--------------------------------------------------------------------&*
+*       品目存在チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_MATNR.
+
+DATA: LF_MATNR LIKE MARA-MATNR,  "抽出項目格納領域
+L_SUBRC LIKE SY-SUBRC.     "リターン値保管項目
+
+* Add Start 2010/09/24
+CLEAR ST_CHK_MAT.
+READ TABLE IT_CHK_MAT INTO ST_CHK_MAT
+WITH KEY MATNR = GF_IFILE-MATNR
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+IF ST_CHK_MAT-ERR = 'X'.
+G_FLG_MSG = 1.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+ENDIF.
+ELSE.
+* Add End   2010/09/24
+*2002/06/21 ADD Start
+IF GF_IFILE-MATNR(1) = ' '.
+G_FLG_MSG = 6.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+* Add Start 2010/09/24
+CLEAR ST_CHK_MAT.
+ST_CHK_MAT-MATNR = GF_IFILE-MATNR.
+ST_CHK_MAT-ERR   = 'X'.
+APPEND ST_CHK_MAT TO IT_CHK_MAT.
+SORT IT_CHK_MAT BY MATNR.
+* Add End   2010/09/24
+EXIT.
+ENDIF.
+*2002/06/21 ADD END
+SELECT SINGLE MATNR
+FROM MARA
+INTO LF_MATNR
+WHERE MATNR = GF_IFILE-MATNR.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+G_FLG_MSG = 1.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+* Add Start 2010/09/24
+CLEAR ST_CHK_MAT.
+ST_CHK_MAT-MATNR = GF_IFILE-MATNR.
+ST_CHK_MAT-ERR   = 'X'.
+APPEND ST_CHK_MAT TO IT_CHK_MAT.
+SORT IT_CHK_MAT BY MATNR.
+* Add End   2010/09/24
+ELSEIF SY-SUBRC = 8.
+L_SUBRC = SY-SUBRC.
+*    CLOSE DATASET P_IFILE.
+MESSAGE A603 WITH SY-REPID CNS_TBL_001 L_SUBRC.
+ENDIF.
+* Add Start 2010/09/24
+ENDIF.
+* Add End   2010/09/24
+
+ENDFORM.                    " frm_check_1
+*&--------------------------------------------------------------------&*
+*&      Form  frm_check_werks                                         &*
+*&--------------------------------------------------------------------&*
+*       プラント存在チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_WERKS.
+
+DATA: L_WERKS LIKE T001W-WERKS,  "抽出項目格納領域
+L_SUBRC LIKE SY-SUBRC.     "リターン値保管項目
+
+* Add Start 2010/09/24
+READ TABLE IT_CHK_WER WITH KEY WERKS = GF_IFILE-WERKS
+TRANSPORTING NO FIELDS
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+G_FLG_MSG = 2.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+ENDIF.
+* Add End   2010/09/24
+
+* Del Start 2010/09/24
+*    SELECT SINGLE werks
+*      FROM t001w
+*      INTO l_werks
+*      WHERE werks = gf_ifile-werks.
+*
+*    IF sy-subrc = 0.
+*    ELSEIF sy-subrc = 4.
+*      g_flg_msg = 2.
+*      PERFORM frm_set_gt_write.      "エラーレコード帳票登録
+*      g_flg_err = 1.
+*    ELSEIF sy-subrc = 8.
+*      l_subrc = sy-subrc.
+**    CLOSE DATASET P_IFILE.
+*      MESSAGE a603 WITH sy-repid cns_tbl_002 l_subrc.
+*    ENDIF.
+* Del End   2010/09/24
+
+ENDFORM.                    " frm_check_werks
+*&--------------------------------------------------------------------&*
+*&      Form  frm_check_lifnr                                         &*
+*&--------------------------------------------------------------------&*
+*       仕入先存在チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_LIFNR.
+
+DATA: L_LIFNR LIKE LFA1-LIFNR,  "抽出項目格納領域
+L_SUBRC LIKE SY-SUBRC.    "リターン値保管項目
+
+* Add Start 2010/09/24
+CLEAR ST_CHK_LIF.
+READ TABLE IT_CHK_LIF INTO ST_CHK_LIF
+WITH KEY LIFNR = GF_IFILE-LIFNR
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+IF ST_CHK_LIF-ERR = 'X'.
+G_FLG_MSG = 3.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+ENDIF.
+ELSE.
+* Add End   2010/09/24
+SELECT SINGLE LIFNR
+FROM LFA1
+INTO L_LIFNR
+WHERE LIFNR = GF_IFILE-LIFNR.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+G_FLG_MSG = 3.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+* Add Start 2010/09/24
+CLEAR ST_CHK_LIF.
+ST_CHK_LIF-LIFNR = GF_IFILE-LIFNR.
+ST_CHK_LIF-ERR   = 'X'.
+APPEND ST_CHK_LIF TO IT_CHK_LIF.
+SORT IT_CHK_LIF BY LIFNR.
+* Add End   2010/09/24
+ELSEIF SY-SUBRC = 8.
+L_SUBRC = SY-SUBRC.
+*    CLOSE DATASET P_IFILE.
+MESSAGE A603 WITH SY-REPID CNS_TBL_003 L_SUBRC.
+ENDIF.
+* Add Start 2010/09/24
+ENDIF.
+* Add End   2010/09/24
+ENDFORM.                    " frm_check_lifnr
+*&--------------------------------------------------------------------&*
+*&      Form  frm_check_porg                                          &*
+*&--------------------------------------------------------------------&*
+*       購買組織存在チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_PORG.
+
+DATA: LF_EINA LIKE EINA,              "抽出項目格納領域
+LT_EINA LIKE TABLE OF LF_EINA,
+L_SUBRC LIKE SY-SUBRC.          "リターン値保管項目
+
+SELECT * FROM EINA
+INTO CORRESPONDING FIELDS OF TABLE LT_EINA
+WHERE MATNR = GF_IFILE-MATNR
+AND   LIFNR = GF_IFILE-LIFNR.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+G_FLG_MSG = 4.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+ELSEIF SY-SUBRC = 8.
+L_SUBRC = SY-SUBRC.
+*    CLOSE DATASET P_IFILE.
+MESSAGE A603 WITH SY-REPID CNS_TBL_004 L_SUBRC.
+ENDIF.
+
+ENDFORM.                    " frm_check_porg
+*&--------------------------------------------------------------------&*
+*&      Form  frm_set_gt_write                                        &*
+*&--------------------------------------------------------------------&*
+*       帳票設定処理
+*----------------------------------------------------------------------*
+FORM FRM_SET_GT_WRITE.
+
+* メッセージの設定
+CASE G_FLG_MSG.
+WHEN 1.                            "品目がエラーの場合
+GF_WRITE-MESSAGE = TEXT-011.
+WHEN 2.                            "プラントがエラーの場合
+GF_WRITE-MESSAGE = TEXT-012.
+WHEN 3.                            "仕入先がエラーの場合
+GF_WRITE-MESSAGE = TEXT-013.
+WHEN 4.                            "購買組織がエラーの場合
+GF_WRITE-MESSAGE = TEXT-014.
+WHEN 5.                            "ＢＤＣエラー
+GF_WRITE-MESSAGE = GT_BDCMSG-MSGTX. "メッセージ.
+WHEN 6.
+GF_WRITE-MESSAGE = TEXT-028.
+* Add Start 2010/09/24
+WHEN 7.
+GF_WRITE-MESSAGE = TEXT-032.     "同一仕入先重複登録エラーの場合
+WHEN 8.
+GF_WRITE-MESSAGE = TEXT-033.     "明細件数16件以上の場合
+WHEN 9.
+GF_WRITE-MESSAGE = TEXT-034.     "有効終了日が過去日付の場合
+* Add End   2010/09/24
+ENDCASE.
+
+* 帳票項目の登録
+IF G_FLG_MSG = 5.
+GF_WRITE-MATNR   = GF_OFILE-MATNR.  "品目
+GF_WRITE-WERKS   = GF_OFILE-WERKS.  "プラント
+GF_WRITE-VDATU   = GF_OFILE-VDATU.  "有効開始日
+GF_WRITE-BDATU   = GF_OFILE-BDATU.  "有効終了日
+GF_WRITE-LIFNR   = GF_OFILE-LIFNR.  "仕入先
+GF_WRITE-EKORG   = GF_OFILE-EKORG.  "購買組織
+GF_WRITE-FLIFN   = GF_OFILE-FLIFN.  "固定供給元
+GF_WRITE-ERR_FLG = '0'.                "登録種別→エラー
+ELSE.
+GF_WRITE-MATNR   = GF_IFILE-MATNR.  "品目
+GF_WRITE-WERKS   = GF_IFILE-WERKS.  "プラント
+GF_WRITE-VDATU   = GF_IFILE-VDATU.  "有効開始日
+GF_WRITE-BDATU   = GF_IFILE-BDATU.  "有効終了日
+GF_WRITE-LIFNR   = GF_IFILE-LIFNR.  "仕入先
+GF_WRITE-EKORG   = GF_IFILE-EKORG.  "購買組織
+GF_WRITE-FLIFN   = GF_IFILE-FLIFN.  "固定供給元
+GF_WRITE-ERR_FLG = '0'.                "登録種別→エラー
+ENDIF.
+
+APPEND GF_WRITE TO GT_WRITE.
+G_CNT_ERR = G_CNT_ERR + 1.             "エラー件数カウント
+
+MESSAGE S402 WITH GF_IFILE-MATNR '：' GF_WRITE-MESSAGE.
+CLEAR: GF_WRITE,
+G_FLG_MSG.
+
+ENDFORM.                    " frm_set_gt_write
+*&--------------------------------------------------------------------&*
+*&      Form  frm_set_gt_ifile                                        &*
+*&--------------------------------------------------------------------&*
+*       正常データ用内部ＴＢＬへの登録
+*----------------------------------------------------------------------*
+FORM FRM_SET_GT_IFILE.
+* Add Start 2010/09/24
+CLEAR GF_OFILE.
+GF_OFILE = GF_IFILE.
+APPEND GF_OFILE TO GT_OFILE.
+
+*  IF gf_ifile-lifnr = p_lifnr.
+*    g_cnt_ifile = g_cnt_ifile + 1.    "正常データ件数
+*  ENDIF.
+
+* BDCのLOOP用テーブル
+READ TABLE IT_HEADER WITH KEY MATNR = GF_IFILE-MATNR
+WERKS = GF_IFILE-WERKS
+TRANSPORTING NO FIELDS
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+CLEAR ST_HEADER.
+ST_HEADER-MATNR = GF_IFILE-MATNR.
+ST_HEADER-WERKS = GF_IFILE-WERKS.
+APPEND ST_HEADER TO IT_HEADER.
+SORT IT_HEADER BY MATNR WERKS.
+ENDIF.
+* Add End   2010/09/24
+* Del Start 2010/09/24
+*  gf_ofile-matnr = gf_ifile-matnr.  "品目
+*  gf_ofile-werks = gf_ifile-werks.  "プラント
+*  gf_ofile-vdatu = gf_ifile-vdatu.  "有効開始日
+*  gf_ofile-bdatu = gf_ifile-bdatu.  "有効終了日
+*  gf_ofile-lifnr = gf_ifile-lifnr.  "仕入先
+*  gf_ofile-ekorg = gf_ifile-ekorg.  "購買組織
+*  gf_ofile-flifn = gf_ifile-flifn.  "固定供給元
+*
+*  APPEND gf_ofile TO gt_ofile.
+*  CLEAR gf_ofile.
+* Del End   2010/09/24
+ENDFORM.                    " frm_set_gt_ifile
+*&--------------------------------------------------------------------&*
+*&      Form  frm_bachi                                               &*
+*&--------------------------------------------------------------------&*
+*       更新処理(バッチインプット)
+*----------------------------------------------------------------------*
+FORM FRM_BACHI.
+* Add Start 2010/09/24
+* local
+DATA: L_PARAMS TYPE CTU_PARAMS,
+L_POS    TYPE I,
+L_FLG    TYPE C.
+
+L_PARAMS-DISMODE = G_BDC_MODE.
+L_PARAMS-UPDMODE = 'S'.
+L_PARAMS-DEFSIZE = 'X'.
+
+LOOP AT IT_HEADER INTO ST_HEADER.
+CLEAR: L_POS, L_FLG.
+
+*   再チェック
+PERFORM DATA_RECHECK CHANGING L_FLG.
+CHECK L_FLG = SPACE.
+
+*   第1画面
+PERFORM SET_1ST_SCREEN_BDC.
+*   第2画面(明細削除)
+PERFORM SET_2ND_SCREEN_BDC.
+
+LOOP AT GT_OFILE INTO GF_OFILE WHERE MATNR = ST_HEADER-MATNR
+AND WERKS = ST_HEADER-WERKS.
+L_POS = L_POS + 1.
+*     第2画面(明細追加)
+PERFORM SET_ITEM_SCREEN_BDC USING L_POS.
+ENDLOOP.
+*   第2画面(保存)
+PERFORM BDC_FIELD  USING 'BDC_OKCODE'
+'=BU'.
+*   更新
+CALL TRANSACTION 'ME01' USING GT_BDCDATA
+OPTIONS FROM L_PARAMS
+MESSAGES INTO GT_MSGTAB.
+IF SY-SUBRC = 0.
+PERFORM FRM_GET_MESSAGE.    "メッセージ取得処理
+PERFORM FRM_SET_WRITE.      "帳票作成処理
+ELSE.
+PERFORM FRM_GET_MESSAGE.    "メッセージ取得処理
+G_FLG_MSG = 5.
+PERFORM FRM_SET_GT_WRITE.   "エラーレコード帳票登録
+CLEAR G_FLG_MSG.
+ENDIF.
+REFRESH: GT_BDCDATA, GT_BDCMSG, GT_MSGTAB.
+ENDLOOP.
+* Add End   2010/09/24
+* Del Start 2010/09/24
+*  LOOP AT gt_ofile INTO gf_ofile.
+*    PERFORM frm_make_bachitbl.  "更新処理用内部ＴＢＬ作成
+*    CALL TRANSACTION 'ME01' USING gt_bdcdata
+*                            MODE g_bdc_mode
+*                            UPDATE 'S'
+*                            MESSAGES INTO gt_msgtab.
+*
+*    IF sy-subrc = 0.
+*      PERFORM frm_get_message.    "ＢＤＣメッセージ取得処理
+*      PERFORM frm_set_write.      "帳票作成処理
+*      REFRESH: gt_bdcmsg,
+*               gt_msgtab.
+*    ELSEIF sy-subrc <> 0.
+*      PERFORM frm_get_message.    "ＢＤＣメッセージ取得処理
+*      g_flg_msg = 5.
+*      PERFORM frm_set_gt_write.      "エラーレコード帳票登録
+*      CLEAR g_flg_msg.
+*      REFRESH: gt_bdcmsg,
+*               gt_msgtab.
+*    ENDIF.
+*    REFRESH gt_bdcdata.
+*  ENDLOOP.
+* Del End   2010/09/24
+
+ENDFORM.                    " frm_bachi
+*&--------------------------------------------------------------------&*
+*&      Form  frm_make_bachitbl                                       &*
+*&--------------------------------------------------------------------&*
+*       バッチ用内部テーブル作成
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_BACHITBL.
+
+* 第一画面
+PERFORM BDC_DYNPRO USING 'SAPLMEOR' '0200'.
+PERFORM BDC_FIELD  USING 'EORD-MATNR'
+GF_OFILE-MATNR.
+PERFORM BDC_FIELD  USING 'EORD-WERKS'
+GF_OFILE-WERKS.
+PERFORM BDC_FIELD  USING 'BDC_OKCODE'
+'/00'.
+
+* 第二画面
+PERFORM BDC_DYNPRO USING 'SAPLMEOR' '0205'.
+PERFORM BDC_FIELD  USING 'EORD-VDATU(01)'
+GF_OFILE-VDATU.
+PERFORM BDC_FIELD  USING 'EORD-BDATU(01)'
+GF_OFILE-BDATU.
+PERFORM BDC_FIELD  USING 'EORD-LIFNR(01)'
+GF_OFILE-LIFNR.
+PERFORM BDC_FIELD  USING 'EORD-EKORG(01)'
+GF_OFILE-EKORG.
+PERFORM BDC_FIELD  USING 'RM06W-FESKZ(01)'
+GF_OFILE-FLIFN.
+PERFORM BDC_FIELD  USING 'BDC_OKCODE'
+'=BU'.
+
+ENDFORM.                    " frm_make_bachitbl
+*----------------------------------------------------------------------*
+*        Start new screen( バッチ内部TBL DYNPROレコード作成 ）
+*----------------------------------------------------------------------*
+FORM BDC_DYNPRO USING PROGRAM DYNPRO.
+
+CLEAR GT_BDCDATA.
+
+GT_BDCDATA-PROGRAM  = PROGRAM.
+GT_BDCDATA-DYNPRO   = DYNPRO.
+GT_BDCDATA-DYNBEGIN = 'X'.
+APPEND GT_BDCDATA.
+
+ENDFORM.                    "bdc_dynpro
+
+*----------------------------------------------------------------------*
+*        Insert field（ バッチ内部TBL 機能コードレコード作成
+*----------------------------------------------------------------------*
+FORM BDC_FIELD USING FNAM FVAL.
+
+CLEAR GT_BDCDATA.
+
+GT_BDCDATA-FNAM = FNAM.
+GT_BDCDATA-FVAL = FVAL.
+APPEND GT_BDCDATA.
+
+ENDFORM.                    "bdc_field
+*&--------------------------------------------------------------------&*
+*&      Form  frm_get_message                                         &*
+*&--------------------------------------------------------------------&*
+*       バッチインプット結果メッセージ取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_MESSAGE.
+
+DATA: L_MSGID LIKE SY-MSGID,    "汎用モジュール用メッセージＩＤ
+L_MSGNO LIKE SY-MSGNO,    "汎用モジュール用メッセージ番号
+L_MSGTY LIKE SY-MSGTY.    "汎用モジュール用メッセージタイプ
+
+* メッセージ情報を汎用モジュール用項目に代入
+READ TABLE GT_MSGTAB INTO GF_MSGTAB.
+L_MSGID = GF_MSGTAB-MSGID.
+L_MSGNO = GF_MSGTAB-MSGNR.
+L_MSGTY = GF_MSGTAB-MSGTYP.
+
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID = L_MSGID
+MSGNO = L_MSGNO
+MSGTY = L_MSGTY
+*     MSGV1 = ' '
+*     MSGV2 = ' '
+*     MSGV3 = ' '
+*     MSGV4 = ' '
+*     MSGV5 = ' '
+IMPORTING
+*     ERROR =
+MESSG = GT_BDCMSG
+*     MSGLN =
+.
+
+ENDFORM.                    " frm_get_message
+*&--------------------------------------------------------------------&*
+*&      Form  frm_set_write                                           &*
+*&--------------------------------------------------------------------&*
+*       帳票出力用内部テーブルの設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_WRITE.
+
+GF_WRITE-MATNR   = GF_OFILE-MATNR.  "品目
+GF_WRITE-WERKS   = GF_OFILE-WERKS.  "プラント
+GF_WRITE-VDATU   = GF_OFILE-VDATU.  "有効開始日
+GF_WRITE-BDATU   = GF_OFILE-BDATU.  "有効終了日
+GF_WRITE-LIFNR   = GF_OFILE-LIFNR.  "仕入先
+GF_WRITE-EKORG   = GF_OFILE-EKORG.  "購買組織
+GF_WRITE-FLIFN   = GF_OFILE-FLIFN.  "固定供給元
+GF_WRITE-MESSAGE = GT_BDCMSG-MSGTX. "メッセージ
+GF_WRITE-ERR_FLG = '1'.             "登録種別→正常
+
+APPEND GF_WRITE TO GT_WRITE.
+G_CNT_INSERT = G_CNT_INSERT + 1.              "登録件数
+CLEAR: GF_WRITE,
+GT_BDCMSG.
+
+ENDFORM.                    " frm_set_write
+*&--------------------------------------------------------------------&*
+*&      Form  frm_write                                               &*
+*&--------------------------------------------------------------------&*
+*       帳票出力処理
+*----------------------------------------------------------------------*
+FORM FRM_WRITE.
+
+DATA: L_VDATU(10) TYPE C,
+L_BDATU(10) TYPE C.
+
+* ソート処理( ERR or NO ERR/品目/プラント/仕入先 )
+SORT GT_WRITE ASCENDING BY ERR_FLG
+MATNR
+WERKS
+LIFNR.
+
+LOOP AT GT_WRITE INTO GF_WRITE.
+
+*--- 有効開始日の編集
+CONCATENATE GF_WRITE-VDATU+0(4) '/'
+GF_WRITE-VDATU+4(2) '/'
+GF_WRITE-VDATU+6(2)
+INTO L_VDATU.
+
+*--- 有効終了日の編集
+CONCATENATE GF_WRITE-BDATU+0(4) '/'
+GF_WRITE-BDATU+4(2) '/'
+GF_WRITE-BDATU+6(2)
+INTO L_BDATU.
+
+WRITE: /0(18)  GF_WRITE-MATNR,    "品目
+20(8)   GF_WRITE-WERKS,    "プラント
+30(10)  L_VDATU,           "有効開始日
+42(10)  L_BDATU,           "有効終了日
+54(10)  GF_WRITE-LIFNR,    "仕入先
+66(8)   GF_WRITE-EKORG,    "購買組織
+76(10)  GF_WRITE-FLIFN,    "固定供給元
+88(100) GF_WRITE-MESSAGE.  "メッセージ
+
+ENDLOOP.
+
+* エラーメッセージが無い場合の表示
+IF G_CNT_ERR = 0.
+SKIP.
+WRITE /0 TEXT-023.
+WRITE:/1  '入力件数',
+10  G_CNT_FILEDATA,
+/1  '登録件数',
+10  G_CNT_INSERT.
+ELSE.
+ULINE.
+WRITE:/1  '入力件数',
+10  G_CNT_FILEDATA,
+/1  '登録件数',
+10  G_CNT_INSERT,
+/1  'ERR件数',
+10  G_CNT_ERR.
+ENDIF.
+MESSAGE S401 WITH '入力件数' G_CNT_FILEDATA.
+MESSAGE S401 WITH '登録件数' G_CNT_INSERT.
+MESSAGE S401 WITH 'ERR件数' G_CNT_ERR.
+
+ENDFORM.                    " frm_write
+*&--------------------------------------------------------------------&*
+*&      Form  frm_popup_message                                       &*
+*&--------------------------------------------------------------------&*
+*       実行結果ポップアップ表示
+*----------------------------------------------------------------------*
+FORM FRM_POPUP_MESSAGE.
+
+CALL SCREEN 9000 STARTING AT 10 5.
+
+ENDFORM.                    " frm_popup_message
+*&--------------------------------------------------------------------&*
+*&      Module  STATUS_9000  OUTPUT                                   &*
+*&--------------------------------------------------------------------&*
+*       実行結果ポップアップ表示ＰＢＯ
+*----------------------------------------------------------------------*
+MODULE STATUS_9000 OUTPUT.
+*  SET PF-STATUS 'xxxxxxxx'.
+SET TITLEBAR 'TZE011400'.
+
+CM_IFILE = G_CNT_FILEDATA.    "入力ファイル読込件数
+CM_INS   = G_CNT_INSERT.                 "登録件数
+CM_ERR   = G_CNT_ERR.                  "エラー件数
+
+ENDMODULE.                 " STATUS_9000  OUTPUT
+*&--------------------------------------------------------------------&*
+*&      Module  USER_COMMAND_9000  INPUT                              &*
+*&--------------------------------------------------------------------&*
+*       確認ボタンチェック
+*----------------------------------------------------------------------*
+MODULE USER_COMMAND_9000 INPUT.
+
+IF SY-UCOMM = 'OK_CODE'.
+LEAVE SCREEN.
+ENDIF.
+
+ENDMODULE.                 " USER_COMMAND_9000  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  CONV_LIFNR
+*&---------------------------------------------------------------------*
+*       ゼロ埋め 2002/05/24 ADD
+*----------------------------------------------------------------------*
+FORM CONV_LIFNR.
+*仕入先
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = GF_IFILE-LIFNR
+IMPORTING
+OUTPUT = GF_IFILE-LIFNR
+EXCEPTIONS
+OTHERS = 1.
+*品目
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT  = GF_IFILE-MATNR
+IMPORTING
+OUTPUT = GF_IFILE-MATNR
+EXCEPTIONS
+OTHERS = 1.
+
+ENDFORM.                    " CONV_LIFNR
+
+
+*---------------------------------------------------------------------*
+*       FORM Data_Get                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM DATA_GET .
+* Add Start 2010/09/24
+* local
+DATA: L_FLG TYPE C,
+L_CNT TYPE I.
+
+REFRESH: IT_EORD, GT_IFILE, IT_CHK_WER.
+SELECT * FROM EORD INTO TABLE IT_EORD WHERE MATNR IN P_MATNR
+AND WERKS IN I_WERKS.
+SORT IT_EORD BY MATNR WERKS LIFNR.
+* 仕入先置換
+LOOP AT IT_EORD INTO ST_EORD.
+CLEAR GF_IFILE.
+
+*   抽出仕入先を含まない場合は対象外
+AT NEW WERKS.
+CLEAR L_FLG.
+READ TABLE IT_EORD WITH KEY MATNR = ST_EORD-MATNR
+WERKS = ST_EORD-WERKS
+LIFNR = I_LIFNR
+TRANSPORTING NO FIELDS
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+L_FLG = 'X'.
+ENDIF.
+ENDAT.
+CHECK L_FLG = SPACE.
+GF_IFILE = ST_EORD.
+
+IF GF_IFILE-LIFNR = I_LIFNR.
+L_CNT = L_CNT + 1.
+GF_IFILE-LIFNR = P_LIFNR.
+ENDIF.
+APPEND GF_IFILE TO GT_IFILE.
+ENDLOOP.
+
+IF L_CNT = 0.
+MESSAGE S683.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* プラント
+SELECT WERKS FROM T001W INTO TABLE IT_CHK_WER.
+IF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_002 SY-SUBRC.
+ENDIF.
+SORT IT_CHK_WER BY WERKS.
+* Add End   2010/09/24
+
+* Del Start 2010/09/24
+*  CLEAR gt_ifile.
+*  SELECT * FROM eord
+*           INTO CORRESPONDING FIELDS OF TABLE gt_ifile
+*          WHERE werks IN i_werks
+*           AND lifnr EQ i_lifnr
+*           AND  matnr IN p_matnr.
+*  IF sy-subrc NE 0.
+*    MESSAGE s683. STOP.
+*  ENDIF.
+*
+*  LOOP AT gt_ifile INTO gf_ifile .
+**    MOVE : P_WERKS TO GF_IFILE-WERKS .
+*    MOVE : p_lifnr TO gf_ifile-lifnr .
+*    MODIFY : gt_ifile FROM gf_ifile .
+*    CLEAR :gf_ifile .
+*  ENDLOOP.
+* Del End   2010/09/24
+
+ENDFORM .                    "data_get
+*---------------------------------------------------------------------*
+*       FORM Read_File                                                *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM READ_FILE .
+* Mod ES-UP 2012/10/24 -->
+*  DATA : l_line(20) TYPE c ,
+DATA : L_LINE TYPE STRING,
+* Mod ES-UP 2012/10/24 <--
+**** START ADD 2015/02/04 ISID11 ****
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8  TYPE  FLAG,
+L_SUBRC    TYPE SY-SUBRC,
+L_CODEPAGE TYPE ABAP_ENCODING,
+**** END ADD 2015/02/04 ISID11 ****
+NO_DATA(1) TYPE C VALUE 'X' .
+
+**** START ADD 2015/02/04 ISID11 ****
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-035
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+**** END ADD 2015/02/04 ISID11 ****
+* Add ES-UP 2012/08/22 -->
+****START DEL 2014/08/29 ISID18****
+*  CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+*  DATA L_CODEPAGE TYPE CPCODEPAGE.
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+****END DEL 2014/08/29 ISID18****
+* Add ES-UP 2012/08/22 <--
+* Mod ES-UP 2012/08/22 -->
+*  OPEN DATASET fnamein FOR INPUT IN TEXT MODE .
+**** START ADD 2015/02/04 ISID11 ****
+IF L_FLGUTF8 IS INITIAL.
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+TRY .
+OPEN DATASET FNAMEIN FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+
+L_SUBRC = 8.
+
+ENDTRY.
+
+ELSE.
+**** END ADD 2015/02/04 ISID11 ****
+OPEN DATASET FNAMEIN FOR INPUT
+**** START UPD 2014/08/31 ISID19 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/08/31 ISID19 ****
+**** START ADD 2015/01/13 ISID11 ****
+SKIPPING BYTE-ORDER MARK
+**** END ADD 2015/01/13 ISID11 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID11 ****
+L_SUBRC = SY-SUBRC.
+
+ENDIF.
+**** END ADD 2015/02/04 ISID11 ****
+* Mod ES-UP 2012/08/22 <--
+**** START UPD 2015/02/04 ISID11 ****
+*  IF SY-SUBRC NE 0 .
+IF L_SUBRC <> 0 .
+**** END UPD 2015/02/04 ISID11 ****
+
+MESSAGE I668 .
+STOP .
+ENDIF .
+DO .
+READ DATASET FNAMEIN INTO L_LINE .
+IF  SY-SUBRC NE 0 .
+EXIT .
+ENDIF .
+MOVE : L_LINE TO P_MATNR-LOW ,
+'EQ'   TO P_MATNR-OPTION ,
+'I'    TO P_MATNR-SIGN .
+APPEND P_MATNR .
+CLEAR : L_LINE ,NO_DATA .
+ENDDO .
+CLOSE DATASET FNAMEIN .
+IF NO_DATA EQ 'X' .
+MESSAGE I204 .
+STOP .
+ENDIF .
+ENDFORM .                    "read_file
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_duplicate_vendor
+*&---------------------------------------------------------------------*
+*       同一仕入先重複登録チェック＋明細数チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_DUPLICATE_VENDOR.
+* local
+DATA: L_CNT1 TYPE I,
+L_CNT2 TYPE I.
+
+LOOP AT IT_EORD INTO ST_EORD WHERE MATNR = GF_IFILE-MATNR
+AND WERKS = GF_IFILE-WERKS.
+L_CNT1 = L_CNT1 + 1.             "トータル件数
+IF ST_EORD-LIFNR = P_LIFNR.
+L_CNT2 = L_CNT2 + 1.           "同一仕入先件数
+ENDIF.
+ENDLOOP.
+* データ件数チェック（1Page15明細に収まらない場合）
+* 保守工数考慮、ET了解済み
+IF L_CNT1 => 16.
+G_FLG_MSG = 8.
+PERFORM FRM_SET_GT_WRITE.        "エラーレコード帳票登録
+G_FLG_ERR = 1.
+ENDIF.
+
+CHECK G_FLG_ERR = 0.
+
+* 同一仕入先重複チェック
+IF L_CNT2 = 0.
+ELSEIF L_CNT2 = 1.
+IF I_LIFNR <> P_LIFNR.           "上書きではない場合
+G_FLG_MSG = 7.
+PERFORM FRM_SET_GT_WRITE.      "エラーレコード帳票登録
+G_FLG_ERR = 1.
+ENDIF.
+ELSE.                              "既存データが2件以上の場合
+G_FLG_MSG = 7.
+PERFORM FRM_SET_GT_WRITE.        "エラーレコード帳票登録
+G_FLG_ERR = 1.
+ENDIF.
+
+ENDFORM.                    " frm_check_duplicate_vendor
+*&---------------------------------------------------------------------*
+*&      Form  set_bdc_position
+*&---------------------------------------------------------------------*
+*       BDC設定
+*----------------------------------------------------------------------*
+*      -->i_field_name  項目名(ID)
+*      -->i_pos         明細番号
+*      <--o_fnam        項目名(ID)+明細番号
+*----------------------------------------------------------------------*
+FORM SET_BDC_POSITION USING    I_FIELD_NAME TYPE C
+I_POS        TYPE I
+CHANGING O_FNAM       TYPE BDCDATA-FNAM.
+* local
+DATA L_POS_N(2) TYPE N.
+
+CLEAR O_FNAM.
+L_POS_N = I_POS.
+CONCATENATE I_FIELD_NAME '(' L_POS_N ')' INTO O_FNAM.
+
+ENDFORM.                    " set_bdc_position
+*&---------------------------------------------------------------------*
+*&      Form  set_1st_screen_bdc
+*&---------------------------------------------------------------------*
+*       第1画面
+*----------------------------------------------------------------------*
+FORM SET_1ST_SCREEN_BDC.
+* screen
+PERFORM BDC_DYNPRO USING 'SAPLMEOR'
+'0200'.
+* 品目
+PERFORM BDC_FIELD  USING 'EORD-MATNR'
+GF_OFILE-MATNR.
+* プラント
+PERFORM BDC_FIELD  USING 'EORD-WERKS'
+GF_OFILE-WERKS.
+* Enter
+PERFORM BDC_FIELD  USING 'BDC_OKCODE'
+'/00'.
+
+ENDFORM.                    " set_1st_screen_bdc
+*&---------------------------------------------------------------------*
+*&      Form  set_2nd_screen_bdc
+*&---------------------------------------------------------------------*
+*       第2画面(明細削除)
+*----------------------------------------------------------------------*
+FORM SET_2ND_SCREEN_BDC.
+* screen
+PERFORM BDC_DYNPRO USING 'SAPLMEOR' '0205'.
+* 全明細選択
+PERFORM BDC_FIELD  USING 'BDC_OKCODE'
+'=SA'.
+* screen
+PERFORM BDC_DYNPRO USING 'SAPLMEOR' '0205'.
+* 削除ボタン押下
+PERFORM BDC_FIELD  USING 'BDC_OKCODE'
+'=LOES'.
+* screen
+PERFORM BDC_DYNPRO USING 'SAPLSPO1' '0200'.
+* 削除実行
+PERFORM BDC_FIELD  USING 'BDC_OKCODE'
+'=YES'.
+ENDFORM.                    " set_2nd_screen_bdc
+*&---------------------------------------------------------------------*
+*&      Form  set_item_screen_bdc
+*&---------------------------------------------------------------------*
+*       第2画面明細部分
+*----------------------------------------------------------------------*
+*      -->I_POS x明細目(1<=x<=15)
+*----------------------------------------------------------------------*
+FORM SET_ITEM_SCREEN_BDC USING I_POS TYPE I.
+* local
+DATA L_FNAM TYPE BDCDATA-FNAM.
+
+* screen
+PERFORM BDC_DYNPRO USING 'SAPLMEOR' '0205'.
+
+* 有効開始日
+PERFORM SET_BDC_POSITION USING    'EORD-VDATU' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-VDATU.
+* 有効終了日
+PERFORM SET_BDC_POSITION USING    'EORD-BDATU' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-BDATU.
+* 仕入先
+PERFORM SET_BDC_POSITION USING    'EORD-LIFNR' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-LIFNR.
+* 購買組織
+PERFORM SET_BDC_POSITION USING    'EORD-EKORG' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-EKORG.
+* 品目を供給するプラント
+PERFORM SET_BDC_POSITION USING    'EORD-RESWK' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-RESWK.
+* 発注単位
+PERFORM SET_BDC_POSITION USING    'EORD-MEINS' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-MEINS.
+* 購買契約番号
+PERFORM SET_BDC_POSITION USING    'EORD-EBELN' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-EBELN.
+* 購買契約明細
+PERFORM SET_BDC_POSITION USING    'EORD-EBELP' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-EBELP.
+* 固定供給元
+PERFORM SET_BDC_POSITION USING    'RM06W-FESKZ' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-FLIFN.
+* 保留供給元一覧
+PERFORM SET_BDC_POSITION USING    'EORD-NOTKZ' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-NOTKZ.
+* 生産管理における供給元一覧の用途
+PERFORM SET_BDC_POSITION USING    'EORD-AUTET' I_POS
+CHANGING L_FNAM.
+PERFORM BDC_FIELD  USING L_FNAM
+GF_OFILE-AUTET.
+ENDFORM.                    " set_item_screen_bdc
+*&---------------------------------------------------------------------*
+*&      Form  data_recheck
+*&---------------------------------------------------------------------*
+*       再チェック
+*----------------------------------------------------------------------*
+*      -->O_FLG 後続処理中断(X:中断)
+*----------------------------------------------------------------------*
+FORM DATA_RECHECK CHANGING O_FLG TYPE C.
+* 有効終了日が過去日付のデータはgt_ofileから除外される。
+* 除外されたデータが置換仕入先の場合、更新対象から除外
+READ TABLE GT_OFILE WITH KEY MATNR = ST_HEADER-MATNR
+WERKS = ST_HEADER-WERKS
+LIFNR = P_LIFNR
+TRANSPORTING NO FIELDS.
+IF SY-SUBRC <> 0.
+O_FLG = 'X'.
+ENDIF.
+
+ENDFORM.                    " data_recheck
+*&---------------------------------------------------------------------*
+*&      Form  data_check2
+*&---------------------------------------------------------------------*
+*       データチェック2
+*----------------------------------------------------------------------*
+FORM DATA_CHECK2.
+
+ENDFORM.                    " data_check2
+*&---------------------------------------------------------------------*
+*&      Form  check_werks
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM CHECK_WERKS.
+
+ENDFORM.                    " check_werks

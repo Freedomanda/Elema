@@ -1,0 +1,2530 @@
+************************************************************************
+* [プログラム名]
+*   ZS012800        出荷出庫BDC
+* [処理概要]
+*   UTLからIFした出荷情報をR3に取込み、出荷出庫をBDCで自動に行う。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2007/06/28   DMC               新規開発
+*  2008/03/04   DMC               出荷BDCの第一画面日付変更
+*  　　　　　　　　               スプール分割対応
+*  2008/04/01   DMC               オーバーフロー回避対応
+*  2008/04/09   DMC               出荷伝票クリア対応
+*  2009/01/13   DMC               受注伝票テキストを出庫時に更新対応
+*  　　　　　　　　               出荷数量（BDC）を更新しない
+*  2009/03/25   NDSC(TSUJIMOTO)   ・出荷伝票ヘッダテキスト登録を
+*  　　　　　　　　               　出荷時⇒出庫時に変更
+*                                 ・出庫登録時に出庫転記日を設定
+*  2009/03/26   NDSC(TSUJIMOTO)   出荷伝票ヘッダ・社内備考の登録を
+*  　　　　　　　　               出荷時⇒出庫時に変更
+*  2009/06/15   NDSC(KODAMA)
+*                       出庫処理結果表示において複数レコード出庫時に
+*　　　　　　　　　　　送信数量、累計出荷数、出荷済未出庫数が正しく
+*                      表示されるように変更
+*  2010/03/09   SOLFIS(HATA)      プラントマスタ標準プリンタ取得
+*  2011/01/31   SOLFIS(JO)        受注伝票ヘッダテキストの社内用備考に
+*                                 「InvoiceNo」のみ設定
+************************************************************************
+REPORT ZS012800 MESSAGE-ID Z1
+LINE-SIZE 170
+NO STANDARD PAGE HEADING.
+
+*---------------------------------------------------------------------
+* TABLES
+*---------------------------------------------------------------------
+TABLES: ZSD003.
+
+*---------------------------------------------------------------------
+* TYPES
+*---------------------------------------------------------------------
+* 出荷対象データ
+TYPES: BEGIN OF TYP_SHIPPING_DATA,
+VSTEL      TYPE ZSD003-VSTEL,            " 出荷ポイント
+XCHPF       TYPE VBAP-XCHPF,          " ロット管理所要量区分
+SHPDAT     TYPE ZSD003-SHPDAT,           " 出荷日付
+INVOICE    TYPE ZSD003-INVOICE,          " インボイスNO
+VBELN      TYPE ZSD003-VBELN,            " 受注番号
+POSNR      TYPE ZSD003-POSNR,            " 明細
+SENDID     TYPE ZSD003-SENDID,           " 送信ID
+TORIKOMI   TYPE ZSD003-TORIKOMI,         " 取込回数
+LFIMG      TYPE ZSD003-LFIMG,            " 数量
+WADAT      TYPE ZSD003-WADAT,            " 出庫日付
+ASNNO      TYPE ZSD003-ASNNO,            " ASN番号
+SHPBDC     TYPE ZSD003-SBDC,             " 出荷BDC
+VBELN_S    TYPE ZSD003-VBELN_S,          " 出荷伝票
+END OF TYP_SHIPPING_DATA.
+* 出荷対象データ内部テーブル
+TYPES: TYP_T_SHIPPING_DATA TYPE STANDARD TABLE OF TYP_SHIPPING_DATA.
+
+* 出庫対象データ
+TYPES: BEGIN OF TYP_SHIP_DATA,
+VBELN_S    TYPE ZSD003-VBELN_S,          " 出荷伝票
+VSTEL      TYPE ZSD003-VSTEL,            " 出荷ポイント
+SHPDAT     TYPE ZSD003-SHPDAT,           " 出荷日付
+INVOICE    TYPE ZSD003-INVOICE,          " インボイスNO
+VBELN      TYPE ZSD003-VBELN,            " 受注番号
+POSNR      TYPE ZSD003-POSNR,            " 明細
+SENDID     TYPE ZSD003-SENDID,           " 送信ID
+TORIKOMI   TYPE ZSD003-TORIKOMI,         " 取込回数
+LFIMG      TYPE ZSD003-LFIMG,            " 数量
+WADAT      TYPE ZSD003-WADAT,            " 出庫日付
+WABDC      TYPE ZSD003-WABDC,            " 出庫BDC
+* ADD 2009/01/13 {
+ASNNO      TYPE ZSD003-ASNNO,            " ASN番号
+* } ADD 2009/01/13
+END OF TYP_SHIP_DATA.
+* 出庫対象データ内部テーブル
+TYPES: TYP_T_SHIP_DATA TYPE STANDARD TABLE OF TYP_SHIP_DATA.
+
+* 帳票出力用
+TYPES: BEGIN OF TYP_OUTPUT_RESULT,
+VSTEL          TYPE ZSD003-VSTEL,        " 出荷ポイント
+INVOICE        TYPE ZSD003-INVOICE,      " インボイスNO
+VBELN          TYPE ZSD003-VBELN,        " 受注番号
+POSNR          TYPE ZSD003-POSNR,        " 明細
+SDMENG         TYPE ZSD002-SDMENG,       " 送信数量
+LFIMG          TYPE ZSD003-LFIMG,        " 数量
+LFIMG_SUM      TYPE ZSD002-LFIMG,        " 累計出荷数
+KWAMNG_SUM     TYPE ZSD002-KWAMNG,       " 累計出庫数
+SHPDAT         TYPE ZSD003-SHPDAT,       " 出荷日付
+WADAT          TYPE ZSD003-WADAT,        " 出庫日付
+VBELN_S        TYPE ZSD003-VBELN_S,      " 出荷伝票
+WABDC          TYPE ZSD003-WABDC,        " 出庫確認
+MESSAGE_1(80)  TYPE C,                   " 出荷メッセージ
+MESSAGE_2(80)  TYPE C,                   " 出庫メッセージ
+COUNT_1        TYPE I,                   " 出荷対象件数
+COUNT_ERROR_1  TYPE I,                   " 出荷エラー件数
+COUNT_NORMAL_1 TYPE I,                   " 出荷正常件数
+COUNT_2        TYPE I,                   " 出庫対象件数
+COUNT_ERROR_2  TYPE I,                   " 出庫エラー件数
+COUNT_NORMAL_2 TYPE I,                   " 出庫正常件数
+END OF TYP_OUTPUT_RESULT.
+* 帳票出力用内部テーブル
+TYPES: TYP_T_OUTPUT_RESULT TYPE STANDARD TABLE OF TYP_OUTPUT_RESULT.
+
+* 出荷予定数量集計用
+TYPES: BEGIN OF TYP_SUM_QUANTITY,
+SENDID  TYPE ZSD002-SENDID,           " 送信ID
+VBELN   TYPE ZSD002-VBELN,            " 受注番号
+POSNR   TYPE ZSD002-POSNR,            " 明細
+SDMENG  TYPE ZSD002-SDMENG,           " 送信数量
+LFIMG   TYPE ZSD002-LFIMG,            " 出荷数量
+KWAMNG  TYPE ZSD002-KWAMNG,           " 出庫数量
+END OF TYP_SUM_QUANTITY.
+* 出荷予定数量集計用内部テーブル
+TYPES: TYP_T_SUM_QUANTITY TYPE STANDARD TABLE OF TYP_SUM_QUANTITY.
+
+* エラーメッセージ
+TYPES: BEGIN OF TYP_ERROR_INFO,
+TYPE(1)      TYPE C,                  " 出荷・出庫
+LINE_NO      TYPE SY-TABIX,           " 行番
+MESSAGE(80)  TYPE C,                  " エラーメッセージ
+END OF TYP_ERROR_INFO.
+* エラーメッセージ内部テーブル
+TYPES: TYP_T_ERROR_INFO TYPE STANDARD TABLE OF TYP_ERROR_INFO.
+
+*---------------------------------------------------------------------
+* 定数宣言
+*---------------------------------------------------------------------
+CONSTANTS: CNS_RC_CODE_NOT_FOUND     TYPE SY-SUBRC VALUE 4,
+CNS_RC_CODE_DB_ERROR      TYPE SY-SUBRC VALUE 8,
+CNS_RC_CODE_ERROR         TYPE SY-SUBRC VALUE 9.
+
+* エラータイプ
+CONSTANTS: CNS_ERROR_TYPE_SHIPPING(1)  TYPE C VALUE '1',  " 出荷
+CNS_ERROR_TYPE_SHIP(1)      TYPE C VALUE '2'.  " 出庫
+
+* 出力ディバイス
+CONSTANTS: CNS_OUTPUT_DEVICE_PRINTER(1) TYPE C VALUE 'P', "プリンタ
+CNS_OUTPUT_DEVICE_SCREEN(1)  TYPE C VALUE 'S'. "スクリーン
+
+CONSTANTS: CNS_DEFAULT_PRINTER_NAME TYPE PRI_PARAMS-PDEST VALUE 'TST3'.
+*---------------------------------------------------------------------
+* 内部テーブル・作業領域
+*---------------------------------------------------------------------
+* 出荷対象データ
+DATA: GT_SHIPPING_DATA TYPE TYP_T_SHIPPING_DATA.
+* 出庫対象データ
+DATA: GT_SHIP_DATA TYPE TYP_T_SHIP_DATA.
+* 処理結果
+DATA: GT_OUTPUT_RESULT TYPE TYP_T_OUTPUT_RESULT.
+* エラーメッセージ
+DATA: GT_SUM_QUANTITY TYPE TYP_T_SUM_QUANTITY.
+* エラーメッセージ
+DATA: GT_ERROR_INFO TYPE TYP_T_ERROR_INFO.
+
+*---------------------------------------------------------------------
+* 変数宣言
+*---------------------------------------------------------------------
+DATA: G_VSTEL TYPE TVSTT-VSTEL,
+G_VTEXT TYPE TVSTT-VTEXT.
+DATA: G_COUNT_1 TYPE I,
+G_COUNT_NORMAL_1 TYPE I,
+G_COUNT_ERROR_1 TYPE I,
+G_COUNT_2 TYPE I,
+G_COUNT_NORMAL_2 TYPE I,
+G_COUNT_ERROR_2 TYPE I.
+
+DATA: G_RC TYPE SY-SUBRC.
+
+*---------------------------------------------------------------------
+* 選択画面定義
+*---------------------------------------------------------------------
+* 【出荷出庫BDC】
+SELECTION-SCREEN BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+* 会社コード
+PARAMETERS: P_BUKRS TYPE T001-BUKRS MEMORY ID BUK.
+* 出荷年月日
+SELECT-OPTIONS: S_SHPDAT FOR ZSD003-SHPDAT OBLIGATORY.
+* 出庫年月日
+SELECT-OPTIONS: S_WADAT FOR ZSD003-WADAT OBLIGATORY.
+* テスト実行
+PARAMETERS: P_TEST TYPE C AS CHECKBOX DEFAULT 'X'.
+* 営業所プリンタに出力（本実行）
+PARAMETERS: P_PRINT TYPE C AS CHECKBOX.
+SELECTION-SCREEN END   OF BLOCK BL1.
+
+*---------------------------------------------------------------------
+* START-OF-SELECTION
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+
+CLEAR: GT_ERROR_INFO[],
+GT_SUM_QUANTITY[],
+GT_OUTPUT_RESULT[].
+
+* 出荷対象データ取得
+PERFORM GET_SHIPPING_DATA.
+* 出荷対象データチェック
+PERFORM CHECK_SHIPPING_DATA.
+* 合計数量設定
+PERFORM SET_SUM_QUANTITY_1.
+IF P_TEST = ' '.
+PERFORM PROCESS_SHIPPING.
+ENDIF.
+* 出荷結果設定
+PERFORM SET_SHIPPING_RESULT.
+
+* 出庫対象データ取得
+PERFORM GET_SHIP_DATA.
+* 出庫対象データチェック
+PERFORM CHECK_SHIP_DATA.
+* 合計数量設定
+PERFORM SET_SUM_QUANTITY_2.
+IF P_TEST = ' '.
+PERFORM PROCESS_SHIP.
+ENDIF.
+* 出庫結果設定
+PERFORM SET_SHIP_RESULT.
+
+*---------------------------------------------------------------------
+* END-OF-SELECTION
+*---------------------------------------------------------------------
+END-OF-SELECTION.
+
+* 処理結果出力
+PERFORM OUTPUT_RESULT USING CNS_OUTPUT_DEVICE_SCREEN.
+IF P_TEST = ' ' AND P_PRINT = 'X'.
+PERFORM OUTPUT_RESULT USING CNS_OUTPUT_DEVICE_PRINTER.
+ENDIF.
+IF GT_OUTPUT_RESULT[] IS INITIAL.
+*   処理対象データがありません
+MESSAGE S616.
+ELSE.
+IF P_TEST = 'X'.
+*     テスト実行結果を出力しました
+MESSAGE S645.
+ELSE.
+IF GT_ERROR_INFO[] IS INITIAL.
+*       出荷出庫処理が終了しました
+MESSAGE S650.
+ELSE.
+*       エラーレコードがあります、
+*       スプール/エラーファイルを確認してください
+MESSAGE S647.
+ENDIF.
+ENDIF.
+ENDIF.
+
+*---------------------------------------------------------------------
+* TOP-OF-PAGE
+*---------------------------------------------------------------------
+TOP-OF-PAGE.
+
+PERFORM OUTPUT_HEADER.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHIPPING_DATA
+*&---------------------------------------------------------------------*
+*       出荷対象データ取得
+*----------------------------------------------------------------------*
+FORM GET_SHIPPING_DATA.
+
+CLEAR G_RC.
+SELECT VBAP~VSTEL           " 出荷ポイント
+VBAP~XCHPF                " ロット管理所要量区分
+ZSD003~SHPDAT        " 出荷日付
+ZSD003~INVOICE       " インボイスNO
+ZSD003~VBELN         " 受注番号
+ZSD003~POSNR         " 明細
+ZSD003~SENDID        " 送信ID
+ZSD003~TORIKOMI      " 取込回数
+ZSD003~LFIMG         " 数量
+ZSD003~WADAT         " 出庫日付
+ZSD003~ASNNO         " ASN番号
+ZSD003~SBDC          " 出荷BDC
+ZSD003~VBELN_S       " 出荷伝票
+INTO TABLE GT_SHIPPING_DATA
+FROM ZSD003 INNER JOIN VBAP ON VBAP~VBELN = ZSD003~VBELN AND
+VBAP~POSNR = ZSD003~POSNR
+WHERE LOEVM <> 'X'
+AND SHPDAT IN S_SHPDAT
+AND SBDC = ' '
+*   仕様変更より、セット品の出荷出庫も行う
+*    AND VBAP~PSTYV <> 'ZSEK'
+.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ELSE.
+SORT GT_SHIPPING_DATA BY VSTEL INVOICE VBELN POSNR.
+ENDIF.
+
+ENDFORM.                    " GET_SHIPPING_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHIP_DATA
+*&---------------------------------------------------------------------*
+*       出庫対象データ取得
+*----------------------------------------------------------------------*
+FORM GET_SHIP_DATA.
+
+CLEAR G_RC.
+SELECT VBELN_S              " 出荷伝票
+VSTEL                " 出荷ポイント
+SHPDAT               " 出荷日付
+INVOICE              " インボイスNO
+VBELN                " 受注番号
+POSNR                " 明細
+SENDID               " 送信ID
+TORIKOMI             " 取込回数
+LFIMG                " 数量
+WADAT                " 出庫日付
+WABDC                " 出荷BDC
+* ADD 2009/01/13 {
+ASNNO                " ASN番号
+* } ADD 2009/01/13
+INTO TABLE GT_SHIP_DATA
+FROM ZSD003
+WHERE LOEVM <> 'X'
+AND WADAT IN S_WADAT
+AND SBDC = 'X'
+AND WABDC = ' '.
+
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ELSE.
+SORT GT_SHIP_DATA BY VBELN_S.
+ENDIF.
+
+ENDFORM.                    " GET_SHIP_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EXECUTE_SHIPPING_BDC
+*&---------------------------------------------------------------------*
+*       出荷BDC実行
+*----------------------------------------------------------------------*
+FORM EXECUTE_SHIPPING_BDC
+USING    IT_SHIPPING_DATA TYPE TYP_T_SHIPPING_DATA
+CHANGING E_VBELN_VL
+E_MESSAGE.
+
+DATA: LF_SHIPPING_DATA LIKE LINE OF GT_SHIPPING_DATA,
+L_POSNR_VL TYPE LIPS-POSNR,
+L_LFIMG(12) TYPE C.
+DATA: LT_BDCDATA TYPE TABLE OF BDCDATA,
+LF_BDCDATA LIKE LINE OF LT_BDCDATA.
+DATA: LF_OPTION TYPE CTU_PARAMS.
+DATA: LT_MESSAGE TYPE TABLE OF BDCMSGCOLL,
+LF_MESSAGE LIKE LINE OF LT_MESSAGE.
+
+READ TABLE IT_SHIPPING_DATA INTO LF_SHIPPING_DATA INDEX 1.
+
+* 第一画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0100'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 「ENTER」
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '/00'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 出荷ポイント
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIKP-VSTEL'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-VSTEL.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 選択日付
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-DATBI'.
+*2008/03/04 MOD START 　選択日付を変更
+*  LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-SHPDAT.
+LF_BDCDATA-FVAL    = '9999/12/31'.
+*2008/03/04 MOD END
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 受注伝票番号
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-VBELN'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-VBELN.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 開始明細
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-ABPOS'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-POSNR.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 終了明細
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-BIPOS'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-POSNR.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 出荷登録 概要：数量
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0200'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 2009/03/25 MOD START
+* ヘッダ→テキスト -->  エンター
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM    = 'BDC_OKCODE'.
+
+*  LF_BDCDATA-FVAL    = '=KTEX'.
+LF_BDCDATA-FVAL    = '/00'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 2009/03/25 MOD END
+* 出庫動予定日付
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIKP-WADAT'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-SHPDAT.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 実際の在庫移動日付
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIKP-WADAT_IST'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-WADAT.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 2009/03/25 DEL START
+* 出荷登録 ヘッダ－テキスト
+*  CLEAR LF_BDCDATA.
+*  LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+*  LF_BDCDATA-DYNPRO    = '0330'.
+*  LF_BDCDATA-DYNBEGIN  = 'X'.
+*  APPEND LF_BDCDATA TO LT_BDCDATA.
+* 戻る
+*  CLEAR LF_BDCDATA.
+*  LF_BDCDATA-FNAM    = 'BDC_OKCODE'.
+*  LF_BDCDATA-FVAL    = '=BAFE'.
+*  APPEND LF_BDCDATA TO LT_BDCDATA.
+* INVOICE No.
+*  CLEAR LF_BDCDATA.
+*  LF_BDCDATA-FNAM   = 'RTEXT-LTEXT(12)'.
+*  LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-INVOICE.
+*  APPEND LF_BDCDATA TO LT_BDCDATA.
+* ASN No.
+*  CLEAR LF_BDCDATA.
+*  LF_BDCDATA-FNAM   = 'RTEXT-LTEXT(13)'.
+*  LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-ASNNO.
+*  APPEND LF_BDCDATA TO LT_BDCDATA.
+* 2009/03/25 DEL START
+
+LOOP AT IT_SHIPPING_DATA INTO LF_SHIPPING_DATA.
+
+*   出荷明細番号
+L_POSNR_VL = SY-TABIX * 10.
+
+IF L_POSNR_VL > 10.
+
+*     出荷伝票→受注出荷
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=RAUF'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+*     受注伝票追加 POPUP
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0105'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+*     「ENTER」
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=ENT1'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+*     開始明細
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-ABPOS'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-POSNR.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+*     終了明細
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-BIPOS'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-POSNR.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+*     出荷登録 概要：数量
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0200'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+*     編集→カーソル移動
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=POPO'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+CLEAR LF_BDCDATA.
+*     出庫動予定日付
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIKP-WADAT'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-SHPDAT.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+*     位置 POPUP
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0111'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+*     「ENTER」
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = 'WEIT'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+*     出荷明細
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'RV50A-POSNR'.
+LF_BDCDATA-FVAL    = L_POSNR_VL.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+ENDIF.
+
+*   出荷登録 概要：数量
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0200'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+*   出荷数量
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIPSD-G_LFIMG(01)'.
+WRITE LF_SHIPPING_DATA-LFIMG TO L_LFIMG NO-GROUPING LEFT-JUSTIFIED.
+LF_BDCDATA-FVAL    = L_LFIMG.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+AT LAST.
+*     「保存」
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=SICH'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+ENDAT.
+
+ENDLOOP.
+
+CLEAR G_RC.
+LF_OPTION-DISMODE = 'N'.
+LF_OPTION-UPDMODE = 'S'.
+LF_OPTION-DEFSIZE = 'X'.
+CALL TRANSACTION 'VL01' USING LT_BDCDATA
+OPTIONS FROM LF_OPTION
+MESSAGES INTO LT_MESSAGE.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'S' MSGID = 'VL' MSGNR = '311'.
+IF SY-SUBRC = 0.
+*   登録成功の場合、伝票番号を取得する
+E_VBELN_VL = LF_MESSAGE-MSGV2.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = E_VBELN_VL
+IMPORTING
+OUTPUT = E_VBELN_VL.
+ELSE.
+*   登録失敗の場合、エラーメッセージを取得する
+*   メッセージタイプ順：「E」→「W」→「S」
+G_RC = CNS_RC_CODE_ERROR.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'E'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'W'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'S'.
+ENDIF.
+ENDIF.
+ENDIF.
+MESSAGE ID LF_MESSAGE-MSGID
+TYPE 'S'
+NUMBER LF_MESSAGE-MSGNR
+INTO E_MESSAGE
+WITH LF_MESSAGE-MSGV1 LF_MESSAGE-MSGV2
+LF_MESSAGE-MSGV3 LF_MESSAGE-MSGV4.
+
+ENDFORM.                    " EXECUTE_SHIPPING_BDC
+*&---------------------------------------------------------------------*
+*&      Form  EXECUTE_SHIP_BDC
+*&---------------------------------------------------------------------*
+*       出庫BDC実行
+*----------------------------------------------------------------------*
+FORM EXECUTE_SHIP_BDC USING    IT_SHIP_DATA TYPE TYP_T_SHIP_DATA
+CHANGING E_MESSAGE.
+
+DATA: LF_SHIP_DATA LIKE LINE OF IT_SHIP_DATA.
+DATA: LT_BDCDATA TYPE TABLE OF BDCDATA,
+LF_BDCDATA LIKE LINE OF LT_BDCDATA.
+DATA: LF_OPTION TYPE CTU_PARAMS.
+DATA: LT_MESSAGE TYPE TABLE OF BDCMSGCOLL,
+LF_MESSAGE LIKE LINE OF LT_MESSAGE.
+
+READ TABLE IT_SHIP_DATA INTO LF_SHIP_DATA INDEX 1.
+
+* 第一画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0101'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 2009/03/25 MOD START
+*「出庫確認」-> エンターキー
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+*  LF_BDCDATA-FVAL    = '=WABU'.
+LF_BDCDATA-FVAL    = '/00'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 2009/03/25 MOD END
+* 出荷伝票番号
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIKP-VBELN'.
+LF_BDCDATA-FVAL    = LF_SHIP_DATA-VBELN_S.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 2009/03/25 ADD START
+* 第一画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0200'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* ヘッダ→テキスト
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM    = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=KTEX'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 実際の在庫移動日付
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIKP-WADAT_IST'.
+LF_BDCDATA-FVAL    = LF_SHIP_DATA-WADAT.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 出荷登録 ヘッダ－テキスト
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0330'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 戻る
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM    = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=BAFE'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* INVOICE No.
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'RTEXT-LTEXT(12)'.
+LF_BDCDATA-FVAL    = LF_SHIP_DATA-INVOICE.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* ASN No.
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'RTEXT-LTEXT(13)'.
+LF_BDCDATA-FVAL    = LF_SHIP_DATA-ASNNO.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第一画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0200'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 「出庫確認」
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=WABU'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 2009/03/25 ADD END
+
+CLEAR G_RC.
+LF_OPTION-DISMODE = 'N'.
+LF_OPTION-UPDMODE = 'S'.
+LF_OPTION-DEFSIZE = 'X'.
+CALL TRANSACTION 'VL02' USING LT_BDCDATA
+OPTIONS FROM LF_OPTION
+MESSAGES INTO LT_MESSAGE.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'S' MSGID = 'VL' MSGNR = '311'.
+IF SY-SUBRC <> 0.
+*   登録失敗の場合、エラーメッセージを取得する
+*   メッセージタイプ順：「E」→「W」→「S」
+G_RC = CNS_RC_CODE_ERROR.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'E'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'W'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'S'.
+ENDIF.
+ENDIF.
+ENDIF.
+MESSAGE ID LF_MESSAGE-MSGID
+TYPE 'S'
+NUMBER LF_MESSAGE-MSGNR
+INTO E_MESSAGE
+WITH LF_MESSAGE-MSGV1 LF_MESSAGE-MSGV2
+LF_MESSAGE-MSGV3 LF_MESSAGE-MSGV4.
+
+ENDFORM.                    " EXECUTE_SHIP_BDC
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_SHIPPING_DATA
+*&---------------------------------------------------------------------*
+*       出荷対象データチェック
+*----------------------------------------------------------------------*
+FORM CHECK_SHIPPING_DATA.
+
+DATA: LF_SHIPPING_DATA LIKE LINE OF GT_SHIPPING_DATA.
+DATA: LT_SUM_QUANTITY TYPE TYP_T_SUM_QUANTITY,
+LF_SUM_QUANTITY LIKE LINE OF LT_SUM_QUANTITY.
+DATA: L_TOTAL_QUANTITY TYPE VBAP-KBMENG,
+L_SHIPMENT_QUANTITY TYPE LIPS-LFIMG,
+L_REMAIN_QUANTITY TYPE ZSD003-LFIMG.
+DATA: L_LINE_NO TYPE SY-TABIX.
+
+LOOP AT GT_SHIPPING_DATA INTO LF_SHIPPING_DATA.
+L_LINE_NO = SY-TABIX.
+CLEAR LF_SUM_QUANTITY.
+*   累計確認数量取得
+PERFORM GET_TOTAL_QUANTITY USING    LF_SHIPPING_DATA-VBELN
+LF_SHIPPING_DATA-POSNR
+CHANGING L_TOTAL_QUANTITY.
+IF G_RC <> 0.
+*     受注伝票が存在しません
+PERFORM SET_ERROR_INFO USING CNS_ERROR_TYPE_SHIPPING
+L_LINE_NO
+TEXT-E01.
+CONTINUE.
+ENDIF.
+*   出荷済数量取得
+PERFORM GET_SHIPMENT_QUANTITY USING    LF_SHIPPING_DATA-VBELN
+LF_SHIPPING_DATA-POSNR
+CHANGING L_SHIPMENT_QUANTITY.
+*   出荷予定合計数量取得
+READ TABLE LT_SUM_QUANTITY INTO LF_SUM_QUANTITY
+WITH KEY VBELN = LF_SHIPPING_DATA-VBELN
+POSNR = LF_SHIPPING_DATA-POSNR.
+*   出荷可能数量算出
+L_REMAIN_QUANTITY =
+L_TOTAL_QUANTITY - L_SHIPMENT_QUANTITY - LF_SUM_QUANTITY-LFIMG.
+IF LF_SHIPPING_DATA-LFIMG > L_REMAIN_QUANTITY.
+*     出荷可能数量を超えています
+PERFORM SET_ERROR_INFO USING CNS_ERROR_TYPE_SHIPPING
+L_LINE_NO
+TEXT-E02.
+ENDIF.
+*   出荷予定合計数量設定
+LF_SUM_QUANTITY-VBELN = LF_SHIPPING_DATA-VBELN.
+LF_SUM_QUANTITY-POSNR = LF_SHIPPING_DATA-POSNR.
+LF_SUM_QUANTITY-LFIMG = LF_SHIPPING_DATA-LFIMG.
+COLLECT LF_SUM_QUANTITY INTO LT_SUM_QUANTITY.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_SHIPPING_DATA
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_SHIP_DATA
+*&---------------------------------------------------------------------*
+*       出庫対象データチェック
+*----------------------------------------------------------------------*
+FORM CHECK_SHIP_DATA.
+
+DATA: LF_SHIP_DATA LIKE LINE OF GT_SHIP_DATA.
+
+DATA: L_LINE_NO TYPE SY-TABIX.
+
+LOOP AT GT_SHIP_DATA INTO LF_SHIP_DATA.
+L_LINE_NO = SY-TABIX.
+PERFORM CHECK_SHIPPING_ORDER_IS_EXIST USING LF_SHIP_DATA-VBELN_S.
+IF G_RC <> 0.
+*     出荷伝票が存在しません
+PERFORM SET_ERROR_INFO USING CNS_ERROR_TYPE_SHIP
+L_LINE_NO
+TEXT-E03.
+ENDIF.
+PERFORM CHECK_FI_PERIOD_IS_OPENED USING LF_SHIP_DATA-WADAT.
+IF G_RC <> 0.
+*     会計期間がオープンされてません
+PERFORM SET_ERROR_INFO USING CNS_ERROR_TYPE_SHIP
+L_LINE_NO
+TEXT-E04.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_SHIP_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_ERROR_INFO
+*&---------------------------------------------------------------------*
+*       エラーメッセージ追加
+*----------------------------------------------------------------------*
+*      -->I_TYPE     エラータイプ
+*      -->I_LINE_NO  行番
+*      -->I_MESSAGE  エラーメッセージ
+*----------------------------------------------------------------------*
+FORM SET_ERROR_INFO USING    I_TYPE
+I_LINE_NO
+I_MESSAGE.
+
+DATA: LF_ERROR_INFO LIKE LINE OF GT_ERROR_INFO.
+
+LF_ERROR_INFO-TYPE = I_TYPE.
+LF_ERROR_INFO-LINE_NO = I_LINE_NO.
+LF_ERROR_INFO-MESSAGE = I_MESSAGE.
+APPEND LF_ERROR_INFO TO GT_ERROR_INFO.
+
+ENDFORM.                    " SET_ERROR_INFO
+*&---------------------------------------------------------------------*
+*&      Form  GET_TOTAL_QUANTITY
+*&---------------------------------------------------------------------*
+*       出荷可能数量取得
+*----------------------------------------------------------------------*
+*      -->I_VBELN           受注伝票番号
+*      -->I_POSNR           受注明細
+*      <--E_TOTAL_QUANTITY  出荷可能数量
+*----------------------------------------------------------------------*
+FORM GET_TOTAL_QUANTITY USING    I_VBELN
+I_POSNR
+CHANGING E_TOTAL_QUANTITY.
+
+CLEAR: G_RC.
+CLEAR: E_TOTAL_QUANTITY.
+SELECT SINGLE KBMENG
+INTO E_TOTAL_QUANTITY
+FROM VBAP
+WHERE VBELN = I_VBELN
+AND POSNR = I_POSNR
+AND ABGRU = ' '.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_TOTAL_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHIPMENT_QUANTITY
+*&---------------------------------------------------------------------*
+*       出荷数量取得
+*----------------------------------------------------------------------*
+*      -->I_VBELN              受注伝票番号
+*      -->I_POSNR              受注明細
+*      <--E_SHIPMENT_QUANTITY  出荷数量
+*----------------------------------------------------------------------*
+FORM GET_SHIPMENT_QUANTITY USING    I_VBELN
+I_POSNR
+CHANGING E_SHIPMENT_QUANTITY.
+
+CLEAR: G_RC.
+CLEAR: E_SHIPMENT_QUANTITY.
+SELECT SUM( LIPS~LFIMG )
+INTO E_SHIPMENT_QUANTITY
+FROM VBFA INNER JOIN LIPS ON VBFA~VBELN = LIPS~VBELN AND
+VBFA~POSNN = LIPS~POSNR
+WHERE VBFA~VBELV    = I_VBELN
+AND VBFA~POSNV    = I_POSNR
+AND VBFA~VBTYP_N  = 'J'
+AND EXISTS
+( SELECT WBSTK
+FROM VBUK
+WHERE VBELN = VBFA~VBELV
+AND WBSTK <> 'C' ).
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_SHIPMENT_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  SET_SHIPPING_RESULT
+*&---------------------------------------------------------------------*
+*       出荷処理結果設定
+*----------------------------------------------------------------------*
+FORM SET_SHIPPING_RESULT.
+
+DATA: LF_OUTPUT_RESULT LIKE LINE OF GT_OUTPUT_RESULT.
+DATA: LF_SHIPPING_DATA LIKE LINE OF GT_SHIPPING_DATA,
+LF_SUM_QUANTITY LIKE LINE OF GT_SUM_QUANTITY.
+DATA: LF_ERROR_INFO LIKE LINE OF GT_ERROR_INFO.
+DATA: L_LINE_NO TYPE SY-TABIX.
+
+LOOP AT GT_SHIPPING_DATA INTO LF_SHIPPING_DATA.
+L_LINE_NO = SY-TABIX.
+CLEAR: LF_OUTPUT_RESULT, LF_SUM_QUANTITY.
+*   出荷ポイント
+LF_OUTPUT_RESULT-VSTEL = LF_SHIPPING_DATA-VSTEL.
+*   インボイスNO
+LF_OUTPUT_RESULT-INVOICE = LF_SHIPPING_DATA-INVOICE.
+*   受注番号
+LF_OUTPUT_RESULT-VBELN = LF_SHIPPING_DATA-VBELN.
+*   明細
+LF_OUTPUT_RESULT-POSNR = LF_SHIPPING_DATA-POSNR.
+*   出荷済の場合、出荷数量集計
+IF LF_SHIPPING_DATA-SHPBDC = 'X'.
+LF_SUM_QUANTITY-SENDID = LF_SHIPPING_DATA-SENDID.
+LF_SUM_QUANTITY-VBELN = LF_SHIPPING_DATA-VBELN.
+LF_SUM_QUANTITY-POSNR = LF_SHIPPING_DATA-POSNR.
+LF_SUM_QUANTITY-LFIMG = LF_SHIPPING_DATA-LFIMG.
+COLLECT LF_SUM_QUANTITY INTO GT_SUM_QUANTITY.
+ENDIF.
+READ TABLE GT_SUM_QUANTITY INTO LF_SUM_QUANTITY
+WITH KEY SENDID = LF_SHIPPING_DATA-SENDID
+VBELN = LF_SHIPPING_DATA-VBELN
+POSNR = LF_SHIPPING_DATA-POSNR.
+*   送信数量
+LF_OUTPUT_RESULT-SDMENG = LF_SUM_QUANTITY-SDMENG.
+*   累計出荷数
+LF_OUTPUT_RESULT-LFIMG_SUM = LF_SUM_QUANTITY-LFIMG.
+*   累計出庫数
+LF_OUTPUT_RESULT-KWAMNG_SUM = LF_SUM_QUANTITY-KWAMNG.
+*   数量
+LF_OUTPUT_RESULT-LFIMG = LF_SHIPPING_DATA-LFIMG.
+*   出荷日付
+LF_OUTPUT_RESULT-SHPDAT = LF_SHIPPING_DATA-SHPDAT.
+*   出庫日付
+LF_OUTPUT_RESULT-WADAT = LF_SHIPPING_DATA-WADAT.
+*   出荷伝票
+LF_OUTPUT_RESULT-VBELN_S = LF_SHIPPING_DATA-VBELN_S.
+*   出荷対象件数
+LF_OUTPUT_RESULT-COUNT_1 = 1.
+READ TABLE GT_ERROR_INFO INTO LF_ERROR_INFO
+WITH KEY TYPE = CNS_ERROR_TYPE_SHIPPING LINE_NO = L_LINE_NO.
+IF SY-SUBRC = 0.
+*     出荷エラー件数
+LF_OUTPUT_RESULT-COUNT_ERROR_1 = 1.
+*     出荷メッセージ
+LF_OUTPUT_RESULT-MESSAGE_1 = LF_ERROR_INFO-MESSAGE.
+ELSE.
+*     出荷正常件数
+LF_OUTPUT_RESULT-COUNT_NORMAL_1 = 1.
+ENDIF.
+APPEND LF_OUTPUT_RESULT TO GT_OUTPUT_RESULT.
+ENDLOOP.
+
+ENDFORM.                    " SET_SHIPPING_RESULT
+*&---------------------------------------------------------------------*
+*&      Form  SET_SHIP_RESULT
+*&---------------------------------------------------------------------*
+*       出庫処理結果設定
+*----------------------------------------------------------------------*
+FORM SET_SHIP_RESULT.
+
+DATA: LF_OUTPUT_RESULT LIKE LINE OF GT_OUTPUT_RESULT.
+DATA: LF_SHIP_DATA LIKE LINE OF GT_SHIP_DATA,
+LF_SUM_QUANTITY LIKE LINE OF GT_SUM_QUANTITY.
+DATA: LF_ERROR_INFO LIKE LINE OF GT_ERROR_INFO.
+DATA: L_LINE_NO TYPE SY-TABIX.
+
+LOOP AT GT_SHIP_DATA INTO LF_SHIP_DATA.
+L_LINE_NO = SY-TABIX.
+* 2009/06/15 MODIFY START
+*    CLEAR LF_OUTPUT_RESULT.
+CLEAR:  LF_OUTPUT_RESULT, LF_SUM_QUANTITY.
+* 2009/06/15 MODIFY END
+READ TABLE GT_OUTPUT_RESULT INTO LF_OUTPUT_RESULT
+WITH KEY VSTEL = LF_SHIP_DATA-VSTEL
+INVOICE = LF_SHIP_DATA-INVOICE
+VBELN = LF_SHIP_DATA-VBELN
+POSNR = LF_SHIP_DATA-POSNR.
+*   出庫対象件数
+LF_OUTPUT_RESULT-COUNT_2 = 1.
+READ TABLE GT_ERROR_INFO INTO LF_ERROR_INFO
+WITH KEY TYPE = CNS_ERROR_TYPE_SHIP LINE_NO = L_LINE_NO.
+IF SY-SUBRC = 0.
+*     出庫エラー件数
+LF_OUTPUT_RESULT-COUNT_ERROR_2 = 1.
+*     出庫メッセージ
+LF_OUTPUT_RESULT-MESSAGE_2 = LF_ERROR_INFO-MESSAGE.
+ELSE.
+*     出庫正常件数
+LF_OUTPUT_RESULT-COUNT_NORMAL_2 = 1.
+ENDIF.
+*   出庫確認
+LF_OUTPUT_RESULT-WABDC = LF_SHIP_DATA-WABDC.
+*   出庫済の場合、出庫数量集計
+IF LF_SHIP_DATA-WABDC = 'X'.
+LF_SUM_QUANTITY-SENDID = LF_SHIP_DATA-SENDID.
+LF_SUM_QUANTITY-VBELN = LF_SHIP_DATA-VBELN.
+LF_SUM_QUANTITY-POSNR = LF_SHIP_DATA-POSNR.
+LF_SUM_QUANTITY-KWAMNG = LF_SHIP_DATA-LFIMG.
+COLLECT LF_SUM_QUANTITY INTO GT_SUM_QUANTITY.
+ENDIF.
+READ TABLE GT_SUM_QUANTITY INTO LF_SUM_QUANTITY
+WITH KEY SENDID = LF_SHIP_DATA-SENDID
+VBELN = LF_SHIP_DATA-VBELN
+POSNR = LF_SHIP_DATA-POSNR.
+*   送信数量
+LF_OUTPUT_RESULT-SDMENG = LF_SUM_QUANTITY-SDMENG.
+*   累計出荷数
+LF_OUTPUT_RESULT-LFIMG_SUM = LF_SUM_QUANTITY-LFIMG.
+*   累計出庫数
+LF_OUTPUT_RESULT-KWAMNG_SUM = LF_SUM_QUANTITY-KWAMNG.
+*   該当レコードは出荷処理対象の場合
+IF LF_OUTPUT_RESULT-COUNT_1 = 0.
+*     出荷ポイント
+LF_OUTPUT_RESULT-VSTEL = LF_SHIP_DATA-VSTEL.
+*     インボイスNO
+LF_OUTPUT_RESULT-INVOICE = LF_SHIP_DATA-INVOICE.
+*     受注番号
+LF_OUTPUT_RESULT-VBELN = LF_SHIP_DATA-VBELN.
+*     明細
+LF_OUTPUT_RESULT-POSNR = LF_SHIP_DATA-POSNR.
+*     数量
+LF_OUTPUT_RESULT-LFIMG = LF_SHIP_DATA-LFIMG.
+*     出荷日付
+LF_OUTPUT_RESULT-SHPDAT = LF_SHIP_DATA-SHPDAT.
+*     出庫日付
+LF_OUTPUT_RESULT-WADAT = LF_SHIP_DATA-WADAT.
+*     出荷伝票
+LF_OUTPUT_RESULT-VBELN_S = LF_SHIP_DATA-VBELN_S.
+APPEND LF_OUTPUT_RESULT TO GT_OUTPUT_RESULT.
+*   該当レコードは出荷処理対象外の場合
+ELSE.
+MODIFY GT_OUTPUT_RESULT FROM LF_OUTPUT_RESULT
+TRANSPORTING WABDC KWAMNG_SUM MESSAGE_2
+COUNT_2 COUNT_ERROR_2 COUNT_NORMAL_2
+WHERE VSTEL = LF_SHIP_DATA-VSTEL
+AND INVOICE = LF_SHIP_DATA-INVOICE
+AND VBELN = LF_SHIP_DATA-VBELN
+AND POSNR = LF_SHIP_DATA-POSNR.
+ENDIF.
+ENDLOOP.
+SORT GT_OUTPUT_RESULT BY VSTEL INVOICE VBELN POSNR.
+
+ENDFORM.                    " SET_SHIP_RESULT
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_SHIPPING
+*&---------------------------------------------------------------------*
+*       出荷処理
+*----------------------------------------------------------------------*
+FORM PROCESS_SHIPPING.
+
+DATA: LT_SHIPPING_DATA TYPE TYP_T_SHIPPING_DATA,
+LF_SHIPPING_DATA LIKE LINE OF LT_SHIPPING_DATA.
+DATA: L_VBELN_VL TYPE ZSD003-VBELN_S,
+L_MESSAGE(80) TYPE C.
+DATA: LT_LINE_NO TYPE STANDARD TABLE OF SY-TABIX,
+L_LINE_NO LIKE LINE OF LT_LINE_NO.
+
+LOOP AT GT_SHIPPING_DATA INTO LF_SHIPPING_DATA.
+L_LINE_NO = SY-TABIX.
+AT NEW VBELN.
+CLEAR: LT_SHIPPING_DATA[], LT_LINE_NO[].
+ENDAT.
+READ TABLE GT_ERROR_INFO TRANSPORTING NO FIELDS
+WITH KEY TYPE = CNS_ERROR_TYPE_SHIPPING LINE_NO = L_LINE_NO.
+IF SY-SUBRC <> 0.
+APPEND LF_SHIPPING_DATA TO LT_SHIPPING_DATA.
+APPEND L_LINE_NO TO LT_LINE_NO.
+ENDIF.
+AT END OF VBELN.
+IF NOT LT_SHIPPING_DATA[] IS INITIAL.
+*       出荷BDC実行
+*2008/04/09 ADD-S
+*出荷伝票変数クリア
+CLEAR:L_VBELN_VL,L_MESSAGE.
+*2008/04/09 ADD-E
+IF LF_SHIPPING_DATA-XCHPF = 'X'.
+PERFORM EXECUTE_SHIPPING_BATCH_BDC
+CHANGING LT_SHIPPING_DATA[]
+L_VBELN_VL
+L_MESSAGE.
+ELSE.
+PERFORM EXECUTE_SHIPPING_BDC USING    LT_SHIPPING_DATA[]
+CHANGING L_VBELN_VL
+L_MESSAGE.
+ENDIF.
+
+IF NOT L_VBELN_VL IS INITIAL.
+* UPDATE 2009/01/13 {
+**         受注伝票テキスト更新
+*         出荷伝票テキスト更新
+* } UPDATE 2009/01/13
+PERFORM UPDATE_ORDER_TEXT USING LT_SHIPPING_DATA[]
+L_VBELN_VL.
+*         出荷データ更新
+PERFORM UPDATE_SHIPPING_DATA USING LT_SHIPPING_DATA[]
+L_VBELN_VL.
+LF_SHIPPING_DATA-SHPBDC = 'X'.
+LF_SHIPPING_DATA-VBELN_S = L_VBELN_VL.
+LOOP AT LT_LINE_NO INTO L_LINE_NO.
+MODIFY GT_SHIPPING_DATA FROM LF_SHIPPING_DATA
+INDEX L_LINE_NO TRANSPORTING SHPBDC VBELN_S.
+ENDLOOP.
+ELSE.
+LOOP AT LT_LINE_NO INTO L_LINE_NO.
+PERFORM SET_ERROR_INFO USING CNS_ERROR_TYPE_SHIPPING
+L_LINE_NO
+L_MESSAGE.
+ENDLOOP.
+ENDIF.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " PROCESS_SHIPPING
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_SHIP
+*&---------------------------------------------------------------------*
+*       出庫処理
+*----------------------------------------------------------------------*
+FORM PROCESS_SHIP.
+
+DATA: LT_SHIP_DATA TYPE TYP_T_SHIP_DATA,
+LF_SHIP_DATA LIKE LINE OF LT_SHIP_DATA.
+DATA: L_MESSAGE(80) TYPE C.
+DATA: LT_LINE_NO TYPE STANDARD TABLE OF SY-TABIX,
+L_LINE_NO LIKE LINE OF LT_LINE_NO.
+
+LOOP AT GT_SHIP_DATA INTO LF_SHIP_DATA.
+L_LINE_NO = SY-TABIX.
+AT NEW VBELN_S.
+CLEAR: LT_SHIP_DATA[], LT_LINE_NO[].
+ENDAT.
+READ TABLE GT_ERROR_INFO TRANSPORTING NO FIELDS
+WITH KEY TYPE = CNS_ERROR_TYPE_SHIP LINE_NO = L_LINE_NO.
+IF SY-SUBRC <> 0.
+APPEND LF_SHIP_DATA TO LT_SHIP_DATA.
+APPEND L_LINE_NO TO LT_LINE_NO.
+ENDIF.
+AT END OF VBELN_S.
+IF NOT LT_SHIP_DATA[] IS INITIAL.
+
+*       出庫BDC実行
+PERFORM EXECUTE_SHIP_BDC USING    LT_SHIP_DATA[]
+CHANGING L_MESSAGE.
+IF G_RC = 0.
+* ADD 2009/01/13 {
+*         受注伝票テキスト更新
+PERFORM UPDATE_ORDER_TEXT1 USING LT_SHIP_DATA[]
+LF_SHIP_DATA-VBELN_S.
+* } ADD 2009/01/13
+*         出庫データ更新
+PERFORM UPDATE_SHIP_DATA USING LT_SHIP_DATA[].
+LF_SHIP_DATA-WABDC = 'X'.
+LOOP AT LT_LINE_NO INTO L_LINE_NO.
+MODIFY GT_SHIP_DATA FROM LF_SHIP_DATA
+INDEX L_LINE_NO TRANSPORTING WABDC.
+ENDLOOP.
+ELSE.
+LOOP AT LT_LINE_NO INTO L_LINE_NO.
+PERFORM SET_ERROR_INFO USING CNS_ERROR_TYPE_SHIP
+L_LINE_NO
+L_MESSAGE.
+ENDLOOP.
+ENDIF.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " PROCESS_SHIP
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_SHIPPING_DATA
+*&---------------------------------------------------------------------*
+*       出荷データ更新
+*----------------------------------------------------------------------*
+*      -->IT_SHIPPING_DATA  出荷データ
+*      -->I_VBELN_VL        出荷伝票番号
+*----------------------------------------------------------------------*
+FORM UPDATE_SHIPPING_DATA
+USING IT_SHIPPING_DATA TYPE TYP_T_SHIPPING_DATA
+I_VBELN_VL.
+
+DATA: LF_SHIPPING_DATA LIKE LINE OF IT_SHIPPING_DATA.
+
+LOOP AT IT_SHIPPING_DATA INTO LF_SHIPPING_DATA.
+PERFORM UPDATE_ZSD003_SHIPPING USING LF_SHIPPING_DATA
+I_VBELN_VL.
+IF G_RC <> 0.
+EXIT.
+ENDIF.
+* DELETE 2009/01/13 {
+*    PERFORM UPDATE_ZSD002_SHIPPING USING LF_SHIPPING_DATA.
+*    IF G_RC <> 0.
+*      EXIT.
+*    ENDIF.
+* } DELETE 2009/01/13
+ENDLOOP.
+
+CHECK G_RC = 0.
+COMMIT WORK.
+
+ENDFORM.                    " UPDATE_SHIPPING_DATA
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_SHIP_DATA
+*&---------------------------------------------------------------------*
+*       出庫データ更新
+*----------------------------------------------------------------------*
+*      -->IT_SHIP_DATA  出庫データ
+*----------------------------------------------------------------------*
+FORM UPDATE_SHIP_DATA USING IT_SHIP_DATA TYPE TYP_T_SHIP_DATA.
+
+DATA: LF_SHIP_DATA LIKE LINE OF IT_SHIP_DATA.
+
+LOOP AT IT_SHIP_DATA INTO LF_SHIP_DATA.
+PERFORM UPDATE_ZSD003_SHIP USING LF_SHIP_DATA.
+IF G_RC <> 0.
+EXIT.
+ENDIF.
+PERFORM UPDATE_ZSD002_SHIP USING LF_SHIP_DATA.
+IF G_RC <> 0.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+CHECK G_RC = 0.
+COMMIT WORK.
+
+ENDFORM.                    " UPDATE_SHIP_DATA
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZSD003_SHIPPING
+*&---------------------------------------------------------------------*
+*       受信ログ更新（出荷データより）
+*----------------------------------------------------------------------*
+*      -->IF_SHIPPING_DATA  出荷データ
+*      -->I_VBELN_VL        出荷伝票番号
+*----------------------------------------------------------------------*
+FORM UPDATE_ZSD003_SHIPPING
+USING IF_SHIPPING_DATA TYPE TYP_SHIPPING_DATA
+I_VBELN_VL.
+
+CLEAR G_RC.
+UPDATE ZSD003
+SET VSTEL = IF_SHIPPING_DATA-VSTEL
+SBDC = 'X'
+SBDCDAT = SY-DATUM
+SBDCTIM = SY-UZEIT
+SBDCNAM = SY-UNAME
+VBELN_S = I_VBELN_VL
+WHERE SENDID = IF_SHIPPING_DATA-SENDID
+AND VBELN = IF_SHIPPING_DATA-VBELN
+AND POSNR = IF_SHIPPING_DATA-POSNR
+AND INVOICE = IF_SHIPPING_DATA-INVOICE
+AND TORIKOMI = IF_SHIPPING_DATA-TORIKOMI.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+ENDIF.
+
+ENDFORM.                    " UPDATE_ZSD003_SHIPPING
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZSD003_SHIP
+*&---------------------------------------------------------------------*
+*       受信ログ更新（出庫データより）
+*----------------------------------------------------------------------*
+*      -->IF_SHIP_DATA  出庫データ
+*----------------------------------------------------------------------*
+FORM UPDATE_ZSD003_SHIP USING IF_SHIP_DATA TYPE TYP_SHIP_DATA.
+
+CLEAR G_RC.
+UPDATE ZSD003
+SET WABDC = 'X'
+WBDCDAT = SY-DATUM
+WBDCTIM = SY-UZEIT
+WBDCNAM = SY-UNAME
+WHERE SENDID = IF_SHIP_DATA-SENDID
+AND VBELN = IF_SHIP_DATA-VBELN
+AND POSNR = IF_SHIP_DATA-POSNR
+AND INVOICE = IF_SHIP_DATA-INVOICE
+AND TORIKOMI = IF_SHIP_DATA-TORIKOMI.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+ENDIF.
+
+ENDFORM.                    " UPDATE_ZSD003_SHIP
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_HEADER
+*&---------------------------------------------------------------------*
+*       ヘッダ出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_HEADER.
+
+IF P_TEST = 'X'.
+*   ※テスト実行(更新は行われません)
+WRITE: 1 TEXT-R02.
+ENDIF.
+* ***出荷出庫BDC結果 ***
+WRITE: 62 TEXT-R01.
+* 処理日付:
+WRITE: 114 TEXT-R03, 123(10) SY-DATUM.
+* 処理時刻:
+WRITE: 137 TEXT-R04, 146(8) SY-UZEIT.
+* PAGE:
+WRITE: 158 TEXT-R05, 163(3) SY-PAGNO.
+WRITE: / SY-ULINE.
+* 出荷ポイント(営業所)
+WRITE: /1 TEXT-R06, 25 G_VSTEL, 33 G_VTEXT.
+SKIP.
+* 出荷対象期間
+WRITE: /1 TEXT-R07, 17 S_SHPDAT-LOW.
+IF NOT S_SHPDAT-HIGH IS INITIAL.
+WRITE: 28 TEXT-R13, 31 S_SHPDAT-HIGH.
+ENDIF.
+* 出荷対象件数
+WRITE: /1 TEXT-R08, 17(5) G_COUNT_1, 22 TEXT-R14.
+* 正常処理件数
+WRITE: /1 TEXT-R09, 17(5) G_COUNT_NORMAL_1, 22 TEXT-R14.
+* エラー件数
+WRITE: /1 TEXT-R10, 17(5) G_COUNT_ERROR_1, 22 TEXT-R14.
+SKIP.
+* 出庫対象期間
+WRITE: /1 TEXT-R11, 17 S_WADAT-LOW.
+IF NOT S_WADAT-HIGH IS INITIAL.
+WRITE: 28 TEXT-R13, 31 S_WADAT-HIGH.
+ENDIF.
+* 出庫対象件数
+WRITE: /1 TEXT-R12, 17(5) G_COUNT_2, 22 TEXT-R14.
+* 正常処理件数
+WRITE: /1 TEXT-R09, 17(5) G_COUNT_NORMAL_2, 22 TEXT-R14.
+* エラー件数
+WRITE: /1 TEXT-R10, 17(5) G_COUNT_ERROR_2, 22 TEXT-R14.
+SKIP.
+WRITE: / SY-ULINE.
+* 列名
+WRITE: /1 TEXT-R21, 19 TEXT-R22, 32 TEXT-R23, 40 TEXT-R24,
+53 TEXT-R25, 67 TEXT-R26, 82 TEXT-R27, 97 TEXT-R28,
+110 TEXT-R29, 123 TEXT-R30, 132 TEXT-R31.
+WRITE: /53 TEXT-R32, 67 TEXT-R33, 82 TEXT-R34, 97 TEXT-R35,
+110 TEXT-R36, 123 TEXT-R30, 132 TEXT-R31.
+WRITE: / SY-ULINE.
+
+ENDFORM.                    " OUTPUT_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_RESULT
+*&---------------------------------------------------------------------*
+*       処理結果出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_RESULT USING I_DEVICE.
+
+DATA: LF_OUTPUT_RESULT LIKE LINE OF GT_OUTPUT_RESULT.
+DATA: L_PRINTER TYPE PRI_PARAMS-PDEST,
+L_PRINTER_PARAMETER TYPE PRI_PARAMS.
+DATA: L_REMAIN_QUANTITY TYPE ZSD003-LFIMG.
+
+*2008/04/01 ADD-S オーバーフロー回避対応
+DATA:   LT_CNT LIKE GT_OUTPUT_RESULT,
+LF_CNT LIKE LINE OF GT_OUTPUT_RESULT.
+CLEAR:LT_CNT,LF_CNT.
+LT_CNT[] = GT_OUTPUT_RESULT[].
+*2008/04/01 ADD-E
+
+CLEAR SY-PAGNO.
+LOOP AT GT_OUTPUT_RESULT INTO LF_OUTPUT_RESULT.
+AT NEW VSTEL.
+*2008/04/01 DEL-S オーバーフロー回避対応
+*      SUM.
+*2008/04/01 DEL-E
+G_VSTEL = LF_OUTPUT_RESULT-VSTEL.
+*     出荷ポイント名称取得
+PERFORM GET_SHIPPING_POINT_TEXT USING    G_VSTEL
+CHANGING G_VTEXT.
+*2008/04/01 DEL-S オーバーフロー回避対応
+*      G_COUNT_1 = LF_OUTPUT_RESULT-COUNT_1.
+*      G_COUNT_NORMAL_1 = LF_OUTPUT_RESULT-COUNT_NORMAL_1.
+*      G_COUNT_ERROR_1 = LF_OUTPUT_RESULT-COUNT_ERROR_1.
+*      G_COUNT_2 = LF_OUTPUT_RESULT-COUNT_2.
+*      G_COUNT_NORMAL_2 = LF_OUTPUT_RESULT-COUNT_NORMAL_2.
+*      G_COUNT_ERROR_2 = LF_OUTPUT_RESULT-COUNT_ERROR_2.
+*2008/04/01 DEL-E
+*2008/04/01 ADD-S オーバーフロー回避対応
+CLEAR:G_COUNT_1,G_COUNT_NORMAL_1,G_COUNT_ERROR_1,
+G_COUNT_2,G_COUNT_NORMAL_2,G_COUNT_ERROR_2.
+LOOP AT LT_CNT INTO LF_CNT WHERE VSTEL = G_VSTEL.
+G_COUNT_1        = G_COUNT_1        + LF_CNT-COUNT_1.
+G_COUNT_NORMAL_1 = G_COUNT_NORMAL_1 + LF_CNT-COUNT_NORMAL_1.
+G_COUNT_ERROR_1  = G_COUNT_ERROR_1  + LF_CNT-COUNT_ERROR_1.
+G_COUNT_2        = G_COUNT_2        + LF_CNT-COUNT_2.
+G_COUNT_NORMAL_2 = G_COUNT_NORMAL_2 + LF_CNT-COUNT_NORMAL_2.
+G_COUNT_ERROR_2  = G_COUNT_ERROR_2  + LF_CNT-COUNT_ERROR_2.
+ENDLOOP.
+*2008/04/01 ADD-E
+IF I_DEVICE = CNS_OUTPUT_DEVICE_PRINTER.
+IF NOT SY-PAGNO IS INITIAL.
+SY-PAGNO = 1.
+ENDIF.
+*       プリンタ名取得
+PERFORM GET_PRINTER_NAME USING    LF_OUTPUT_RESULT-VSTEL
+CHANGING L_PRINTER.
+IF L_PRINTER IS INITIAL.
+L_PRINTER = CNS_DEFAULT_PRINTER_NAME.
+ENDIF.
+*       プリンタパラメータ取得
+PERFORM GET_PRINTER_PARAMETER USING    L_PRINTER
+CHANGING L_PRINTER_PARAMETER.
+IF NOT L_PRINTER_PARAMETER IS INITIAL.
+*         改ページ、出荷ポイントごとに出力
+NEW-PAGE PRINT ON NO DIALOG
+*2008/03/04 ADD START スプール分割
+NEW-SECTION
+*2008/03/04 ADD END
+PARAMETERS L_PRINTER_PARAMETER.
+ENDIF.
+ELSE.
+NEW-PAGE.
+ENDIF.
+ENDAT.
+*   インボイスNO、受注番号、明細、送信数量
+WRITE: /1 LF_OUTPUT_RESULT-INVOICE, 19 LF_OUTPUT_RESULT-VBELN,
+32 LF_OUTPUT_RESULT-POSNR, 40(12) LF_OUTPUT_RESULT-SDMENG.
+IF LF_OUTPUT_RESULT-COUNT_1 = 0 OR
+LF_OUTPUT_RESULT-COUNT_ERROR_1 <> 0.
+*     ************
+WRITE: 53 TEXT-R41.
+ELSE.
+*     今回出荷数
+WRITE: 53(12) LF_OUTPUT_RESULT-LFIMG.
+ENDIF.
+L_REMAIN_QUANTITY =
+LF_OUTPUT_RESULT-SDMENG - LF_OUTPUT_RESULT-LFIMG_SUM.
+*   累計出荷数、送信済出荷数、出荷日、出荷伝票
+WRITE: 67(12) LF_OUTPUT_RESULT-LFIMG_SUM, 82(12) L_REMAIN_QUANTITY,
+97 LF_OUTPUT_RESULT-SHPDAT, 110 LF_OUTPUT_RESULT-VBELN_S.
+IF LF_OUTPUT_RESULT-COUNT_1 = 0.
+*     出荷対象外
+WRITE: 123 TEXT-R42.
+ELSE.
+IF LF_OUTPUT_RESULT-COUNT_ERROR_1 = 0.
+*       正常
+WRITE: 123 TEXT-R43.
+ELSE.
+*       エラー、メッセージ
+WRITE: 123 TEXT-R44, 132 LF_OUTPUT_RESULT-MESSAGE_1.
+ENDIF.
+ENDIF.
+IF LF_OUTPUT_RESULT-COUNT_2 = 0 OR
+LF_OUTPUT_RESULT-COUNT_ERROR_2 <> 0.
+*     ************
+WRITE: /53 TEXT-R41.
+ELSE.
+*     今回出庫数
+WRITE: /53(12) LF_OUTPUT_RESULT-LFIMG.
+ENDIF.
+L_REMAIN_QUANTITY =
+LF_OUTPUT_RESULT-LFIMG_SUM - LF_OUTPUT_RESULT-KWAMNG_SUM.
+*   累計出庫数、出荷済未出庫、出庫日
+WRITE: 67(12) LF_OUTPUT_RESULT-KWAMNG_SUM, 82(12) L_REMAIN_QUANTITY,
+97 LF_OUTPUT_RESULT-WADAT.
+IF LF_OUTPUT_RESULT-WABDC = 'X'.
+*     確認済
+WRITE: 110 TEXT-R45.
+ELSE.
+*     未出庫
+WRITE: 110 TEXT-R46.
+ENDIF.
+IF LF_OUTPUT_RESULT-COUNT_2 = 0.
+*     出庫対象外
+WRITE: 123 TEXT-R42.
+ELSE.
+IF LF_OUTPUT_RESULT-COUNT_ERROR_2 = 0.
+*       正常
+WRITE: 123 TEXT-R43.
+ELSE.
+*       エラー、メッセージ
+WRITE: 123 TEXT-R44, 132 LF_OUTPUT_RESULT-MESSAGE_2.
+ENDIF.
+ENDIF.
+AT END OF VSTEL.
+IF I_DEVICE = CNS_OUTPUT_DEVICE_PRINTER.
+IF NOT L_PRINTER_PARAMETER IS INITIAL.
+NEW-PAGE PRINT OFF.
+ENDIF.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " OUTPUT_RESULT
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_SHIPPING_ORDER_IS_EXIST
+*&---------------------------------------------------------------------*
+*       出荷伝票存在チェック
+*----------------------------------------------------------------------*
+*      -->I_VBELN_VL  出荷伝票番号
+*----------------------------------------------------------------------*
+FORM CHECK_SHIPPING_ORDER_IS_EXIST USING    I_VBELN_VL.
+
+CLEAR G_RC.
+SELECT COUNT( * ) FROM LIKP
+WHERE VBELN = I_VBELN_VL.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " CHECK_SHIPPING_ORDER_IS_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_FI_PERIOD_IS_OPENED
+*&---------------------------------------------------------------------*
+*       会計期間チェック
+*----------------------------------------------------------------------*
+*      -->I_DATE  日付
+*----------------------------------------------------------------------*
+FORM CHECK_FI_PERIOD_IS_OPENED USING    I_DATE.
+
+DATA: L_COMPANY_CODE TYPE BAPI0002_2-COMP_CODE,
+L_DATE TYPE BAPI0002_4-POSTING_DATE,
+L_YEAR TYPE BAPI0002_4-FISCAL_YEAR,
+L_PERIOD TYPE BAPI0002_4-FISCAL_PERIOD.
+DATA: L_GJAHR TYPE T001B-FRYE1,
+L_MONAT TYPE T001B-FRPE1.
+
+L_COMPANY_CODE = P_BUKRS.
+L_DATE = I_DATE.
+
+CLEAR G_RC.
+* 会計期間取得
+CALL FUNCTION 'BAPI_COMPANYCODE_GET_PERIOD'
+EXPORTING
+COMPANYCODEID = L_COMPANY_CODE
+POSTING_DATE  = L_DATE
+IMPORTING
+FISCAL_YEAR   = L_YEAR
+FISCAL_PERIOD = L_PERIOD.
+
+L_GJAHR = L_YEAR.
+L_MONAT = L_PERIOD.
+
+* 会計期間チェック
+CALL FUNCTION 'FI_PERIOD_CHECK'
+EXPORTING
+I_BUKRS          = P_BUKRS
+I_GJAHR          = L_GJAHR
+I_KOART          = '+'  " 勘定タイプ：全て
+I_MONAT          = L_MONAT
+EXCEPTIONS
+ERROR_PERIOD     = 1
+ERROR_PERIOD_ACC = 2
+OTHERS           = 3.
+IF SY-SUBRC <> 0.
+CALL FUNCTION 'FI_PERIOD_CHECK'
+EXPORTING
+I_BUKRS          = P_BUKRS
+I_GJAHR          = L_GJAHR
+I_KOART          = 'S'  " 勘定タイプ：総勘定元帳
+I_MONAT          = L_MONAT
+EXCEPTIONS
+ERROR_PERIOD     = 1
+ERROR_PERIOD_ACC = 2
+OTHERS           = 3.
+IF SY-SUBRC <> 0.
+CALL FUNCTION 'FI_PERIOD_CHECK'
+EXPORTING
+I_BUKRS          = P_BUKRS
+I_GJAHR          = L_GJAHR
+I_KOART          = 'D'  " 勘定タイプ：得意先
+I_MONAT          = L_MONAT
+EXCEPTIONS
+ERROR_PERIOD     = 1
+ERROR_PERIOD_ACC = 2
+OTHERS           = 3.
+ENDIF.
+ENDIF.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+ENDFORM.                    " CHECK_FI_PERIOD_IS_OPENED
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZSD002_SHIPPING
+*&---------------------------------------------------------------------*
+*       送信ログ更新（出荷データより）
+*----------------------------------------------------------------------*
+*      -->IF_SHIPPING_DATA  出荷データ
+*----------------------------------------------------------------------*
+FORM UPDATE_ZSD002_SHIPPING
+USING IF_SHIPPING_DATA TYPE TYP_SHIPPING_DATA.
+
+CLEAR G_RC.
+UPDATE ZSD002
+SET LFIMG = LFIMG + IF_SHIPPING_DATA-LFIMG
+WHERE SENDID = IF_SHIPPING_DATA-SENDID
+AND VBELN = IF_SHIPPING_DATA-VBELN
+AND POSNR = IF_SHIPPING_DATA-POSNR
+AND LOEVM = ' '.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+ENDIF.
+
+ENDFORM.                    " UPDATE_ZSD002_SHIPPING
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZSD002_SHIP
+*&---------------------------------------------------------------------*
+*       送信ログ更新（出庫データより）
+*----------------------------------------------------------------------*
+*      -->IF_SHIP_DATA  出庫データ
+*----------------------------------------------------------------------*
+FORM UPDATE_ZSD002_SHIP USING IF_SHIP_DATA TYPE TYP_SHIP_DATA.
+
+CLEAR G_RC.
+UPDATE ZSD002
+SET KWAMNG = KWAMNG + IF_SHIP_DATA-LFIMG
+WHERE SENDID = IF_SHIP_DATA-SENDID
+AND VBELN = IF_SHIP_DATA-VBELN
+AND POSNR = IF_SHIP_DATA-POSNR
+AND LOEVM = ' '.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+ENDIF.
+
+ENDFORM.                    " UPDATE_ZSD002_SHIP
+*&---------------------------------------------------------------------*
+*&      Form  GET_PRINTER_NAME
+*&---------------------------------------------------------------------*
+*       プリンタ名取得
+*----------------------------------------------------------------------*
+*      -->I_WERKS    プラント
+*      <--E_PRINTER  プリンタ名
+*----------------------------------------------------------------------*
+FORM GET_PRINTER_NAME USING    I_WERKS
+CHANGING E_PRINTER.
+
+CLEAR G_RC.
+CLEAR E_PRINTER.
+SELECT PRINT_DEST INTO E_PRINTER
+FROM ADR10 UP TO 1 ROWS
+WHERE ADDRNUMBER =
+( SELECT ADRNR
+FROM T001W
+WHERE WERKS = I_WERKS )
+* Add --->
+AND  FLGDEFAULT = 'X'
+* Add <---
+.
+ENDSELECT.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_PRINTER_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHIPPING_POINT_TEXT
+*&---------------------------------------------------------------------*
+*       出荷ポイント名称取得
+*----------------------------------------------------------------------*
+*      -->I_VSTEL  出荷ポイント
+*      <--E_VTEXT  出荷ポイント名称
+*----------------------------------------------------------------------*
+FORM GET_SHIPPING_POINT_TEXT USING    I_VSTEL
+CHANGING E_VTEXT.
+
+CLEAR G_RC.
+CLEAR E_VTEXT.
+SELECT SINGLE VTEXT INTO E_VTEXT
+FROM TVSTT
+WHERE SPRAS = 'J'
+AND VSTEL = I_VSTEL.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_SHIPPING_POINT_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ORDER_TEXT
+*&---------------------------------------------------------------------*
+*       受注伝票テキスト更新
+*----------------------------------------------------------------------*
+*      -->IT_SHIPPING_DATA  出荷データ
+*----------------------------------------------------------------------*
+FORM UPDATE_ORDER_TEXT USING IT_SHIPPING_DATA TYPE TYP_T_SHIPPING_DATA
+I_VBELN_VL.
+
+DATA: LF_SHIPPING_DATA LIKE LINE OF GT_SHIPPING_DATA.
+DATA: LF_TEXT_HEADER TYPE THEAD,
+LT_TEXT_LINE TYPE STANDARD TABLE OF TLINE,
+LF_TEXT_LINE LIKE LINE OF LT_TEXT_LINE.
+
+READ TABLE IT_SHIPPING_DATA INTO LF_SHIPPING_DATA INDEX 1.
+LF_TEXT_HEADER-TDOBJECT = 'VBBK'.
+LF_TEXT_HEADER-TDNAME = LF_SHIPPING_DATA-VBELN.
+LF_TEXT_HEADER-TDID = '0001'.
+LF_TEXT_HEADER-TDSPRAS = 'J'.
+
+* 2009/03/26 DEL START
+* 受注伝票ヘッダテキスト情報取得
+*  CALL FUNCTION 'READ_TEXT'
+*       EXPORTING
+*            ID       = LF_TEXT_HEADER-TDID
+*            LANGUAGE = 'J'
+*            NAME     = LF_TEXT_HEADER-TDNAME
+*            OBJECT   = LF_TEXT_HEADER-TDOBJECT
+*       TABLES
+*            LINES    = LT_TEXT_LINE
+*       EXCEPTIONS
+*            OTHERS   = 0.
+*
+** 社内備考編集
+*  PERFORM BUILD_INNER_NOTE USING    LF_SHIPPING_DATA
+*                           CHANGING LF_TEXT_LINE-TDLINE.
+*  LF_TEXT_LINE-TDFORMAT = '*'.
+* 2009/03/26 DEL END
+
+*  INSERT LF_TEXT_LINE INTO LT_TEXT_LINE INDEX 1.
+* DELETE 2009/01/13 {
+*  CLEAR G_RC.
+** 受注伝票ヘッダテキスト更新
+*  CALL FUNCTION 'SAVE_TEXT'
+*       EXPORTING
+*            HEADER          = LF_TEXT_HEADER
+*            SAVEMODE_DIRECT = 'X'
+*       TABLES
+*            LINES           = LT_TEXT_LINE
+*       EXCEPTIONS
+*            OTHERS          = 0.
+* } DELETE 2009/01/13
+
+LF_TEXT_HEADER-TDNAME = I_VBELN_VL.
+CLEAR LT_TEXT_LINE[].
+
+* 2009/03/26 DEL START
+*  APPEND LF_TEXT_LINE TO LT_TEXT_LINE.
+* 2009/03/26 DEL END
+
+* 出荷伝票ヘッダテキスト登録（クリア）
+CALL FUNCTION 'SAVE_TEXT'
+EXPORTING
+HEADER          = LF_TEXT_HEADER
+SAVEMODE_DIRECT = 'X'
+TABLES
+LINES           = LT_TEXT_LINE
+EXCEPTIONS
+OTHERS          = 0.
+
+ENDFORM.                    " UPDATE_ORDER_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ORDER_TEXT1
+*&---------------------------------------------------------------------*
+*       出荷伝票テキスト更新
+*----------------------------------------------------------------------*
+*      -->IT_SHIP_DATA  出荷データ
+*----------------------------------------------------------------------*
+FORM UPDATE_ORDER_TEXT1 USING IT_SHIP_DATA TYPE TYP_T_SHIP_DATA
+I_VBELN_VL.
+
+DATA: LF_SHIP_DATA LIKE LINE OF GT_SHIP_DATA.
+DATA: LF_TEXT_HEADER TYPE THEAD,
+LT_TEXT_LINE TYPE STANDARD TABLE OF TLINE,
+LF_TEXT_LINE LIKE LINE OF LT_TEXT_LINE.
+
+READ TABLE IT_SHIP_DATA INTO LF_SHIP_DATA INDEX 1.
+LF_TEXT_HEADER-TDOBJECT = 'VBBK'.
+LF_TEXT_HEADER-TDNAME = LF_SHIP_DATA-VBELN.
+LF_TEXT_HEADER-TDID = '0001'.
+LF_TEXT_HEADER-TDSPRAS = 'J'.
+
+* 受注伝票ヘッダテキスト情報取得
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID       = LF_TEXT_HEADER-TDID
+LANGUAGE = 'J'
+NAME     = LF_TEXT_HEADER-TDNAME
+OBJECT   = LF_TEXT_HEADER-TDOBJECT
+TABLES
+LINES    = LT_TEXT_LINE
+EXCEPTIONS
+OTHERS   = 0.
+
+* 社内備考編集
+CLEAR LF_TEXT_LINE-TDLINE.
+LF_TEXT_LINE-TDLINE+0(15) = LF_SHIP_DATA-INVOICE.
+* DEL 2012/01/31 {
+*  LF_TEXT_LINE-TDLINE+15(12) = LF_SHIP_DATA-LFIMG.
+*  LF_TEXT_LINE-TDLINE+27 = LF_SHIP_DATA-ASNNO.
+* } DEL 2012/01/31
+LF_TEXT_LINE-TDFORMAT = '*'.
+INSERT LF_TEXT_LINE INTO LT_TEXT_LINE INDEX 1.
+
+CLEAR G_RC.
+* 受注伝票ヘッダテキスト更新
+CALL FUNCTION 'SAVE_TEXT'
+EXPORTING
+HEADER          = LF_TEXT_HEADER
+SAVEMODE_DIRECT = 'X'
+TABLES
+LINES           = LT_TEXT_LINE
+EXCEPTIONS
+OTHERS          = 0.
+
+* 2009/03/26 ADD START  処理を出荷登録から移動
+LF_TEXT_HEADER-TDNAME = I_VBELN_VL.
+CLEAR LT_TEXT_LINE[].
+APPEND LF_TEXT_LINE TO LT_TEXT_LINE.
+* 出荷伝票ヘッダテキスト登録
+CALL FUNCTION 'SAVE_TEXT'
+EXPORTING
+HEADER          = LF_TEXT_HEADER
+SAVEMODE_DIRECT = 'X'
+TABLES
+LINES           = LT_TEXT_LINE
+EXCEPTIONS
+OTHERS          = 0.
+
+* 2009/03/26 ADD END
+
+ENDFORM.                    " UPDATE_ORDER_TEXT1
+*&---------------------------------------------------------------------*
+*&      Form  BUILD_INNER_NOTE
+*&---------------------------------------------------------------------*
+*       社内備考設定
+*----------------------------------------------------------------------*
+*      -->IF_SHIPPING_DATA  出荷データ
+*      <--E_NOTE            社内備考
+*----------------------------------------------------------------------*
+FORM BUILD_INNER_NOTE USING    IF_SHIPPING_DATA TYPE TYP_SHIPPING_DATA
+CHANGING E_NOTE.
+
+CLEAR E_NOTE.
+E_NOTE+0(15) = IF_SHIPPING_DATA-INVOICE.
+E_NOTE+15(12) = IF_SHIPPING_DATA-LFIMG.
+E_NOTE+27 = IF_SHIPPING_DATA-ASNNO.
+
+ENDFORM.                    " BUILD_INNER_NOTE
+*&---------------------------------------------------------------------*
+*&      Form  SET_SUM_QUANTITY_1
+*&---------------------------------------------------------------------*
+*       出荷合計数量設定
+*----------------------------------------------------------------------*
+FORM SET_SUM_QUANTITY_1.
+
+DATA: LF_SHIPPING_DATA LIKE LINE OF GT_SHIPPING_DATA,
+LF_SUM_QUANTITY LIKE LINE OF GT_SUM_QUANTITY.
+
+LOOP AT GT_SHIPPING_DATA INTO LF_SHIPPING_DATA.
+CLEAR LF_SUM_QUANTITY.
+*   合計数量取得
+READ TABLE GT_SUM_QUANTITY TRANSPORTING NO FIELDS
+WITH KEY SENDID = LF_SHIPPING_DATA-SENDID
+VBELN = LF_SHIPPING_DATA-VBELN
+POSNR = LF_SHIPPING_DATA-POSNR.
+IF SY-SUBRC <> 0.
+*     送信数量取得
+PERFORM GET_SEND_QUANTITY USING    LF_SHIPPING_DATA-SENDID
+LF_SHIPPING_DATA-VBELN
+LF_SHIPPING_DATA-POSNR
+CHANGING LF_SUM_QUANTITY-SDMENG.
+*     出荷出庫済数量取得
+PERFORM GET_FINISH_QUANTITY USING    LF_SHIPPING_DATA-SENDID
+LF_SHIPPING_DATA-VBELN
+LF_SHIPPING_DATA-POSNR
+CHANGING LF_SUM_QUANTITY-LFIMG
+LF_SUM_QUANTITY-KWAMNG.
+*     合計数量設定
+LF_SUM_QUANTITY-SENDID = LF_SHIPPING_DATA-SENDID.
+LF_SUM_QUANTITY-VBELN = LF_SHIPPING_DATA-VBELN.
+LF_SUM_QUANTITY-POSNR = LF_SHIPPING_DATA-POSNR.
+COLLECT LF_SUM_QUANTITY INTO GT_SUM_QUANTITY.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_SUM_QUANTITY_1
+*&---------------------------------------------------------------------*
+*&      Form  GET_SEND_QUANTITY
+*&---------------------------------------------------------------------*
+*       送信数量取得
+*----------------------------------------------------------------------*
+*      -->I_SENDID         送信ID
+*      -->I_VBELN          受注伝票番号
+*      -->I_POSNR          受注明細
+*      <--E_SEND_QUANTITY  送信数量
+*----------------------------------------------------------------------*
+FORM GET_SEND_QUANTITY USING    I_SENDID
+I_VBELN
+I_POSNR
+CHANGING E_SEND_QUANTITY.
+
+CLEAR: G_RC.
+CLEAR: E_SEND_QUANTITY.
+SELECT SDMENG INTO E_SEND_QUANTITY
+FROM ZSD002 UP TO 1 ROWS
+WHERE SENDID = I_SENDID
+AND VBELN = I_VBELN
+AND POSNR = I_POSNR
+AND LOEVM <> 'X'.
+ENDSELECT.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_SEND_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  GET_FINISH_QUANTITY
+*&---------------------------------------------------------------------*
+*       出荷出庫済数量取得
+*----------------------------------------------------------------------*
+*      -->I_SENDID             送信ID
+*      -->I_VBELN              受注伝票番号
+*      -->I_POSNR              受注明細
+*      <--E_SHIPPING_QUANTITY  出荷済数量
+*      <--E_SHIP_QUANTITY      出庫済数量
+*----------------------------------------------------------------------*
+FORM GET_FINISH_QUANTITY USING    I_SENDID
+I_VBELN
+I_POSNR
+CHANGING E_SHIPPING_QUANTITY
+E_SHIP_QUANTITY.
+
+CLEAR: G_RC.
+
+* 出荷済数量取得
+CLEAR: E_SHIPPING_QUANTITY.
+SELECT SUM( LFIMG )
+INTO E_SHIPPING_QUANTITY
+FROM ZSD003
+WHERE SENDID = I_SENDID
+AND VBELN = I_VBELN
+AND POSNR = I_POSNR
+AND LOEVM <> 'X'
+AND SBDC = 'X'.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+* 出庫済数量取得
+CLEAR: E_SHIP_QUANTITY.
+SELECT SUM( LFIMG )
+INTO E_SHIP_QUANTITY
+FROM ZSD003
+WHERE SENDID = I_SENDID
+AND VBELN = I_VBELN
+AND POSNR = I_POSNR
+AND LOEVM <> 'X'
+AND WABDC = 'X'.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_FINISH_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  SET_SUM_QUANTITY_2
+*&---------------------------------------------------------------------*
+*       出庫合計数量設定
+*----------------------------------------------------------------------*
+FORM SET_SUM_QUANTITY_2.
+
+DATA: LF_SHIP_DATA LIKE LINE OF GT_SHIP_DATA,
+LF_SUM_QUANTITY LIKE LINE OF GT_SUM_QUANTITY.
+
+LOOP AT GT_SHIP_DATA INTO LF_SHIP_DATA.
+CLEAR LF_SUM_QUANTITY.
+*   合計数量取得
+READ TABLE GT_SUM_QUANTITY TRANSPORTING NO FIELDS
+WITH KEY SENDID = LF_SHIP_DATA-SENDID
+VBELN = LF_SHIP_DATA-VBELN
+POSNR = LF_SHIP_DATA-POSNR.
+IF SY-SUBRC <> 0.
+*     送信数量取得
+PERFORM GET_SEND_QUANTITY USING    LF_SHIP_DATA-SENDID
+LF_SHIP_DATA-VBELN
+LF_SHIP_DATA-POSNR
+CHANGING LF_SUM_QUANTITY-SDMENG.
+*     出荷出庫済数量取得
+PERFORM GET_FINISH_QUANTITY USING    LF_SHIP_DATA-SENDID
+LF_SHIP_DATA-VBELN
+LF_SHIP_DATA-POSNR
+CHANGING LF_SUM_QUANTITY-LFIMG
+LF_SUM_QUANTITY-KWAMNG.
+*     合計数量設定
+LF_SUM_QUANTITY-SENDID = LF_SHIP_DATA-SENDID.
+LF_SUM_QUANTITY-VBELN = LF_SHIP_DATA-VBELN.
+LF_SUM_QUANTITY-POSNR = LF_SHIP_DATA-POSNR.
+COLLECT LF_SUM_QUANTITY INTO GT_SUM_QUANTITY.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_SUM_QUANTITY_2
+*&---------------------------------------------------------------------*
+*&      Form  GET_PRINTER_PARAMETER
+*&---------------------------------------------------------------------*
+*       プリンタパラメータ取得
+*----------------------------------------------------------------------*
+*      -->I_PRINTER_NAME        プリンタ名
+*      <--EF_PRINTER_PARAMETER  プリンタパラメータ
+*----------------------------------------------------------------------*
+FORM GET_PRINTER_PARAMETER USING    I_PRINTER_NAME
+CHANGING EF_PRINTER_PARAMETER.
+
+DATA: L_VALID(1) TYPE C.
+
+CLEAR G_RC.
+CLEAR EF_PRINTER_PARAMETER.
+CALL FUNCTION 'GET_PRINT_PARAMETERS'
+EXPORTING
+DESTINATION    = I_PRINTER_NAME
+IMMEDIATELY    = 'X'
+LAYOUT         = 'X_58_170'
+NO_DIALOG      = 'X'
+IMPORTING
+OUT_PARAMETERS = EF_PRINTER_PARAMETER
+VALID          = L_VALID
+EXCEPTIONS
+OTHERS         = 0.
+IF L_VALID IS INITIAL.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+ENDFORM.                    " GET_PRINTER_PARAMETER
+*&---------------------------------------------------------------------*
+*&      Form  EXECUTE_SHIPPING_BATCH_BDC
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_LT_SHIPPING_DATA[]  text
+*      <--P_L_VBELN_VL  text
+*      <--P_L_MESSAGE  text
+*----------------------------------------------------------------------*
+FORM EXECUTE_SHIPPING_BATCH_BDC
+CHANGING LT_SHIPPING_DATA TYPE TYP_T_SHIPPING_DATA
+E_VBELN_VL
+E_MESSAGE.
+DATA: LF_SHIPPING_DATA LIKE LINE OF GT_SHIPPING_DATA,
+L_POSNR_BEGIN TYPE LIPS-POSNR,
+L_POSNR_END TYPE LIPS-POSNR,
+L_DATE TYPE DATUM,
+L_DATE_BDC TYPE BDCDATA-FVAL,
+L_LFIMG(12) TYPE C.
+DATA: LT_BDCDATA TYPE TABLE OF BDCDATA,
+LF_BDCDATA LIKE LINE OF LT_BDCDATA.
+DATA: LF_OPTION TYPE CTU_PARAMS.
+DATA: LT_MESSAGE TYPE TABLE OF BDCMSGCOLL,
+LF_MESSAGE LIKE LINE OF LT_MESSAGE.
+
+SORT LT_SHIPPING_DATA BY POSNR DESCENDING.
+READ TABLE LT_SHIPPING_DATA INTO LF_SHIPPING_DATA INDEX 1.
+L_POSNR_END = LF_SHIPPING_DATA-POSNR.
+
+SORT LT_SHIPPING_DATA BY POSNR ASCENDING.
+READ TABLE LT_SHIPPING_DATA INTO LF_SHIPPING_DATA INDEX 1.
+L_POSNR_BEGIN = LF_SHIPPING_DATA-POSNR.
+
+* 第一画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '4001'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 「ENTER」
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '/00'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 出荷ポイント
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIKP-VSTEL'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-VSTEL.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 選択日付
+L_DATE = '99991231'.
+WRITE L_DATE TO L_DATE_BDC.
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-DATBI'.
+LF_BDCDATA-FVAL    = L_DATE_BDC.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 受注伝票番号
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-VBELN'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-VBELN.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 開始明細
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-ABPOS'.
+LF_BDCDATA-FVAL    = L_POSNR_BEGIN.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+* 終了明細
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LV50C-BIPOS'.
+LF_BDCDATA-FVAL    = L_POSNR_END.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+LOOP AT LT_SHIPPING_DATA INTO LF_SHIPPING_DATA.
+* 第2画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '1000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=POPO_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL   =
+'SAPMV50A                                1108SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL   =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL   =
+'SAPMV50A                                1708SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第3画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '0111'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=WEIT'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'RV50A-POSNR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'RV50A-POSNR'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-POSNR.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第4画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '1000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=CHSP_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1108SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'LIPS-POSNR(01)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1708SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第5画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '3000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=MKAL_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3112SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'LIPS-CHARG(02)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3702SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第6画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '3000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=POLO_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3112SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'LIPS-CHARG(02)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3702SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第7画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '3000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=BACK_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'LIPS-CHARG(01)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3112SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3702SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第8画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '1000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=CHSP_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1108SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'LIPSD-G_LFIMG(01)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'LIPSD-G_LFIMG(01)'.
+LF_BDCDATA-FVAL    = LF_SHIPPING_DATA-LFIMG.
+CONDENSE LF_BDCDATA-FVAL.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1708SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第9画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '3000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=CHFD_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3112SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'LIPS-CHARG(01)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3702SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第10画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPLV01F'.
+LF_BDCDATA-DYNPRO    = '0100'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=TAKE'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'XV01FDP-MENGE_P(01)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+* 第11画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '3000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=BACK_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3112SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    = 'LIPS-CHARG(02)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                3702SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+ENDLOOP.
+
+* 第12画面
+CLEAR LF_BDCDATA.
+LF_BDCDATA-PROGRAM   = 'SAPMV50A'.
+LF_BDCDATA-DYNPRO    = '1000'.
+LF_BDCDATA-DYNBEGIN  = 'X'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_OKCODE'.
+LF_BDCDATA-FVAL    = '=SICH_T'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1502SUBSCREEN_HEADER'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1102SUBSCREEN_BODY'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                0611SUBSCREEN_BOTTOM'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_SUBSCR'.
+LF_BDCDATA-FVAL    =
+'SAPMV50A                                1708SUBSCREEN_ICONBAR'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR LF_BDCDATA.
+LF_BDCDATA-FNAM   = 'BDC_CURSOR'.
+LF_BDCDATA-FVAL    =
+'LIPS-MATNR(03)'.
+APPEND LF_BDCDATA TO LT_BDCDATA.
+
+CLEAR G_RC.
+LF_OPTION-DISMODE = 'N'.
+LF_OPTION-UPDMODE = 'S'.
+LF_OPTION-DEFSIZE = 'X'.
+CALL TRANSACTION 'VL01N' USING LT_BDCDATA
+OPTIONS FROM LF_OPTION
+MESSAGES INTO LT_MESSAGE.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'S' MSGID = 'VL' MSGNR = '311'.
+IF SY-SUBRC = 0.
+*   登録成功の場合、伝票番号を取得する
+E_VBELN_VL = LF_MESSAGE-MSGV2.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = E_VBELN_VL
+IMPORTING
+OUTPUT = E_VBELN_VL.
+ELSE.
+*   登録失敗の場合、エラーメッセージを取得する
+*   メッセージタイプ順：「E」→「W」→「S」
+G_RC = CNS_RC_CODE_ERROR.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'E'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'W'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_MESSAGE INTO LF_MESSAGE
+WITH KEY MSGTYP = 'S'.
+ENDIF.
+ENDIF.
+ENDIF.
+MESSAGE ID LF_MESSAGE-MSGID
+TYPE 'S'
+NUMBER LF_MESSAGE-MSGNR
+INTO E_MESSAGE
+WITH LF_MESSAGE-MSGV1 LF_MESSAGE-MSGV2
+LF_MESSAGE-MSGV3 LF_MESSAGE-MSGV4.
+
+ENDFORM.                    " EXECUTE_SHIPPING_BATCH_BDC

@@ -1,0 +1,5435 @@
+*& ISID Co.,Ltd. 2012 All rights.reserved.
+*&---------------------------------------------------------------------*
+*& プログラム：ZFI0301001 伝票バッチインプット(多通貨)
+*& 作成者    ：新井
+*& 作成日付  ：2012/07/25
+*& 機能ID    ：
+*& 処理概要  ： 手入力仕訳データファイルから、伝票転記または
+*& 　　　　　　 未転記伝票起票を行う
+*&---------------------------------------------------------------------*
+*& 更新履歴&
+*& No.   更新日付    更新者     更新内容
+*& 新規  2012/07/25  新井
+*& #001  2012/11/06  ISID144    EHP6へのバージョンアップ対応
+*& #002  2013/10/24  ISID156    不具合対応
+*& #003  2013/12/03  ISID148    不具合対応
+*& #004  2014/09/11  ISID156    通貨コード不具合対応
+*& #005  2015/03/24  ISID06     特殊仕訳チェックエラー対応
+*&---------------------------------------------------------------------*
+report zfi0301001 no standard page heading
+line-size   170
+line-count  58
+message-id  zrlfi00.
+*&---------------------------------------------------------------------*
+*&  内部テーブル定義
+*&---------------------------------------------------------------------*
+*-構造(TYPES)
+types:
+begin of gtt_rec,                    " タブ区切りファイルからのデータを格納
+tflag(01)  type c,                 " 転記制御フラグ
+ldgrp      type bkpf-ldgrp,        " 元帳グループ
+bukrs2(04) type c,                 " 会社コード
+xmwst(01)  type c,                 " 税額自動計算
+bldat(10)  type c,                 " 伝票日付
+budat(10)  type c,                 " 転記日付
+blart      type bkpf-blart,        " 伝票タイプ
+waers(03)  type c,                 " 通貨コード
+kursf(10)  type c,                 " 換算レート
+xblnr      type bkpf-xblnr,        " 参照番号
+bktxt      type bkpf-bktxt,        " 伝票ヘッダテキスト
+bukrs      type bseg-bukrs,        " 取引先(会社)
+newbs      type rf05a-newbs,       " 転記キー
+newko(17)  type c,                 " 勘定コード #002 10
+newum      type rf05a-newum,       " 特殊仕訳コード
+newbw      type rf05a-newbw,       " 取引タイプ
+hkont      type bseg-hkont,        " 統制勘定コード
+wrbtr(14)  type c,                 " 伝票通貨額
+dmbtr(14)  type c,                 " 国内通貨額
+dmbe2(14)  type c,                 " 第2国内通貨額
+dmbe3(14)  type c,                 " 第3国内通貨額
+mwskz      type bseg-mwskz,        " 税コード
+mflag(01)  type c,                 " 税明細区分
+kostl      type cobl-kostl,        " 原価センタ
+prctr      type cobl-prctr,        " 利益センタ
+gsber      type bseg-gsber,        " 事業領域
+pargb      type bseg-pargb,        " 取引先事業領域
+pprct      type bseg-pprct,        " 取引先利益センタ
+zterm      type bseg-zterm,        " 支払条件
+zbd1t(03)  type c,                 " サイト
+zlspr      type bseg-zlspr,        " 支払保留
+kidno      type bseg-kidno,        " 支払参照
+zlsch      type bseg-zlsch,        " 支払方法
+zfbdt(10)  type c,                 " 支払基準日
+wdate(10)  type c,                 " 手形振出日
+ps_posid   type cobl-ps_posid,     " WBS要素
+aufnr      type bseg-aufnr,        " 指図番号
+matnr      type bseg-matnr,        " 品目コード
+fipos      type bseg-fipos,        " 資金計画項目
+valut(10)  type c,                 " 起算日
+xref1      type bseg-xref1,        " 参照キー１
+xref2      type bseg-xref2,        " 参照キー２
+xref3      type bseg-xref3,        " 参照キー３
+lzbkz      type bseg-lzbkz,        " 中央銀行ID
+landl      type bseg-landl,        " 供給国
+hbkid      type bseg-hbkid,        " 取引銀行
+bzdat(10)  type c,                 " 資産起算日
+menge(13)  type c,                 " 数量
+meins(03)  type c,                 " 数量単位
+segment    type bseg-segment,      " セグメント
+zuonr      type bseg-zuonr,        " ソートキー
+sgtxt      type bseg-sgtxt,        " 明細テキスト
+bewar      type bseg-bewar,        " 取引タイプ
+msg        type string,            " メッセージ
+end of gtt_rec,
+
+*********************************************** #004 ADD 20140911 STA **
+begin of gtt_curr_info,               " 通貨情報
+bukrs    type glx_org_info-bukrs,    "会社コード
+rldnr    type glx_org_info-rldnr,    "元帳
+curr1    type glx_org_info-curr1,    "通貨 2 の通貨コード
+curr2    type glx_org_info-curr1,    "通貨 3 の通貨コード
+curr3    type glx_org_info-curr1,    "通貨 4 の通貨コード
+end of gtt_curr_info,
+*********************************************** #004 ADD 20140911 END **
+
+begin of gtt_write,                  " 画面出力用
+line(170) type c,                  " 内容
+end of gtt_write,
+
+begin of gtt_err_info,               " エラー情報保持
+recno      type i,                 " 行番号
+recno_err  type i,                 " エラー先頭行
+lines      type i,                 " エラー明細行
+msg        type string,            " メッセージ
+end of gtt_err_info.
+
+data:
+*-内部テーブル
+* タブ区切りファイルからのデータを格納する内部テーブル
+gdt_rec               type standard table of gtt_rec,
+* バッチインプット用内部テーブル
+gdt_ftpos             type standard table of ftpost,
+* バッチインプット用税データ内部テーブル
+gdt_fttax             type standard table of fttax,
+*********************************************** #004 ADD 20140911 STA **
+* 通貨情報
+gdt_curr_info         type standard table of gtt_curr_info,
+*********************************************** #004 ADD 20140911 END **
+* 画面出力用内部テーブル
+gdt_write             type standard table of gtt_write,
+gdt_accountgl         type standard table of bapiacgl09,
+gdt_accountreceivable type standard table of bapiacar09,
+gdt_accountpayable    type standard table of bapiacap09,
+gdt_currencyamount    type standard table of bapiaccr09,
+gdt_extension1        type standard table of bapiacextc,
+gdt_return            type standard table of bapiret2,
+* BAKファイル作成用内部テーブル
+gdt_bak               type standard table of gtt_rec,
+* エラー情報保持用内部テーブル
+gdt_err_info          type standard table of gtt_err_info,
+* エラー再取込ファイル用内部テーブル
+gdt_err_rec           type standard table of gtt_rec,
+*********************************************** #004 ADD 20140911 STA **
+* 通貨情報
+gds_curr_info         type gtt_curr_info,
+*********************************************** #004 ADD 20140911 END **
+*-ヘッダ行
+gds_rec       like line of gdt_rec,
+gds_ftpos     like line of gdt_ftpos.
+
+*&---------------------------------------------------------------------*
+*&  項目定義
+*&---------------------------------------------------------------------*
+data:
+*-変数
+wk_mwskz(01)      type c,                      " 税カテゴリ
+wk_blart          type blart,                  " 伝票タイプ
+wk_xblnr          type xblnr,                  " 参照伝票番号
+wk_split          type c,                      " 区切りコード
+wk_sessnm         type apqi-groupid,           " バッチインプットセッション名
+wk_msg(100)       type c,                      " メッセージ
+wk_koart          type tbsl-koart,             " 勘定タイプ
+wk_shkzg          type tbsl-shkzg,             " 貸借フラグ
+wk_waers          type t001-waers,             " 会社通貨コード
+wk_bakfm          type rlgrap-filename,        " BACK FILE NAME
+wk_logfm          type rlgrap-filename,        " LOG FILE NAME
+wk_errfm          type rlgrap-filename,        " ERR FILE NAME
+wk_hkont          type bseg-hkont,             " 統制勘定    "#002 ADD 20110617
+*-構造
+fld_errmsg         type lmess,                 " エラーメッセージ
+fld_documentheader type bapiache09,            " 伝票ヘッダ情報
+*-フラグ
+flg_start_err(01) type c,                      " セッション開始エラーフラグ
+flg_end_err(01)   type c,                      " セッション終了エラーフラグ
+*-カウンタ
+cnt_index         type i,                      " 処理行数
+cnt_den           type i,                      " 処理伝票数
+cnt_insrt         type i,                      " 正常伝票数
+cnt_inerr         type i,                      " エラー伝票数
+cnt_lines(03)     type n,                      " 明細行カウンタ
+cnt_recno         type i,                      " 先頭行番号
+cnt_updata        type i,                      " 入力データ件数
+cnt_title         type i.                      " タイトル行数
+
+*-定数
+constants:
+gcf_chk(01)       type c value 'X',            " チェック
+gcf_spc(01)       type c value ' ',            " スペース
+gcf_type(10)      type c value 'ASC',          " タブ区切りFILE
+gcf_flgx(01)      type c value 'X',            " 制御フラグ(Ｘ=第一)
+gcf_flgs(01)      type c value ' ',            " 制御フラグ(  =反対)
+gcf_flgk(01)      type c value 'K',            " ヘッダ
+gcf_flgp(01)      type c value 'P',            " 明細
+gcf_jpy(03)       type c value 'JPY',          " 通貨コード
+gcf_ln001(03)     type c value '001',                     " 明細行数(1行目)
+gcf_fb01(04)      type c value 'FB01',         " 伝票転記
+gcf_fbv1(04)      type c value 'FBV1',         " 伝票未転記
+gcf_ubar(01)      type c value '_',            " アンダーバー
+gcf_typ_e(01)     type c value 'E',            " メッセージタイプ
+gcf_typ_s(01)     type c value 'S',            " メッセージタイプ
+gcf_id(09)        type c value 'ZRLFI00',      " メッセージクラス
+gcf_no_012(03)    type c value '012',          " メッセージ番号
+gcf_no_505(03)    type c value '505',          " メッセージ番号
+gcf_no_512(03)    type c value '512',          " メッセージ番号
+gcf_no_511(03)    type c value '511',          " メッセージ番号
+gcf_no_513(03)    type c value '513',          " メッセージ番号
+gcf_no_514(03)    type c value '514',          " メッセージ番号
+gcf_no_515(03)    type c value '515',          " メッセージ番号
+gcf_no_516(03)    type c value '516',          " メッセージ番号
+gcf_no_517(03)    type c value '517',          " メッセージ番号
+gcf_no_519(03)    type c value '519',          " メッセージ番号
+gcf_ok(02)        type c value 'OK',           " 結果
+gcf_ng(02)        type c value 'NG',           " 結果
+gcf_rldnr_0l(02)  type c value '0L',           "元帳
+*********************************************** #004 ADD 20140911 STA **
+gcf_para01(08)    type c value 'P_FILENM',     " 画面項目名:インプットファイル名
+*********************************************** #004 ADD 20140911 END **
+gcf_para02(08)    type c value 'P_OUTFNM',     " 画面項目名:処理結果情報ファイル名
+gcf_extsn_s(03)   type c value 'txt',          " 拡張子(小文字)
+gcf_extsn_b(03)   type c value 'TXT',          " 拡張子(大文字)
+gcf_koart(01)     type c value '+',            " 勘定タイプまたはマスク
+gcf_shkzg_s(01)   type c value 'S',            " 貸借フラグ(借方)
+gcf_shkzg_h(01)   type c value 'H',            " 貸借フラグ(貸方)
+gcf_koart_d(01)   type c value 'D',            " 勘定タイプ:D(得意先)
+gcf_koart_k(01)   type c value 'K',            " 勘定タイプ:K(仕入先)
+gcf_koart_a(01)   type c value 'A',            " 勘定タイプ:A(固定資産)
+*-------------------------------------- #002 ADD 20110617 START
+gcf_koart_s(01)   type c value 'S',            " 勘定タイプ:S(勘定)
+*-------------------------------------- #002 ADD 20110617 END
+*--------------------------------------------- #002 ADD 20110617 START
+gcf_no_131(03)    type c value '131',          " メッセージ番号
+gcf_no_001(03)    type c value '001',          " メッセージ番号
+gcf_no_326(03)    type c value '326',          " メッセージ番号
+gcf_no_411(03)    type c value '411',          " メッセージ番号
+gcf_id_e9(02)     type c value 'E9',           " メッセージクラス #002 ADD
+gcf_id_aa(02)     type c value 'AA',           " メッセージクラス #002 ADD
+*--------------------------------------------- #002 ADD 20110617 END
+gcf_trunc4        type i value '4',            " 整数部桁数
+gcf_trunc11       type i value '11',           " 整数部桁数
+gcf_frac2         type i value '2',            " 小数部桁数
+gcf_frac5         type i value '5',            " 小数部桁数
+gcf_off1          type i value '0',            " 文字開始位置(見出し)
+gcf_off2          type i value '2',            " 文字開始位置(明細)
+gcf_leng1         type i value '35',           " 帳票ヘッダ部OFFSET位置
+gcf_leng2         type i value '38',           " 帳票フッタ部OFFSET位置
+gcf_ctyp_00(02)   type c value '00',           " 通貨タイプ(取引通貨)
+gcf_ctyp_10(02)   type c value '10',           " 通貨タイプ(会社通貨)
+gcf_ctyp_30(02)   type c value '30',           " 通貨タイプ(2nd)
+gcf_ctyp_60(02)   type c value '60'.           " 通貨タイプ(3rd)
+
+*&---------------------------------------------------------------------*
+*&  共通 INCLUDE
+*&---------------------------------------------------------------------*
+include:
+zrlfir9080_frm00.
+
+*----------------------------------------------------------------------*
+*&  入力パラメータ
+*&---------------------------------------------------------------------*
+*----- 伝票登録
+selection-screen begin of block post with frame title text-t01.
+
+* インプットファイル名
+parameters:
+p_filenm type rlgrap-filename obligatory.
+* 処理結果情報ファイル名
+parameters:
+p_outfnm type rlgrap-filename .
+
+selection-screen skip 1.
+
+*--- ファイルオプション
+selection-screen begin of block fopt with frame title text-t02.
+* サーバー
+selection-screen begin of line.
+selection-screen position 10.
+parameters:
+p_server radiobutton group fopt.
+selection-screen comment 12(10) text-t04 for field p_server.
+selection-screen end of line.
+* ローカル
+selection-screen begin of line.
+selection-screen position 10.
+parameters:
+p_local radiobutton group fopt default 'X'.
+selection-screen comment 12(10) text-t05 for field p_local.
+selection-screen end of line.
+selection-screen end of block fopt.
+
+selection-screen skip 1.
+* バッチインプットセッション名
+parameters:
+p_sessnm(08) type c obligatory.
+selection-screen skip 1.
+
+*--- 実行オプション
+selection-screen begin of block tran with frame title text-t03.
+* 伝票転記（FB01）
+selection-screen begin of line.
+selection-screen position 10.
+parameters:
+p_fb01 radiobutton group tran.
+selection-screen comment 12(25) text-t06 for field p_fb01.
+selection-screen end of line.
+* 未転記伝票起票（FBV1）
+selection-screen begin of line.
+selection-screen position 10.
+parameters:
+p_fbv1 radiobutton group tran default 'X'.
+selection-screen comment 12(25) text-t07 for field p_fbv1.
+selection-screen end of line.
+* テスト実行
+selection-screen skip 1.
+selection-screen begin of line.
+selection-screen position 10.
+parameters:
+p_test as checkbox default 'X'.
+selection-screen comment 12(10) text-t08 for field p_test.
+selection-screen end of line.
+selection-screen end of block tran.
+
+selection-screen end of block post.
+*&---------------------------------------------------------------------*
+*&  入力チェック処理
+*&---------------------------------------------------------------------*
+at selection-screen on value-request for p_filenm.  " ファイル名の取得
+perform frm_filename_get_i changing p_filenm.     " インプットファイル名
+
+at selection-screen on value-request for p_outfnm.  " ファイル名の取得
+perform frm_filename_get_o changing p_outfnm.     " 処理結果情報ファイル名
+
+at selection-screen.
+if p_local = gcf_chk.                             " ローカルの場合
+*----- インプットファイル名チェック
+* ファイル存在チェック
+perform frm_path_chk using p_filenm             " インプットファイル名
+text-t09             " T09:インプットファイル
+gcf_para01.          " 画面項目名:P_FILENM
+endif.
+
+*----- 処理結果情報ファイル名チェック
+* ファイル拡張子チェック
+if p_outfnm is not initial.
+perform frm_extension_chk using p_outfnm          " 処理結果情報ファイル名
+text-t10          " T10:処理結果情報ファイル
+gcf_para02.       " 画面項目名:P_OUTFNM
+endif.
+
+*&---------------------------------------------------------------------*
+*&  メイン処理
+*&---------------------------------------------------------------------*
+start-of-selection.
+
+perform:
+frm_init_all,                      " 作業領域初期化
+frm_make_write_data_head,          " 画面出力データ作成(ヘッダ)
+frm_upload_data.                   " ファイルアップロード
+
+if cnt_updata >= 1.                  " 対象データがある場合
+perform frm_edit_session_name.     " セッション名の編集
+
+if p_test is initial.              " 本実行の場合
+perform frm_post_start           " BDCセッションの始まり
+changing flg_start_err.  " セッション開始エラーフラグ
+endif.
+
+check flg_start_err is initial.    " セッション開始エラーでない場合
+
+perform frm_main_bdc.              " バッチインプットメイン処理
+
+if p_test is initial.              " 本実行の場合
+perform frm_post_end             " BDCセッションの終わり
+changing flg_end_err." セッション終了エラーフラグ
+if flg_end_err is initial.       " セッション終了エラーフラグ
+perform frm_rename_file.       " バッチインプットファイル名変更
+endif.
+endif.
+
+endif.
+
+*&---------------------------------------------------------------------*
+*&  終了処理
+*&---------------------------------------------------------------------*
+end-of-selection.
+
+perform:
+frm_make_write_data_foot,          " 画面出力データ作成(フッタ)
+frm_write_data,                    " 画面出力処理
+frm_dl_write_data.                 " 処理結果情報ファイル出力
+
+*----- エラー再取込ファイル出力
+if lines( gdt_err_info ) <> 0 and p_test is initial.
+perform frm_dowmload_err_file.     " エラー再取込ファイル出力
+endif.
+
+free:gdt_write,gdt_rec.              " リソースの開放
+
+if fld_errmsg is initial.
+*   処理無し
+else.
+*----- エラーメッセージ出力
+message id     fld_errmsg-msgid
+type   fld_errmsg-msgty
+number fld_errmsg-msgno
+with   fld_errmsg-msgv1
+fld_errmsg-msgv2
+fld_errmsg-msgv3
+fld_errmsg-msgv4
+display like gcf_typ_e.
+endif.
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILENAME_GET_I
+*&---------------------------------------------------------------------*
+*       入力ファイル名の取得
+*----------------------------------------------------------------------*
+*      <--C_IPATH  ファイル名
+*----------------------------------------------------------------------*
+form frm_filename_get_i  changing c_ipath type c.
+
+data:
+tmp_file  type filetable,                " ファイル名一覧格納
+tmp_hfile like line of tmp_file,         " ヘッダ
+tmp_rc    type i.                        " 結果
+
+*----- メソッド：ファイル名取得
+call method cl_gui_frontend_services=>file_open_dialog
+changing
+file_table              = tmp_file
+rc                      = tmp_rc
+exceptions
+file_open_dialog_failed = 1
+cntl_error              = 2
+error_no_gui            = 3
+not_supported_by_gui    = 4
+others                  = 5.
+
+case sy-subrc.
+when 0.
+if tmp_rc < 0.
+else.
+read table tmp_file into tmp_hfile index 1.
+c_ipath = tmp_hfile-filename.
+endif.
+when others.
+message id sy-msgid type sy-msgty number sy-msgno
+with sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+endcase.
+
+endform.                    " FRM_FILENAME_GET_I
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILENAME_GET_O
+*&---------------------------------------------------------------------*
+*       出力ファイル名の取得
+*----------------------------------------------------------------------*
+*      <--C_OPATH  ファイル名
+*----------------------------------------------------------------------*
+form frm_filename_get_o  changing c_opath type c.
+
+data:
+tmp_file  type string,                   " ファイル名
+tmp_path  type string,                   " パス
+tmp_full  type string.                   " フルパス
+
+*----- メソッド：ファイル名取得
+call method cl_gui_frontend_services=>file_save_dialog
+changing
+filename             = tmp_file
+path                 = tmp_path
+fullpath             = tmp_full
+exceptions
+cntl_error           = 1
+error_no_gui         = 2
+not_supported_by_gui = 3
+others               = 4.
+
+case sy-subrc.
+when 0.
+c_opath = tmp_full.
+when others.
+message id sy-msgid type sy-msgty number sy-msgno
+with sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+endcase.
+
+endform.                    " FRM_FILENAME_GET_O
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PATH_CHK
+*&---------------------------------------------------------------------*
+*       ファイルの存在をチェック
+*----------------------------------------------------------------------*
+*      -->U_IPATH   入力ファイル名
+*      -->U_TEXT    項目名テキスト
+*      -->U_PARA    画面項目名
+*----------------------------------------------------------------------*
+form frm_path_chk using value(u_ipath) type c
+value(u_text)  type c
+value(u_para)  type c.
+
+data:
+tmp_file      type string,               " ファイル名
+tmp_result    type c,                    " 結果
+tmp_msgv2(50) type c.                    " サーバー OR ローカル
+
+*----- 型合わせ
+tmp_file = u_ipath.
+
+*----- メソッド：ファイルの存在チェック
+call method cl_gui_frontend_services=>file_exist
+exporting
+file                 = tmp_file
+receiving
+result               = tmp_result
+exceptions
+cntl_error           = 1
+error_no_gui         = 2
+wrong_parameter      = 3
+not_supported_by_gui = 4
+others               = 5.
+
+case sy-subrc.
+when 0.
+*     ファイルが存在する＝X／存在しない＝スペース
+if tmp_result = gcf_spc.
+*       エラーメッセージ変数２のセット
+tmp_msgv2 = text-t05.            " ローカル
+
+set cursor field u_para.
+message e501 with u_text tmp_msgv2.
+*       &1（&2）は存在しません。
+endif.
+when others.
+endcase.
+
+endform.                    " FRM_PATH_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EXTENSION_CHK
+*&---------------------------------------------------------------------*
+*       拡張子チェック
+*----------------------------------------------------------------------*
+*      -->U_PATH     ファイル名(フルパス)
+*      -->U_TEXT     項目名テキスト
+*      -->U_PARA     画面項目名
+*----------------------------------------------------------------------*
+form frm_extension_chk using value(u_path)     type c
+value(u_text)     type c
+value(u_para)     type c.
+
+*********************************************** #001 MOD 20121106 STA **
+*  DATA:  TMP_PATH   TYPE DSVASDOCID,         " ファイル名(フルパス)
+*         TMP_EXTSN  TYPE DSVASDOCID.         " 拡張子
+data:  tmp_path   type string,              " ファイル名(フルパス)
+tmp_extsn  type string.              " 拡張子
+*********************************************** #001 MOD 20121106 END **
+
+*----- 型合わせ
+tmp_path = u_path.                         " ファイル名(フルパス)
+
+*----- 汎用モジュールの呼出し：ファイルパス分割処理
+*********************************************** #001 MOD 20121106 STA **
+*  CALL FUNCTION 'DSVAS_DOC_FILENAME_SPLIT'
+*    EXPORTING
+*      PF_DOCID     = TMP_PATH                " ファイル名(フルパス)
+*    IMPORTING8
+*      PF_EXTENSION = TMP_EXTSN.              " 拡張子
+call function 'CH_SPLIT_FILENAME'
+exporting
+complete_filename = tmp_path            " ファイル名(フルパス)
+importing
+extension         = tmp_extsn           " 拡張子
+exceptions
+invalid_drive     = 1
+invalid_path      = 2
+others            = 3.
+if sy-subrc <> 0.
+* Implement suitable error handling here
+endif.
+*********************************************** #001 MOD 20121106 END **
+
+*----- 拡張子が'txt'OR'TXT'でない場合、エラー
+if tmp_extsn = gcf_extsn_s.                " 'txt'
+*  正常
+else.
+if tmp_extsn = gcf_extsn_b.              " 'TXT'
+*    正常
+else.
+*     エラー
+set cursor field u_para.
+message e502 with u_text.
+*     &1 はTXTファイルを指定してください。
+endif.
+endif.
+
+endform.                               "FRM_EXTENSION_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_INIT_ALL
+*&---------------------------------------------------------------------*
+*       作業領域初期化
+*----------------------------------------------------------------------*
+form frm_init_all .
+
+refresh:
+gdt_rec,    gdt_ftpos,     gdt_write,
+*********************************************** #004 ADD 20140911 STA **
+gdt_curr_info,
+*********************************************** #004 ADD 20140911 END **
+gdt_fttax,  gdt_accountgl, gdt_accountreceivable,
+gdt_accountpayable,         gdt_currencyamount,
+gdt_return, gdt_bak,
+gdt_extension1.
+
+clear:
+gds_rec,     gds_ftpos,    wk_mwskz,
+*********************************************** #004 ADD 20140911 STA **
+gds_curr_info,
+*********************************************** #004 ADD 20140911 END **
+wk_blart,    wk_xblnr,   wk_split,
+wk_sessnm,   wk_msg,     wk_koart,
+wk_shkzg,    wk_waers,   flg_start_err,
+flg_end_err, cnt_index,  cnt_den,
+cnt_insrt,   cnt_inerr,  cnt_lines,
+cnt_recno,   cnt_updata, fld_errmsg,
+cnt_title,   fld_documentheader.
+
+endform.                    " FRM_INIT_ALL
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_WRITE_DATA_HEAD
+*&---------------------------------------------------------------------*
+*       画面出力データ作成(ヘッダ)
+*----------------------------------------------------------------------*
+form frm_make_write_data_head .
+
+data:
+tmp_mask_time(05) type c value '__:__',      " 時刻用マスク
+tmp_leng          type i,                    " テキスト長
+h_write           type gtt_write.            " 画面出力データヘッダ
+
+get time.
+perform frm_create_newfm.
+
+*----- タイトル
+h_write-line+gcf_off1(100) = text-t11.         " T11:【 伝票バッチインプット...】
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 空白行
+append h_write to gdt_write.
+
+*----- ■実行情報
+h_write-line+gcf_off1(30)  = text-t12.                    " T12:■実行情報
+append h_write to gdt_write.
+clear  h_write.
+
+*----- インプットファイル名
+h_write-line+gcf_off2(42)   = text-t13.        " T13:インプットファイル名
+* オフセット位置取得
+perform frm_get_offleng using text-t13
+gcf_leng1
+changing tmp_leng.
+
+h_write-line+tmp_leng(2)   = text-t20.                    " T20:'：'
+tmp_leng = tmp_leng + 3.
+h_write-line+tmp_leng(115) = p_filenm.         " 画面入力値
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 処理結果情報ファイル名
+h_write-line+gcf_off2(42)   = text-t14.        " T14:処理結果情報ファイル名
+* オフセット位置取得
+perform frm_get_offleng using text-t14
+gcf_leng1
+changing tmp_leng.
+
+h_write-line+tmp_leng(2)   = text-t20.                    " T20:'：'
+tmp_leng = tmp_leng + 3.
+h_write-line+tmp_leng(115) = p_outfnm.         " 画面入力値
+append h_write to gdt_write.
+clear  h_write.
+
+*----- ファイルオプション
+h_write-line+gcf_off2(42)   = text-t15.        " T15:ファイルオプション
+* オフセット位置取得
+perform frm_get_offleng using text-t15
+gcf_leng1
+changing tmp_leng.
+h_write-line+tmp_leng(2)   = text-t20.                    " T20:'：'
+tmp_leng = tmp_leng + 3.
+case gcf_chk.
+when p_server.                               " サーバーの場合
+h_write-line+tmp_leng(115) = text-t04.
+when p_local.                                " ローカルの場合
+h_write-line+tmp_leng(115) = text-t05.
+endcase.
+append h_write to gdt_write.
+clear  h_write.
+
+*----- バッチインプットセッション名
+h_write-line+gcf_off2(42)   = text-t16.        " T16:バッチインプットセッション名
+* オフセット位置取得
+perform frm_get_offleng using text-t16
+gcf_leng1
+changing tmp_leng.
+h_write-line+tmp_leng(2)   = text-t20.                    " T20:'：'
+tmp_leng = tmp_leng + 3.
+h_write-line+tmp_leng(115) = p_sessnm.         " 画面入力値
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 実行オプション
+h_write-line+gcf_off2(42)   = text-t17.        " T17:実行オプション
+* オフセット位置取得
+perform frm_get_offleng using text-t17
+gcf_leng1
+changing tmp_leng.
+h_write-line+tmp_leng(2)   = text-t20.                    " T20:'：'
+tmp_leng = tmp_leng + 3.
+case gcf_chk.
+when p_fb01.                                 " 伝票転記（FB01）の場合
+h_write-line+tmp_leng(115) = text-t06.
+when p_fbv1.                                 " 未転記伝票起票（FBV1）の場合
+h_write-line+tmp_leng(115) = text-t07.
+endcase.
+append h_write to gdt_write.
+clear  h_write.
+
+*----- テスト実行
+h_write-line+gcf_off2(42)   = text-t18.                   " T18:テスト実行
+* オフセット位置取得
+perform frm_get_offleng using text-t18
+gcf_leng1
+changing tmp_leng.
+h_write-line+tmp_leng(2)   = text-t20.                    " T20:'：'
+tmp_leng = tmp_leng + 3.
+if p_test = gcf_chk.                           " テスト実行の場合
+h_write-line+tmp_leng(115) = text-t18.
+else.                                          " 本実行の場合
+h_write-line+tmp_leng(115) = text-t21.
+endif.
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 実行日時
+h_write-line+gcf_off2(42)   = text-t19.                   " T19:実行日時
+* オフセット位置取得
+perform frm_get_offleng using text-t19
+gcf_leng1
+changing tmp_leng.
+h_write-line+tmp_leng(2)   = text-t20.                    " T20:'：'
+tmp_leng = tmp_leng + 3.
+* ユーザー書式で表示
+write sy-datum to h_write-line+tmp_leng(10).   " 日付
+
+tmp_leng = tmp_leng + 12.
+write sy-uzeit to h_write-line+tmp_leng(5)     " 時間
+using edit mask tmp_mask_time.
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 空白行
+append h_write to gdt_write.
+
+endform.                    " FRM_MAKE_WRITE_DATA_HEAD
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPLOAD_DATA
+*&---------------------------------------------------------------------*
+*       ファイルのアップロード
+*----------------------------------------------------------------------*
+form frm_upload_data.
+
+*----- ファイルの保存場所によってアップロード方法を変える
+if p_server = gcf_chk.
+perform:
+frm_upload_server_data.          " サーバからデータをUL
+elseif p_local = gcf_chk.
+perform:
+frm_upload_local_data.           " ローカルからデータをUL
+endif.
+
+endform.                    " FRM_UPLOAD_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPLOAD_SERVER_DATA
+*&---------------------------------------------------------------------*
+*       入力ファイルデータをアップロードする(サーバ)
+*----------------------------------------------------------------------*
+form frm_upload_server_data .
+
+data:tmp_data type string.
+data:gdt_string    type table of string,
+tmp_string    type string.
+field-symbols: <wa>   type any,
+<comp> type any.
+
+*----- 区切りコードにTABを設定
+wk_split = cl_abap_char_utilities=>horizontal_tab.
+
+*----- ファイルオープン(UNIX FILE)
+open dataset p_filenm for input
+in text mode
+with smart linefeed
+encoding utf-8 ignoring conversion errors
+skipping byte-order mark.
+
+case sy-subrc.
+when 0.
+when others.
+message s503 with text-t04 sy-subrc display like gcf_typ_e.
+*     バッチインプットファイル（&1）の読込みに失敗しました。&2
+leave list-processing.
+endcase.
+
+*----- 入力ファイル読込
+do.
+clear: gds_rec,tmp_data.
+read dataset p_filenm into tmp_data.
+if sy-subrc <> 0.
+exit.
+endif.
+
+* タブ区切りのデータを内部テーブルに格納
+split tmp_data at wk_split into table gdt_string.
+* 内部テーブルのデータをループし、GDT_STRING構造の1項目目から順番に格納する
+assign gds_rec to <wa>.
+loop at gdt_string into tmp_string.
+assign component sy-tabix of structure <wa> to <comp>.
+<comp> = tmp_string.
+endloop.
+append gds_rec to gdt_rec.
+enddo.
+
+if p_test is initial.                      " 本実行の場合
+*   BAKファイル作成用内部テーブルの保持
+gdt_bak = gdt_rec.
+endif.
+
+*----- アップロードデータの件数取得とタイトル行削除
+perform frm_cnt_updata.
+*----- ファイルクローズ(UNIX FILE)
+close dataset p_filenm.
+
+endform.                    " FRM_UPLOAD_SERVER_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPLOAD_LOCAL_DATA
+*&---------------------------------------------------------------------*
+*       入力ファイルデータをアップロードする(ローカル)
+*----------------------------------------------------------------------*
+form frm_upload_local_data.
+
+data:tmp_fname  type string.             " ファイル名
+
+*----- 型合わせ
+tmp_fname = p_filenm.
+
+call function 'GUI_UPLOAD'
+exporting
+filename                = tmp_fname  " ファイル名
+filetype                = gcf_type   " タイプ'ASC'
+has_field_separator     = gcf_chk    " X: タブ区切り
+tables
+data_tab                = gdt_rec   " 入力データ
+exceptions
+file_open_error         = 1
+file_read_error         = 2
+no_batch                = 3
+gui_refuse_filetransfer = 4
+invalid_type            = 5
+no_authority            = 6
+unknown_error           = 7
+bad_data_format         = 8
+header_not_allowed      = 9
+separator_not_allowed   = 10
+header_too_long         = 11
+unknown_dp_error        = 12
+access_denied           = 13
+dp_out_of_memory        = 14
+disk_full               = 15
+dp_timeout              = 16
+others                  = 17.
+
+case sy-subrc.
+when 0.
+*     正常
+*     アップロードデータの件数取得とタイトル行削除
+perform frm_cnt_updata.
+when others.
+*     エラー
+message s503 with text-t05 sy-subrc display like gcf_typ_e.
+*     バッチインプットファイル（&1）の読込みに失敗しました。&2
+leave list-processing.
+endcase.
+
+endform.                    " FRM_UPLOAD_LOCAL_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CNT_UPDATA
+*&---------------------------------------------------------------------*
+*       アップロードデータの件数取得とタイトル行削除
+*----------------------------------------------------------------------*
+form frm_cnt_updata .
+
+data:
+tmp_msgv1(50) type c.             " メッセージ変数１
+
+clear cnt_title.
+
+loop at gdt_rec into gds_rec.
+if gds_rec-tflag = gcf_flgx.       " 制御フラグ=X
+exit.                            " LOOP終了
+else.
+delete gdt_rec index 1.          " １行削除
+cnt_title = cnt_title + 1.       " タイトル行数カウント
+endif.
+endloop.
+clear gds_rec.
+
+*----- 入力データ件数の保持
+clear cnt_updata.
+cnt_updata = lines( gdt_rec ).
+
+*----- 対象データが0件の場合
+if cnt_updata = 0.
+*   エラーメッセージ変数１のセット
+case gcf_chk.
+when p_server.
+tmp_msgv1 = text-t04.        " サーバー
+when p_local.
+tmp_msgv1 = text-t05.        " ローカル
+endcase.
+
+message s504 with tmp_msgv1.
+*   バッチインプットファイル（&1）処理対象件数は0件でした。
+leave list-processing.
+endif.
+
+endform.                    " FRM_CNT_UPDATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EDIT_SESSION_NAME
+*&---------------------------------------------------------------------*
+*       セッション名の編集
+*----------------------------------------------------------------------*
+form frm_edit_session_name .
+
+data:
+tmp_cnt_updata type string,           " 入力データ件数
+h_write        type gtt_write.        " 画面出力データヘッダ
+
+*----- 画面入力値 + '_' + 入力データ件数
+clear wk_sessnm.
+* 結合処理用に型変換
+tmp_cnt_updata = cnt_updata.
+concatenate p_sessnm                    " 画面入力値
+gcf_ubar                    " '_'
+tmp_cnt_updata              " 入力データ件数
+into wk_sessnm.                  " セッション名
+
+*----- 画面出力データに「■処理結果」を追加
+h_write-line+gcf_off1(30) = text-t22.                     " T22:■処理結果
+append h_write to gdt_write.
+
+endform.                    " FRM_EDIT_SESSION_NAME
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_POST_START
+*&---------------------------------------------------------------------*
+*       BDCセッションの始まり
+*----------------------------------------------------------------------*
+*      <--C_FLG_ERR  セッション開始エラーフラグ
+*----------------------------------------------------------------------*
+form frm_post_start changing c_flg_err type flag.
+
+data:
+tmp_func type rfipi-funct value 'C'.     " 方式:C(コールトラン方式)
+
+clear c_flg_err.
+
+*----- 汎用モジュールの呼出し：POSTING開始
+call function 'POSTING_INTERFACE_START'
+exporting
+i_function         = tmp_func
+i_group            = wk_sessnm         " セッション名
+i_user             = sy-uname
+i_xbdcc            = gcf_chk           " エラーセッションを残す
+exceptions
+client_incorrect   = 1
+function_invalid   = 2
+group_name_missing = 3
+mode_invalid       = 4
+update_invalid     = 5
+others             = 6.
+
+case sy-subrc.
+when 0.
+when others.
+c_flg_err = gcf_chk.                   " セッション開始エラーフラグON
+*     メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t23.           " T23:バッチインプット
+fld_errmsg-msgv2 = text-t24.                          " T24:開始
+*     &1 の &2 に失敗しました。
+endcase.
+
+endform.                    " FRM_POST_START
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAIN_BDC
+*&---------------------------------------------------------------------*
+* 　    バッチインプットのメイン処理
+*----------------------------------------------------------------------*
+form frm_main_bdc.
+
+data:tmp_reccnt    type sy-tabix value '1', " 入力データのINDEX
+tmp_eflg1     type flag,               " エラーフラグ(1明細)
+tmp_eflgden   type flag,               " エラーフラグ(伝票)
+tmp_wrbtr     type bseg-wrbtr,         " 伝票通貨額チェック
+tmp_dmbtr     type bseg-dmbtr,         " 国内通貨額チェック
+tmp_dmbe2     type bseg-dmbe2,         " 第2国内通貨額
+tmp_dmbe3     type bseg-dmbe3,         " 第3国内通貨額
+tmp_d2err_flg type flag,               " 第2国内通貨額エラーフラグ
+tmp_d3err_flg type flag,               " 第3国内通貨額エラーフラグ
+tmp_flg_d2    type flag,               " 第2国内通貨額ありフラグ
+tmp_flg_d3    type flag,               " 第3国内通貨額ありフラグ
+tmp_wrerr_flg type flag,               " 伝票通貨額エラーフラグ(型)
+tmp_dmerr_flg type flag,               " 国内通貨額エラーフラグ(型)
+tmp_flg_dm    type flag.               " 国内通貨額ありフラグ
+
+clear:cnt_recno, cnt_lines, cnt_index.
+
+*----- 対象データLOOP
+loop at gdt_rec into gds_rec.
+
+cnt_index  = cnt_index  + 1.              " 処理行数カウント
+
+*-- 転記制御'X'の編集
+if gds_rec-tflag = gcf_flgx.
+
+tmp_reccnt = cnt_index.                 " 処理結果-先頭行番号の保持
+
+if cnt_index > 1.                       " 伝票毎の処理(1件目以降で転記制御が'X')
+cnt_den = cnt_den + 1.                " 処理伝票数カウント
+*       1伝票毎の処理
+perform frm_1denpyo_proc
+using tmp_wrbtr          " 伝票通貨額
+tmp_dmbtr          " 国内通貨額
+tmp_dmbe2          " 第2国内通貨額
+tmp_dmbe3          " 第3国内通貨額
+tmp_flg_dm         " 国内通貨額ありフラグ
+tmp_flg_d2         " 第2国内通貨額ありフラグ
+tmp_flg_d3         " 第3国内通貨額ありフラグ
+changing tmp_eflgden.       " エラーフラグ(伝票)
+clear: tmp_wrbtr, tmp_dmbtr, tmp_flg_dm,
+tmp_eflgden.
+clear: tmp_dmbe2,tmp_dmbe3,tmp_flg_d2,tmp_flg_d3.
+endif.
+
+*     1明細目の処理
+cnt_recno = tmp_reccnt.             " 処理結果-先頭行番号
+cnt_lines = 1.                      " 伝票内-明細番号
+*     エラーチェック
+perform frm_field_chk
+changing tmp_eflg1          " エラーフラグ(1明細)
+wk_shkzg           " 貸借フラグ
+tmp_wrerr_flg      " 伝票通貨額エラーフラグ(型)
+tmp_dmerr_flg      " 国内通貨額エラーフラグ(型)
+tmp_d2err_flg
+tmp_d3err_flg.
+
+if tmp_eflg1 is initial.            " エラーがない場合(今処理中の明細)
+case p_test.
+*         テスト実行の場合
+when gcf_chk.
+*           ヘッダ行+明細行(1明細)のBAPIデータ作成
+perform:frm_bapi_head.
+*         本実行の場合
+when space.
+*           ヘッダ行+明細行(1明細)のBDCデータ作成
+perform:frm_bdc_head.
+endcase.
+else.                               " エラーがあった場合(今処理中の明細)
+tmp_eflgden = gcf_chk.            " エラーフラグ(伝票)ON
+clear tmp_eflg1.                  " エラーフラグ(1明細)OFF
+endif.
+endif.
+
+*-- 転記制御' 'の編集
+if gds_rec-tflag = gcf_flgs
+or gds_rec-tflag is initial.
+
+cnt_lines = cnt_lines + 1.        " 伝票内-明細番号カウント
+*     エラーチェック
+perform frm_field_chk
+changing tmp_eflg1        " エラーフラグ(1明細)
+wk_shkzg         " 貸借フラグ
+tmp_wrerr_flg    " 伝票通貨額エラーフラグ(型)
+tmp_dmerr_flg    " 国内通貨額エラーフラグ(型)
+tmp_d2err_flg
+tmp_d3err_flg.
+
+if tmp_eflg1 is initial.          " エラーがない場合
+*       処理無し
+else.                             " エラーがある場合
+tmp_eflgden = gcf_chk.          " エラーフラグ(伝票)ON
+clear tmp_eflg1.
+endif.
+
+case p_test.
+*       テスト実行の場合
+when gcf_chk.
+if tmp_eflgden is initial.    " 伝票にエラーがない場合
+*           明細行(1明細)のBAPIデータ作成
+perform:frm_bapi_body.
+else.                         " エラーがあった場合(今処理中の明細)
+perform frm_refresh_bapi.   " BAPIデータ初期化
+endif.
+
+*       本実行の場合
+when space.
+if tmp_eflgden is initial.    " 伝票にエラーがない場合
+*           明細行(1明細)のBDCデータ作成
+perform:frm_bdc_body.
+else.                         " エラーがあった場合(今処理中の明細)
+perform frm_refresh_bapi.   " BAPIデータ初期化
+refresh gdt_ftpos.         " BDCデータ初期化
+endif.
+endcase.
+endif.
+
+*----- 全レコード対象の処理
+*   転記制御：妥当性チェック
+perform frm_wrong_data_chk
+using gds_rec-tflag " 転記制御
+text-t34                        " T34:転記制御
+changing tmp_eflg1.  " エラーフラグ(1明細)
+
+if tmp_eflg1 is initial.            " エラー(1明細)がない場合
+*     金額の集計(バランスチェック用)
+perform frm_sum_wrbtr_dmbtr
+using gds_rec-wrbtr  " 伝票通貨額
+gds_rec-dmbtr  " 国内通貨額
+gds_rec-dmbe2  " 第2国内通貨額
+gds_rec-dmbe3  " 第3国内通貨額
+tmp_wrerr_flg  " 伝票通貨額エラーフラグ(型)
+tmp_dmerr_flg  " 国内通貨額エラーフラグ(型)
+tmp_d2err_flg  " 第2国内通貨額エラーフラグ(型)
+tmp_d3err_flg  " 第3国内通貨額エラーフラグ(型)
+changing tmp_wrbtr      " 伝票通貨額
+tmp_dmbtr      " 国内通貨額
+tmp_dmbe2      " 第2国内通貨額
+tmp_dmbe3      " 第3国内通貨額
+tmp_flg_dm     " 国内通貨額ありフラグ
+tmp_flg_d2     " 第2国内通貨額ありフラグ
+tmp_flg_d3.    " 第3国内通貨額ありフラグ
+else.                               " エラー(1明細)がある場合
+tmp_eflgden = gcf_chk.            " エラーフラグ(伝票)ON
+clear tmp_eflg1.                  " エラーフラグ(1明細)OFF
+endif.
+
+clear: tmp_wrerr_flg, tmp_dmerr_flg." 金額エラーフラグOFF
+clear: tmp_d2err_flg,tmp_d3err_flg.
+endloop.
+
+*----- 最終伝票の転記処理
+cnt_den = cnt_den + 1.                " 処理伝票数カウント
+
+* 1伝票毎の処理
+perform frm_1denpyo_proc
+using tmp_wrbtr           " 伝票通貨額
+tmp_dmbtr           " 国内通貨額
+tmp_dmbe2           " 第2国内通貨額
+tmp_dmbe3           " 第3国内通貨額
+tmp_flg_dm          " 国内通貨額ありフラグ
+tmp_flg_d2          " 第2国内通貨額ありフラグ
+tmp_flg_d3          " 第3国内通貨額ありフラグ
+changing tmp_eflgden.        " エラーフラグ(伝票)
+
+*----- リソースの開放
+case p_test.
+*   テスト実行の場合
+when gcf_chk.
+free:
+fld_documentheader,
+gdt_accountreceivable,
+gdt_accountpayable,
+gdt_accountgl,
+gdt_currencyamount,
+gdt_return.
+*   本実行の場合
+when space.
+free:
+gdt_ftpos.
+endcase.
+
+endform.                               " FRM_MAIN_BDC
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SKB1_CHECK
+*&---------------------------------------------------------------------*
+* 　    勘定コードマスタ(会社レベル)から税カテゴリをチェックする
+*----------------------------------------------------------------------*
+*      -->U_INEWKO   勘定コード
+*      <--C_OMWSKZ   税カテゴリ
+*----------------------------------------------------------------------*
+form frm_skb1_check using    u_inewko type c
+changing c_omwskz type c.
+
+data:
+tmp_newko     type skb1-saknr,
+tmp_mwskz(02) type c.
+
+constants:
+gcf_flowi(01)     type c value '>',      " 税カテゴリ
+gcf_flowo(01)     type c value '<'.      " 税カテゴリ
+
+*----- アルファ変換
+perform frm_alpha_insert using u_inewko    " 勘定コード
+changing tmp_newko.  " 変換後
+
+select single
+mwskz                               " 税カテゴリ
+into tmp_mwskz
+from skb1                                " 勘定コードマスタ (会社コード)
+where bukrs = gds_rec-bukrs2
+and saknr = tmp_newko.
+
+if ( tmp_mwskz = gcf_flowo or
+tmp_mwskz = gcf_flowi ).
+c_omwskz = gcf_chk.
+endif.
+
+endform.                    " FRM_SKB1_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDC_HEAD
+*&---------------------------------------------------------------------*
+*       'X'の時の１行目の編集
+*----------------------------------------------------------------------*
+form frm_bdc_head.
+
+data:
+tmp_count(03) type n,                       " 明細行行数
+tmp_bldat(10) type c,                       " 伝票日付(ユーザー書式)
+tmp_budat(10) type c,                       " 転記日付(ユーザー書式)
+tmp_date      type d,                       " 日付型変換用
+tmp_kursf(10) type c.                       " 換算レート(ユーザー書式)
+
+refresh gdt_ftpos.
+
+*----- 伝票タイプ、参照伝票番号の保持(登録成功時の画面出力用)
+clear: wk_blart, wk_xblnr.
+wk_blart = gds_rec-blart.                             " 伝票タイプ
+wk_xblnr = gds_rec-xblnr.                             " 参照伝票番号
+
+*----- ユーザー書式に変換する
+if gds_rec-bldat is not initial.
+tmp_date = gds_rec-bldat.
+write tmp_date to tmp_bldat.
+endif.
+if gds_rec-budat is not initial.
+tmp_date = gds_rec-budat.
+write tmp_date to tmp_budat.
+endif.
+if gds_rec-kursf is not initial.
+write gds_rec-kursf to tmp_kursf no-sign no-grouping.
+endif.
+
+*----- 明細テーブルカウンタ設定
+tmp_count = gcf_ln001.
+perform
+frm_bdcdata_set using:
+gcf_flgk tmp_count 'BKPF-BLDAT' tmp_bldat,        " 伝票日付
+gcf_flgk tmp_count 'BKPF-BUDAT' tmp_budat,        " 転記日付
+gcf_flgk tmp_count 'BKPF-BLART' gds_rec-blart,    " 伝票タイプ
+gcf_flgk tmp_count 'BKPF-BUKRS' gds_rec-bukrs2,   " 会社コード
+gcf_flgk tmp_count 'BKPF-WAERS' gds_rec-waers.    " 通貨
+if ( gds_rec-waers <> gcf_jpy )
+and not ( gds_rec-kursf is initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgk tmp_count 'BKPF-KURSF' tmp_kursf.      " 換算レート
+endif.
+perform
+frm_bdcdata_set using:
+gcf_flgk tmp_count 'BKPF-XBLNR' gds_rec-xblnr,    " 参照番号
+gcf_flgk tmp_count 'BKPF-BKTXT' gds_rec-bktxt.    " 伝票ヘッダTXT
+
+if gds_rec-bukrs <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgk tmp_count 'RF014-VBUND' gds_rec-bukrs. " 取引先(会社)
+endif.
+
+if gds_rec-ldgrp is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgk tmp_count 'BKPF-LDGRP' gds_rec-ldgrp.  " 元帳グループ
+endif.
+
+*********************************************** #002 ADD 20131024 START **
+* 未転記伝票の場合
+if p_fbv1 = gcf_chk.
+perform
+frm_bdcdata_set using:
+gcf_flgk tmp_count 'VBKPF-XBWAE' space.  " 転記時に伝票通貨の伝票のみ振替
+endif.
+*********************************************** #002 ADD 20131024 END   **
+
+*----- 転記制御:'X',' '共通の処理
+perform frm_bdcdata_set_common using tmp_count.     " 明細行行数
+
+endform.                               " FRM_BDC_HEAD
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDC_BODY
+*&---------------------------------------------------------------------*
+*       'X'の時の２行目以降の編集
+*----------------------------------------------------------------------*
+form frm_bdc_body.
+
+*----- 転記制御:'X',' '共通の処理
+perform frm_bdcdata_set_common using cnt_lines.
+
+endform.                               " FRM_BDC_BODY
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDCDATA_SET_COMMON
+*&---------------------------------------------------------------------*
+*       転記制御:'X',' '共通の処理
+*----------------------------------------------------------------------*
+*      -->U_COUNT  明細行行数
+*----------------------------------------------------------------------*
+form frm_bdcdata_set_common using value(u_count) type num03.
+data:
+tmp_zfbdt(10) type c,                       " 支払基準日(ユーザー書式)
+tmp_wdate(10) type c,                       " 手形振出日(ユーザー書式)
+tmp_valut(10) type c,                       " 起算日(ユーザー書式)
+tmp_bzdat(10) type c,                       " 資産起算日(ユーザー書式)
+tmp_date      type d,                       " 日付型変換用
+tmp_meins     type meins,                   " 数量単位(外部形式)
+tmp_wrbtr(14) type c,                       " 伝票通貨額(ユーザー書式)
+tmp_dmbtr(14) type c,                       " 国内通貨額(ユーザー書式)
+tmp_menge(13) type c.                       " 数量(ユーザー書式)
+data:
+tmp_dmbe2(14) type c,                       " 第2国内通貨額(ユーザー書式)
+tmp_dmbe3(14) type c.                       " 第3国内通貨額(ユーザー書式)
+
+*----- 日付をユーザー書式に変換する
+if gds_rec-zfbdt is not initial.
+tmp_date = gds_rec-zfbdt.
+write tmp_date to tmp_zfbdt.
+endif.
+if gds_rec-wdate is not initial.
+tmp_date = gds_rec-wdate.
+write tmp_date to tmp_wdate.
+endif.
+if gds_rec-valut is not initial.
+tmp_date = gds_rec-valut.
+write tmp_date to tmp_valut.
+endif.
+if gds_rec-bzdat is not initial.
+tmp_date = gds_rec-bzdat.
+write tmp_date to tmp_bzdat.
+endif.
+if gds_rec-meins is not initial.
+call function 'CONVERSION_EXIT_CUNIT_OUTPUT'
+exporting
+input    = gds_rec-meins
+language = sy-langu
+importing
+output   = tmp_meins.
+endif.
+if gds_rec-wrbtr is not initial.
+write gds_rec-wrbtr to tmp_wrbtr no-sign no-grouping.
+endif.
+if gds_rec-dmbtr is not initial.
+write gds_rec-dmbtr to tmp_dmbtr no-sign no-grouping.
+endif.
+if gds_rec-menge is not initial.
+write gds_rec-menge to tmp_menge no-sign no-grouping.
+endif.
+
+if gds_rec-dmbe2 is not initial.
+write gds_rec-dmbe2 to tmp_dmbe2 no-sign no-grouping.
+endif.
+if gds_rec-dmbe3 is not initial.
+write gds_rec-dmbe3 to tmp_dmbe3 no-sign no-grouping.
+endif.
+
+constants:
+gcf_rebzg_v  type bseg-rebzg  value 'V', " 参照請求書(クレメモ支払日計算用)
+gcf_newbs_11 type rf05a-newbs value '11'," 転記キー(クレメモ)
+gcf_newbs_19 type rf05a-newbs value '19'," 転記キー(クレメモ)
+gcf_newbs_21 type rf05a-newbs value '21'," 転記キー(クレメモ)
+gcf_newbs_29 type rf05a-newbs value '29'." 転記キー(クレメモ)
+
+
+*----- 税明細区分が'X'の場合、税のデータを追加
+if gds_rec-mflag = gcf_chk.
+*-- 税データの作成
+perform
+frm_bdcdata_set_tax using gds_rec-newbs        " 転記キー
+tmp_wrbtr            " 伝票通貨額
+tmp_dmbtr            " 国内通貨額
+tmp_dmbe2            " 第2国内通貨額
+tmp_dmbe3            " 第3国内通貨額
+gds_rec-mwskz.        " 税コード
+return.                                         " PERFORM終了
+*----- 税明細区分が'X'でない場合
+else.
+*  下記の処理を行う。
+endif.
+
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'RF05A-NEWBS' gds_rec-newbs,   " 転記キー
+gcf_flgp u_count 'RF05A-NEWKO' gds_rec-newko.   " 勘定科目
+if gds_rec-newum <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'RF05A-NEWUM' gds_rec-newum. " 特殊仕訳コード
+endif.
+if gds_rec-newbw <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'RF05A-NEWBW' gds_rec-newbw. " 取引タイプ
+endif.
+
+if gds_rec-hkont <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-HKONT' gds_rec-hkont.  " 統制勘定コード
+endif.
+
+if not ( gds_rec-wrbtr   is  initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-WRBTR' tmp_wrbtr.      " 伝票通貨額
+endif.
+if not ( gds_rec-dmbtr   is  initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-DMBTR' tmp_dmbtr.      " 国内通貨額
+endif.
+
+if not ( gds_rec-dmbe2   is  initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-DMBE2' tmp_dmbe2.      "第2国内通貨額
+endif.
+if not ( gds_rec-dmbe3   is  initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-DMBE3' tmp_dmbe3.      "第3国内通貨額
+endif.
+
+if gds_rec-xmwst <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BKPF-XMWST' gcf_chk.      " 税額自動計算フラグ
+endif.
+if gds_rec-mwskz <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-MWSKZ' gds_rec-mwskz.  " 税コード
+endif.
+
+* 課税基準額設定
+*  勘定コードマスタ(会社レベル)の読み込み
+clear:wk_mwskz.
+if wk_koart = gcf_koart_s.                        "#002 ADD
+perform:frm_skb1_check using gds_rec-newko
+changing wk_mwskz.       " 税カテゴリの取得
+endif.                                            "#002 ADD
+if wk_mwskz = gcf_chk.
+case gcf_chk.
+when p_fb01.                                  " 転記の場合
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'RF05A-XSTBA' gcf_chk. " 税カテゴリ
+when p_fbv1.                                  " 未転記の場合
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'RF05V-XSTBA' gcf_chk. " 税カテゴリ
+endcase.
+endif.
+if gds_rec-kostl <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-KOSTL' gds_rec-kostl.  " 原価センタ
+endif.
+if gds_rec-prctr <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-PRCTR' gds_rec-prctr.  " 利益センタ
+endif.
+
+if gds_rec-gsber <> space.
+case wk_koart.
+when gcf_koart_k.                                 " 仕入先
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-GSBER' gds_rec-gsber.  " 事業領域
+when gcf_koart_d.                                 " 得意先
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-GSBER' gds_rec-gsber.  " 事業領域
+when others.                                      " GL勘定
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-GSBER' gds_rec-gsber.  " 事業領域
+endcase.
+endif.
+
+if gds_rec-pargb <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-PARGB' gds_rec-pargb.  " 取引先事業領域
+endif.
+if gds_rec-pprct <> space .
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-PPRCTR' gds_rec-pprct. " 取引先利益センタ
+endif.
+if gds_rec-zterm <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-ZTERM' gds_rec-zterm.  " 支払条件
+endif.
+if gds_rec-zlspr <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-ZLSPR' gds_rec-zlspr.  " 支払保留
+endif.
+if gds_rec-zlsch <>  space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-ZLSCH' gds_rec-zlsch.  " 支払方法
+endif.
+if not ( gds_rec-zfbdt is initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-ZFBDT' tmp_zfbdt.      " 支払基準日
+endif.
+if not ( gds_rec-wdate   is  initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSED-WDATE' tmp_wdate.      " 手形振出日
+endif.
+if gds_rec-ps_posid <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-PS_POSID' gds_rec-ps_posid. " WBS要素
+endif.
+if gds_rec-aufnr <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-AUFNR' gds_rec-aufnr.  " 指図
+endif.
+if gds_rec-matnr <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-MATNR' gds_rec-matnr.  " 品目コード
+endif.
+if gds_rec-fipos <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-FIPOS' gds_rec-fipos.  " 資金計画項目
+endif.
+if not ( gds_rec-valut is initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-VALUT' tmp_valut.      " 起算日
+endif.
+if not ( gds_rec-bzdat is initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-BZDAT' tmp_bzdat.      " 資産起算日
+endif.
+if not ( gds_rec-menge is initial ).
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-MENGE' tmp_menge.      " 数量
+endif.
+if gds_rec-zuonr <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-ZUONR' gds_rec-zuonr.  " ソートキー
+endif.
+if gds_rec-xref1 <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-XREF1' gds_rec-xref1.  " 参照キー１
+endif.
+if gds_rec-xref2 <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-XREF2' gds_rec-xref2.  " 参照キー２
+endif.
+if gds_rec-xref3 <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-XREF3' gds_rec-xref3.  " 参照キー３
+endif.
+if gds_rec-sgtxt <> space.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-SGTXT' gds_rec-sgtxt.  " 明細テキスト
+endif.
+
+if gds_rec-zbd1t is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-ZBD1T' gds_rec-zbd1t.  " サイト
+endif.
+if gds_rec-kidno is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-KIDNO' gds_rec-kidno.  " 支払参照
+endif.
+if gds_rec-hbkid is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-HBKID' gds_rec-hbkid.  " 取引銀行
+endif.
+if gds_rec-landl is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-LANDL' gds_rec-landl.  " 供給国
+endif.
+if gds_rec-lzbkz is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-LZBKZ' gds_rec-lzbkz.  " 中央銀行ID
+endif.
+if gds_rec-meins is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'BSEG-MEINS' tmp_meins.      " 数量単位
+endif.
+if gds_rec-segment is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-SEGMENT' gds_rec-segment.  " セグメント
+endif.
+if gds_rec-bewar is not initial.
+perform
+frm_bdcdata_set using:
+gcf_flgp u_count 'COBL-RMVCT' gds_rec-bewar.  " 取引タイプ
+endif.
+************************************************ #003 MOD 20131203 STA **
+*特殊仕訳コードが使用された際にエラーとなるため削除
+*----- クレメモの場合、支払日計算用に参照請求書に'V'を設定
+*  IF GDS_REC-NEWBS BETWEEN GCF_NEWBS_11 AND GCF_NEWBS_19. " 転記キー：11～19
+*    PERFORM
+*      FRM_BDCDATA_SET USING:
+*        GCF_FLGP U_COUNT 'BSEG-REBZG' GCF_REBZG_V.  " 参照請求書:V
+*  ENDIF.
+*
+*  IF GDS_REC-NEWBS BETWEEN GCF_NEWBS_21 AND GCF_NEWBS_29. " 転記キー：21～29
+*    PERFORM
+*      FRM_BDCDATA_SET USING:
+*        GCF_FLGP U_COUNT 'BSEG-REBZG' GCF_REBZG_V.  " 参照請求書:V
+*  ENDIF.
+************************************************ #003 MOD 20131203 END **
+endform.                    " FRM_BDCDATA_SET_COMMON
+*&---------------------------------------------------------------------*
+*&      Form  FRM_POST_DATA
+*&---------------------------------------------------------------------*
+*       コールトランザクションの実行(伝票転記処理)
+*----------------------------------------------------------------------*
+form frm_post_data.
+
+data:gdt_blntab   type table of blntab,  " 登録された伝票データ
+h_blntab      type blntab,           " 登録された伝票データ
+tmp_tcode     type sy-tcode,         " トランザクションコード
+tmp_subrc     type sy-subrc,         " リターンコード
+fld_lmess     type lmess.            " バッチインプットMSG用
+
+*----- トランザクションコード、エラーメッセージ用変数１のセット
+case gcf_chk.
+when p_fb01.                            " 転記の場合
+tmp_tcode = gcf_fb01.                 " トランザクションコード
+when p_fbv1.                            " 未転記の場合
+tmp_tcode = gcf_fbv1.                 " トランザクションコード
+endcase.
+
+*----- 汎用モジュールの呼出し：伝票転記
+call function 'POSTING_INTERFACE_DOCUMENT'
+exporting
+i_tcode                  = tmp_tcode
+importing
+e_msgid                  = fld_lmess-msgid  " メッセージ ID
+e_msgno                  = fld_lmess-msgno  " メッセージ番号
+e_msgty                  = fld_lmess-msgty  " メッセージタイプ
+e_msgv1                  = fld_lmess-msgv1  " メッセージ変数１
+e_msgv2                  = fld_lmess-msgv2  " メッセージ変数２
+e_msgv3                  = fld_lmess-msgv3  " メッセージ変数３
+e_msgv4                  = fld_lmess-msgv4  " メッセージ変数４
+e_subrc                  = tmp_subrc        " 結果
+tables
+t_blntab                 = gdt_blntab
+t_ftpost                 = gdt_ftpos
+t_fttax                  = gdt_fttax
+exceptions
+account_missing          = 1
+company_code_missing     = 2
+posting_key_invalid      = 3
+posting_key_missing      = 4
+record_type_invalid      = 5
+transaction_code_invalid = 6
+amount_format_error      = 7
+too_many_line_items      = 8
+company_code_invalid     = 9
+screen_not_found         = 10
+no_authorization         = 11
+others                   = 12.
+
+*----- 例外処理
+if sy-subrc <> 0.
+cnt_inerr =  cnt_inerr + 1.        " エラー伝票数カウント
+*   画面出力データ作成(明細)
+perform frm_make_write_data_body
+using sy-msgid       " メッセージクラス
+sy-msgno       " メッセージ番号
+sy-msgv1       " メッセージ変数１
+sy-msgv2       " メッセージ変数２
+sy-msgv3       " メッセージ変数３
+sy-msgv4       " メッセージ変数４
+0              " 明細番号
+cnt_recno      " 先頭行番号
+gcf_ng         " 結果:NG
+sy-msgno.      " エラー番号
+else.
+*----- 登録成功の場合
+if tmp_subrc  = 0.
+cnt_insrt =  cnt_insrt + 1.         " 正常伝票数カウント
+*     会社コード、会計伝票番号の読み込み
+read table gdt_blntab into h_blntab
+index 1
+transporting belnr       " 会計伝票番号
+bukrs.      " 会社コード
+*     画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id         " メッセージクラス
+space          " メッセージ番号
+h_blntab-bukrs " 会社コード
+wk_blart       " 伝票タイプ
+h_blntab-belnr " 会計伝票番号
+wk_xblnr       " 参照番号
+0              " 明細番号
+cnt_recno      " 先頭行番号
+gcf_ok         " 結果:OK
+space.         " エラー番号
+
+else.
+*----- 登録失敗の場合
+cnt_inerr =  cnt_inerr + 1.          " エラー伝票数カウント
+*     画面出力データ作成(明細)
+perform frm_make_write_data_body
+using fld_lmess-msgid " メッセージクラス
+fld_lmess-msgno " メッセージ番号
+fld_lmess-msgv1 " T65:伝票転記...
+fld_lmess-msgv2 " T66:バッチインプット処理
+fld_lmess-msgv3 " メッセージ変数３
+fld_lmess-msgv4 " メッセージ変数４
+0               " 明細番号
+cnt_recno       " 先頭行番号
+gcf_ng          " 結果:NG
+fld_lmess-msgno." エラー番号
+endif.
+endif.
+
+*----- 次の伝票単位の為の INITIALIZE処理
+refresh: gdt_ftpos, gdt_fttax.
+clear:   gds_ftpos.
+
+endform.                               "  FRM_POST_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ALPHA_INSERT
+*&---------------------------------------------------------------------*
+*       アルファ変換
+*----------------------------------------------------------------------*
+*      -->U_IDATA   変換前文字列
+*      <--C_ODATA   変換後文字列
+*----------------------------------------------------------------------*
+form frm_alpha_insert using     value(u_idata) type clike
+changing  c_odata        type clike.
+
+clear c_odata.
+
+call function 'CONVERSION_EXIT_ALPHA_INPUT'
+exporting
+input  = u_idata          " 変換前文字列
+importing
+output = c_odata.         " 変換後文字列
+
+endform.                    " FRM_ALPHA_INSERT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDCDATA_SET
+*&---------------------------------------------------------------------*
+*       BDCテーブルにデータをセット
+*----------------------------------------------------------------------*
+*      -->U_ISTYLE  フラグ(Ｋ：ヘッダ、Ｐ：明細)
+*      -->U_ICOUNT  明細行
+*      -->U_IFNAM   項目名
+*      -->U_IFVAL   項目値
+*----------------------------------------------------------------------*
+form frm_bdcdata_set using value(u_istyle) type c
+value(u_icount) type n
+value(u_ifnam)  type c
+value(u_ifval)  type any.
+
+clear gds_ftpos.
+gds_ftpos-stype = u_istyle.       " Ｋ:ヘッダ、Ｐ:明細
+gds_ftpos-count = u_icount.       " 明細行
+gds_ftpos-fnam  = u_ifnam.        " 項目名
+gds_ftpos-fval  = u_ifval.        " 項目値
+append gds_ftpos to gdt_ftpos.
+
+endform.                    " FRM_BDCDATA_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FIELD_CHK
+*&---------------------------------------------------------------------*
+*       エラーチェック
+*----------------------------------------------------------------------*
+*      <--C_EFLG1     エラーフラグ(1明細)
+*      <--C_SHKZG     貸借フラグ
+*      <--C_WRERR_FLG 伝票通貨額エラーフラグ(型)
+*      <--C_DMERR_FLG 国内通貨額エラーフラグ(型)
+*      <--C_D2ERR_FLG 2nd貨額エラーフラグ(型)
+*      <--C_D3ERR_FLG 3rd通貨額エラーフラグ(型)
+*----------------------------------------------------------------------*
+form frm_field_chk  changing c_eflg1     type flag
+c_shkzg     type shkzg
+c_wrerr_flg type flag
+c_dmerr_flg type flag
+c_d2err_flg type flag
+c_d3err_flg type flag.
+data:
+tmp_flg_err type flag,                      " エラーフラグ
+tmp_land1   type t001-land1,                " 国コード
+tmp_ktopl   type t001-ktopl,                " 勘定コード表
+tmp_gjahr   type bapi0002_4-fiscal_year,    " 会計年度
+tmp_monat   type bapi0002_4-fiscal_period,  " 会計期間
+tmp_akont   type knb1-akont,                " 総勘定元帳の統制勘定
+tmp_mwskz   type skb1-mwskz,                " 勘定マスタレコードの税カテゴリ
+tmp_kokrs   type csks-kokrs.                " 管理領域
+
+*----- エラーフラグ(1明細)初期化
+clear c_eflg1.
+
+*----- 会社コード：存在チェック
+perform frm_bukrs_exist_chk using gds_rec-bukrs2" 会社コード
+changing tmp_land1   " 国コード
+wk_waers    " 通貨コード
+tmp_ktopl   " 勘定コード表
+c_eflg1.    " エラーフラグ(1明細)
+*----- 会社コード：権限チェック
+perform frm_bukrs_authority_chk  using gds_rec-bukrs2 " 会社コード
+changing c_eflg1.       " エラーフラグ(1明細)
+*----- 税額自動：妥当性チェック
+perform frm_wrong_data_chk  using gds_rec-xmwst " 税額自動
+text-t33      " T33:税額自動
+changing c_eflg1.      " エラーフラグ(1明細)
+*----- 伝票日付：妥当性チェック
+perform frm_date_chk using text-t35             " T35:伝票日付
+changing gds_rec-bldat        " 伝票日付
+c_eflg1.             " エラーフラグ(1明細)
+
+*----- 転記日付：妥当性チェック
+perform frm_date_chk using text-t36             " T36:転記日付
+changing gds_rec-budat        " 転記日付
+c_eflg1.             " エラーフラグ(1明細)
+
+*----- 転記日付が妥当な値の場合
+if tmp_flg_err is initial.
+*-- 転記日付：会計年度、会計期間チェック
+perform frm_get_period_year
+using gds_rec-bukrs2  " 会社コード
+gds_rec-budat   " 転記日付
+changing tmp_gjahr     " 会計年度
+tmp_monat     " 会計期間
+tmp_flg_err   " エラーフラグ
+c_eflg1.      " エラーフラグ(1明細)
+
+*   会計年度、会計期間が取得できた場合
+if tmp_flg_err is initial.
+*     転記日付：会計期間オープンチェック
+perform frm_date_period_chk
+using gds_rec-bukrs2  " 会社コード
+tmp_gjahr     " 会計年度
+tmp_monat     " 会計期間
+changing c_eflg1.      " エラーフラグ(1明細)
+
+else.
+clear tmp_flg_err.                        " エラーフラグ初期化
+endif.
+else.
+clear tmp_flg_err.                          " エラーフラグ初期化
+endif.
+
+*----- 伝票タイプ：存在チェック
+perform frm_blart_exist_chk
+using gds_rec-blart   " 伝票タイプ
+changing c_eflg1.        " エラーフラグ(1明細)
+
+*----- 通貨コード：存在チェック
+perform frm_waers_exist_chk
+using gds_rec-waers    " 通貨コード
+changing c_eflg1.         " エラーフラグ(1明細)
+
+*----- レート：妥当性チェック
+*-- 数値チェック
+perform frm_numeric_chk using text-t64                    " T64:レート
+gcf_chk         " レートチェックフラグ
+changing gds_rec-kursf   " レート
+tmp_flg_err   " エラーフラグ
+c_eflg1.      " エラーフラグ(1明細)
+
+*-- 数値型の場合
+if tmp_flg_err is initial.
+*   桁数チェック
+perform frm_num_size_chk
+using gds_rec-kursf    " レート
+gcf_trunc4     " 整数部桁数
+gcf_frac5      " 小数部桁数
+text-t64       " T64:レート
+changing c_eflg1.       " エラーフラグ(1明細)
+
+else.
+*   桁数チェックなし
+clear tmp_flg_err.
+endif.
+*----- 転記キー：妥当性チェック
+perform frm_newbs_chk using gds_rec-newbs     " 転記キー
+changing c_shkzg           " 貸借フラグ
+wk_koart          " 勘定タイプ
+c_eflg1.          " エラーフラグ(1明細)
+
+*----- 勘定コード：存在チェック
+perform frm_newko_chk using gds_rec-bukrs2    " 会社コード
+gds_rec-newko     " 勘定コード
+wk_koart          " 勘定タイプ
+tmp_ktopl         " 勘定コード表   "#002 ADD 20110617
+changing tmp_akont         " 総勘定元帳の統制勘定
+tmp_mwskz         " 勘定マスタレコードの税カテゴリ
+c_eflg1.          " エラーフラグ(1明細)
+
+*----- 特殊仕訳チェック
+if gds_rec-newum is initial.
+*   チェックなし
+else.
+*-- 特殊仕訳：存在チェック
+perform frm_newum_exist_chk
+using gds_rec-newum   " 特殊仕訳
+wk_koart        " 勘定タイプ
+changing c_eflg1.        " エラーフラグ(1明細)
+endif.
+
+*----- 取引タイプチェック
+if gds_rec-newbw is initial.
+*   チェックなし
+else.
+*-- 取引タイプ：存在チェック
+perform frm_newbw_chk using gds_rec-newbw   " 取引タイプ
+wk_koart          "#002 ADD 20110617
+changing c_eflg1.        " エラーフラグ(1明細)
+endif.
+
+*----- 統制勘定コードチェック
+if gds_rec-hkont is initial.
+*   チェックなし
+else.
+case wk_koart.
+when gcf_koart_d.
+*       統制勘定コード：妥当性チェック
+perform frm_hkont_chk using gds_rec-hkont " 統制勘定コード
+tmp_ktopl   " 勘定コード表
+tmp_akont   " 総勘定元帳の統制勘定
+changing c_eflg1.    " エラーフラグ(1明細)
+
+when gcf_koart_k.
+*       統制勘定コード：妥当性チェック
+perform frm_hkont_chk using gds_rec-hkont " 統制勘定コード
+tmp_ktopl   " 勘定コード表
+tmp_akont   " 総勘定元帳の統制勘定
+changing c_eflg1.    " エラーフラグ(1明細)
+********************************** #002 ADD ISID015 20110617 START ***
+when gcf_koart_a.                         " 'A'
+*       統制勘定コード：入力ありはエラーとする
+*--     エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*       エラーメッセージ
+perform frm_make_write_data_body
+using gcf_id_e9         " メッセージクラス
+gcf_no_131        " メッセージ番号
+gds_rec-hkont     " メッセージ変数２
+text-t47          " T47:統制勘定コード
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_131.     " エラー番号
+********************************** #002 ADD ISID015 20110617 END   ***
+
+
+when others.
+*       チェックなし
+endcase.
+endif.
+
+*----- 伝票通貨額：妥当性チェック
+*-- 数値チェック
+perform frm_numeric_chk using text-t56                    " T56:伝票通貨額
+space           " レートチェックフラグ
+changing gds_rec-wrbtr   " 伝票通貨額
+tmp_flg_err   " エラーフラグ
+c_eflg1.      " エラーフラグ(1明細)
+
+*-- 数値型の場合
+if tmp_flg_err is initial.
+*   桁数チェック
+perform frm_num_size_chk
+using gds_rec-wrbtr    " 伝票通貨額
+gcf_trunc11    " 整数部桁数
+gcf_frac2      " 小数部桁数
+text-t56                     " T56:伝票通貨額
+changing c_wrerr_flg.   " 伝票通貨額エラーフラグ(型)
+
+if c_wrerr_flg is initial.
+*     正常
+else.
+*     エラー
+c_eflg1 = gcf_chk.                      " エラーフラグ(1明細)ON
+endif.
+
+else.
+*   桁数チェックなし
+c_wrerr_flg = gcf_chk.                   " 伝票通貨額エラーフラグ(型)ON
+clear tmp_flg_err.
+endif.
+
+
+*----- 国内通貨額チェック
+if gds_rec-dmbtr is initial.
+*   チェックなし
+else.
+perform frm_numeric_chk using text-t48      " T48:国内通貨額
+space         " レートチェックフラグ
+changing gds_rec-dmbtr " 国内通貨額
+tmp_flg_err   " エラーフラグ
+c_eflg1.      " エラーフラグ(1明細)
+if tmp_flg_err is initial.
+*     処理無し
+else.
+c_dmerr_flg = gcf_chk.                    " 国内通貨額エラーフラグON(型)
+clear tmp_flg_err.
+endif.
+endif.
+*----- 第2国内通貨額チェック
+if gds_rec-dmbe2 is initial.
+*   チェックなし
+else.
+perform frm_numeric_chk using text-t77      " T77:国内2通貨額
+space         " レートチェックフラグ
+changing gds_rec-dmbe2 " 第2国内通貨額
+tmp_flg_err   " エラーフラグ
+c_eflg1.      " エラーフラグ(1明細)
+if tmp_flg_err is initial.
+*     処理無し
+else.
+c_d2err_flg = gcf_chk.                    " 国内2通貨額エラーフラグON(型)
+clear tmp_flg_err.
+endif.
+endif.
+
+*----- 第3国内通貨額チェック
+if gds_rec-dmbe3 is initial.
+*   チェックなし
+else.
+perform frm_numeric_chk using text-t78      " T78:国内3rd通貨額
+space         " レートチェックフラグ
+changing gds_rec-dmbe3 " 第3国内通貨額
+tmp_flg_err   " エラーフラグ
+c_eflg1.      " エラーフラグ(1明細)
+if tmp_flg_err is initial.
+*     処理無し
+else.
+c_d3err_flg = gcf_chk.                    " 国内3通貨額エラーフラグON(型)
+clear tmp_flg_err.
+endif.
+endif.
+*----- 税コードチェック
+if gds_rec-mwskz is initial.
+*   チェックなし
+else.
+if tmp_land1 is initial.
+*     チェックなし
+else.
+*     税コード：存在チェック
+perform frm_mwskz_chk using gds_rec-mwskz    " 税コード
+tmp_land1       " 国コード
+changing c_eflg1.        " エラーフラグ(1明細)
+endif.
+endif.
+
+*----- 税明細区分：妥当性チェック
+perform frm_wrong_data_chk  using gds_rec-mflag " 税明細区分
+text-t50      " T50:税明細区分
+changing c_eflg1.      " エラーフラグ(1明細)
+
+
+if gds_rec-kostl is initial.                    " 原価センタなし
+if gds_rec-prctr is initial.                  " 利益センタなし
+*     管理領域取得なし
+else.                                         " 利益センタあり
+*     管理領域チェック
+perform frm_get_kokrs using gds_rec-bukrs2  " 会社コード
+changing tmp_kokrs       " 管理領域
+tmp_flg_err     " エラーフラグ
+c_eflg1.        " エラーフラグ(1明細)
+endif.
+else.                                           " 原価センタあり
+*   管理領域チェック
+perform frm_get_kokrs using gds_rec-bukrs2    " 会社コード
+changing tmp_kokrs         " 管理領域
+tmp_flg_err       " エラーフラグ
+c_eflg1.          " エラーフラグ(1明細)
+endif.
+
+*----- 原価センタチェック
+if gds_rec-kostl is initial.
+*   チェックなし
+else.
+if tmp_flg_err is initial.                  " 管理領域が取得できた場合
+*     原価センタ：存在チェック
+perform frm_kostl_chk using gds_rec-kostl " 原価センタ
+gds_rec-budat " 転記日付
+tmp_kokrs     " 管理領域
+changing c_eflg1.      " エラーフラグ(1明細)
+else.
+*     チェックなし
+endif.
+endif.
+
+*----- 利益センタチェック
+if gds_rec-prctr is initial.
+*   チェックなし
+else.
+if tmp_flg_err is initial.
+*     利益センタ：存在チェック
+perform frm_prctr_chk using gds_rec-prctr " 利益センタ
+gds_rec-budat " 転記日付
+tmp_kokrs     " 管理領域
+changing c_eflg1.      " エラーフラグ(1明細)
+else.
+*     チェックなし
+clear tmp_flg_err.
+endif.
+endif.
+
+*----- 事業領域チェック
+if gds_rec-gsber is initial.
+*   チェックなし
+else.
+*-- 事業領域：存在チェック
+perform frm_gsber_chk using gds_rec-gsber   " 事業領域
+changing c_eflg1.        " エラーフラグ(1明細)
+endif.
+
+*----- 支払条件チェック
+if gds_rec-zterm is initial.
+*   チェックなし
+else.
+*-- 支払条件：存在チェック
+perform frm_zterm_chk using gds_rec-zterm   " 支払条件
+changing c_eflg1.        " エラーフラグ(1明細)
+endif.
+
+*----- 支払保留チェック
+if gds_rec-zlspr is initial.
+*   チェックなし
+else.
+*-- 支払保留：存在チェック
+perform frm_zlspr_chk using gds_rec-zlspr   " 支払保留
+changing c_eflg1.        " エラーフラグ(1明細)
+endif.
+
+*----- 支払方法チェック
+if gds_rec-zlsch is initial.
+*   チェックなし
+else.
+if tmp_land1 is initial.
+*     チェックなし
+else.
+*     支払方法：存在チェック
+perform frm_zlsch_chk using gds_rec-zlsch   " 支払方法
+gds_rec-bukrs2  " 会社コード
+changing c_eflg1.        " エラーフラグ(1明細)
+endif.
+endif.
+
+*----- 支払基準日チェック
+if gds_rec-zfbdt is initial.
+*   チェックなし
+else.
+*-- 支払基準日：妥当性チェック
+perform frm_date_chk using text-t57       " T57:支払基準日
+changing gds_rec-zfbdt  " 支払基準日
+c_eflg1.       " エラーフラグ(1明細)
+endif.
+
+*----- 手形振出日チェック
+if gds_rec-wdate is initial.
+*   チェックなし
+else.
+perform frm_date_chk using text-t58       " T58:手形振出日
+changing gds_rec-wdate  " 手形振出日
+c_eflg1.       " エラーフラグ(1明細)
+endif.
+
+*----- 起算日チェック
+if gds_rec-valut is initial.
+*   チェックなし
+else.
+perform frm_date_chk using text-t59        " T59:起算日
+changing gds_rec-valut   " 起算日
+c_eflg1.        " エラーフラグ(1明細)
+endif.
+
+*----- 資産起算日チェック
+if gds_rec-bzdat is initial.
+*   チェックなし
+else.
+perform frm_date_chk using text-t60         " T60:資産起算日
+changing gds_rec-bzdat    " 資産起算日
+c_eflg1.         " エラーフラグ(1明細)
+endif.
+
+*----- 数量チェック
+if gds_rec-menge is initial.
+*   チェックなし
+else.
+*-- 数量：妥当性チェック
+perform frm_numeric_chk using text-t61      " T61:数量
+space         " レートチェックフラグ
+changing gds_rec-menge " 数量
+tmp_flg_err   " エラーフラグ
+c_eflg1.      " エラーフラグ(1明細)
+clear tmp_flg_err.
+endif.
+
+*----- 数量単位チェック
+if gds_rec-meins is initial.
+*   チェックなし
+else.
+*-- 数量単位：妥当性チェック
+perform frm_meins_chk using   text-t76        " T76:数量単位
+changing gds_rec-meins   " 数量単位
+c_eflg1.      " エラーフラグ(1明細)
+clear tmp_flg_err.
+endif.
+
+endform.                    " FRM_FIELD_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BUKRS_EXIST_CHK
+*&---------------------------------------------------------------------*
+*       会社コード：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_BUKRS  会社コード
+*      <--C_LAND1  国コード
+*      <--C_WAERS  通貨コード
+*      <--C_KTOPL  勘定コード表
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_bukrs_exist_chk  using value(u_bukrs) type t001-bukrs
+changing c_land1        type t001-land1
+c_waers        type t001-waers
+c_ktopl        type t001-ktopl
+c_eflg1        type flag.
+
+clear: c_land1, c_waers, c_ktopl.
+
+select single
+land1                               " 国コード
+waers                               " 通貨コード
+ktopl                               " 勘定コード表
+into (c_land1, c_waers, c_ktopl )
+from t001
+where bukrs = u_bukrs.                    " 会社コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_bukrs           " 会社コード
+text-t26                         " T26:会社コード
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_BUKRS_EXIST_CHK
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BUKRS_AUTHORITY_CHK
+*&---------------------------------------------------------------------*
+*       会社コード：権限チェック
+*----------------------------------------------------------------------*
+*      -->U_BUKRS  会社コード
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_bukrs_authority_chk  using value(u_bukrs) type t001-bukrs
+changing c_eflg1        type flag.
+
+* 会社コードの権限チェック
+authority-check object 'F_BKPF_BUK'
+id 'BUKRS' field u_bukrs
+id 'ACTVT' field '01'.              " 登録または生成
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_012        " メッセージ番号
+u_bukrs           " 会社コード
+space             " メッセージ変数２
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_BUKRS_AUTHORITY_CHK
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WRONG_DATA_CHK
+*&---------------------------------------------------------------------*
+*       項目値の妥当性チェック
+*----------------------------------------------------------------------*
+*      -->U_DATA     項目値
+*      -->U_TEXT     項目名テキスト
+*      <--C_EFLG1    エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_wrong_data_chk  using value(u_data)     type any
+value(u_text)     type c
+changing c_eflg1           type flag.
+
+if u_data is initial.                      " 初期値
+*   正常
+else.
+if u_data = gcf_flgs.                    " スペース
+*     正常
+else.
+if u_data = gcf_flgx.                  " 'X'
+*       正常
+else.                                  " 上記のどれでもない場合
+*       エラー
+*       エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*       伝票内-明細番号カウント
+*       CNT_LINES = CNT_LINES + 1.
+*       画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id        " メッセージクラス
+gcf_no_511    " メッセージ番号
+u_text        " 項目名テキスト
+space         " メッセージ変数２
+space         " メッセージ変数３
+space         " メッセージ変数４
+cnt_lines     " 明細番号
+cnt_recno     " 先頭行番号
+gcf_ng        " 結果
+gcf_no_511.   " エラー番号
+endif.
+endif.
+endif.
+
+endform.                    " FRM_WRONG_DATA_CHK
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATE_CHK
+*&---------------------------------------------------------------------*
+*       日付の妥当性チェック
+*----------------------------------------------------------------------*
+*      -->U_DATE     日付
+*      -->U_TEXT     項目名テキスト
+*      <--C_EFLG1    エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_date_chk  using value(u_text) type c
+changing u_date        type c
+c_eflg1       type flag.
+
+data:
+tmp_date type sydatum,                   " 日付
+tmp_date_c(10) type c.                   " 日付(入力データ型)
+
+* 日付(入力データ型)退避
+tmp_date_c = u_date.
+*----- 汎用モジュールの呼出し：ユーザー書式での日付妥当性チェック
+call function 'DATE_CONV_EXT_TO_INT'
+exporting
+i_date_ext = tmp_date_c   " 日付(入力データ形式)
+importing
+e_date_int = tmp_date     " 日付(内部形式)
+exceptions
+error      = 1
+others     = 2.
+*----- 日付が妥当な場合、内部形式の値に変換する
+if sy-subrc = 0.
+u_date = tmp_date.
+*----- 日付が妥当でない値の場合
+else.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_513        " メッセージ番号
+u_text            " 項目名テキスト
+tmp_date_c        " 日付(入力データ形式)
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_513.       " エラー番号
+endif.
+
+endform.                    " FRM_DATE_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_PERIOD_YEAR
+*&---------------------------------------------------------------------*
+*       会計期間、会計年度の取得
+*----------------------------------------------------------------------*
+*      -->U_BUKRS     会社コード
+*      -->U_DATE      転記日付
+*      <--C_GJAHR     会計年度
+*      <--C_MONAT     会計期間
+*      <--C_FLG_ERR   エラーフラグ
+*      <--C_EFLG1     エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_get_period_year    using value(u_bukrs) type t001-bukrs
+value(u_date)  type c
+changing c_gjahr        type bapi0002_4-fiscal_year
+c_monat        type bapi0002_4-fiscal_period
+c_flg_err      type flag
+c_eflg1        type flag.
+
+data:
+tmp_date      type bapi0002_4-posting_date, " 転記日付
+tmp_fld_ret   type bapireturn1,             " リターンコード
+tmp_msgv2(50) type c.                       " メッセージ変数２
+
+*----- 型合わせ
+tmp_date = u_date.
+
+*----- 汎用モジュールの呼出し：会社コード: 転記日付 -> 期間、会計年度
+call function 'BAPI_COMPANYCODE_GET_PERIOD'
+exporting
+companycodeid = u_bukrs                " 会社コード
+posting_date  = tmp_date               " 転記日付
+importing
+fiscal_year   = c_gjahr                " 会計年度
+fiscal_period = c_monat                " 会計期間
+return        = tmp_fld_ret.           " リターンコード
+
+*----- エラーの場合
+if tmp_fld_ret-type = gcf_typ_e.           " メッセージタイプE
+*-- エラーフラグON
+c_flg_err = gcf_chk.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- メッセージ変数２の作成
+concatenate u_bukrs                      " 会社コード
+u_date                       " 転記日付
+into tmp_msgv2                    " メッセージ変数２
+separated by space.                    " 区切り文字：半角スペース
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_515        " メッセージ番号
+text-t37          " T37:会計年度と会計期間
+tmp_msgv2         " 会社コード、転記日付
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_515.       " エラー番号
+endif.
+
+endform.                    " FRM_GET_PERIOD_YEAR
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATE_PERIOD_CHK
+*&---------------------------------------------------------------------*
+*       会計期間オープンチェック
+*----------------------------------------------------------------------*
+*      -->U_BUKRS     会社コード
+*      -->U_GJAHR     会計年度
+*      -->U_MONAT     会計期間
+*      <--C_EFLG1     エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_date_period_chk using value(u_bukrs) type t001-bukrs
+value(u_gjahr) type bapi0002_4-fiscal_year
+value(u_monat) type bapi0002_4-fiscal_period
+changing c_eflg1        type flag.
+
+data:
+tmp_koart  type t001b-mkoar,             " 勘定タイプまたはマスク
+tmp_monat  type t001b-frpe1.             " 会計期間
+
+*----- 会計期間オープンチェック用項目のセット
+tmp_koart  = gcf_koart.                    " 勘定タイプまたはマスク'+'
+tmp_monat  = u_monat.                      " 会計期間(型合わせ)
+
+*----- 汎用モジュールの呼出し：会計期間のオープンチェック
+call function 'FI_PERIOD_CHECK'
+exporting
+i_bukrs          = u_bukrs             " 会社コード
+i_gjahr          = u_gjahr             " 会計年度
+i_koart          = tmp_koart           " 勘定タイプまたはマスク
+i_monat          = tmp_monat           " 会計期間
+exceptions
+error_period     = 1
+error_period_acc = 2
+invalid_input    = 3
+others           = 4.
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_516        " メッセージ番号
+space             " メッセージ変数１
+space             " メッセージ変数２
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_516.       " エラー番号
+endif.
+
+endform.                    " FRM_DATE_PERIOD_CHK
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BLART_EXIST_CHK
+*&---------------------------------------------------------------------*
+*       伝票タイプ：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_BLART  伝票タイプ
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_blart_exist_chk  using value(u_blart) type bkpf-blart
+changing c_eflg1        type flag.
+
+select single
+count(*)
+from t003
+where blart = u_blart.                    " 伝票タイプ
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_blart           " 会社コード
+text-t38                         " T38:伝票タイプ
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_BLART_EXIST_CHK
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WAERS_EXIST_CHK
+*&---------------------------------------------------------------------*
+*       通貨コード：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_WAERS  通貨コード
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_waers_exist_chk  using value(u_waers) type char03
+changing c_eflg1        type flag.
+
+data:
+tmp_waers type tcurc-waers.              " 通貨コード
+
+tmp_waers = u_waers.                       " 通貨コード
+
+select single
+count(*)
+from tcurc
+where waers = tmp_waers.                  " 通貨コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_waers           " 通貨コード
+text-t39                         " T39:通貨コード
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_WAERS_EXIST_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BALANCE_CHK
+*&---------------------------------------------------------------------*
+*       金額バランスチェック
+*----------------------------------------------------------------------*
+*      -->U_WRBTR   伝票通貨額
+*      -->U_DMBTR   国内通貨額
+*      -->U_DMBE2   第2国内通貨額
+*      -->U_DMBE3   第3国内通貨額
+*      -->U_FLG_DM  国内通貨額ありフラグ
+*      -->U_FLG_D2  第2国内通貨額ありフラグ
+*      -->U_FLG_D3  第3国内通貨額ありフラグ
+*      <--C_FLG_ERR エラーフラグ
+*----------------------------------------------------------------------*
+form frm_balance_chk  using value(u_wrbtr)  type bseg-wrbtr
+value(u_dmbtr)  type bseg-dmbtr
+value(u_dmbe2)  type bseg-dmbe2
+value(u_dmbe3)  type bseg-dmbe3
+value(u_flg_dm) type flag
+value(u_flg_d2) type flag
+value(u_flg_d3) type flag
+changing c_flg_err       type flag.
+
+*----- 伝票通貨額：バランスチェック
+if u_wrbtr = 0.
+*   正常
+else.
+*   エラー
+*-- エラーフラグON
+c_flg_err = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_519        " メッセージ番号
+text-t56                         " T56:伝票通貨額
+space             " メッセージ変数２
+space             " メッセージ変数３
+space             " メッセージ変数４
+0                 " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_519.       " エラー番号
+endif.
+
+*----- 国内通貨額がない場合
+if u_flg_dm is initial.
+*   処理無し
+
+*----- 国内通貨額がある場合
+else.
+*-- 国内通貨額：バランスチェック
+if u_dmbtr = 0.
+*     正常
+else.
+*     エラー
+*     エラーフラグON
+c_flg_err = gcf_chk.
+*     画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id         " メッセージクラス
+gcf_no_519      " メッセージ番号
+text-t48                       " T48:国内通貨額
+space           " メッセージ変数２
+space           " メッセージ変数３
+space           " メッセージ変数４
+0               " 明細番号
+cnt_recno       " 先頭行番号
+gcf_ng          " 結果
+gcf_no_519.     " エラー番号
+endif.
+endif.
+*----- 第2国内通貨額がない場合
+if u_flg_d2 is initial.
+*   処理無し
+*----- 第2国内通貨額がある場合
+else.
+*-- 第2国内通貨額：バランスチェック
+if u_dmbe2 = 0.
+*     正常
+else.
+*     エラー
+*     エラーフラグON
+c_flg_err = gcf_chk.
+*     画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id         " メッセージクラス
+gcf_no_519      " メッセージ番号
+text-t77        " T77:第2国内通貨額
+space           " メッセージ変数２
+space           " メッセージ変数３
+space           " メッセージ変数４
+0               " 明細番号
+cnt_recno       " 先頭行番号
+gcf_ng          " 結果
+gcf_no_519.     " エラー番号
+endif.
+endif.
+
+*----- 第3国内通貨額がない場合
+if u_flg_d3 is initial.
+*   処理無し
+*----- 第3国内通貨額がある場合
+else.
+*-- 第3国内通貨額：バランスチェック
+if u_dmbe3 = 0.
+*     正常
+else.
+*     エラー
+*     エラーフラグON
+c_flg_err = gcf_chk.
+*     画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id         " メッセージクラス
+gcf_no_519      " メッセージ番号
+text-t78        " T77:第3国内通貨額
+space           " メッセージ変数２
+space           " メッセージ変数３
+space           " メッセージ変数４
+0               " 明細番号
+cnt_recno       " 先頭行番号
+gcf_ng          " 結果
+gcf_no_519.     " エラー番号
+endif.
+endif.
+
+endform.                    " FRM_BALANCE_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NEWBS_CHK
+*&---------------------------------------------------------------------*
+*       転記キー：妥当性チェック
+*----------------------------------------------------------------------*
+*      -->U_NEWBS  転記キー
+*      <--C_SHKZG  貸借フラグ
+*      <--C_KOART  勘定タイプ
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_newbs_chk  using    value(u_newbs) type rf05a-newbs
+changing c_shkzg        type bseg-shkzg
+c_koart        type tbsl-koart
+c_eflg1        type flag.
+
+clear: c_shkzg, c_koart.
+
+select single
+shkzg                               " 貸借フラグ
+koart                               " 勘定タイプ
+into (c_shkzg, c_koart )
+from tbsl
+where bschl = u_newbs.                    " 転記キー
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_newbs           " 転記キー
+text-t40                         " T40:転記キー
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_NEWBS_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SUM_WRBTR_DMBTR
+*&---------------------------------------------------------------------*
+*       金額の集計(バランスチェック用)
+*----------------------------------------------------------------------*
+*      -->U_WRBTR     伝票通貨額
+*      -->U_DMBTR     国内通貨額
+*      -->U_DMBE2     第2国内通貨額
+*      -->U_DMBE3     第3国内通貨額
+*      -->U_WRERR_FLG 伝票通貨額エラーフラグ(型)
+*      -->U_DMERR_FLG 国内通貨額エラーフラグ(型)
+*      -->U_D2ERR_FLG 第2国内通貨額エラーフラグ(型)
+*      -->U_D3ERR_FLG 第3国内通貨額エラーフラグ(型)
+*      <--C_WRBTR     伝票通貨額
+*      <--C_DMBTR     国内通貨額
+*      <--C_DMBE2     第2国内通貨額
+*      <--C_DMBE3     第3国内通貨額
+*      <--C_FLG_DM    国内通貨額ありフラグ
+*      <--C_FLG_D2    第2国内通貨額ありフラグ
+*      <--C_FLG_D3    第3国内通貨額ありフラグ
+*----------------------------------------------------------------------*
+form frm_sum_wrbtr_dmbtr  using    value(u_wrbtr)     type char14
+value(u_dmbtr)     type char14
+value(u_dmbe2)     type char14
+value(u_dmbe3)     type char14
+value(u_wrerr_flg) type flag
+value(u_dmerr_flg) type flag
+value(u_d2err_flg) type flag
+value(u_d3err_flg) type flag
+changing c_wrbtr            type bseg-wrbtr
+c_dmbtr            type bseg-dmbtr
+c_dmbe2            type bseg-dmbe2
+c_dmbe3            type bseg-dmbe3
+c_flg_dm           type flag
+c_flg_d2           type flag
+c_flg_d3           type flag.
+data:
+tmp_wrbtr type bseg-wrbtr,        " 伝票通貨額
+tmp_dmbtr type bseg-dmbtr,        " 国内通貨額
+tmp_dmbe2 type bseg-dmbe2,        " 第2国内通貨額
+tmp_dmbe3 type bseg-dmbe3.        " 第3国内通貨額
+
+*----- 各通貨額に型エラーがあった場合、その金額を加算しない
+*-- 伝票通貨額
+if u_wrerr_flg is initial.          " エラーなし
+*   INファイルの金額
+tmp_wrbtr = u_wrbtr.
+else.                               " エラーあり
+*   加算する金額は0
+endif.
+
+*-- 国内通貨額
+if u_dmerr_flg is initial.          " エラーなし
+*   INファイルの金額
+tmp_dmbtr = u_dmbtr.
+else.                               " エラーあり
+*   加算する金額は0
+endif.
+
+*-- 第2国内通貨額
+if u_d2err_flg is initial.          " エラーなし
+*   INファイルの金額
+tmp_dmbe2 = u_dmbe2.
+else.                               " エラーあり
+*   加算する金額は0
+endif.
+
+*-- 第3国内通貨額
+if u_d3err_flg is initial.          " エラーなし
+*   INファイルの金額
+tmp_dmbe3 = u_dmbe3.
+else.                               " エラーあり
+*   加算する金額は0
+endif.
+
+case wk_shkzg.                      " 貸借を考慮
+*-- S:借方の場合
+when gcf_shkzg_s.
+c_wrbtr = c_wrbtr + tmp_wrbtr.  " 伝票通貨額
+if u_dmbtr is initial.          " 国内通貨額が無い場合
+*       処理無し
+else.                           " 国内通貨額がある場合
+c_flg_dm = gcf_chk.           " 国内通貨額ありフラグ
+c_dmbtr = c_dmbtr + tmp_dmbtr." 国内通貨額
+endif.
+
+if u_dmbe2 is initial.          " 第2国内通貨額が無い場合
+*       処理無し
+else.                           " 第2国内通貨額がある場合
+c_flg_d2 = gcf_chk.           " 第2国内通貨額ありフラグ
+c_dmbe2 = c_dmbe2 + tmp_dmbe2." 第2国内通貨額
+endif.
+
+if u_dmbe3 is initial.          " 第3国内通貨額が無い場合
+*       処理無し
+else.                           " 第3国内通貨額がある場合
+c_flg_d3 = gcf_chk.           " 第3国内通貨額ありフラグ
+c_dmbe3 = c_dmbe3 + tmp_dmbe3." 第3国内通貨額
+endif.
+
+*-- H:貸方の場合
+when gcf_shkzg_h.
+c_wrbtr = c_wrbtr - tmp_wrbtr.  " 伝票通貨額
+if u_dmbtr is initial.          " 国内通貨額が無い場合
+*       処理無し
+else.                           " 国内通貨額がある場合
+c_flg_dm = gcf_chk.           " 国内通貨額ありフラグ
+c_dmbtr = c_dmbtr - tmp_dmbtr." 国内通貨額
+endif.
+
+if u_dmbe2 is initial.          " 第2国内通貨額が無い場合
+*       処理無し
+else.                           " 第2国内通貨額がある場合
+c_flg_d2 = gcf_chk.           " 第2国内通貨額ありフラグ
+c_dmbe2 = c_dmbe2 - tmp_dmbe2." 第2国内通貨額
+endif.
+if u_dmbe3 is initial.          " 第3国内通貨額が無い場合
+*       処理無し
+else.                           " 第3国内通貨額がある場合
+c_flg_d3 = gcf_chk.           " 第3国内通貨額ありフラグ
+c_dmbe3 = c_dmbe3 - tmp_dmbe3." 第3国内通貨額
+endif.
+
+when others.
+*      処理無し
+endcase.
+
+endform.                    " FRM_SUM_WRBTR_DMBTR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NEWKO_CHK
+*&---------------------------------------------------------------------*
+*       勘定コード：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_BUKRS  会社コード
+*      -->U_NEWKO  勘定コード
+*      -->U_KOART  勘定タイプ
+*      <--C_AKONT  総勘定元帳の統制勘定
+*      <--C_MWSKZ  勘定マスタレコードの税カテゴリ
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_newko_chk  using    value(u_bukrs)  type t001-bukrs
+*                             VALUE(U_NEWKO)  TYPE SKB1-SAKNR  "#002 DEL
+value(u_newko)  type c         "#002 ADD
+value(u_koart)  type tbsl-koart
+value(u_ktopl)  type t001-ktopl "#002 ADD
+changing c_akont         type knb1-akont
+c_mwskz         type skb1-mwskz
+c_eflg1         type flag.
+
+
+data:
+tmp_newko type skb1-saknr,               " アルファ変換後
+tmp_newko_aa(17) type c.                                "#002 ADD
+
+clear: c_akont, c_mwskz.
+
+*----- アルファ変換
+if u_koart <> gcf_koart_a.                   "#002 ADD 20110617
+perform frm_alpha_insert using u_newko     " 勘定コード
+changing tmp_newko.  " 変換後
+endif.                                       "#002 ADD 20110617
+
+*----- 勘定タイプ別処理
+case u_koart.
+when gcf_koart_d.
+*     得意先コード存在チェック
+perform frm_kunnr_chk using tmp_newko  " 勘定コード
+u_bukrs    " 会社コード
+changing c_akont    " 総勘定元帳の統制勘定
+c_eflg1.   " エラーフラグ(1明細)
+when gcf_koart_k.
+*     仕入先コード存在チェック
+perform frm_lifnr_chk using tmp_newko  " 勘定コード
+u_bukrs    " 会社コード
+changing c_akont    " 総勘定元帳の統制勘定
+c_eflg1.   " エラーフラグ(1明細)
+when gcf_koart_a.
+***************************** #002 ADD 20110617 ISID015 START ***
+**     固定資産の場合、存在チェックなし
+*     資産番号の存在チェック
+tmp_newko_aa = u_newko.
+perform frm_anln_chk using tmp_newko_aa " 勘定コード
+u_bukrs      " 会社コード
+u_ktopl      " 勘定コード表
+changing "C_AKONT     " 総勘定元帳の統制勘定
+c_eflg1.     " エラーフラグ(1明細)
+***************************** #002 ADD 20110617 ISID015 END   ***
+when others.
+*     勘定コード存在チェック
+perform frm_saknr_chk using tmp_newko  " 勘定コード
+u_bukrs    " 会社コード
+changing c_mwskz    " 勘定マスタレコードの税カテゴリ
+c_eflg1.   " エラーフラグ(1明細)
+endcase.
+
+endform.                    " FRM_NEWKO_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_KUNNR_CHK
+*&---------------------------------------------------------------------*
+*       得意先コード存在チェック
+*----------------------------------------------------------------------*
+*      -->U_KUNNR  得意先コード
+*      -->U_BUKRS  会社コード
+*      <--C_AKONT  総勘定元帳の統制勘定
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_kunnr_chk  using    value(u_kunnr) type knb1-kunnr
+value(u_bukrs) type knb1-bukrs
+changing c_akont        type knb1-akont
+c_eflg1        type flag.
+
+clear c_akont.
+
+select single
+akont                               " 総勘定元帳の統制勘定
+into c_akont
+from knb1
+where kunnr = u_kunnr                     " 得意先コード
+and bukrs = u_bukrs.                    " 会社コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_kunnr           " 得意先コード
+text-t41          " T41:得意先マスタ（会社コード）
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_KUNNR_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LIFNR_CHK
+*&---------------------------------------------------------------------*
+*       仕入先コード存在チェック
+*----------------------------------------------------------------------*
+*      -->U_LIFNR  仕入先コード
+*      -->U_BUKRS  会社コード
+*      <--C_AKONT  総勘定元帳の統制勘定
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_lifnr_chk  using    value(u_lifnr) type lfb1-lifnr
+value(u_bukrs) type lfb1-bukrs
+changing c_akont        type lfb1-akont
+c_eflg1        type flag.
+clear c_akont.
+
+select single
+akont                               " 総勘定元帳の統制勘定
+into c_akont
+from lfb1
+where lifnr = u_lifnr                     " 仕入先コード
+and bukrs = u_bukrs.                    " 会社コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_lifnr           " 仕入先コード
+text-t42          " T42:仕入先マスタ（会社コード）
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_LIFNR_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SAKNR_CHK
+*&---------------------------------------------------------------------*
+*       勘定コード存在チェック
+*----------------------------------------------------------------------*
+*      -->U_SAKNR  勘定コード
+*      -->U_BUKRS  会社コード
+*      <--C_MWSKZ  勘定マスタレコードの税カテゴリ
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_saknr_chk  using    value(u_saknr) type skb1-saknr
+value(u_bukrs) type skb1-bukrs
+changing c_mwskz        type skb1-mwskz
+c_eflg1        type flag.
+
+clear c_mwskz.
+
+select single
+mwskz                               " 勘定マスタレコードの税カテゴリ
+into c_mwskz
+from skb1
+where saknr = u_saknr                     " 勘定コード
+and bukrs = u_bukrs.                    " 会社コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_saknr           " 勘定コード
+text-t43          " T43:勘定コードマスタ（会社コード）
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_LIFNR_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NEWUM_EXIST_CHK
+*&---------------------------------------------------------------------*
+*       特殊仕訳：妥当性チェック
+*----------------------------------------------------------------------*
+*      -->U_NEWUM  特殊仕訳
+*      -->U_KOART  勘定タイプ
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_newum_exist_chk  using value(u_newum) type rf05a-newum
+value(u_koart) type tbsl-koart
+changing c_eflg1        type flag.
+
+select single
+count(*)
+from t074u
+where koart = u_koart                     " 勘定タイプ
+and umskz = u_newum.                    " 特殊仕訳コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_newum           " 特殊仕訳コード
+text-t44          " T44:特殊仕訳
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_NEWUM_EXIST_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NEWBW_CHK
+*&---------------------------------------------------------------------*
+*       取引タイプ：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_NEWBW  取引タイプ
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_newbw_chk  using value(u_newbw) type tabw-bwasl
+value(u_koart) type tbsl-koart   "#002 ADD 20110617
+changing c_eflg1        type flag.
+select single
+count(*)
+from tabw
+where bwasl = u_newbw.                    " 資産取引タイプ
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_newbw           " 取引タイプ
+text-t45                         " T45:取引タイプ
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+********************************** #002 ADD ISID015 20110617 START ***
+* 勘定タイプ：A（転記キー：70(借方資産),75(貸方資産)）の場合、
+* 取引タイプを制限する
+if u_koart = gcf_koart_a.
+if u_newbw = '100' or u_newbw = 'D10' .                  " 資産取引タイプ
+else.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id_aa         " メッセージクラス
+gcf_no_411        " メッセージ番号
+u_newbw           " 取引タイプ
+space             " メッセージ変数２
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_411.       " エラー番号
+endif.
+endif.
+********************************** #002 ADD ISID015 20110617 END   ***
+
+
+endform.                    " FRM_NEWBW_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_HKONT_CHK
+*&---------------------------------------------------------------------*
+*       統制勘定コード：妥当性チェック
+*----------------------------------------------------------------------*
+*      -->U_HKONT  統制勘定コード
+*      -->U_KTOPL  勘定コード表
+*      -->U_AKONT  総勘定元帳の統制勘定
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_hkont_chk  using value(u_hkont) type bseg-hkont
+value(u_ktopl) type t001-ktopl
+value(u_akont) type knb1-akont
+changing c_eflg1        type flag.
+
+data:
+tmp_hkont type bseg-hkont.               " アルファ変換後
+
+*----- アルファ変換
+perform frm_alpha_insert using u_hkont     " 統制勘定コード
+changing tmp_hkont.  " 変換後
+
+select single
+count(*)
+from thkon
+where ktopl = u_ktopl                     " 勘定コード表
+and hkont = u_akont                     " 総勘定元帳勘定
+and abwhk = tmp_hkont.                  " 代替 G/L 勘定
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_511        " メッセージ番号
+text-t47          " T47:統制勘定コード
+space             " メッセージ変数２
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_511.       " エラー番号
+endif.
+
+endform.                    " FRM_HKONT_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NUMERIC_CHK
+*&---------------------------------------------------------------------*
+*       数値チェック
+*----------------------------------------------------------------------*
+*      -->U_VALUE   項目値
+*      -->U_RATE    レートチェックフラグ
+*      <-->U_TEXT    項目名テキスト
+*      <--C_FLG_ERR エラーフラグ
+*      <--C_EFLG1   エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_numeric_chk using value(u_text)  type c
+u_rate         type c
+changing u_value        type any
+c_flg_err      type flag
+c_eflg1        type flag.
+data:
+tmp_flg_err      type flag,          " エラーフラグ(+-含み)
+tmp_rate         type tcurr-ukurs,   " レート(内部形式)
+tmp_value_c(16)  type c.             " 数値(内部形式)
+
+constants:
+gcf_ca_plus(03)  type c value '*+*', " プラス記号含みチェック用
+gcf_ca_minus(03) type c value '*-*'. " マイナス記号含みチェック用
+
+clear c_flg_err.
+
+if u_value ca gcf_ca_plus.             " プラス記号を含む場合
+*   エラー
+tmp_flg_err = gcf_chk.
+else.
+if u_value cp gcf_ca_minus.          " マイナス記号を含む場合
+*     エラー
+tmp_flg_err = gcf_chk.
+else.
+*     正常
+endif.
+endif.
+
+if tmp_flg_err is initial.
+
+* 数値項目チェック
+if u_rate is not initial.
+*----- レート入力チェックを行う(ユーザー書式)
+call function 'CONVERT_RATE_INPUT'
+exporting
+rate_extern = u_value
+importing
+rate        = tmp_rate
+exceptions
+input_error = 1
+others      = 2.
+if sy-subrc = 0.
+u_value = tmp_rate.
+else.
+tmp_flg_err = gcf_chk.
+endif.
+else.
+*----- 数値入力チェックを行う(ユーザー書式)
+call function 'CATS_NUMERIC_INPUT_CHECK'
+exporting
+input      = u_value
+internal   = 'X'
+importing
+output     = tmp_value_c
+exceptions
+no_numeric = 1
+others     = 2.
+if sy-subrc = 0.
+u_value = tmp_value_c.
+else.
+tmp_flg_err = gcf_chk.
+endif.
+endif.
+endif.
+
+if tmp_flg_err is initial.
+*   正常
+else.
+*   エラー
+*-- エラーフラグON
+c_flg_err = gcf_chk.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_514        " メッセージ番号
+u_text            " 項目名テキスト
+u_value           " 項目値
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_514.       " エラー番号
+endif.
+
+endform.                    " FRM_NUMERIC_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MWSKZ_CHK
+*&---------------------------------------------------------------------*
+*       税コード：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_MWSKZ  税コード
+*      -->U_LAND1  国コード
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_mwskz_chk  using value(u_mwskz) type t007a-mwskz
+value(u_land1) type t001-land1
+changing c_eflg1        type flag.
+
+select single
+count(*)
+from t007a as t7 inner join
+t005  as t5
+on t7~kalsm = t5~kalsm                 " 手順
+where t7~mwskz = u_mwskz                  " 税コード
+and t5~land1 = u_land1.                 " 国コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_mwskz           " 税コード
+text-t49                         " T49:税キー
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_MWSKZ_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_KOKRS
+*&---------------------------------------------------------------------*
+*       管理領域チェック
+*----------------------------------------------------------------------*
+*      -->U_BUKRS   会社コード
+*      <--C_KOKRS   管理領域
+*      <--C_FLG_ERR エラーフラグ
+*      <--C_EFLG1   エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_get_kokrs  using    value(u_bukrs) type t001-bukrs
+changing c_kokrs        type tka02-kokrs
+c_flg_err      type flag
+c_eflg1        type flag.
+
+clear c_kokrs.
+
+*----- 汎用モジュールの呼出し：管理領域の取得
+call function 'KOKRS_GET_FROM_BUKRS'
+exporting
+i_bukrs        = u_bukrs               " 会社コード
+importing
+e_kokrs        = c_kokrs               " 管理領域
+exceptions
+no_kokrs_found = 1
+others         = 2.
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグON
+c_flg_err = gcf_chk.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_517        " メッセージ番号
+u_bukrs           " 会社コード
+space             " メッセージ変数２
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_517.       " エラー番号
+endif.
+
+endform.                    " FRM_GET_KOKRS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_KOSTL_CHK
+*&---------------------------------------------------------------------*
+*       原価センタ：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_KOSTL  原価センタ
+*      -->U_BUDAT  転記日付
+*      <--C_KOKRS  管理領域
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_kostl_chk  using    value(u_kostl) type csks-kostl
+value(u_budat) type c
+value(u_kokrs) type csks-kokrs
+changing c_eflg1        type flag.
+
+data:
+tmp_kostl type csks-kostl.               " アルファ変換後
+
+*----- アルファ変換
+perform frm_alpha_insert using u_kostl     " 原価センタ
+changing tmp_kostl.  " 変換後
+
+select count(*)
+from csks
+up to 1 rows
+where kokrs    = u_kokrs                  " 管理領域
+and kostl    = tmp_kostl                " 原価センタ
+and datbi   >= u_budat                  " 有効終了日
+and datab   <= u_budat                  " 有効開始日
+and bkzkp    = space.                   " 実績一次転記用ロックフラグ
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_kostl           " 原価センタ
+text-t51                         " T51:原価センタ
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_KOSTL_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PRCTR_CHK
+*&---------------------------------------------------------------------*
+*       利益センタ：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_PRCTR  利益センタ
+*      -->U_BUDAT  転記日付
+*      <--C_KOKRS  管理領域
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_prctr_chk  using    value(u_prctr) type cepc-prctr
+value(u_budat) type c
+value(u_kokrs) type csks-kokrs
+changing c_eflg1        type flag.
+
+data:
+tmp_prctr type cepc-prctr.               " アルファ変換後
+
+*----- アルファ変換
+perform frm_alpha_insert using u_prctr     " 利益センタ
+changing tmp_prctr.  " 変換後
+
+select count(*)
+from cepc
+up to 1 rows
+where prctr     = tmp_prctr               " 利益センタ
+and datbi    >= u_budat                 " 有効終了日
+and kokrs     = u_kokrs                 " 管理領域
+and datab    <= u_budat                 " 有効開始日
+and lock_ind  = space.                  " ロックフラグ
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_prctr           " 利益センタ
+text-t52          " T52:利益センタ
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_PRCTR_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GSBER_CHK
+*&---------------------------------------------------------------------*
+*       事業領域：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_GSBER  事業領域
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_gsber_chk  using value(u_gsber) type bseg-gsber
+changing c_eflg1        type flag.
+
+select single
+count(*)
+from tgsb
+where gsber = u_gsber.                    " 事業領域
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_gsber           " 事業領域
+text-t53          " T53:事業領域
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_GSBER_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ZTERM_CHK
+*&---------------------------------------------------------------------*
+*       支払条件：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_ZTERM  支払条件
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_zterm_chk  using value(u_zterm) type bseg-zterm
+changing c_eflg1        type flag.
+
+select count(*)
+from t052
+up to 1 rows
+where zterm = u_zterm.                    " 支払条件
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_zterm           " 支払条件
+text-t63                         " T63:支払条件
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_ZTERM_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ZLSPR_CHK
+*&---------------------------------------------------------------------*
+*       支払保留：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_ZLSPR  支払保留
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_zlspr_chk  using value(u_zlspr) type bseg-zlspr
+changing c_eflg1        type flag.
+
+select single
+count(*)
+from t008
+where zahls = u_zlspr.                    " 支払保留
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_zlspr           " 支払保留
+text-t54          " T54:支払保留
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_ZLSPR_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ZLSCH_CHK
+*&---------------------------------------------------------------------*
+*       支払方法：存在チェック
+*----------------------------------------------------------------------*
+*      -->U_ZLSCH  支払方法
+*      -->U_BUKRS  会社コード
+*      <--C_EFLG1  エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_zlsch_chk  using value(u_zlsch) type bseg-zlsch
+value(u_bukrs) type t001-bukrs
+changing c_eflg1        type flag.
+
+select single
+count(*)
+from t042e
+where zbukr = u_bukrs                     " 支払会社コード
+and zlsch = u_zlsch.                    " 支払方法
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_zlsch           " 支払方法
+text-t55                         " T55:支払方法
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_ZLSCH_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NUM_SIZE_CHK
+*&---------------------------------------------------------------------*
+*       桁数チェック
+*----------------------------------------------------------------------*
+*      -->U_VALUE   数値
+*      -->U_TRUNC   整数部桁数
+*      -->U_FRAC    小数部桁数
+*      -->U_TEXT    項目名テキスト
+*      <--C_EFLG1   エラーフラグ
+*----------------------------------------------------------------------*
+form frm_num_size_chk  using value(u_value) type any
+value(u_trunc) type i
+value(u_frac)  type i
+value(u_text)  type c
+changing c_eflg1        type flag.
+
+data:
+tmp_frac   type i,                       " 小数部桁数
+tmp_string type string.                  " 整数部、小数部格納用
+
+*----- 整数部格納
+tmp_string = trunc( u_value ).
+
+*----- 指定桁数より大きい場合
+if numofchar( tmp_string ) > u_trunc.
+*-- エラーフラグON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_514        " メッセージ番号
+u_text            " 項目名テキスト
+u_value           " 項目値
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_514.       " エラー番号
+*----- 指定桁数通りの場合
+else.
+*-- 小数部格納(0.XXX)
+tmp_string = frac( u_value ).
+*-- 「0.」の長さを考慮
+tmp_frac = u_frac + 2.
+
+*-- 指定桁数より大きい場合
+if numofchar( tmp_string ) > tmp_frac.
+*     エラーフラグON
+c_eflg1 = gcf_chk.
+*     画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id          " メッセージクラス
+gcf_no_514      " メッセージ番号
+u_text          " 項目名テキスト
+u_value         " 項目値
+space           " メッセージ変数３
+space           " メッセージ変数４
+cnt_lines       " 明細番号
+cnt_recno       " 先頭行番号
+gcf_ng          " 結果
+gcf_no_514.     " エラー番号
+endif.
+endif.
+
+endform.                    " FRM_NUM_SIZE_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_OFFLENG
+*&---------------------------------------------------------------------*
+*       オフセット位置取得
+*----------------------------------------------------------------------*
+*      -->U_TEXT  テキスト
+*      -->U_LENG  オフセットしたい位置(BYTE)
+*      <--C_LENG  オフセット位置
+*----------------------------------------------------------------------*
+form frm_get_offleng  using    value(u_text) type c
+value(u_leng) type i
+changing c_leng        type i.
+
+*----- バイト数取得
+c_leng = cl_abap_list_utilities=>dynamic_output_length( u_text ).
+
+*----- バイト数 - 文字数
+c_leng = c_leng - numofchar( u_text ).
+* バイト数 = 文字数 の場合
+if c_leng = 0.
+c_leng = u_leng.
+* バイト数 > 文字数 の場合
+else.
+c_leng = u_leng - c_leng.
+endif.
+
+endform.                    " FRM_GET_OFFLENG
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDCDATA_SET_TAX
+*&---------------------------------------------------------------------*
+*       税データの作成
+*----------------------------------------------------------------------*
+*      -->U_NEWBS  転記キー
+*      -->U_WRBTR  伝票通貨額
+*      -->U_DMBTR  国内通貨額
+*      -->U_DMBE2  第2国内通貨額
+*      -->U_DMBE3  第3国内通貨額
+*      -->U_MWSKZ  税コード
+*----------------------------------------------------------------------*
+form frm_bdcdata_set_tax  using value(u_newbs) type rf05a-newbs
+value(u_wrbtr) type char14
+value(u_dmbtr) type char14
+value(u_dmbe2) type char14
+value(u_dmbe3) type char14
+value(u_mwskz) type bseg-mwskz.
+
+data:
+h_fttax type fttax.                      " 税データヘッダ
+
+*----- 税データ作成
+if not ( u_wrbtr is initial ).             " 伝票通貨額
+h_fttax-fwste = u_wrbtr.
+endif.
+
+h_fttax-mwskz = u_mwskz.                   " 税コード
+h_fttax-bschl = u_newbs.                   " 転記キー
+
+if not ( u_dmbtr is initial ).             " 国内通貨額
+h_fttax-hwste = u_dmbtr.
+endif.
+
+if not ( u_dmbe2 is initial ).             " 2ND CURRENCY
+h_fttax-h2ste = u_dmbe2.
+endif.
+if not ( u_dmbe3 is initial ).             " 2RD CURRENCY
+h_fttax-h3ste = u_dmbe3.
+endif.
+
+append h_fttax to gdt_fttax.
+
+endform.                    " FRM_BDCDATA_SET_TAX
+*&---------------------------------------------------------------------*
+*&      Form  FRM_1DENPYO_PROC
+*&---------------------------------------------------------------------*
+*       1伝票毎の処理
+*----------------------------------------------------------------------*
+*      -->U_WRBTR    伝票通貨額
+*      -->U_DMBTR    国内通貨額
+*      -->U_DMBE2    第2国内通貨額
+*      -->U_DMBE3    第3国内通貨額
+*      -->U_FLG_DM   国内通貨額ありフラグ
+*      -->U_FLG_D2   第2国内通貨額ありフラグ
+*      -->U_FLG_D3   第3国内通貨額ありフラグ
+*      <--U_FLG_ERR  エラーフラグ(伝票)
+*----------------------------------------------------------------------*
+form frm_1denpyo_proc using value(u_wrbtr)  type bseg-wrbtr
+value(u_dmbtr)  type bseg-dmbtr
+value(u_dmbe2)  type bseg-dmbe2
+value(u_dmbe3)  type bseg-dmbe3
+value(u_flg_dm) type flag
+value(u_flg_d2) type flag
+value(u_flg_d3) type flag
+changing c_flg_err       type flag.
+
+*----- 金額バランスチェック
+perform frm_balance_chk
+using u_wrbtr               " 伝票通貨額
+u_dmbtr               " 国内通貨額
+u_dmbe2               " 第2国内通貨額
+u_dmbe3               " 第3国内通貨額
+u_flg_dm              " 国内通貨額ありフラグ
+u_flg_d2              " 第2国内通貨額ありフラグ
+u_flg_d3              " 第3国内通貨額ありフラグ
+changing c_flg_err.            " エラーフラグ(伝票)
+
+if c_flg_err is initial.          " 伝票にエラーがない場合
+*-- 転記 or チェック処理
+case p_test.
+*    テスト実行の場合
+when gcf_chk.
+*       BAPIによる伝票チェック
+perform frm_bapi_docu_check.
+*     本実行の場合
+when space.
+*       バッチインプット実行
+perform frm_post_data.
+endcase.
+else.                             " 伝票にエラーがある場合
+cnt_inerr =  cnt_inerr + 1.     " エラー伝票数カウント
+clear c_flg_err.                " エラーフラグ(伝票)OFF
+endif.
+
+endform.                    " FRM_1DENPYO_PROC
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BAPI_HEAD
+*&---------------------------------------------------------------------*
+*       ヘッダ行+明細行(1明細)のBAPIデータ作成
+*----------------------------------------------------------------------*
+form frm_bapi_head.
+
+perform frm_refresh_bapi.            " BAPIデータ初期化
+
+perform frm_fill_header.             " BAPI-伝票ヘッダ情報作成
+
+perform frm_fill_details.            " BAPI-伝票明細情報作成
+
+endform.                    " FRM_BAPI_HEAD
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BAPI_BODY
+*&---------------------------------------------------------------------*
+*       明細行(1明細)のBAPIデータ作成
+*----------------------------------------------------------------------*
+form frm_bapi_body.
+
+perform frm_fill_details.            " BAPI-伝票明細情報作成
+
+endform.                    " FRM_BAPI_BODY
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILL_HEADER
+*&---------------------------------------------------------------------*
+*       BAPI-伝票ヘッダ情報作成
+*----------------------------------------------------------------------*
+form frm_fill_header.
+
+constants:
+gcf_obj_typ type bapiache09-obj_type value 'IDOC',  " 参照処理
+gcf_obj_key type bapiache09-obj_key  value '$',     " オブジェクトキー
+gcf_bus_act type bapiache09-bus_act  value 'RFBU'.  " 取引
+
+*----- 現在ログオン中のシステム名取得
+call function 'OWN_LOGICAL_SYSTEM_GET'
+importing
+own_logical_system             = fld_documentheader-obj_sys " 元伝票の論理システム
+exceptions
+own_logical_system_not_defined = 1
+others                         = 2.
+
+if sy-subrc <> 0.
+message id sy-msgid type sy-msgty number sy-msgno
+with sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+endif.
+
+fld_documentheader-obj_type   = gcf_obj_typ.          " 参照処理(IDOC)
+fld_documentheader-obj_key    = gcf_obj_key.          " オブジェクトキー($)
+fld_documentheader-username   = sy-uname.             " ユーザ名
+fld_documentheader-header_txt = gds_rec-bktxt.        " 伝票ヘッダテキスト
+fld_documentheader-comp_code  = gds_rec-bukrs2.       " 会社コード
+fld_documentheader-doc_date   = gds_rec-bldat.        " 伝票の伝票日付
+fld_documentheader-pstng_date = gds_rec-budat.        " 伝票の転記日付
+fld_documentheader-doc_type   = gds_rec-blart.        " 伝票タイプ
+fld_documentheader-ref_doc_no = gds_rec-xblnr.        " 参照伝票番号
+fld_documentheader-bus_act    = gcf_bus_act.          " 取引(RFBU)
+
+endform.                    " FRM_FILL_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILL_DETAILS
+*&---------------------------------------------------------------------*
+*       BAPI-伝票明細情報作成
+*----------------------------------------------------------------------*
+form frm_fill_details.
+
+*----- 明細情報
+case wk_koart.
+when gcf_koart_d.                  " 'D'
+perform frm_fill_accountar.      " 得意先明細
+when gcf_koart_k.                  " 'K'
+perform frm_fill_accountap.      " 仕入先明細
+****************************** #002 ADD ISID015 20110617 START ***
+when gcf_koart_a.                  " 'A'
+perform frm_fill_accountaa.      " 固定資産
+****************************** #002 ADD ISID015 20110617 END   ***
+when others.
+perform frm_fill_accountgl.      " 勘定明細
+endcase.
+
+*----- 通貨情報
+perform frm_fill_currencyamount.     " 通貨明細
+
+endform.                    " FRM_FILL_DETAILS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILL_ACCOUNTAR
+*&---------------------------------------------------------------------*
+*       BAPI-得意先明細情報作成
+*----------------------------------------------------------------------*
+form frm_fill_accountar.
+
+data:
+h_accountreceivable type  bapiacar09.               " 得意先明細
+
+*----- アルファ変換
+perform frm_alpha_insert:
+using gds_rec-newko                  " 得意先コード1
+changing h_accountreceivable-customer,  " 変換後
+using gds_rec-hkont                  " 総勘定元帳勘定
+changing h_accountreceivable-gl_account," 変換後
+using gds_rec-prctr                  " 利益センタ
+changing h_accountreceivable-profit_ctr." 変換後
+
+h_accountreceivable-itemno_acc = cnt_lines.             " 会計伝票明細番号
+h_accountreceivable-ref_key_1  = gds_rec-xref1.         " 参照キー１
+h_accountreceivable-ref_key_2  = gds_rec-xref2.         " 参照キー２
+h_accountreceivable-ref_key_3  = gds_rec-xref3.         " 参照キー３
+h_accountreceivable-pmnttrms   = gds_rec-zterm.         " 支払条件キー
+h_accountreceivable-pmnt_block = gds_rec-zlspr.         " 支払保留キー
+h_accountreceivable-pymt_meth  = gds_rec-zlsch.         " 支払方法
+h_accountreceivable-bline_date = gds_rec-zfbdt.         " 期日計算の基準日
+h_accountreceivable-item_text  = gds_rec-sgtxt.         " 明細テキスト
+************************************************ #005 DEL 20150324 STA **
+*  H_ACCOUNTRECEIVABLE-SP_GL_IND  = GDS_REC-NEWUM.         " 特殊仕訳コード
+************************************************ #005 DEL 20150324 END **
+h_accountreceivable-comp_code  = gds_rec-bukrs2.        " 会社コード
+h_accountreceivable-bus_area   = gds_rec-gsber.         " 事業領域
+h_accountreceivable-dsct_days1 = gds_rec-zbd1t.         " サイト
+h_accountreceivable-paymt_ref  = gds_rec-kidno.         " 支払参照
+h_accountreceivable-supcountry = gds_rec-landl.         " 供給国
+h_accountreceivable-bank_id    = gds_rec-hbkid.         " 取引銀行
+h_accountreceivable-scbank_ind = gds_rec-lzbkz.         " 中央銀行ID
+
+append h_accountreceivable to gdt_accountreceivable.
+
+endform.                    " FRM_FILL_ACCOUNTAR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILL_ACCOUNTAP
+*&---------------------------------------------------------------------*
+*       BAPI-仕入先明細情報作成
+*----------------------------------------------------------------------*
+form frm_fill_accountap.
+
+data:
+h_accountpayable    type  bapiacap09.               " 仕入先明細
+
+*----- アルファ変換
+perform frm_alpha_insert:
+using gds_rec-newko                   " 仕入先または債権者の勘定コード
+changing h_accountpayable-vendor_no,     " 変換後
+using gds_rec-hkont                   " 総勘定元帳勘定
+changing h_accountpayable-gl_account,    " 変換後
+using gds_rec-prctr                   " 利益センタ
+changing h_accountpayable-profit_ctr.    " 変換後
+
+h_accountpayable-itemno_acc = cnt_lines.                " 会計伝票明細番号
+h_accountpayable-ref_key_1  = gds_rec-xref1.            " 参照キー１
+h_accountpayable-ref_key_2  = gds_rec-xref2.            " 参照キー２
+h_accountpayable-ref_key_3  = gds_rec-xref3.            " 参照キー３
+h_accountpayable-pmnttrms   = gds_rec-zterm.            " 支払条件キー
+h_accountpayable-pmnt_block = gds_rec-zlspr.            " 支払保留キー
+h_accountpayable-pymt_meth  = gds_rec-zlsch.            " 支払方法
+h_accountpayable-bline_date = gds_rec-zfbdt.            " 期日計算の基準日
+h_accountpayable-item_text  = gds_rec-sgtxt.            " 明細テキスト
+************************************************ #005 DEL 20150324 STA **
+*  H_ACCOUNTPAYABLE-SP_GL_IND  = GDS_REC-NEWUM.            " 特殊仕訳コード
+************************************************ #005 DEL 20150324 END **
+h_accountpayable-comp_code  = gds_rec-bukrs2.           " 会社コード
+h_accountpayable-bus_area   = gds_rec-gsber.            " 事業領域
+h_accountpayable-dsct_days1 = gds_rec-zbd1t.            " サイト
+h_accountpayable-bank_id    = gds_rec-hbkid.            " 取引銀行
+h_accountpayable-supcountry = gds_rec-landl.            " 供給国
+h_accountpayable-scbank_ind = gds_rec-lzbkz.            " 中央銀行ID
+
+append h_accountpayable to gdt_accountpayable.
+
+endform.                    " FRM_FILL_ACCOUNTAP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILL_ACCOUNTGL
+*&---------------------------------------------------------------------*
+*       BAPI-勘定明細情報作成
+*----------------------------------------------------------------------*
+form frm_fill_accountgl.
+
+data:
+h_accountgl         type  bapiacgl09.            " 勘定明細
+
+*----- アルファ変換
+perform frm_alpha_insert:
+using gds_rec-newko                 " 総勘定元帳勘定
+changing h_accountgl-gl_account,       " 変換後
+using gds_rec-prctr                 " 利益センタ
+changing h_accountgl-profit_ctr,       " 変換後
+using gds_rec-kostl                 " 原価センタ
+changing h_accountgl-costcenter,       " 変換後
+using gds_rec-aufnr                 " 指図番号
+changing h_accountgl-orderid,          " 変換後
+using gds_rec-pprct                 " パートナ利益センタ
+changing h_accountgl-part_prctr,       " 変換後
+using gds_rec-segment               " セグメント
+changing h_accountgl-segment.          " 変換後
+
+h_accountgl-itemno_acc     = cnt_lines.              " 会計伝票明細番号
+h_accountgl-ref_key_1      = gds_rec-xref1.          " 参照キー１
+h_accountgl-ref_key_2      = gds_rec-xref2.          " 参照キー２
+h_accountgl-ref_key_3      = gds_rec-xref3.          " 参照キー３
+h_accountgl-value_date     = gds_rec-valut.          " 起算日
+h_accountgl-item_text      = gds_rec-sgtxt.          " 明細テキスト
+h_accountgl-material       = gds_rec-matnr.          " 品目コード
+h_accountgl-quantity       = gds_rec-menge.          " 数量
+h_accountgl-base_uom       = gds_rec-meins.          " 数量単位
+h_accountgl-bus_area       = gds_rec-gsber.          " 事業領域
+h_accountgl-wbs_element    = gds_rec-ps_posid.       " WBS 要素
+h_accountgl-acct_type      = wk_koart.             " 勘定タイプ
+h_accountgl-tr_part_ba     = gds_rec-pargb.          " 取引先事業領域
+h_accountgl-cs_trans_t     = gds_rec-bewar.          " 取引タイプ
+
+append h_accountgl to gdt_accountgl.
+
+endform.                    " FRM_FILL_ACCOUNTGL
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILL_CURRENCYAMOUNT
+*&---------------------------------------------------------------------*
+*       BAPI-通貨情報作成
+*----------------------------------------------------------------------*
+form frm_fill_currencyamount.
+
+*----- 伝票通貨額
+perform frm_set_currencyamount
+using gcf_ctyp_00    " 通貨タイプ：00(取引通貨)
+gds_rec-wrbtr.   " 伝票通貨額
+
+*********************************************** #004 ADD 20140911 STA **
+*----- 通貨コード取得
+if gds_rec-dmbtr is not initial or
+gds_rec-dmbe2 is not initial or
+gds_rec-dmbe3 is not initial.
+
+perform frm_curr_info.
+
+endif.
+*********************************************** #004 ADD 20140911 END **
+
+if gds_rec-dmbtr is initial.                   " 国内通貨額が初期値
+else.
+*----- 国内通貨額
+perform frm_set_currencyamount
+using gcf_ctyp_10    " 通貨タイプ：10(会社通貨)
+gds_rec-dmbtr.   " 国内通貨額
+endif.
+*グループ通貨チェック
+if gds_rec-dmbe2 is initial.                   " 2nd国内通貨額が初期値
+else.
+*----- 2nd国内通貨額
+perform frm_set_currencyamount
+using gcf_ctyp_30    " 通貨タイプ：30(2nd currency)
+gds_rec-dmbe2.   "2nd 国内通貨額
+endif.
+*グローバル会社通貨チェック
+if gds_rec-dmbe3 is initial.                   " 3rd国内通貨額が初期値
+else.
+*----- 3rd国内通貨額
+perform frm_set_currencyamount
+using gcf_ctyp_60    " 通貨タイプ：60(3rd currency)
+gds_rec-dmbe3.   "3d 国内通貨額
+endif.
+
+endform.                    " FRM_FILL_CURRENCYAMOUNTS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_CURRENCYAMOUNT
+*&---------------------------------------------------------------------*
+*       通貨明細セット
+*----------------------------------------------------------------------*
+*      -->U_TYP    通貨タイプ
+*      -->U_AMOUNT 金額
+*----------------------------------------------------------------------*
+form frm_set_currencyamount using value(u_typ)    type bapiaccr09-curr_type
+value(u_amount) type char14.
+
+data:
+h_currencyamount    type  bapiaccr09.               " 通貨明細
+
+h_currencyamount-itemno_acc   = cnt_lines.            " 会計伝票明細番号
+h_currencyamount-curr_type    = u_typ.                " 通貨タイプおよび評価ビュー
+
+if u_typ = gcf_ctyp_10.                               " 会社通貨(10)の場合
+h_currencyamount-currency   = wk_waers.             " 会社通貨コード
+elseif u_typ = gcf_ctyp_30.
+*********************************************** #004 MOD 20140911 STA **
+*    H_CURRENCYAMOUNT-CURRENCY   = 'JPY'.
+h_currencyamount-currency   = gds_curr_info-curr2.
+*********************************************** #004 MOD 20140911 END **
+elseif u_typ = gcf_ctyp_60.
+*********************************************** #004 MOD 20140911 STA **
+*    H_CURRENCYAMOUNT-CURRENCY   = 'USD'.
+h_currencyamount-currency   = gds_curr_info-curr3.
+*********************************************** #004 MOD 20140911 END **
+else.                                                 " 取引通貨(00)の場合
+h_currencyamount-currency   = gds_rec-waers.          " 通貨コード
+endif.
+
+h_currencyamount-amt_doccur   = u_amount.             " 金額
+h_currencyamount-exch_rate    = gds_rec-kursf.          " 換算レート
+
+*----- 貸方の場合、金額の符号反転
+if wk_shkzg = gcf_shkzg_h.                            " 貸借フラグ(H)
+h_currencyamount-amt_doccur =
+h_currencyamount-amt_doccur * -1.  " 金額
+endif.
+
+append h_currencyamount to gdt_currencyamount.
+
+endform.                    " FRM_SET_CURRENCYAMOUNT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_REFRESH_BAPI
+*&---------------------------------------------------------------------*
+*       BAPIデータ初期化
+*----------------------------------------------------------------------*
+form frm_refresh_bapi .
+
+clear:
+fld_documentheader.                      " ヘッダ
+
+refresh:
+gdt_accountreceivable,                  " 得意先
+gdt_accountpayable,                     " 仕入先
+gdt_accountgl,                          " 勘定
+gdt_currencyamount,                     " 通貨
+gdt_return,                             " リターン
+gdt_extension1.                         " 追加項目
+
+endform.                    " FRM_REFRESH_BAPI
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BAPI_DOCU_CHECK
+*&---------------------------------------------------------------------*
+*       BAPIによる伝票チェック
+*----------------------------------------------------------------------*
+form frm_bapi_docu_check .
+
+data:
+cnt_errmsg          type i,                    " エラーメッセージ件数
+h_return            type bapiret2.             " リターンメッセージ
+
+*----- BAPI:会計伝票チェック
+call function 'BAPI_ACC_DOCUMENT_CHECK'
+exporting
+documentheader    = fld_documentheader      " ヘッダ情報
+tables
+accountgl         = gdt_accountgl           " 勘定コード明細
+accountreceivable = gdt_accountreceivable   " 得意先明細
+accountpayable    = gdt_accountpayable      " 仕入先明細
+currencyamount    = gdt_currencyamount      " 通貨明細
+extension1        = gdt_extension1          " 追加項目
+return            = gdt_return.             " リターンメッセージ
+
+*----- エラーメッセージLOOP
+loop at gdt_return into h_return
+where type = gcf_typ_e.      " メッセージタイプ'E'
+********************************** #002 ADD ISID015 20110617 START ***
+if h_return-id = gcf_id_aa.
+if h_return-number = gcf_no_001
+or h_return-number = gcf_no_326.
+continue.
+endif.
+endif.
+********************************** #002 ADD ISID015 20110617 END   ***
+
+cnt_errmsg = cnt_errmsg + 1.                   " エラーメッセージ件数カウント
+if cnt_errmsg > 1.
+*     画面出力データ作成(明細)
+perform frm_make_write_data_body
+using h_return-id             " メッセージクラス
+h_return-number         " メッセージ番号
+h_return-message_v1     " メッセージ変数１
+h_return-message_v2     " メッセージ変数２
+h_return-message_v3     " メッセージ変数３
+h_return-message_v4     " メッセージ変数４
+0                       " 明細番号
+cnt_recno               " 先頭行番号
+gcf_ng                  " 結果:NG
+h_return-number.        " エラー番号
+endif.
+endloop.
+
+*----- エラー伝票の場合
+if cnt_errmsg > 1.
+cnt_inerr =  cnt_inerr + 1.                    " エラー伝票数カウント
+else.
+*----- 正常伝票の場合
+cnt_insrt =  cnt_insrt + 1.                    " 正常伝票数カウント
+*   画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id                      " メッセージクラス
+space                       " メッセージ番号
+space                       " メッセージ変数１
+space                       " メッセージ変数２
+space                       " メッセージ変数３
+space                       " メッセージ変数４
+0                           " 明細番号
+cnt_recno                   " 先頭行番号
+gcf_ok                      " 結果:OK
+space.                      " エラー番号
+endif.
+
+*----- BAPIデータ初期化
+perform frm_refresh_bapi.
+
+endform.                    " FRM_BAPI_DOCU_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_WRITE_DATA_BODY
+*&---------------------------------------------------------------------*
+*       画面出力データ作成(明細)
+*----------------------------------------------------------------------*
+*      -->U_MSGID      メッセージクラス
+*      -->U_MSGNO      メッセージ番号
+*      -->U_MSGV1      メッセージ変数１
+*      -->U_MSGV2      メッセージ変数２
+*      -->U_MSGV3      メッセージ変数３
+*      -->U_MSGV4      メッセージ変数４
+*      -->U_CNT_LINES  明細番号
+*      -->U_CNT_RECNO  先頭行番号
+*      -->U_RESULT     結果
+*      -->U_ERRNO      エラー番号
+*----------------------------------------------------------------------*
+form frm_make_write_data_body  using value(u_msgid)     type c
+value(u_msgno)     type any
+value(u_msgv1)     type c
+value(u_msgv2)     type c
+value(u_msgv3)     type c
+value(u_msgv4)     type c
+value(u_cnt_lines) type numc3
+value(u_cnt_recno) type i
+value(u_result)    type char02
+value(u_errno)     type any.
+data:
+tmp_recno_txt   type string,             " テキスト「先頭行番号」
+tmp_result_txt  type string,             " テキスト「結果」
+tmp_errno_txt   type string,             " テキスト「エラー番号」
+tmp_msg_txt     type string,             " テキスト「メッセージ」
+tmp_line_txt1   type string,             " テキスト「第」
+tmp_line_txt2   type string,             " テキスト「明細」
+tmp_msgid       type symsgid,            " メッセージクラス
+tmp_msgno       type symsgno,            " メッセージ番号
+tmp_errno       type char12,             " エラー番号
+tmp_lines       type char3,              " 明細番号
+tmp_leng        type i,                  " 右シフト数
+tmp_recnop1     type i,                  " 先頭行番号(タイトル行を加算)
+tmp_recno       type char7,              " 先頭行番号(C型)
+h_write         type gtt_write,          " 画面出力データヘッダ
+h_err_info      type gtt_err_info.       " エラー情報ヘッダ
+
+constants:
+gcf_space2(02)  type c value '  '.       " 項目間スペース(2)
+
+clear wk_msg.
+
+if u_msgno is initial.                     " メッセージ番号が初期値
+if u_msgv1 is initial.                   " メッセージ変数１が初期値
+*      メッセージなし
+else.                                    " メッセージ変数１が初期値でない
+*----- エラーメッセージ作成
+concatenate u_msgv1                    " メッセージ変数１
+u_msgv2                    " メッセージ変数２
+u_msgv3                    " メッセージ変数３
+u_msgv4                    " メッセージ変数４
+into wk_msg                     " の結合
+separated by gcf_space2.             " 区切り文字:スペース
+endif.
+else.                                      " メッセージ番号が初期値でない
+*----- エラーメッセージ作成
+message id     u_msgid                   " メッセージID
+type   gcf_typ_e                 " メッセージタイプ
+number u_msgno                   " メッセージ番号
+with   u_msgv1                   " メッセージ変数１
+u_msgv2                   " メッセージ変数２
+u_msgv3                   " メッセージ変数３
+u_msgv4                   " メッセージ変数４
+into   wk_msg.                   " メッセージ
+endif.
+
+if u_cnt_lines is initial.                 " 明細番号
+*----- 「第N明細」分の長さだけ右にメッセージをシフトさせる処理
+*-- 右シフト数の算出
+tmp_leng =
+cl_abap_list_utilities=>dynamic_output_length( text-t27 )   " １つ目のテキストの長さ
++ strlen( u_cnt_lines )                                       " 明細番号の長さ
++ cl_abap_list_utilities=>dynamic_output_length( text-t28 )   " ２つ目のテキストの長さ
++ 1.                                                          " スペースの分
+*-- メッセージの右シフト
+shift wk_msg by tmp_leng places right.
+
+else.                                      " 明細番号依存のメッセージの場合
+
+*   明細番号の左0を消去
+write u_cnt_lines to tmp_lines no-zero right-justified.
+*   テキストの余分な空白削除
+tmp_line_txt1 = text-t27.                               " T27:第
+tmp_line_txt2 = text-t28.                               " T28:明細
+
+*----- 「第N明細」作成
+concatenate tmp_line_txt1                " テキスト「第」
+tmp_lines                    " 明細番号
+tmp_line_txt2                " テキスト「明細」
+space                        " 半角スペース
+wk_msg                       " メッセージ
+into wk_msg                       " の結合
+respecting blanks.
+
+endif.
+
+*----- 先頭行番号：変換(右寄せ)
+tmp_recnop1 = u_cnt_recno + cnt_title.     " 削除したタイトル行分を加算
+write tmp_recnop1 to tmp_recno right-justified no-sign.
+
+*----- エラー番号：初期値でない場合、メッセージクラス+メッセージ番号
+if u_errno is initial.
+else.
+tmp_msgid = u_msgid.
+tmp_msgno = u_errno.
+concatenate tmp_msgid                    " メッセージクラス
+tmp_msgno                    " メッセージ番号
+into tmp_errno.                   " の結合
+endif.
+
+*----- テキストの余分な空白削除
+* 先頭行番号
+tmp_recno_txt  = text-t29.                                " T29:先頭行番号
+* 結果
+tmp_result_txt = text-t30.                                " T30:結果
+* エラー番号
+tmp_errno_txt  = text-t31.                                " T31:エラー番号
+* メッセージ
+tmp_msg_txt    = text-t32.                                " T32:メッセージ
+
+*----- 各項目の結合
+concatenate h_write-line(gcf_off2)         " 左側空白
+tmp_recno_txt                  " 先頭行番号テキスト
+tmp_recno                      " 先頭行番号
+gcf_space2                     " 項目間スペース
+tmp_result_txt                 " 結果テキスト
+u_result                       " 結果
+gcf_space2                     " 項目間スペース
+tmp_errno_txt                  " エラー番号テキスト
+tmp_errno                      " エラー番号
+gcf_space2                     " 項目間スペース
+tmp_msg_txt                    " メッセージテキスト
+wk_msg                         " メッセージ
+into h_write-line                   " の結合
+respecting blanks.
+
+*----- データ追加
+append h_write to gdt_write.
+
+*----- エラー情報保持用内部テーブル更新
+if u_result = gcf_ng.
+clear h_err_info.
+h_err_info-recno     = u_cnt_recno + tmp_lines - 1.
+h_err_info-recno_err = u_cnt_recno.
+h_err_info-lines     = tmp_lines.
+h_err_info-msg       = h_write-line.
+append h_err_info to gdt_err_info.
+endif.
+
+endform.                    " FRM_MAKE_WRITE_DATA_BODY
+*&---------------------------------------------------------------------*
+*&      Form  FRM_POST_END
+*&---------------------------------------------------------------------*
+*       BDCセッションの終わり
+*----------------------------------------------------------------------*
+*      <--C_FLG_ERR  セッション終了エラーフラグ
+*----------------------------------------------------------------------*
+form frm_post_end changing c_flg_err type flag.
+
+clear c_flg_err.
+
+call function 'POSTING_INTERFACE_END'
+exceptions
+session_not_processable = 1
+others                  = 2.
+
+case sy-subrc.
+when 0.
+when others.
+c_flg_err = gcf_chk.                   " セッション終了エラーフラグON
+*     メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t23.           " T23:バッチインプット
+fld_errmsg-msgv2 = text-t25.                          " T25:終了
+*     &1 の &2 に失敗しました。
+endcase.
+
+endform.                    " FRM_POST_END
+*&---------------------------------------------------------------------*
+*&      Form  FRM_RENAME_FILE
+*&---------------------------------------------------------------------*
+*       バッチインプットファイル名変更
+*----------------------------------------------------------------------*
+form frm_rename_file .
+
+data:
+tmp_flg_err type flag.                     " エラーフラグ(X:ファイルコピー失敗)
+
+case gcf_chk.
+when p_server.
+*----- バッチインプットファイルの別名コピー(サーバ)
+perform frm_file_copy_server
+changing tmp_flg_err.      " エラーフラグ
+if tmp_flg_err is initial.
+*----- バッチインプット元ファイル削除(サーバ)
+perform frm_file_delete_server.
+endif.
+
+when p_local.
+*----- バッチインプットファイルの別名コピー
+perform frm_file_copy changing tmp_flg_err.  " エラーフラグ
+
+if tmp_flg_err is initial.
+*----- バッチインプット元ファイル削除
+perform frm_file_delete.
+endif.
+endcase.
+
+endform.                    " FRM_RENAME_FILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILE_COPY
+*&---------------------------------------------------------------------*
+*       バッチインプットファイルの別名コピー
+*----------------------------------------------------------------------*
+*      <--C_FLG_ERR  エラーフラグ
+*----------------------------------------------------------------------*
+form frm_file_copy changing c_flg_err type flag.
+
+data:
+tmp_fold     type string,                " 元ファイル名
+tmp_fnew     type string.                " 新ファイル名
+
+constants:
+gcf_bak(04)  type c value '.BAK'.        " コピーファイル用拡張子
+
+clear c_flg_err.
+
+*----- 新ファイル名作成
+concatenate p_filenm                       " 元ファイル名
+gcf_bak                        " 拡張子：'.BAK'
+into tmp_fnew.                      " の結合
+
+*----- エラー再取込ファイル用にWK_ERRFMにパスを保持
+wk_errfm = tmp_fnew.
+
+*----- 型合わせ
+tmp_fold = p_filenm.
+
+*----- メソッド：ファイルコピー
+call method cl_gui_frontend_services=>file_copy
+exporting
+source               = tmp_fold        " 元ファイル名
+destination          = tmp_fnew        " 新ファイル名
+overwrite            = space           " 上書き不可
+exceptions
+cntl_error           = 1
+error_no_gui         = 2
+wrong_parameter      = 3
+disk_full            = 4
+access_denied        = 5
+file_not_found       = 6
+destination_exists   = 7
+unknown_error        = 8
+path_not_found       = 9
+disk_write_protect   = 10
+drive_not_ready      = 11
+not_supported_by_gui = 12
+others               = 13.
+
+if sy-subrc <> 0.
+c_flg_err = gcf_chk.                   " エラーフラグON
+*   メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t68.           " T68:バッチインプットファイル名
+fld_errmsg-msgv2 = text-t67.                            " T67:変更
+*   &1 の &2 に失敗しました。
+endif.
+
+endform.                    " FRM_FILE_COPY
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILE_DELETE
+*&---------------------------------------------------------------------*
+*       バッチインプット元ファイル削除
+*----------------------------------------------------------------------*
+form frm_file_delete .
+
+data:
+tmp_eflg type flag,                      " エラーフラグ
+tmp_fold type string,                    " 元ファイル名
+tmp_rc   type i.                         " リターンコード
+
+*----- 型合わせ
+tmp_fold = p_filenm.
+
+*----- メソッド：ファイル削除
+call method cl_gui_frontend_services=>file_delete
+exporting
+filename             = tmp_fold        " 元ファイル名
+changing
+rc                   = tmp_rc          " リターンコード
+exceptions
+file_delete_failed   = 1
+cntl_error           = 2
+error_no_gui         = 3
+file_not_found       = 4
+access_denied        = 5
+unknown_error        = 6
+not_supported_by_gui = 7
+wrong_parameter      = 8
+others               = 9.
+
+if sy-subrc <> 0.
+*   エラーフラグON
+tmp_eflg = gcf_chk.
+else.
+if tmp_rc = 0.
+*     正常
+else.
+*     エラーフラグON
+tmp_eflg = gcf_chk.
+endif.
+endif.
+
+if tmp_eflg is initial.
+*   処理無し
+else.
+*   メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t68.           " T68:バッチインプットファイル名
+fld_errmsg-msgv2 = text-t67.                            " T67:変更
+*   &1 の &2 に失敗しました。
+endif.
+
+endform.                    " FRM_FILE_DELETE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILE_COPY_SERVER
+*&---------------------------------------------------------------------*
+*       バッチインプットファイルの別名コピー(サーバ)
+*----------------------------------------------------------------------*
+*      <--C_FLG_ERR  エラーフラグ
+*----------------------------------------------------------------------*
+form frm_file_copy_server changing c_flg_err type flag.
+
+data:
+tmp_flg_err  type flag,            " エラーフラグ
+tmp_fnew     type rlgrap-filename, " 新ファイル名
+tmp_errmsg   type symsg.           " エラーメッセージ構造
+
+clear c_flg_err.
+
+*----- 新ファイル名作成
+tmp_fnew = wk_bakfm.
+
+*----- エラー再取込ファイル用にWK_ERRFMにパスを保持
+wk_errfm = tmp_fnew.
+
+*----- コピーファイルの存在チェック
+perform frm_open_server_file
+using tmp_fnew    " 新ファイル名
+gcf_chk     " INPUTモードでOPEN
+changing tmp_errmsg. " エラーメッセージ構造
+
+if tmp_errmsg is initial.            " 存在していた場合
+*----- ファイルCLOSE、エラーフラグON
+close dataset tmp_fnew.
+tmp_flg_err = gcf_chk.             " エラーフラグON
+
+else.                                " 存在していない場合
+*----- BAKファイル作成
+perform frm_download_svfile        " サーバへデータをDL
+using gdt_bak    " 出力データ
+tmp_fnew    " 出力ファイル名
+cl_abap_char_utilities=>horizontal_tab
+space       " 使用無し(末尾空白削除フラグ)
+space       " UNICODEファイル作成
+changing tmp_errmsg. " エラーメッセージ構造
+if tmp_errmsg is initial.
+else.
+tmp_flg_err = gcf_chk.           " エラーフラグON
+endif.
+endif.
+
+if tmp_flg_err is initial.
+else.
+c_flg_err = gcf_chk.               " エラーフラグON
+*   メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t68.       " T68:バッチインプットファイル名
+fld_errmsg-msgv2 = text-t67.                             " T67:変更
+*   &1 の &2 に失敗しました。
+endif.
+
+*----- リソースの開放
+free gdt_bak.
+
+endform.                    " FRM_FILE_COPY_SERVER
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILE_DELETE_SERVER
+*&---------------------------------------------------------------------*
+*       バッチインプット元ファイル削除(サーバ)
+*----------------------------------------------------------------------*
+form frm_file_delete_server .
+
+*----- 元ファイル削除
+delete dataset p_filenm.
+
+case sy-subrc.
+when 0.
+when others.
+*    メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t68.       " T68:バッチインプットファイル名
+fld_errmsg-msgv2 = text-t67.       " T67:変更
+*    &1 の &2 に失敗しました。
+endcase.
+
+endform.                    " FRM_FILE_DELETE_SERVER
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_WRITE_DATA_FOOT
+*&---------------------------------------------------------------------*
+*       画面出力データ作成(フッタ)
+*----------------------------------------------------------------------*
+form frm_make_write_data_foot .
+
+data:
+tmp_leng type i,                         " オフセット位置
+h_write  type gtt_write.                 " 画面出力データヘッダ
+
+*----- 空白行
+append h_write to gdt_write.
+
+*----- ■処理結果サマリー
+h_write-line+gcf_off1(100) = text-t69.     " T69:■処理結果サマリー
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 処理行数
+h_write-line+gcf_off2(32) = text-t70.                     " T70:処理行数
+* オフセット位置取得
+perform frm_get_offleng using text-t70
+gcf_leng2
+changing tmp_leng.
+
+h_write-line+tmp_leng(2) = text-t20.                      " T20:':'
+tmp_leng = tmp_leng + 2.
+write cnt_index to h_write+tmp_leng(8)     " 処理行数
+right-justified.
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 処理伝票数
+h_write-line+gcf_off2(32) = text-t71.                     " T71:処理伝票数
+* オフセット位置取得
+perform frm_get_offleng using text-t71
+gcf_leng2
+changing tmp_leng.
+
+h_write-line+tmp_leng(2) = text-t20.                      " T20:':'
+tmp_leng = tmp_leng + 2.
+write cnt_den to h_write+tmp_leng(8)       " 処理伝票数
+right-justified.
+append h_write to gdt_write.
+clear  h_write.
+
+*----- 正常伝票数
+h_write-line+gcf_off2(32) = text-t72.                     " T72:正常伝票数
+* オフセット位置取得
+perform frm_get_offleng using text-t72
+gcf_leng2
+changing tmp_leng.
+
+h_write-line+tmp_leng(2) = text-t20.                      " T20:':'
+tmp_leng = tmp_leng + 2.
+write cnt_insrt to h_write+tmp_leng(8)     " 正常伝票数
+right-justified.
+append h_write to gdt_write.
+clear  h_write.
+
+*----- エラー伝票数
+h_write-line+gcf_off2(32) = text-t73.      " T73:エラー伝票数
+* オフセット位置取得
+perform frm_get_offleng using text-t73
+gcf_leng2
+changing tmp_leng.
+
+h_write-line+tmp_leng(2) = text-t20.                      " T20:':'
+tmp_leng = tmp_leng + 2.
+write cnt_inerr to h_write+tmp_leng(8)     " エラー伝票数
+right-justified.
+append h_write to gdt_write.
+clear  h_write.
+
+endform.                    " FRM_MAKE_WRITE_DATA_FOOT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WRITE_DATA
+*&---------------------------------------------------------------------*
+*       画面出力処理
+*----------------------------------------------------------------------*
+form frm_write_data .
+
+data:
+h_write type gtt_write.                  " 画面出力データヘッダ
+
+*----- 出力
+loop at gdt_write into h_write.
+
+if h_write is initial.
+skip 1.
+endif.
+
+write : / h_write.
+
+endloop.
+
+endform.                    " FRM_WRITE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DL_WRITE_DATA
+*&---------------------------------------------------------------------*
+*       処理結果情報ファイル出力
+*----------------------------------------------------------------------*
+form frm_dl_write_data .
+
+*----- ファイルの保存場所によってダウンロード方法を変える
+if p_server = gcf_chk.
+perform:
+frm_download_server.             " サーバへデータをDL
+elseif p_local = gcf_chk.
+perform:
+frm_download_local_x.            " ローカルへデータをDL
+endif.
+
+endform.                    " FRM_DL_WRITE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DOWNLOAD_LOCAL_X
+*&---------------------------------------------------------------------*
+*       ローカルへデータをDL
+*----------------------------------------------------------------------*
+form frm_download_local_x.
+
+data:
+tmp_file type string.                    " ファイル名
+
+constants:
+gcf_codepage type abap_encoding value '4110'. " コードページ:UTF-8
+
+*----- 型合わせ
+tmp_file = p_outfnm.
+
+*----- 汎用モジュールの呼び出し：ダウンロード
+call function 'GUI_DOWNLOAD'
+exporting
+filename                = tmp_file      " ファイル名
+write_field_separator   = gcf_chk       " TAB種別
+codepage                = gcf_codepage  " コードページ
+tables
+data_tab                = gdt_write    " 内部テーブル
+exceptions
+file_write_error        = 1
+no_batch                = 2
+gui_refuse_filetransfer = 3
+invalid_type            = 4
+no_authority            = 5
+unknown_error           = 6
+header_not_allowed      = 7
+separator_not_allowed   = 8
+filesize_not_allowed    = 9
+header_too_long         = 10
+dp_error_create         = 11
+dp_error_send           = 12
+dp_error_write          = 13
+unknown_dp_error        = 14
+access_denied           = 15
+dp_out_of_memory        = 16
+disk_full               = 17
+dp_timeout              = 18
+file_not_found          = 19
+dataprovider_exception  = 20
+control_flush_error     = 21
+others                  = 22.
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*   メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t74.           " T74:処理結果情報
+fld_errmsg-msgv2 = text-t75.           " T75:ダウンロード
+*   &1 の &2 に失敗しました。
+endif.
+
+endform.                    " FRM_DOWNLOAD_LOCAL_X
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DOWNLOAD_SERVER
+*&---------------------------------------------------------------------*
+*       サーバへデータをDL
+*----------------------------------------------------------------------*
+form frm_download_server .
+
+data:
+h_write  type gtt_write,               " 出力データヘッダ
+tmp_leng type i.                       " データ長
+
+*----- ファイルOPEN
+open dataset p_outfnm for output
+in text mode
+encoding utf-8 ignoring conversion errors.
+if sy-subrc <> 0.
+*   メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t74.           " T74:処理結果情報
+fld_errmsg-msgv2 = text-t75.           " T75:ダウンロード
+*   &1 の &2 に失敗しました。
+return.                                " PERFORM終了
+endif.
+
+*----- データ書き込みループ
+loop at gdt_write into h_write.
+
+tmp_leng = numofchar( h_write ).
+*-- データ書き込み処理
+transfer h_write to p_outfnm length tmp_leng.
+endloop.
+
+*----- ファイルCLOSE
+close dataset p_outfnm.
+
+endform.                    " FRM_DOWNLOAD_SERVER
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MEINS_CHK
+*&---------------------------------------------------------------------*
+*       数量単位チェック
+*----------------------------------------------------------------------*
+*      -->U_VALUE   項目値
+*      -->U_TEXT    項目名テキスト
+*      <--C_EFLG1   エラーフラグ(1明細)
+*----------------------------------------------------------------------*
+form frm_meins_chk using   value(u_text)  type c
+changing u_value        type any
+c_eflg1        type flag.
+data:
+tmp_meins      type meins.
+
+call function 'CONVERSION_EXIT_CUNIT_INPUT'
+exporting
+input          = u_value
+language       = sy-langu
+importing
+output         = tmp_meins
+exceptions
+unit_not_found = 1
+others         = 2.
+*----- 正常データの場合、内部形式の値に変更
+if sy-subrc = 0.
+u_value = tmp_meins.
+*----- エラーの場合
+else.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_value           " 項目値
+u_text            " 項目名テキスト
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+endif.
+
+endform.                    " FRM_NUMERIC_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ANLN_CHK                            #002 ADD
+*&---------------------------------------------------------------------*
+*       資産番号の存在チェック
+*----------------------------------------------------------------------*
+form frm_anln_chk  using    value(u_anln)  type c
+value(u_bukrs) type lfb1-bukrs
+value(u_ktopl) type t001-ktopl
+changing "C_AKONT        TYPE LFB1-AKONT
+c_eflg1        type flag.
+data:
+ldf_anln(17)   type c,
+ldf_anln1      type anla-anln1,
+ldf_anln2      type anla-anln2,
+ldf_ktogr      type anla-ktogr.
+
+ldf_anln = u_anln.
+split ldf_anln at '-' into ldf_anln1
+ldf_anln2.
+
+perform frm_alpha_insert using ldf_anln1    " 勘定コード
+changing ldf_anln1.  " 変換後
+
+perform frm_alpha_insert using ldf_anln2    " 勘定コード
+changing ldf_anln2.  " 変換後
+
+select single
+ktogr                               "勘定設定
+from anla
+into ldf_ktogr
+where bukrs = u_bukrs                     " 仕入先コード
+and anln1 = ldf_anln1
+and anln2 = ldf_anln2.                  " 会社コード
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*-- エラーフラグ(1明細)ON
+c_eflg1 = gcf_chk.
+*-- 画面出力データ作成(明細)
+perform frm_make_write_data_body
+using gcf_id            " メッセージクラス
+gcf_no_512        " メッセージ番号
+u_anln            " 資産番号
+text-t77          " 資産マスタ
+space             " メッセージ変数３
+space             " メッセージ変数４
+cnt_lines         " 明細番号
+cnt_recno         " 先頭行番号
+gcf_ng            " 結果
+gcf_no_512.       " エラー番号
+return.
+endif.
+
+* 統制勘定取得
+select single ktansw    "取得勘定
+from t095
+into wk_hkont
+where ktopl = u_ktopl
+and ktogr = ldf_ktogr.
+
+endform.                    " FRM_ANLN_CHK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILL_ACCOUNTAA
+*&---------------------------------------------------------------------*
+*       BAPI-資産明細情報作成
+*----------------------------------------------------------------------*
+form frm_fill_accountaa .
+
+data:
+h_accountgl         type  bapiacgl09,            " 勘定明細
+ldf_anln1           type anla-anln1,
+ldf_anln2           type anla-anln2.
+
+split gds_rec-newko at '-' into ldf_anln1
+ldf_anln2.
+
+*----- アルファ変換
+perform frm_alpha_insert:
+using wk_hkont                   " 総勘定元帳勘定
+*                   USING GDS_REC-HKONT
+changing h_accountgl-gl_account,     " 変換後
+using gds_rec-prctr                 " 利益センタ
+changing h_accountgl-profit_ctr,     " 変換後
+using gds_rec-kostl                 " 原価センタ
+changing h_accountgl-costcenter,     " 変換後
+using gds_rec-aufnr                 " 指図番号
+changing h_accountgl-orderid,        " 変換後
+using gds_rec-pprct                 " パートナ利益センタ
+changing h_accountgl-part_prctr,     " 変換後
+using gds_rec-segment               " セグメント
+changing h_accountgl-segment,         " 変換後
+using ldf_anln1                    " 資産番号
+changing h_accountgl-asset_no,        " 変換後
+using ldf_anln2                    " 資産補助番号
+changing h_accountgl-sub_number.      " 変換後
+*                   USING GDS_REC-NEWBW                " 取引タイプ
+*                CHANGING H_ACCOUNTGL-CS_TRANS_T.      " 変換後
+
+
+h_accountgl-itemno_acc     = cnt_lines.            " 会計伝票明細番号
+h_accountgl-ref_key_1      = gds_rec-xref1.          " 参照キー１
+h_accountgl-ref_key_2      = gds_rec-xref2.          " 参照キー２
+h_accountgl-ref_key_3      = gds_rec-xref3.          " 参照キー３
+h_accountgl-value_date     = gds_rec-valut.          " 起算日
+h_accountgl-item_text      = gds_rec-sgtxt.          " 明細テキスト
+h_accountgl-material       = gds_rec-matnr.          " 品目コード
+h_accountgl-quantity       = gds_rec-menge.          " 数量
+h_accountgl-base_uom       = gds_rec-meins.          " 数量単位
+h_accountgl-bus_area       = gds_rec-gsber.          " 事業領域
+h_accountgl-wbs_element    = gds_rec-ps_posid.       " WBS 要素
+h_accountgl-acct_type      = wk_koart.             " 勘定タイプ
+h_accountgl-tr_part_ba     = gds_rec-pargb.          " 取引先事業領域
+
+append h_accountgl to gdt_accountgl.
+
+endform.                    " FRM_FILL_ACCOUNTAA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CREATE_NEWFM
+*&---------------------------------------------------------------------*
+*      処理結果ファイル名＆BACKファイル名の作成
+*----------------------------------------------------------------------*
+form frm_create_newfm .
+constants:
+gcf_bak(04)  type c value '.BAK',        " コピーファイル用拡張子
+gcf_log(04)  type c value '.LOG'.
+
+*----- 新ファイル名作成
+concatenate p_filenm                       " 元ファイル名
+sy-datum
+sy-uzeit
+gcf_bak                        " 拡張子：'.BAK'
+into wk_bakfm.                      " の結合
+*----- 処理結果ファイル名作成
+if p_outfnm is initial.
+concatenate p_filenm                    " 元ファイル名
+sy-datum
+sy-uzeit
+gcf_log                          " 拡張子：'.LOG'
+into wk_logfm.                        " の結合
+p_outfnm = wk_logfm.
+else.
+if p_server = gcf_chk.
+concatenate p_outfnm                    " 元ファイル名
+sy-datum
+sy-uzeit
+gcf_log                            " 拡張子：'.LOG'
+into wk_logfm.                          " の結合
+p_outfnm = wk_logfm.
+endif.
+endif.
+endform.                    " FRM_CREATE_NEWFM
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DOWMLOAD_ERR_FILE
+*&---------------------------------------------------------------------*
+*       エラー再取込ファイル出力
+*       (エラー再取込ファイル作成処理用ロジック)
+*----------------------------------------------------------------------*
+form frm_dowmload_err_file.
+data:
+tmp_errfm1    type rlgrap-filename,   " ERR FILE NAME
+tmp_errfm2    type rlgrap-filename.   " ERR FILE NAME
+
+* エラー再取込ファイル作成
+perform frm_make_err_data.
+
+* 出力対象データがあれば出力
+if lines( gdt_err_rec ) <> 0.
+*   ファイル名称生成
+tmp_errfm1 = wk_errfm.
+*   拡張子除去(.txt .TXT .bak .BAK)
+replace '.txt' in tmp_errfm1 with ''.
+replace '.TXT' in tmp_errfm1 with ''.
+replace '.bak' in tmp_errfm1 with ''.
+replace '.BAK' in tmp_errfm1 with ''.
+concatenate tmp_errfm1   " ファイルパス
+'_ERR.TXT'   " _ERR.TXT'
+into tmp_errfm2.
+*----- ファイルの保存場所によってダウンロード方法を変える
+if p_server = gcf_chk.
+" ファイル出力(サーバ)
+perform frm_download_server_err using tmp_errfm2.
+elseif p_local = gcf_chk.
+" ファイル出力(ローカル)
+perform frm_download_local_err using tmp_errfm2.
+endif.
+endif.
+*
+
+endform.                    " FRM_UPLOAD_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_RE_DATA
+*&---------------------------------------------------------------------*
+*       エラー再取込ファイル作成
+*       (エラー再取込ファイル作成処理用ロジック)
+*----------------------------------------------------------------------*
+form frm_make_err_data.
+data:
+tmp_err_doc_flg like gcf_flgx,      "出力対象明細フラグ
+h_rec           type gtt_rec,       "テーブルヘッダ(取込ファイル)
+h_err_rec       type gtt_rec,       "テーブルヘッダ(出力ファイル)
+h_err_info      type gtt_err_info.  "テーブルヘッダ(エラー情報)
+
+* 変数・テーブルクリア
+clear:tmp_err_doc_flg,h_rec.
+refresh:gdt_err_rec.
+
+* 取込ファイル保持内部テーブル読込
+loop at gdt_rec into h_rec.
+*   伝票先頭行の場合(制御フラグ:X)
+if h_rec-tflag = gcf_flgx.
+*     出力対象明細フラグクリア
+clear tmp_err_doc_flg.
+*     エラー情報ファイル読込
+clear h_err_info.
+read table gdt_err_info
+with key recno_err = sy-tabix into h_err_info.
+if sy-subrc = 0.
+*       出力対象明細フラグON(X)
+tmp_err_doc_flg = gcf_flgx.
+*       ヘッダコピー
+clear h_err_rec.
+h_err_rec = h_rec.
+*       エラーメッセージセット
+h_err_rec-msg = h_err_info-msg.
+*       出力用内部テーブル APPEND
+append h_err_rec to gdt_err_rec.
+endif.
+*   出力対象明細フラグON(X)の場合
+elseif tmp_err_doc_flg = gcf_flgx.
+*     ヘッダコピー
+clear h_err_rec.
+h_err_rec = h_rec.
+*     エラー情報ファイル読込
+clear h_err_info.
+read table gdt_err_info
+with key recno_err = sy-tabix into h_err_info.
+if sy-subrc = 0.
+*       エラーメッセージセット
+h_err_rec-msg = h_err_info-msg.
+endif.
+*     出力用内部テーブル APPEND
+append h_err_rec to gdt_err_rec.
+endif.
+endloop.
+endform. "FRM_MAKE_RE_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DOWNLOAD_LOCAL_ERR
+*&---------------------------------------------------------------------*
+*       ローカルへファイルをDL
+*       (エラー再取込ファイル作成処理用ロジック)
+*----------------------------------------------------------------------*
+form frm_download_local_err using p_file.
+data:
+tmp_file type string.                    " ファイル名
+
+constants:
+gcf_codepage type abap_encoding value '4110'. " コードページ:UTF-8
+
+*----- 型合わせ
+tmp_file = p_file.
+
+*----- 汎用モジュールの呼び出し：ダウンロード
+call function 'GUI_DOWNLOAD'
+exporting
+filename                = tmp_file      " ファイル名
+write_field_separator   = gcf_chk       " TAB種別
+codepage                = gcf_codepage  " コードページ
+tables
+data_tab                = gdt_err_rec" 内部テーブル
+exceptions
+file_write_error        = 1
+no_batch                = 2
+gui_refuse_filetransfer = 3
+invalid_type            = 4
+no_authority            = 5
+unknown_error           = 6
+header_not_allowed      = 7
+separator_not_allowed   = 8
+filesize_not_allowed    = 9
+header_too_long         = 10
+dp_error_create         = 11
+dp_error_send           = 12
+dp_error_write          = 13
+unknown_dp_error        = 14
+access_denied           = 15
+dp_out_of_memory        = 16
+disk_full               = 17
+dp_timeout              = 18
+file_not_found          = 19
+dataprovider_exception  = 20
+control_flush_error     = 21
+others                  = 22.
+
+*----- エラーの場合
+if sy-subrc <> 0.
+*   メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t74.           " T74:処理結果情報
+fld_errmsg-msgv2 = text-t75.           " T75:ダウンロード
+*   &1 の &2 に失敗しました。
+endif.
+
+endform.                    " FRM_DOWNLOAD_LOCAL_ERR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DOWNLOAD_SERVER_ERR
+*&---------------------------------------------------------------------*
+*       サーバへファイルをDL
+*       (エラー再取込ファイル作成処理用ロジック)
+*----------------------------------------------------------------------*
+form frm_download_server_err using p_file.
+
+data:
+tmp_flg_err  type flag,            " エラーフラグ
+tmp_fnew     type rlgrap-filename, " 新ファイル名
+tmp_errmsg   type symsg.           " エラーメッセージ構造
+
+*----- BAKファイル作成
+perform frm_download_svfile        " サーバへデータをDL
+using gdt_err_rec  " 出力データ
+p_file       " 出力ファイル名
+cl_abap_char_utilities=>horizontal_tab
+space       " 使用無し(末尾空白削除フラグ)
+space       " UNICODEファイル作成
+changing tmp_errmsg. " エラーメッセージ構造
+if tmp_errmsg is initial.
+else.
+*     メッセージデータセット
+fld_errmsg-msgid = gcf_id.
+fld_errmsg-msgty = gcf_typ_s.
+fld_errmsg-msgno = gcf_no_505.
+fld_errmsg-msgv1 = text-t68.       " T68:バッチインプットファイル名
+fld_errmsg-msgv2 = text-t67.                             " T67:変更
+*     &1 の &2 に失敗しました。
+endif.
+
+endform.                    " FRM_DOWNLOAD_SERVER_ERR
+*********************************************** #004 ADD 20140911 STA **
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CURR_INFO
+*&---------------------------------------------------------------------*
+*       通貨コード取得
+*----------------------------------------------------------------------*
+form frm_curr_info .
+
+data:
+ldf_rldnr       type t881-rldnr,
+lds_org_info    type glx_org_info.         "所属情報
+
+clear:
+gds_curr_info.
+
+if gds_rec-ldgrp is initial.
+ldf_rldnr = gcf_rldnr_0l.
+else.
+ldf_rldnr = gds_rec-ldgrp.
+endif.
+
+read table gdt_curr_info into gds_curr_info
+with key bukrs = gds_rec-bukrs2
+rldnr = ldf_rldnr.
+
+if sy-subrc <> 0.
+
+*   通貨の取得
+call function 'G_GET_ORGANIZATIONAL_DATA'
+exporting
+i_rldnr                  = ldf_rldnr
+i_orgunit                = gds_rec-bukrs2
+*       JOIN_OF_VALUTYP_AND_CURT = 'X'
+*       SEND_ERROR_WHEN_DEPLD    = ' '
+importing
+organizational_info      = lds_org_info
+exceptions
+no_info_found            = 1
+error_in_setup           = 2
+error_in_depld           = 3
+others                   = 4.
+
+gds_curr_info-bukrs = lds_org_info-bukrs.
+gds_curr_info-rldnr = lds_org_info-rldnr.
+gds_curr_info-curr1 = lds_org_info-curr1.
+gds_curr_info-curr2 = lds_org_info-curr2.
+gds_curr_info-curr3 = lds_org_info-curr3.
+append gds_curr_info to gdt_curr_info.
+
+endif.
+
+
+endform.                    " FRM_CURR_INFO
+*********************************************** #004 ADD 20140911 END **
+*Text symbol text・
+*T01:Document Entry
+*T02:File Option
+*T03:Processing Options
+*T04:Server
+*T05:Local
+*T06:Post Documents (FB01)
+*T07:Park Documents(FBV1)
+*T08:Test Run
+*T09:Batch input file
+*T10:Processing results information File Name
+*T11:【　Batch Input For Documents　Processing Results Information　】
+*T12:■Executed Information
+*T13:InputFileName
+*T14:ProcessingResultsFileName
+*T15:File Option
+*T16:Batch Input Session Name
+*T17:Processing Options
+*T18:Test Run
+*T19:Executed Time
+*T20::
+*T21:Real Run
+*T22:■Processing Results
+*T23:Batch input
+*T24:Start
+*T25:End
+*T26:Company Code
+*T28:Item
+*T29:Top Line Number of Document:
+*T30:Result:
+*T31:Error No:
+*T32:Message:
+*T33:Calculate Tax
+*T34:Post Control
+*T35:Document Date
+*T36:Posting Day
+*T37:Period and Fiscal Year
+*T38:Document Type
+*T39:Currency Key
+*T40:Posting Key
+*T41:Costomer Master  (Company Code)
+*T42:Supplier Master  (Company Code)
+*T43:Account Code Master (Company Code)
+*T44:Special G/L
+*T45:Transaction Type
+*T46:Post Key or Asset Type
+*T47:Control Accont Code
+*T48:Amount in Local Currency
+*T49:Tax code
+*T50:Tax Line item Control
+*T51:Cost Center
+*T52:Profit Center
+*T53:Business Area
+*T54:Payment Block
+*T55:Payment Method
+*T56:Amount in document currency
+*T57:Bline Date
+*T58:Drawe Date
+*T59:Value date
+*T60:Asset Value Date
+*T61:Quantity
+*T63:Pmnt terms
+*T64:Exchange rate
+*T67:Change
+*T68:Batch input file name
+*T69:■Processing Results Summary
+*T70:Numbers Of Processing Line
+*T71:Numbers Of Processing Doucment
+*T72:Numbers Of Normal Doucment
+*T73:Numbers Of Error Doucment
+*T74:Processing results information
+*T75:Download
+*T76:Unit of Measure
+*T77:2nd Currency
+*T78:3nd Currency
+*Selection text・
+*P_FILENM:        InputFileName
+*P_OUTFNM:        ProcessingResultsFileName
+*P_SESSNM:        Batch Input Session Name

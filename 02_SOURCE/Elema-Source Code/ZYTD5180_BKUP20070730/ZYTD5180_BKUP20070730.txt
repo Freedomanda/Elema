@@ -1,0 +1,428 @@
+REPORT ZYTD5160 MESSAGE-ID Z1 .
+
+TABLES : KNMT ,
+MARA .
+
+DATA : BDC_TAB TYPE TABLE OF BDCDATA WITH HEADER LINE ,
+IN_DATA(1000) TYPE C ,
+BDC_MSG TYPE TABLE OF BDCMSGCOLL WITH HEADER LINE .
+*----------------------------------------------------------------------*
+* 型定義
+*----------------------------------------------------------------------*
+TYPES : BEGIN OF TYP_FILE ,
+KUNNR(10) TYPE C ,          "得意先コード
+MATNR(18) TYPE C ,          "品目コード
+KDMAT(35) TYPE C ,          "得意先品目
+POSTX(40) TYPE C ,          "得意先品目テキスト
+LTX01(30) TYPE C ,          "得意先品目情報
+LTX02(30) TYPE C ,          "納品書用備考
+END OF TYP_FILE ,
+BEGIN OF TYP_DATA  ,
+KUNNR LIKE KNMT-KUNNR ,     "仕入先コード
+MATNR LIKE KNMT-MATNR ,     "品目コード
+KDMAT LIKE KNMT-KDMAT ,     "得意先品目
+POSTX LIKE KNMT-POSTX ,     "得意先品目テキスト
+LTX01(30) TYPE C ,          "得意先品目情報
+LTX02(30) TYPE C ,          "納品書用備考
+END OF TYP_DATA  ,
+BEGIN OF TYP_MARA ,
+MATNR LIKE MARA-MATNR ,     "品目コード
+MEINS LIKE MARA-MEINS ,     "基本数量単位
+END OF TYP_MARA .
+*----------------------------------------------------------------------*
+* 変数宣言
+*----------------------------------------------------------------------*
+DATA :
+D_TAB TYPE TABLE OF TYP_DATA ,
+D_WRK TYPE TYP_DATA ,
+F_TAB TYPE TABLE OF TYP_FILE ,
+F_WRK TYPE TYP_FILE ,
+M_TAB TYPE TABLE OF TYP_MARA ,
+M_WRK TYPE TYP_MARA .
+
+DATA : W_MEINS(3)   TYPE C,          "発注単位
+W_CNT        TYPE I,          "テーブル行数カウンタ
+FLG_MEINS(1) TYPE C,          "単位変換フラグ
+FLG_WRITE(1) TYPE C.          "WRITEフラグ
+
+DATA : BDC_TRAN LIKE SYST-TCODE VALUE 'VD52' ,
+BDC_MODE(1) TYPE C VALUE 'N' .
+*      BDC_MODE(1) TYPE C VALUE 'A' .
+
+*----------------------------------------------------------------------*
+* 選択画面
+*----------------------------------------------------------------------*
+PARAMETERS : P_FILE LIKE RLGRAP-FILENAME.
+* Add 2006.03.16 --->
+Parameters : P_LOCAL RadioButton Group R_1 , "ローカル
+P_SERVE RadioButton Group R_1 . "サーバー
+* Add 2006.03.16 <---
+AT SELECTION-SCREEN .
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+PERFORM WS_FILENAME_GET USING P_FILE.
+START-OF-SELECTION .
+
+PERFORM READ_FILE .
+PERFORM DATA_GET .
+PERFORM CHK_ITEM .
+LOOP AT F_TAB INTO F_WRK .
+READ TABLE D_TAB INTO D_WRK WITH KEY KUNNR = F_WRK-KUNNR
+MATNR = F_WRK-MATNR
+BINARY SEARCH.
+PERFORM BDC_SET .
+PERFORM CALL_TRAN .
+ENDLOOP .
+
+*----------------------------------------------------------------------*
+* ファイルパス取得
+*----------------------------------------------------------------------*
+FORM WS_FILENAME_GET USING P_FILE.
+
+CALL FUNCTION 'WS_FILENAME_GET'
+EXPORTING
+DEF_PATH         = 'C:\SAPDATA'
+MASK             = '*.*,ALL FILES,*.*.'
+MODE             = 'O'
+IMPORTING
+FILENAME         = P_FILE
+EXCEPTIONS
+INV_WINSYS       = 1
+NO_BATCH         = 2
+SELECTION_CANCEL = 3
+SELECTION_ERROR  = 4
+OTHERS           = 5.
+
+
+ENDFORM.
+*----------------------------------------------------------------------*
+* ファイル読み込み
+*----------------------------------------------------------------------*
+FORM READ_FILE .
+* Add 2006.03.16 --->
+Data : L_LINE(1000) Type C .
+Data : W_TAB Type X Value '09' .
+If P_LOCAL EQ 'X' .
+* Add 2006.03.16 <---
+CALL FUNCTION 'WS_UPLOAD'
+EXPORTING
+FILENAME                = P_FILE
+FILETYPE                = 'DAT'
+TABLES
+DATA_TAB                = F_TAB
+EXCEPTIONS
+CONVERSION_ERROR        = 1
+FILE_OPEN_ERROR         = 2
+FILE_READ_ERROR         = 3
+INVALID_TYPE            = 4
+NO_BATCH                = 5
+UNKNOWN_ERROR           = 6
+INVALID_TABLE_WIDTH     = 7
+GUI_REFUSE_FILETRANSFER = 8
+CUSTOMER_ERROR          = 9
+OTHERS                  = 10.
+
+*   汎用モジュール失敗時エラーメッセージ出力
+IF SY-SUBRC NE 0.
+MESSAGE I616 .
+STOP .
+ELSE.
+ENDIF.
+* Add 2006.03.16 --->
+Else .
+Open Dataset P_FILE For Input IN TEXT MODE .
+If SY-SUBRC NE 0 .
+MESSAGE I616 .
+STOP .
+Else .
+Do .
+Read Dataset P_FILE Into L_LINE .
+If SY-SUBRC NE 0 .
+Exit .
+EndIf .
+Split L_LINE At W_TAB
+Into F_WRK-KUNNR
+F_WRK-MATNR
+F_WRK-KDMAT
+F_WRK-POSTX
+F_WRK-LTX01
+F_WRK-LTX02
+.
+Append F_WRK To F_TAB .
+Clear : F_WRK .
+EndDo .
+Close DataSet P_FILE .
+EndIf .
+EndIf .
+* Add 2006.03.16 <---
+
+
+* 取得データ０件時エラーメッセージ出力
+CLEAR : W_CNT.
+DESCRIBE TABLE F_TAB LINES W_CNT .
+IF W_CNT = 0 .
+MESSAGE I616 .
+STOP .
+ELSE.
+ENDIF.
+
+* 取得データ変換
+LOOP AT F_TAB INTO F_WRK.
+PERFORM CONV_ALPHA_IN_SYORI USING F_WRK-KUNNR
+CHANGING F_WRK-KUNNR.
+PERFORM CONV_MATN1_IN_SYORI USING F_WRK-MATNR
+CHANGING F_WRK-MATNR.
+MODIFY F_TAB FROM F_WRK.
+ENDLOOP.
+
+ENDFORM .
+*----------------------------------------------------------------------*
+* 対象データ取得
+*----------------------------------------------------------------------*
+FORM DATA_GET .
+
+* 変更前データ取得
+SELECT KUNNR
+MATNR
+KDMAT
+POSTX
+INTO CORRESPONDING FIELDS OF TABLE D_TAB
+FROM KNMT
+FOR ALL ENTRIES IN F_TAB
+WHERE MATNR = F_TAB-MATNR
+AND KUNNR = F_TAB-KUNNR
+.
+* 取得データ０件時エラーメッセージ出力
+CLEAR : W_CNT.
+DESCRIBE TABLE D_TAB LINES W_CNT .
+IF W_CNT = 0 .
+MESSAGE I616 .
+STOP .
+ELSE.
+SORT D_TAB BY KUNNR MATNR .
+ENDIF.
+
+* 品目マスタ取得
+SELECT MATNR
+MEINS
+INTO CORRESPONDING FIELDS OF TABLE M_TAB
+FROM MARA
+FOR ALL ENTRIES IN F_TAB
+WHERE MATNR = F_TAB-MATNR.
+
+ENDFORM .
+*----------------------------------------------------------------------*
+* BDCテーブルセット
+*----------------------------------------------------------------------*
+FORM BDC_SET .
+
+CLEAR : W_MEINS.
+
+PERFORM SET_BDC USING :
+* 第一画面
+'RV10A001' '1000' 'X'  ,
+'BDC_CURSOR' 'MATNR_R-LOW' ''  ,
+'BDC_OKCODE' '=ONLI' ''  ,
+'KUNNR' F_WRK-KUNNR ''  ,
+'VKORG' '1000' ''  ,
+'VTWEG' '10' ''  ,
+'MATNR_R-LOW' F_WRK-MATNR ''  ,
+*
+'SAPMV10A' '200' 'X'  ,
+'BDC_CURSOR' 'MV10A-KDMAT(01)' ''  ,
+'BDC_OKCODE' '=SELE' ''  ,
+*
+'SAPMV10A' '0300' 'X'  ,
+'BDC_CURSOR' 'MV10A-POSTX' ''  ,
+'BDC_OKCODE' '=TEXT' ''  ,
+*
+'SAPLV70T' '101' 'X'  ,
+'BDC_CURSOR' 'LV70T-LTX01(02)' ''  ,
+'BDC_OKCODE' '=UPD' ''  .
+If F_WRK-LTX01 EQ 'X'  .
+PERFORM SET_BDC USING :
+'LV70T-LTX01(01)' '' ''  .
+Else .
+If Not ( F_WRK-LTX01 Is Initial ) .
+PERFORM SET_BDC USING :
+'LV70T-LTX01(01)' F_WRK-LTX01 ''  .
+EndIf .
+EndIf .
+
+If F_WRK-LTX02 EQ 'X'  .
+PERFORM SET_BDC USING :
+'LV70T-LTX01(02)'  '' ''  .
+Else .
+If Not ( F_WRK-LTX02 Is Initial ) .
+PERFORM SET_BDC USING :
+'LV70T-LTX01(02)' F_WRK-LTX02 ''  .
+EndIf .
+EndIf .
+
+*
+PERFORM SET_BDC USING :
+'SAPMV10A' '0300' 'X'  ,
+'BDC_CURSOR' 'MV10A-KDMAT' ''  ,
+'BDC_OKCODE' '=SICH' ''  ,
+'MV10A-KDMAT' F_WRK-KDMAT ''  .
+*     'MV10A-POSTX' F_WRK-POSTX ''  .
+If F_WRK-POSTX EQ 'X'  .
+PERFORM SET_BDC USING :
+'MV10A-POSTX' '' ''  .
+Else .
+If Not ( F_WRK-POSTX Is Initial ) .
+PERFORM SET_BDC USING :
+'MV10A-POSTX' F_WRK-POSTX ''  .
+EndIf .
+EndIf .
+
+
+ENDFORM .
+*----------------------------------------------------------------------*
+* トランザクションコール
+*----------------------------------------------------------------------*
+FORM CALL_TRAN .
+
+DATA : W_MSG LIKE MESSAGE ,
+W_MSGNO LIKE SY-MSGNO .
+
+CALL TRANSACTION BDC_TRAN
+USING   BDC_TAB
+MODE    BDC_MODE
+MESSAGES INTO BDC_MSG
+.
+
+LOOP AT BDC_MSG WHERE MSGTYP = 'E' OR MSGTYP = 'A'.
+MOVE : BDC_MSG-MSGNR TO W_MSGNO ,
+'X'           TO FLG_WRITE.
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID         = BDC_MSG-MSGID
+MSGNO         = W_MSGNO
+MSGTY         = BDC_MSG-MSGTYP
+MSGV1         = BDC_MSG-MSGV1
+MSGV2         = BDC_MSG-MSGV2
+MSGV3         = BDC_MSG-MSGV3
+MSGV4         = BDC_MSG-MSGV4
+*         MSGV5         = BDC_MSG-MSGV5
+IMPORTING
+*         ERROR         =
+MESSG         = W_MSG
+*         MSGLN         =
+.
+MESSAGE ID BDC_MSG-MSGID
+*            Type BDC_MSG-MSGTYP
+TYPE 'S'
+NUMBER W_MSGNO
+WITH BDC_MSG-MSGV1
+BDC_MSG-MSGV2
+BDC_MSG-MSGV3
+BDC_MSG-MSGV4
+.
+WRITE : /1 BDC_MSG-MSGTYP,
+3 W_MSG-MSGTX .
+
+ENDLOOP .
+
+IF FLG_WRITE IS INITIAL.
+PERFORM WRITE_CHANGE_OK.
+ENDIF.
+
+ULINE.
+
+CLEAR   : FLG_WRITE.
+REFRESH : BDC_TAB , BDC_MSG .
+CLEAR   : D_WRK , F_WRK .
+
+ENDFORM .
+*----------------------------------------------------------------------*
+* BDCセット
+*----------------------------------------------------------------------*
+FORM SET_BDC USING P_DAT P_VAL P_FLG .
+MOVE : P_FLG TO BDC_TAB-DYNBEGIN .
+IF P_FLG EQ 'X' .
+MOVE : P_DAT TO BDC_TAB-PROGRAM ,
+P_VAL TO BDC_TAB-DYNPRO .
+ELSE .
+MOVE : P_DAT TO BDC_TAB-FNAM ,
+P_VAL TO BDC_TAB-FVAL .
+ENDIF .
+APPEND : BDC_TAB .
+CLEAR : BDC_TAB .
+ENDFORM .
+*----------------------------------------------------------------------*
+* 項目チェック
+*----------------------------------------------------------------------*
+FORM CHK_ITEM.
+LOOP AT F_TAB INTO F_WRK.
+READ TABLE D_TAB INTO D_WRK WITH KEY KUNNR = F_WRK-KUNNR
+MATNR = F_WRK-MATNR
+BINARY SEARCH.
+
+IF SY-SUBRC = 0.
+
+IF F_WRK-KDMAT IS INITIAL. "得意先品目が空白
+MOVE D_WRK-KDMAT TO F_WRK-KDMAT.
+ENDIF.
+
+
+MODIFY F_TAB FROM F_WRK .
+
+ELSE.
+
+WRITE : / '品目'     , F_WRK-MATNR ,
+'得意先'   , F_WRK-KUNNR ,
+'は得意先品目マスタに存在しませんでした。'.
+ULINE .
+DELETE TABLE F_TAB FROM F_WRK .
+
+ENDIF.
+
+ENDLOOP.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+* 前ゼロ埋め変換
+*----------------------------------------------------------------------*
+FORM CONV_ALPHA_IN_SYORI USING P_IN
+CHANGING P_OUT.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = P_IN
+IMPORTING
+OUTPUT = P_OUT.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+* 前ゼロ埋め変換
+*----------------------------------------------------------------------*
+FORM CONV_MATN1_IN_SYORI USING P_IN
+CHANGING P_OUT.
+
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT  = P_IN
+IMPORTING
+OUTPUT = P_OUT.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+* 変更成功メッセージ出力
+*----------------------------------------------------------------------*
+FORM WRITE_CHANGE_OK.
+
+WRITE : / '品目'     , F_WRK-MATNR ,
+'得意先'   , F_WRK-KUNNR ,
+'の得意先品目マスタが下記のとおり変更されました。'.
+IF F_WRK-KDMAT NE D_WRK-KDMAT.
+WRITE: / '得意先品目：' , D_WRK-KDMAT , '⇒' , F_WRK-KDMAT.
+ENDIF.
+
+IF F_WRK-POSTX NE D_WRK-POSTX.
+WRITE: / '得意先品目テキスト：' , D_WRK-POSTX , '⇒' , F_WRK-POSTX.
+ENDIF.
+
+WRITE: / '得意先品目情報：', F_WRK-LTX01.
+WRITE: / '納品書用備考：' , F_WRK-LTX02.
+ENDFORM.

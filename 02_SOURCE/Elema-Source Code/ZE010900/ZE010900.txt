@@ -1,0 +1,435 @@
+************************************************************************
+* [プログラム名]
+*   ZE010900       メールアドレスダウンロード
+*
+* [処理概要]
+*   ・EDIでエラーが発生した場合に、担当部署へその旨メールをなげる。
+*　　その為、常にR/3に登録されている部署(プラント：購買)のメールアドレス
+*    をEDIサーバの該当マスタと同期を取る為に、PGMで定期的に情報をダウン
+*    ロードする。
+*
+* [改定履歴]
+*　YYYY/MM/DD  Programar         Description
+*  2002/02/05  PSD K.Usami        新規開発
+*  2002/06/20   PSD T.SAITOH      再移送
+*& 2012/08/22  ISID              ES-UP
+************************************************************************
+REPORT  ZE010900                      .
+************************************************************************
+* TYPES
+************************************************************************
+* プラント型
+TYPES: BEGIN OF typ_plant,
+WERKS      TYPE T001W-WERKS,     " プラント
+ADRNR      TYPE T001W-ADRNR,     " 住所
+END   OF typ_plant.
+* メールアドレス型
+TYPES: BEGIN OF typ_add,
+SMTP_ADDR  TYPE ADR6-SMTP_ADDR,  " メールアドレス
+ADDRNUMBER TYPE ADR6-ADDRNUMBER,
+END   OF typ_add.
+* カナ名称型
+TYPES: BEGIN OF typ_kana,
+NAME3       TYPE ADRC-NAME3,     " カナ名称
+END   OF typ_kana.
+* 帳票出力型
+TYPES: BEGIN OF typ_file,
+WERKS(4)       TYPE c,     " プラント
+NAME3(35)      TYPE c,     " カナ名称
+SMTP_ADDR(50)  TYPE c,     " メールアドレス
+S_FLG(1)       TYPE c,     " 削除フラグ
+DATUM(8)       TYPE c,     " 送信日
+UZEIT(6)       TYPE c,     " 送信時間
+END   OF typ_file.
+
+***********************************************************************
+* DATA
+***********************************************************************
+* システム項目変数
+DATA: G_REPID                 TYPE SY-REPID,        " プログラムＩＤ
+G_DATUM                 TYPE SY-DATUM,        " システム日付
+G_UZEIT                 TYPE SY-UZEIT.        " システム時刻
+
+* プラント用内部テーブル
+DATA: GF_PLANT   TYPE          typ_plant,
+GT_PLANT   LIKE TABLE OF GF_PLANT.
+* メールアドレス用内部テーブル
+DATA: GF_ADDR    TYPE          typ_add,
+GT_ADDR    LIKE TABLE OF GF_ADDR.
+* カナ名称用内部テーブル
+DATA: GF_KANA    TYPE          typ_kana,
+GT_KANA    LIKE TABLE OF GF_KANA.
+
+* 対象データ存在チェックフラグ
+DATA: flg(1) TYPE c,
+eflg(1) TYPE c.
+* ファイル出力件数カウントフラグ
+DATA: cnt_flg TYPE i VALUE 0.
+
+* ダウンロードファイル用内部ＴＢＬ
+DATA: GF_FILE TYPE typ_file,
+GT_FILE LIKE TABLE OF GF_FILE.
+* Mod ES-UP 2012/10/25 -->
+*DATA: GF_DATA(125) TYPE c,
+DATA: GF_DATA TYPE string,
+* Mod ES-UP 2012/10/25 <--
+GT_DATA LIKE TABLE OF GF_DATA.
+* ファイル名
+DATA: IFILE LIKE RLGRAP-FILENAME.
+
+*** 汎用モジュール SXPG_CALL_SYSTEM ***
+DATA: BEGIN OF PROTOCOL.
+INCLUDE STRUCTURE BTCXPM.
+DATA: END OF PROTOCOL.
+
+DATA: EXEC_PROTOCOL   LIKE TABLE OF PROTOCOL,
+COMMANDNAME     LIKE SXPGCOLIST-NAME,
+STATUS          LIKE EXTCMDEXEX-STATUS.
+*---------------------------------------------------------------------
+* 定数宣言
+*---------------------------------------------------------------------
+CONSTANTS:   CNS_T001W(5)    TYPE C VALUE 'T001W',
+CNS_ADR6(4)     TYPE C VALUE 'ADR6',
+CNS_ADRC(4)     TYPE C VALUE 'ADRC'.
+* Add ES-UP 2012/08/22 -->
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/08/22 <--
+************************************************************************
+** 選択画面定義
+************************************************************************
+SELECT-OPTIONS: P_WERKS FOR GF_PLANT-WERKS.       " プラント
+PARAMETERS:     P_IFILE TYPE RLGRAP-FILENAME.     "出力ファイル
+***********************************************************************
+* AT SELECTION-SCREEN
+***********************************************************************
+AT SELECTION-SCREEN.
+*--- 初期処理
+PERFORM frm_init.
+* a)出力ファイル入力チェック
+IF P_IFILE = ' '.
+MESSAGE s805(Z1) WITH text-003.
+STOP.
+ENDIF.
+* b)プラント存在チェック
+PERFORM frm_check_plant.
+************************************************************************
+** START-OF-SELECTION
+************************************************************************
+START-OF-SELECTION.
+* ダウンロードファイル作成処理
+PERFORM frm_make_file.
+IF flg <> 1. " 対象アドレスが1件もない場合
+MESSAGE i811(Z1).
+STOP.
+ENDIF.
+
+* ダウンロードファイル出力処理
+PERFORM frm_write_file.
+*--- 終了処理
+* 処理終了メッセージ出力
+IF cnt_flg <> 0.
+MESSAGE i200(Z1) WITH cnt_flg.
+ENDIF.
+***********************************************************************
+** Form
+***********************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  frm_init
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM frm_init.
+* システム項目用変数設定
+G_REPID = SY-REPID.   " プログラムＩＤ取得
+G_DATUM = SY-DATUM.   " システム日付取得
+G_UZEIT = SY-UZEIT.   " システム時刻取得
+ENDFORM.                    " frm_init
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_plant
+*&---------------------------------------------------------------------*
+*       プラント存在チェック
+*----------------------------------------------------------------------*
+FORM frm_check_plant.
+
+IF P_WERKS IS INITIAL.
+ELSE.
+SELECT SINGLE
+WERKS
+ADRNR
+INTO CORRESPONDING FIELDS OF GF_PLANT
+FROM T001W
+WHERE WERKS IN P_WERKS.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE i021(Z1).
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE a603(Z1) WITH G_REPID CNS_T001W SY-SUBRC.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " frm_check_plant
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_file
+*&---------------------------------------------------------------------*
+*       ダウンロードファイル作成処理
+*----------------------------------------------------------------------*
+FORM frm_make_file.
+* a)プラント取得処理
+PERFORM frm_get_plant.
+
+LOOP AT GT_PLANT INTO GF_PLANT.
+CLEAR: eflg.
+
+* b)メールアドレス取得処理
+PERFORM frm_get_add.
+IF eflg = 1.
+CONTINUE.
+ENDIF.
+* c)カナ名称取得処理
+PERFORM frm_get_kana.
+
+* d)削除フラグ設定処理
+
+* e)送信日設定処理
+GF_FILE-DATUM = G_DATUM.
+* f)送信時間設定処理
+GF_FILE-UZEIT = G_UZEIT.
+
+* g)帳票出力用内部TBLへのレコード追加
+APPEND GF_FILE TO GT_FILE.
+CLEAR GF_FILE.
+ENDLOOP.
+
+ENDFORM.                    " frm_make_file
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_plant
+*&---------------------------------------------------------------------*
+*       プラント取得処理
+*----------------------------------------------------------------------*
+FORM frm_get_plant.
+
+IF P_WERKS IS INITIAL.
+SELECT
+WERKS
+ADRNR
+INTO CORRESPONDING FIELDS OF TABLE GT_PLANT
+FROM T001W.
+ELSE.
+SELECT
+WERKS
+ADRNR
+INTO CORRESPONDING FIELDS OF TABLE GT_PLANT
+FROM T001W
+WHERE WERKS IN P_WERKS.
+ENDIF.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE i811(Z1).
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE a603(Z1) WITH G_REPID CNS_T001W SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_get_plant
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_add
+*&---------------------------------------------------------------------*
+*       メールアドレス取得処理
+*----------------------------------------------------------------------*
+FORM frm_get_add.
+
+SELECT SINGLE
+SMTP_ADDR
+ADDRNUMBER
+INTO CORRESPONDING FIELDS OF GF_ADDR
+FROM ADR6
+WHERE ADDRNUMBER = GF_PLANT-ADRNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_FILE-SMTP_ADDR = GF_ADDR-SMTP_ADDR.
+GF_FILE-WERKS = GF_PLANT-WERKS.
+flg = 1.
+WHEN 4.    " 対象データなし
+eflg = 1.
+WHEN 8.    " システムエラー
+MESSAGE a603(Z1) WITH G_REPID CNS_ADR6 SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_get_add
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_add
+*&---------------------------------------------------------------------*
+*       カナ名称取得処理
+*----------------------------------------------------------------------*
+FORM frm_get_kana.
+
+SELECT SINGLE
+NAME3
+INTO CORRESPONDING FIELDS OF GF_KANA
+FROM ADRC
+WHERE ADDRNUMBER = GF_PLANT-ADRNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_FILE-NAME3 = GF_KANA-NAME3.
+WHEN 4.    " 対象データなし
+WHEN 8.    " システムエラー
+MESSAGE a603(Z1) WITH G_REPID CNS_ADRC SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_get_kana
+*&---------------------------------------------------------------------*
+*&      Form  frm_update
+*&---------------------------------------------------------------------*
+*       ダウンロードファイル出力処理
+*----------------------------------------------------------------------*
+FORM frm_write_file.
+
+* EDIサーバへダウンロード
+PERFORM frm_file_download.
+* ファイル読込BATの起動
+PERFORM frm_sxpg_call_system.
+
+ENDFORM.                    " frm_write_file.
+*&---------------------------------------------------------------------*
+*&      Form  frm_file_download
+*&---------------------------------------------------------------------*
+*       EDIサーバへダウンロード
+*----------------------------------------------------------------------*
+FORM frm_file_download.
+
+PERFORM frm_edit_file.                      "ファイル編集処理
+PERFORM frm_output_file.                 "作成ファイル出力処理
+
+ENDFORM.                    " frm_file_download
+*&---------------------------------------------------------------------*
+*&      Form  frm_call_system
+*&---------------------------------------------------------------------*
+*       ファイル読込BATの起動
+*----------------------------------------------------------------------*
+FORM frm_sxpg_call_system.
+COMMANDNAME = 'ZEDI_OUTBOUNDM'.
+CALL FUNCTION 'SXPG_CALL_SYSTEM'
+EXPORTING
+COMMANDNAME                      = COMMANDNAME
+*   ADDITIONAL_PARAMETERS            = ' '
+IMPORTING
+STATUS                           = STATUS
+*   EXITCODE                         =
+TABLES
+EXEC_PROTOCOL                    = EXEC_PROTOCOL
+EXCEPTIONS
+NO_PERMISSION                    = 1
+COMMAND_NOT_FOUND                = 2
+PARAMETERS_TOO_LONG              = 3
+SECURITY_RISK                    = 4
+WRONG_CHECK_CALL_INTERFACE       = 5
+PROGRAM_START_ERROR              = 6
+PROGRAM_TERMINATION_ERROR        = 7
+X_ERROR                          = 8
+PARAMETER_EXPECTED               = 9
+TOO_MANY_PARAMETERS              = 10
+ILLEGAL_COMMAND                  = 11
+OTHERS                           = 12
+.
+
+IF SY-SUBRC <> 0.
+MESSAGE i400(Z1) WITH text-001.
+STOP.
+ENDIF.
+
+
+ENDFORM.                    " frm_sxpg_call_system
+*&---------------------------------------------------------------------*
+*&      Form  frm_edit_file
+*&---------------------------------------------------------------------*
+*       出力ファイル編集処理
+*----------------------------------------------------------------------*
+FORM frm_edit_file.
+
+LOOP AT GT_FILE INTO GF_FILE.
+
+CONCATENATE '"'  GF_FILE-WERKS      '"'  ','
+'"'  GF_FILE-NAME3      '"'  ','
+'"'  GF_FILE-SMTP_ADDR  '"'  ','
+'"'  GF_FILE-S_FLG      '"'  ','
+'"'  GF_FILE-DATUM      '"'  ','
+'"'  GF_FILE-UZEIT      '"'
+INTO GF_DATA.
+
+APPEND GF_DATA TO GT_DATA.
+CLEAR: GF_DATA.
+
+ENDLOOP.
+
+ENDFORM.                    " frm_edit_file
+*&---------------------------------------------------------------------*
+*&      Form  frm_output_file
+*&---------------------------------------------------------------------*
+*       ファイル出力処理
+*----------------------------------------------------------------------*
+FORM frm_output_file.
+* Mod ES-UP 2012/08/22 -->
+*  OPEN DATASET P_IFILE FOR OUTPUT IN TEXT MODE.
+data: l_conv type ref to zcl_conv_to_sjis,
+l_errfile type string,
+l_message type string,
+l_openflg type abap_bool.
+create object l_conv.
+l_errfile = l_conv->get_error_filename( filename = P_IFILE
+foldnum  = '00' ).
+if l_errfile is initial.
+message e001(z2).
+endif.
+
+OPEN DATASET P_IFILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE l_conv->codepage
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/08/22 <--
+IF SY-SUBRC = 8.
+MESSAGE i209(Z1).
+STOP.
+ENDIF.
+
+* Add ES-UP 2012/10/29 -->
+l_openflg = abap_false.
+* Add ES-UP 2012/10/29 <--
+LOOP AT GT_DATA INTO GF_DATA.
+* Add ES-UP 2012/10/29 -->
+if l_conv->convert_check( GF_DATA ) = abap_true.
+* Add ES-UP 2012/10/29 <--
+TRANSFER GF_DATA TO P_IFILE.
+cnt_flg = cnt_flg + 1.
+* Add ES-UP 2012/10/29 -->
+else.
+if l_openflg = abap_false.
+l_openflg = abap_true.
+open dataset l_errfile for output
+in legacy text mode code page l_conv->codepage
+message l_message
+ignoring conversion errors.
+if sy-subrc <> 0.
+message l_message type 'E'.
+endif.
+endif.
+transfer GF_DATA to l_errfile.
+endif.
+* Add ES-UP 2012/10/29 <--
+ENDLOOP.
+
+* Add ES-UP 2012/10/29 -->
+if l_openflg = abap_true.
+close dataset l_errfile.
+message s002(z2).
+endif.
+* Add ES-UP 2012/10/29 <--
+CLOSE DATASET P_IFILE.
+
+ENDFORM.                    " frm_output_file

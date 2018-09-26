@@ -1,0 +1,1442 @@
+*&-------------------------------------------------------------------
+*& Report  ZF020600
+*&-------------------------------------------------------------------
+* [プログラム名]
+*   ZF020500        仕入先ＢＤＣ（取引銀行）
+*
+* [処理概要]
+*　　　仕入先の取引銀行をＢＤＣ更新する
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2005/07/22   DMC S.MIKAMI      新規開発
+*& 2012/08/17   ISID              ES-UP
+*& 2014/08/29   ISID18            コードページを"UTF-8"に修正
+*& 2015/01/12   ISID11            アップロード時のBOMロジック改修
+*& 2015/02/04   ISID18            コードページ処理の再修正
+*&-------------------------------------------------------------------
+
+REPORT ZF020600
+NO STANDARD PAGE HEADING
+LINE-SIZE 170
+LINE-COUNT 58
+MESSAGE-ID Y1.
+
+************************************************************************
+*  宣言部
+************************************************************************
+*----------------------------------------------------------------------*
+*  TABLES
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*  構造定義
+*----------------------------------------------------------------------*
+
+* 変更対象ファイルアップロード用
+TYPES: BEGIN OF TYP_FILE,
+LIFNR   TYPE LFB1-LIFNR,  "支払先コード
+HBKID   TYPE LFB1-HBKID,  "銀行ID
+END OF TYP_FILE.
+
+* 支払先マスタ（一般セクション）取得用
+TYPES: BEGIN OF TYP_LFA1,
+LIFNR   TYPE LFA1-LIFNR,  "支払先コード
+NAME1   TYPE LFA1-NAME1,  "名称１
+END OF TYP_LFA1.
+
+* 取引銀行マスタ取得用
+TYPES: BEGIN OF TYP_T012,
+BUKRS   TYPE LFB1-BUKRS,  "会社コード
+HBKID   TYPE LFB1-HBKID,  "銀行ID
+END OF TYP_T012.
+
+* 支払先マスタ（会社コード）取得用
+TYPES: BEGIN OF TYP_LFB1,
+LIFNR   TYPE LFB1-LIFNR,  "支払先コード
+BUKRS   TYPE LFB1-BUKRS,  "会社コード
+*      ZWELS   TYPE LFB1-ZWELS,  "支払方法
+*      ZTERM   TYPE LFB1-ZTERM,  "支払条件
+HBKID   TYPE LFB1-HBKID,  "銀行ID
+END OF TYP_LFB1.
+
+* 項目編集用
+TYPES: BEGIN OF TYP_EDIT,
+LIFNR    TYPE LFA1-LIFNR,  "支払先コード
+NAME1    TYPE LFA1-NAME1,  "名称１
+HBKID_B  TYPE LFB1-HBKID,  "銀行ID(更新前)
+HBKID_A  TYPE LFB1-HBKID,  "銀行ID(更新後)
+ERROR    TYPE C,           "エラーフラグ
+MSG(400) TYPE C,           "メッセージ
+END OF TYP_EDIT.
+
+* ＢＤＣメッセージ取得用
+TYPES: BEGIN OF TYP_T100,
+SPRSL   TYPE T100-SPRSL,  "言語キー
+ARBGB   TYPE T100-ARBGB,  "アプリケーションエリア
+MSGNR   TYPE T100-MSGNR,  "メッセージ番号
+TEXT    TYPE T100-TEXT,   "メッセージテキスト
+END OF TYP_T100.
+
+* ダウンロード用
+TYPES:BEGIN OF TYP_DL,
+* Mod ES-UP 2012/10/25 -->
+*       LINE(1000),
+LINE TYPE STRING,
+* Mod ES-UP 2012/10/25 <--
+END OF TYP_DL.
+
+*----------------------------------------------------------------------*
+*  内部テーブル定義
+*----------------------------------------------------------------------*
+* 支払先マスタ(一般)取得用
+DATA: GT_LFA1    TYPE STANDARD TABLE OF TYP_LFA1.
+* 支払先マスタ(会社)取得用
+DATA: GT_LFB1    TYPE STANDARD TABLE OF TYP_LFB1.
+* 取引銀行マスタ取得用
+DATA: GT_T012    TYPE STANDARD TABLE OF TYP_T012.
+* アップロードデータ取得用
+DATA: GT_IN      TYPE STANDARD TABLE OF TYP_FILE.
+* ダウンロードデータ(エラー)編集用
+DATA: GT_ERR     TYPE STANDARD TABLE OF TYP_DL.
+* ダウンロードデータ(バックアップ)編集用
+DATA: GT_BAK     TYPE STANDARD TABLE OF TYP_DL.
+* ＢＤＣデータ編集用
+DATA: GT_BDC     TYPE STANDARD TABLE OF BDCDATA WITH HEADER LINE.
+* メッセージ取得用
+DATA: GT_MSG     TYPE STANDARD TABLE OF BDCMSGCOLL WITH HEADER LINE.
+
+*----------------------------------------------------------------------*
+*  項目列定義
+*----------------------------------------------------------------------*
+* データ編集用
+DATA: GW_EDIT     TYPE TYP_EDIT.
+* アップロードデータ読込用
+DATA: GW_IN       TYPE TYP_FILE.
+* バックアップデータ退避用
+DATA: GW_ESC      TYPE TYP_FILE.
+
+**** START ADD 2015/02/04 ISID18 ****
+DATA:
+GW_OUTPUT_CP   TYPE ZTEGZZM001-Z_OUTPUT_CP,
+GW_SAPCODEPAGE TYPE STRING,
+GW_CODEPAGE    TYPE ABAP_ENCODING,
+GW_FLGUTF8     TYPE FLAG.
+**** END ADD 2015/02/04 ISID18 ****
+
+*----------------------------------------------------------------------*
+*  固定値定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+* Mod ES-UP 2012/08/17 -->
+*  CNS_TAB           TYPE X VALUE '09',
+CNS_OPEN          TYPE C LENGTH 1 VALUE 'O',
+* Mod ES-UP 2012/08/17 <--
+CNS_MODE(01)      TYPE C VALUE 'S',
+CNS_DEF_PATH(03)  TYPE C VALUE 'C:\',
+CNS_DAT(03)       TYPE C VALUE 'DAT',
+CNS_TRAN(04)      TYPE C VALUE 'FK02',
+CNS_TITLE1(06)    TYPE C VALUE '入力元',
+CNS_TITLE2(14)    TYPE C VALUE '出力先(エラー)',
+CNS_TITLE3(20)    TYPE C VALUE '出力先(バックアップ)',
+CNS_MASK(70)      TYPE C VALUE ',テキスト文書(*.TXT),*.TXT.',
+CNS_FNAME1        TYPE RLGRAP-FILENAME
+VALUE 'C:\SAPDATA\仕入先マスタBDC_入力.TXT',
+CNS_FNAME2        TYPE RLGRAP-FILENAME
+VALUE 'C:\SAPDATA\仕入先マスタBDC_エラー.TXT',
+CNS_FNAME3        TYPE RLGRAP-FILENAME
+VALUE 'C:\SAPDATA\仕入先マスタBDC_バックアップ.TXT',
+CNS_ALPHA(52)     TYPE C
+VALUE 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'.
+* Add ES-UP 2012/08/17 -->
+****START UPD 2014/08/29 ISID18****
+*CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+CONSTANTS CNS_UTF TYPE STRING VALUE `UTF-8`.
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/08/17 <--
+************************************************************************
+*  実行画面定義
+************************************************************************
+PARAMETERS: P_BUKRS  LIKE T001-BUKRS OBLIGATORY.  "会社コード
+PARAMETERS: P_TEST AS CHECKBOX DEFAULT 'X'.       "テスト実行
+PARAMETERS: P_BACK AS CHECKBOX DEFAULT 'X'.       "バックアップ実行
+
+* 入力元ファイル設定パラメータ
+SELECTION-SCREEN BEGIN OF BLOCK FRM1 WITH FRAME TITLE TEXT-001.
+PARAMETERS: P_FILE1 TYPE RLGRAP-FILENAME OBLIGATORY.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS  P_ILOCAL  RADIOBUTTON GROUP RBI DEFAULT 'X'.
+SELECTION-SCREEN: COMMENT 4(8) TEXT-003, POSITION 14.
+PARAMETERS  P_ISERVE  RADIOBUTTON GROUP RBI.
+SELECTION-SCREEN: COMMENT 17(6) TEXT-004.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK FRM1.
+
+* エラーファイル設定パラメータ
+SELECTION-SCREEN BEGIN OF BLOCK FRM2 WITH FRAME TITLE TEXT-002.
+PARAMETERS: P_FILE2 TYPE RLGRAP-FILENAME OBLIGATORY.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS  P_ELOCAL  RADIOBUTTON GROUP RBE DEFAULT 'X'.
+SELECTION-SCREEN: COMMENT 4(8) TEXT-003, POSITION 14.
+PARAMETERS  P_ESERVE  RADIOBUTTON GROUP RBE.
+SELECTION-SCREEN: COMMENT 17(6) TEXT-004.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK FRM2.
+
+* バックアップファイル設定パラメータ
+SELECTION-SCREEN BEGIN OF BLOCK FRM3 WITH FRAME TITLE TEXT-005.
+PARAMETERS: P_FILE3 TYPE RLGRAP-FILENAME OBLIGATORY.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS  P_BLOCAL  RADIOBUTTON GROUP RBB DEFAULT 'X'.
+SELECTION-SCREEN: COMMENT 4(8) TEXT-003, POSITION 14.
+PARAMETERS  P_BSERVE  RADIOBUTTON GROUP RBB.
+SELECTION-SCREEN: COMMENT 17(6) TEXT-004.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK FRM3.
+
+************************************************************************
+*  INITIALIZATION.
+************************************************************************
+INITIALIZATION.
+* パラメータから会社コードの初期値を取得
+GET PARAMETER ID 'BUK' FIELD P_BUKRS.
+
+
+************************************************************************
+*  AT SELECTION-SCREEN.
+************************************************************************
+AT SELECTION-SCREEN.
+
+**** START ADD 2015/02/04 ISID18 ****
+* コードページ取得処理
+PERFORM FRM_GET_CPAGE.
+**** END ADD 2015/02/04 ISID18 ****
+
+PERFORM CHECK_PATH.
+
+************************************************************************
+*  AT SELECTION-SCREEN ON VALUE-REQUEST FOR XXXXX.
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE1.
+
+PERFORM CALL_WS_FILENAME_GET
+USING CNS_FNAME1
+CNS_DEF_PATH
+CNS_MASK
+* Mod ES-UP 2012/08/17 -->
+*                 CNS_MODE
+CNS_OPEN
+* Mod ES-UP 2012/08/17 <--
+CNS_TITLE1
+CHANGING P_FILE1.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE2.
+
+PERFORM CALL_WS_FILENAME_GET
+USING CNS_FNAME2
+CNS_DEF_PATH
+CNS_MASK
+CNS_MODE
+CNS_TITLE2
+CHANGING P_FILE2.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE3.
+
+PERFORM CALL_WS_FILENAME_GET
+USING CNS_FNAME3
+CNS_DEF_PATH
+CNS_MASK
+CNS_MODE
+CNS_TITLE3
+CHANGING P_FILE3.
+
+************************************************************************
+*  START-OF-SELECTION
+************************************************************************
+START-OF-SELECTION.
+
+* 変更対象データの読込
+PERFORM GET_FILE TABLES GT_IN
+USING P_FILE1
+P_ILOCAL.
+
+PERFORM GET_DATA.
+
+************************************************************************
+*  END-OF-SELECTION
+************************************************************************
+END-OF-SELECTION.
+
+PERFORM MAIN_RTN.
+PERFORM DOWNLOAD_DATA.
+
+************************************************************************
+*  TOP-OF-PAGE
+************************************************************************
+TOP-OF-PAGE.
+PERFORM SET_HEADER.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PATH
+*&---------------------------------------------------------------------*
+*       ファイルパスのチェック
+*----------------------------------------------------------------------*
+FORM CHECK_PATH.
+
+DATA: LV_RETURN TYPE C.
+* Add ES-UP 2012/08/17 -->
+DATA L_FILENAME TYPE STRING.
+* Add ES-UP 2012/08/17 <--
+* サーバーの場合のチェック
+IF NOT P_ISERVE IS INITIAL.
+* Mod ES-UP 2012/08/17 -->
+*    OPEN DATASET P_FILE1 IN TEXT MODE .
+
+**** START UPD 2014/09/05 ISID19 ****
+*     OPEN DATASET P_FILE1 FOR INPUT
+*        IN LEGACY TEXT MODE.
+**** START UPD 2015/02/04 ISID18 ****
+*    OPEN DATASET P_FILE1 FOR INPUT
+*    IN TEXT MODE ENCODING UTF-8
+***** START ADD 2015/01/12 ISID11 ****
+*    SKIPPING BYTE-ORDER MARK.
+IF GW_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_FILE1 FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE GW_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_FILE1 FOR INPUT
+IN TEXT MODE ENCODING UTF-8
+SKIPPING BYTE-ORDER MARK
+IGNORING CONVERSION ERRORS.
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+**** END ADD 2015/01/12 ISID11 ****
+**** END UPD 2014/09/05 ISID19 ****
+
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+MESSAGE E400
+WITH '指定の入力ファイルはサーバ上に存在しません。'.
+ENDIF.
+CLOSE DATASET P_FILE1.
+* ローカルPCの場合のチェック
+ELSE.
+* Mod ES-UP 2012/08/17 -->
+*    PERFORM CHECK_LOCAL_IN USING P_FILE1
+*                        CHANGING LV_RETURN.
+*    IF LV_RETURN = '0'.
+L_FILENAME = P_FILE1.
+IF CL_GUI_FRONTEND_SERVICES=>FILE_EXIST( L_FILENAME ) = ABAP_FALSE.
+* Mod ES-UP 2012/08/17 <--
+MESSAGE E400
+WITH '指定の入力ファイルはローカルPCに存在しません。'.
+ENDIF.
+ENDIF.
+
+* サーバーの場合のチェック
+IF NOT P_ESERVE IS INITIAL.
+* 既存ファイル存在チェック
+* Mod ES-UP 2012/08/17 -->
+*    OPEN DATASET P_FILE2 IN TEXT MODE .
+
+**** START UPD 2014/09/05 ISID19 ****
+*    OPEN DATASET P_FILE2 FOR INPUT
+*      IN LEGACY TEXT MODE.
+
+**** START UPD 2015/02/04 ISID18 ****
+*    OPEN DATASET P_FILE2 FOR INPUT
+*    IN TEXT MODE ENCODING UTF-8
+***** START ADD 2015/01/12 ISID11 ****
+*    SKIPPING BYTE-ORDER MARK.
+IF GW_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_FILE2 FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE GW_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_FILE2 FOR INPUT
+IN TEXT MODE ENCODING UTF-8
+SKIPPING BYTE-ORDER MARK
+IGNORING CONVERSION ERRORS.
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+
+**** END ADD 2015/01/12 ISID11 ****
+**** END UPD 2014/09/05 ISID19 ****
+
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+* ファイルパス存在チェック
+* Mod ES-UP 2012/08/17 -->
+*      OPEN DATASET P_FILE2 FOR OUTPUT IN TEXT MODE.
+
+**** START UPD 2014/09/05 ISID19 ****
+*      OPEN DATASET P_FILE2 FOR OUTPUT
+*        IN LEGACY TEXT MODE.
+**** START UPD 2015/02/04 ISID18 ****
+*      OPEN DATASET P_FILE2 FOR OUTPUT
+*              IN TEXT MODE ENCODING UTF-8.
+IF GW_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_FILE2 FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE GW_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_FILE2 FOR OUTPUT
+IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS.
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+**** END UPD 2014/09/05 ISID19 ****
+
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+MESSAGE E400
+WITH 'エラーファイルの出力先はサーバ上に存在しません。'.
+ELSE.
+DELETE DATASET P_FILE2.
+ENDIF.
+ENDIF.
+CLOSE DATASET P_FILE2.
+* ローカルPCの場合のチェック
+ELSE.
+PERFORM CHECK_LOCAL_OUT USING P_FILE2
+CHANGING LV_RETURN.
+IF LV_RETURN = '0'.
+MESSAGE E400
+WITH 'エラーファイルの出力先はローカルPCに存在しません。'.
+ENDIF.
+ENDIF.
+
+* サーバーの場合のチェック
+IF NOT P_BSERVE IS INITIAL.
+* 既存ファイル存在チェック
+* Mod ES-UP 2012/08/17 -->
+*    OPEN DATASET P_FILE3 IN TEXT MODE .
+
+**** START UPD 2014/09/05 ISID19 ****
+*    OPEN DATASET P_FILE3 FOR INPUT
+*      IN LEGACY TEXT MODE.
+
+**** START UPD 2015/02/04 ISID18 ****
+*    OPEN DATASET P_FILE3 FOR INPUT
+*      IN TEXT MODE ENCODING UTF-8
+***** START ADD 2015/01/12 ISID11 ****
+*      SKIPPING BYTE-ORDER MARK.
+IF GW_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_FILE3 FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE GW_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_FILE3 FOR INPUT
+IN TEXT MODE ENCODING UTF-8
+SKIPPING BYTE-ORDER MARK
+IGNORING CONVERSION ERRORS.
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+
+**** END ADD 2015/01/12 ISID11 ****
+**** START UPD 2014/09/05 ISID19 ****
+
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+* ファイルパス存在チェック
+* Mod ES-UP 2012/08/17 -->
+*      OPEN DATASET P_FILE3 FOR OUTPUT IN TEXT MODE.
+
+**** START UPD 2014/09/05 ISID19 ****
+*      OPEN DATASET P_FILE3 FOR OUTPUT
+*          IN LEGACY TEXT MODE.
+**** START UPD 2015/02/04 ISID18 ****
+*      OPEN DATASET P_FILE3 FOR OUTPUT
+*        IN TEXT MODE ENCODING UTF-8.
+IF GW_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_FILE3 FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE GW_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_FILE3 FOR OUTPUT
+IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS.
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+**** START UPD 2014/09/05 ISID19 ****
+
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+MESSAGE E400
+WITH 'バックアップの出力先はサーバ上に存在しません。'.
+ELSE.
+DELETE DATASET P_FILE3.
+ENDIF.
+ENDIF.
+CLOSE DATASET P_FILE3.
+* ローカルPCの場合のチェック
+ELSE.
+PERFORM CHECK_LOCAL_OUT USING P_FILE3
+CHANGING LV_RETURN.
+IF LV_RETURN = '0'.
+MESSAGE E400
+WITH 'バックアップの出力先はローカルPCに存在しません。'.
+ENDIF.
+ENDIF.
+
+
+
+ENDFORM.                    " CHECK_PATH
+* Del ES-UP 2012/08/17 -->
+**&---------------------------------------------------------------------*
+**&      Form  check_local_in
+**&---------------------------------------------------------------------*
+**       ローカル入力ファイルの存在チェック
+**----------------------------------------------------------------------*
+*FORM CHECK_LOCAL_IN USING PV_FILE
+*                 CHANGING PV_RETURN.
+*
+*  DATA: LV_RETURN TYPE C.
+*
+*  CALL FUNCTION 'WS_QUERY'
+*       EXPORTING
+*            FILENAME       = PV_FILE
+*            QUERY          = 'FE'
+*       IMPORTING
+*            RETURN         = PV_RETURN
+*       EXCEPTIONS
+*            INV_QUERY      = 1
+*            NO_BATCH       = 2
+*            FRONTEND_ERROR = 3
+*            OTHERS         = 4.
+*
+*  IF SY-SUBRC  <> 0.
+*    PV_RETURN = '0'.
+*  ENDIF.
+*
+*
+*ENDFORM.                    " check_local_in
+* Del ES-UP 2012/08/17 <--
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_LOCAL_OUT
+*&---------------------------------------------------------------------*
+*       ローカル出力パスの存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_LOCAL_OUT USING PV_FILE
+CHANGING PV_RETURN.
+
+
+DATA: LV_MAE(128)    TYPE C.
+DATA: LV_ATO(128)    TYPE C.
+* Add ES-UP 2012/08/17 -->
+DATA L_DIRNAME TYPE STRING.
+* Add ES-UP 2012/08/17 <--
+
+CALL FUNCTION 'COPI_REVERSE_STRING_SPLIT'
+EXPORTING
+DELIMITER = '\'
+STRING    = PV_FILE
+IMPORTING
+HEAD      = LV_MAE
+TAIL      = LV_ATO
+EXCEPTIONS
+NOT_FOUND = 1
+TOO_SMALL = 2
+OTHERS    = 3.
+IF SY-SUBRC <> 0.
+PV_RETURN = '0'.
+EXIT.
+ENDIF.
+
+* Mod ES-UP 2012/08/17 -->
+*  CALL FUNCTION 'WS_QUERY'
+*       EXPORTING
+*            FILENAME       = LV_MAE
+*            QUERY          = 'FE'
+*       IMPORTING
+*            RETURN         = PV_RETURN
+*       EXCEPTIONS
+*            INV_QUERY      = 1
+*            NO_BATCH       = 2
+*            FRONTEND_ERROR = 3
+*            OTHERS         = 4.
+*  IF SY-SUBRC  <> 0.
+L_DIRNAME = LV_MAE.
+IF CL_GUI_FRONTEND_SERVICES=>DIRECTORY_EXIST( L_DIRNAME ) = ABAP_FALSE.
+* Mod ES-UP 2012/08/17 <--
+PV_RETURN = '0'.
+ENDIF.
+
+
+ENDFORM.                    " CHECK_LOCAL_OUT
+
+*&---------------------------------------------------------------------*
+*&      FORM CALL_WS_FILENAME_GET
+*&---------------------------------------------------------------------*
+*       ファイル入出力先の検索ウィンドウ呼び出し処理
+*----------------------------------------------------------------------*
+FORM CALL_WS_FILENAME_GET USING PV_FILENAME
+PV_PATH
+PV_MASK
+PV_MODE
+PV_TITLE
+CHANGING PV_PATH_C.
+* Mod ES-UP 2012/08/17 -->
+*  CALL FUNCTION 'WS_FILENAME_GET'
+*       EXPORTING
+*            DEF_FILENAME     = PV_FILENAME
+*            DEF_PATH         = PV_PATH
+*            MASK             = PV_MASK
+*            MODE             = PV_MODE
+*            TITLE            = PV_TITLE
+*       IMPORTING
+*            FILENAME         = PV_PATH_C
+*       EXCEPTIONS
+*            INV_WINSYS       = 1
+*            NO_BATCH         = 2
+*            SELECTION_CANCEL = 3
+*            SELECTION_ERROR  = 4
+*            OTHERS           = 5.
+*
+*  IF SY-SUBRC <> 0.
+*  ENDIF.
+DATA: L_FILENAME    TYPE STRING,
+L_PATH        TYPE STRING,
+L_FULLPATH    TYPE STRING,
+L_TITLE       TYPE STRING,
+L_USER_ACTION TYPE I.
+DATA: L_FILE_TABLE TYPE FILETABLE,
+L_FILE       TYPE REF TO FILE_TABLE,
+L_RC         TYPE I.
+L_TITLE = PV_TITLE.
+IF PV_MODE = CNS_OPEN.
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+WINDOW_TITLE            = L_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+*      DEFAULT_FILENAME        = DEFAULT_FILENAME
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+*      INITIAL_DIRECTORY       = INITIAL_DIRECTORY
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = L_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS "POVの時は、すべて0にすること
+FILE_OPEN_DIALOG_FAILED = 0
+CNTL_ERROR              = 0
+ERROR_NO_GUI            = 0
+NOT_SUPPORTED_BY_GUI    = 0
+OTHERS                  = 0 ).
+IF L_RC > 0.
+READ TABLE L_FILE_TABLE REFERENCE INTO L_FILE INDEX 1.
+IF SY-SUBRC = 0.
+PV_PATH_C = L_FILE->FILENAME.
+ENDIF.
+ENDIF.
+ELSE.
+CL_GUI_FRONTEND_SERVICES=>FILE_SAVE_DIALOG(
+EXPORTING
+WINDOW_TITLE         = L_TITLE
+*      DEFAULT_EXTENSION    = DEFAULT_EXTENSION
+*      DEFAULT_FILE_NAME    = DEFAULT_FILE_NAME
+*      WITH_ENCODING        = WITH_ENCODING
+*      FILE_FILTER          = FILE_FILTER
+*      INITIAL_DIRECTORY    = INITIAL_DIRECTORY
+*      PROMPT_ON_OVERWRITE  = 'X'
+CHANGING
+FILENAME             = L_FILENAME
+PATH                 = L_PATH
+FULLPATH             = L_FULLPATH
+USER_ACTION          = L_USER_ACTION
+*      FILE_ENCODING        = FILE_ENCODING
+EXCEPTIONS
+CNTL_ERROR           = 1
+ERROR_NO_GUI         = 2
+NOT_SUPPORTED_BY_GUI = 3
+OTHERS               = 4 ).
+IF SY-SUBRC = 0
+AND L_USER_ACTION = CL_GUI_FRONTEND_SERVICES=>ACTION_OK.
+PV_PATH_C = L_FULLPATH.
+ENDIF.
+ENDIF.
+* Mod ES-UP 2012/08/17 <--
+ENDFORM.                    "CALL_WS_FILENAME_GET
+
+*&---------------------------------------------------------------------*
+*&      Form  get_file
+*&---------------------------------------------------------------------*
+*       変更元ファイルの取得
+*----------------------------------------------------------------------*
+FORM GET_FILE TABLES PT_TABLE
+USING PV_PATH
+PV_LOCAL.
+
+* ラジオボタンでローカルを指定している場合
+IF NOT PV_LOCAL IS INITIAL.
+PERFORM UPLOAD_DATA TABLES PT_TABLE
+USING PV_PATH.
+* ラジオボタンでサーバを指定している場合
+ELSE.
+PERFORM READ_FILE TABLES PT_TABLE
+USING PV_PATH.
+ENDIF.
+
+ENDFORM.                    " get_file
+
+*&---------------------------------------------------------------------*
+*&      Form  upload_data
+*&---------------------------------------------------------------------*
+*       データのアップロード
+*----------------------------------------------------------------------*
+FORM UPLOAD_DATA TABLES PT_TABLE
+USING PV_PATH.
+* Mod ES-UP 2012/08/17 -->
+*  CALL FUNCTION 'WS_UPLOAD'
+*       EXPORTING
+*            FILENAME                = PV_PATH
+*            FILETYPE                = CNS_DAT
+*       TABLES
+*            DATA_TAB                = PT_TABLE
+*       EXCEPTIONS
+*            CONVERSION_ERROR        = 1
+*            FILE_OPEN_ERROR         = 2
+*            FILE_READ_ERROR         = 3
+*            INVALID_TYPE            = 4
+*            NO_BATCH                = 5
+*            UNKNOWN_ERROR           = 6
+*            INVALID_TABLE_WIDTH     = 7
+*            GUI_REFUSE_FILETRANSFER = 8
+*            CUSTOMER_ERROR          = 9
+*            OTHERS                  = 10.
+DATA: L_FILENAME TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING.
+L_FILENAME = PV_PATH.
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** START UPD 2015/02/04 ISID18 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+IF GW_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( GW_SAPCODEPAGE ).
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+****END UPD 2014/08/29 ISID18****
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILENAME
+FILETYPE                = 'DAT'
+HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER_LENGTH           = 0
+*      READ_BY_LINE            = 'X'
+*      DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+*      IGNORE_CERR             = ABAP_TRUE
+*      REPLACEMENT             = '#'
+*      VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*    IMPORTING
+*      FILELENGTH              = FILELENGTH
+*      HEADER                  = HEADER
+CHANGING
+DATA_TAB                = PT_TABLE[]
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+MESSAGE E400 WITH 'アップロードに失敗しました。'.
+ENDIF.
+
+ENDFORM.                    " upload_data
+
+*&---------------------------------------------------------------------*
+*&      Form  read_file
+*&---------------------------------------------------------------------*
+*       サーバ上のファイルを読み込み
+*----------------------------------------------------------------------*
+FORM READ_FILE TABLES PT_TABLE
+USING PV_PATH.
+
+DATA: LW_LINE(1000) TYPE C.
+DATA: LW_WORK       TYPE TYP_FILE.
+DATA: LV_LEN        TYPE I.
+* テキストモードでファイル・オープン
+* Mod ES-UP 2012/08/17 -->
+*  OPEN DATASET PV_PATH IN TEXT MODE .
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+
+****START DEL 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+****END DEL 2014/08/29 ISID18****
+
+**** START ADD 2015/02/04 ISID18 ****
+IF GW_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET PV_PATH FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE GW_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+**** END ADD 2015/02/04 ISID18 ****
+OPEN DATASET PV_PATH FOR INPUT
+**** START UPD 2014/09/04 ISID19 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/09/04 ISID19 ****
+**** START ADD 2015/01/12 ISID11 ****
+SKIPPING BYTE-ORDER MARK
+**** END ADD 2015/01/12 ISID11 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID18 ****
+ENDIF.
+**** END ADD 2015/02/04 ISID18 ****
+
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+MESSAGE E400 WITH 'ファイルオープンエラー。'.
+ENDIF.
+
+* レコードが無くなるまで読込
+DO 100000 TIMES.
+READ DATASET PV_PATH INTO LW_LINE.
+LV_LEN = STRLEN( LW_LINE ).
+IF  SY-SUBRC = 0.
+IF LV_LEN = 0.
+CONTINUE.
+ENDIF.
+* Mod ES-UP 2012/08/17 -->
+*      SPLIT LW_LINE AT CNS_TAB INTO LW_WORK-LIFNR
+SPLIT LW_LINE AT CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB
+INTO LW_WORK-LIFNR
+* Mod ES-UP 2012/08/17 <--
+LW_WORK-HBKID.
+APPEND LW_WORK TO PT_TABLE.
+ELSE.
+EXIT.
+ENDIF.
+CLEAR: LW_LINE,LW_WORK,LV_LEN.
+ENDDO.
+
+IF PT_TABLE[] IS INITIAL.
+MESSAGE E400 WITH '対象となるデータが存在しません。'.
+ENDIF.
+
+* ファイルをクローズ
+CLOSE DATASET PV_PATH.
+IF SY-SUBRC <> 0.
+MESSAGE E400 WITH 'ファイルクローズエラー。'.
+ENDIF.
+
+ENDFORM.                    " read_file
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA
+*&---------------------------------------------------------------------*
+*       編集元データの取得
+*----------------------------------------------------------------------*
+FORM GET_DATA.
+
+* 支払先マスタ(一般セクション)を全件取得
+SELECT
+LIFNR   "支払先コード
+NAME1   "名称１
+FROM LFA1 INTO TABLE GT_LFA1.
+
+* 該当会社コードの支払先マスタ(会社コード)を全件取得
+SELECT
+LIFNR   "支払先コード
+BUKRS   "会社コード
+*         ZWELS   "支払方法
+*         ZTERM   "支払条件
+HBKID   "銀行ID
+FROM LFB1 INTO TABLE GT_LFB1
+WHERE BUKRS = P_BUKRS.
+
+* 該当会社コードの取引銀行マスタ全件取得
+SELECT
+BUKRS   "会社コード
+HBKID   "銀行ID
+FROM T012 INTO TABLE GT_T012
+WHERE BUKRS = P_BUKRS.
+
+ENDFORM.                    " GET_DATA
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_RTN
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM MAIN_RTN.
+
+* アップロードファイルにエントリが存在することが前提
+IF NOT GT_IN[] IS INITIAL.
+LOOP AT GT_IN INTO GW_IN.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = GW_IN-LIFNR
+IMPORTING
+OUTPUT = GW_IN-LIFNR.
+
+
+CLEAR: GW_EDIT, GW_ESC.
+* データの編集
+PERFORM EDIT_DATA.
+* ＢＤＣデータの作成
+PERFORM MAKE_BDC.
+* コールトランザクション
+PERFORM CALL_TRAN.
+* エラーデータ格納
+IF NOT GW_EDIT-ERROR IS INITIAL.
+PERFORM MAKE_DL_REC TABLES GT_ERR
+USING GW_IN.
+ENDIF.
+* 処理結果リストの出力
+PERFORM MAKE_LIST.
+ENDLOOP.
+ELSE.
+MESSAGE E400 WITH '対象となるデータが存在しません。'.
+ENDIF.
+
+
+ENDFORM.                    " MAIN_RTN
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_DATA
+*&---------------------------------------------------------------------*
+*       データの編集
+*----------------------------------------------------------------------*
+FORM EDIT_DATA.
+
+DATA: LW_LFA1       TYPE TYP_LFA1.
+DATA: LW_LFB1       TYPE TYP_LFB1.
+DATA: LW_T012       TYPE TYP_T012.
+DATA: LV_LIFNRN(10) TYPE N.
+
+** 対象データのマスタ存在チェック
+
+* 仕入先コードを前ゼロ詰め10桁に変換
+IF GW_IN-LIFNR CO '0123456789 '.
+LV_LIFNRN   = GW_IN-LIFNR.
+GW_IN-LIFNR = LV_LIFNRN.
+ENDIF.
+
+* 仕入先マスタ(一般)存在チェック
+READ TABLE GT_LFA1 INTO LW_LFA1
+WITH KEY LIFNR = GW_IN-LIFNR.
+IF SY-SUBRC = 0.
+GW_EDIT-LIFNR = LW_LFA1-LIFNR.
+GW_EDIT-NAME1 = LW_LFA1-NAME1.
+ELSE.
+GW_EDIT-LIFNR = GW_IN-LIFNR.
+GW_EDIT-NAME1 = '【不明な仕入先】'.
+GW_EDIT-ERROR = 'X'.
+GW_EDIT-MSG   = '仕入先の一般情報がマスタに登録されていません。'.
+*    CONCATENATE '仕入先【'
+*                GW_IN-LIFNR
+*                '】の一般情報がマスタに登録されていません。'
+*        INTO GW_EDIT-MSG.
+*    CONDENSE GW_EDIT-MSG.
+EXIT.
+ENDIF.
+
+* 仕入先マスタ(会社)存在チェック
+READ TABLE GT_LFB1 INTO LW_LFB1
+WITH KEY LIFNR = GW_IN-LIFNR.
+
+IF SY-SUBRC = 0.
+GW_EDIT-HBKID_B = LW_LFB1-HBKID.
+ELSE.
+GW_EDIT-ERROR = 'X'.
+GW_EDIT-MSG   = '仕入先の会社情報がマスタに登録されていません。'.
+*    CONCATENATE '仕入先【'
+*                GW_IN-LIFNR
+*                '】の会社情報がマスタに登録されていません。'
+*        INTO GW_EDIT-MSG.
+*    CONDENSE GW_EDIT-MSG.
+EXIT.
+ENDIF.
+
+* 取引銀行マスタ存在チェック
+READ TABLE GT_T012 INTO LW_T012
+WITH KEY HBKID = GW_IN-HBKID.
+
+IF SY-SUBRC = 0
+OR GW_IN-HBKID IS INITIAL.
+GW_EDIT-HBKID_A = GW_IN-HBKID.
+ELSE.
+GW_EDIT-ERROR = 'X'.
+CONCATENATE
+'取引銀行【' GW_IN-HBKID '】はマスタに登録されていません。'
+INTO GW_EDIT-MSG.
+CONDENSE GW_EDIT-MSG.
+EXIT.
+ENDIF.
+
+* 正常終了分バックアップレコード退避
+GW_ESC-LIFNR = LW_LFB1-LIFNR.
+GW_ESC-HBKID = LW_LFB1-HBKID.
+
+ENDFORM.                    " EDIT_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BDC
+*&---------------------------------------------------------------------*
+*       ＢＤＣデータの作成
+*----------------------------------------------------------------------*
+FORM MAKE_BDC.
+
+CHECK GW_EDIT-ERROR IS INITIAL.
+IF GW_EDIT-HBKID_B = GW_EDIT-HBKID_A.
+GW_EDIT-MSG   = '取引銀行はファイルのIDに変更済みです。'.
+EXIT.
+ENDIF.
+
+CHECK P_TEST IS INITIAL.
+
+PERFORM BDC_DYNPRO      USING 'SAPMF02K'
+'0106'.
+PERFORM BDC_FIELD       USING 'BDC_OKCODE'
+'/00'.
+PERFORM BDC_FIELD       USING 'RF02K-LIFNR'
+GW_EDIT-LIFNR.
+PERFORM BDC_FIELD       USING 'RF02K-BUKRS'
+P_BUKRS.
+PERFORM BDC_FIELD       USING 'RF02K-D0215'
+'X'.
+
+PERFORM BDC_DYNPRO      USING 'SAPMF02K'
+'0215'.
+PERFORM BDC_FIELD       USING 'BDC_OKCODE'
+'=UPDA'.
+PERFORM BDC_FIELD       USING 'LFB1-HBKID'
+GW_EDIT-HBKID_A.
+
+ENDFORM.                    " MAKE_BDC
+
+*----------------------------------------------------------------------*
+*        Start new screen                                              *
+*----------------------------------------------------------------------*
+FORM BDC_DYNPRO USING PV_PROGRAM    TYPE BDCDATA-PROGRAM
+PV_DYNPRO     TYPE BDCDATA-DYNPRO.
+
+CLEAR: GT_BDC.
+GT_BDC-PROGRAM  = PV_PROGRAM.
+GT_BDC-DYNPRO   = PV_DYNPRO.
+GT_BDC-DYNBEGIN = 'X'.
+APPEND GT_BDC.
+
+ENDFORM.                    "BDC_DYNPRO
+
+*----------------------------------------------------------------------*
+*        Insert field                                                  *
+*----------------------------------------------------------------------*
+FORM BDC_FIELD USING L_FNAM
+L_FVAL.
+
+CLEAR: GT_BDC.
+GT_BDC-FNAM = L_FNAM.
+GT_BDC-FVAL = L_FVAL.
+APPEND GT_BDC.
+
+ENDFORM.                    "BDC_FIELD
+
+*&---------------------------------------------------------------------*
+*&      Form  CALL_TRAN
+*&---------------------------------------------------------------------*
+*       コールトランザクション
+*----------------------------------------------------------------------*
+FORM CALL_TRAN.
+
+CHECK NOT GT_BDC[] IS INITIAL.
+
+REFRESH GT_MSG.
+CALL TRANSACTION CNS_TRAN USING GT_BDC
+MODE   'N'
+UPDATE 'S'
+MESSAGES INTO GT_MSG.
+IF SY-SUBRC <> 0.
+GW_EDIT-ERROR = 'X'.
+GW_EDIT-HBKID_A = SPACE.
+PERFORM GET_ERRMSG CHANGING GW_EDIT-MSG.
+ELSE.
+PERFORM MAKE_DL_REC TABLES GT_BAK
+USING GW_ESC.
+ENDIF.
+REFRESH GT_BDC.
+ENDFORM.                    "CALL_TRAN
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ERRMSG
+*&---------------------------------------------------------------------*
+*       バッチエラーメッセージの取得
+*----------------------------------------------------------------------*
+FORM GET_ERRMSG CHANGING PV_MSTRING.
+
+DATA: LW_T100 TYPE TYP_T100.
+
+LOOP AT GT_MSG.
+SELECT SINGLE * FROM T100 INTO LW_T100
+WHERE SPRSL = GT_MSG-MSGSPRA
+AND   ARBGB = GT_MSG-MSGID
+AND   MSGNR = GT_MSG-MSGNR.
+IF SY-SUBRC = 0.
+PV_MSTRING = LW_T100-TEXT.
+IF PV_MSTRING CS '&1'.
+REPLACE '&1' WITH GT_MSG-MSGV1 INTO PV_MSTRING.
+REPLACE '&2' WITH GT_MSG-MSGV2 INTO PV_MSTRING.
+REPLACE '&3' WITH GT_MSG-MSGV3 INTO PV_MSTRING.
+REPLACE '&4' WITH GT_MSG-MSGV4 INTO PV_MSTRING.
+ELSE.
+REPLACE '&' WITH GT_MSG-MSGV1 INTO PV_MSTRING.
+REPLACE '&' WITH GT_MSG-MSGV2 INTO PV_MSTRING.
+REPLACE '&' WITH GT_MSG-MSGV3 INTO PV_MSTRING.
+REPLACE '&' WITH GT_MSG-MSGV4 INTO PV_MSTRING.
+ENDIF.
+CONDENSE PV_MSTRING.
+ELSE.
+PV_MSTRING = GT_MSG.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    "
+
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_LIST
+*&---------------------------------------------------------------------*
+*       リストの出力
+*----------------------------------------------------------------------*
+FORM MAKE_LIST.
+
+WRITE: /   GW_EDIT-LIFNR NO-ZERO,
+20 GW_EDIT-NAME1,
+60 GW_EDIT-HBKID_B,
+70 GW_EDIT-HBKID_A.
+
+IF GW_EDIT-ERROR IS INITIAL.
+WRITE: 80 '正常終了'.
+ELSE.
+WRITE: 80 'エラー'.
+ENDIF.
+
+IF NOT GW_EDIT-MSG IS INITIAL.
+WRITE: 90 GW_EDIT-MSG(70).
+ENDIF.
+
+ENDFORM.                    " MAKE_LIST
+*&---------------------------------------------------------------------*
+*&      Form  DOWNLOAD_DATA
+*&---------------------------------------------------------------------*
+*       データのダウンロード
+*----------------------------------------------------------------------*
+FORM DOWNLOAD_DATA.
+CHECK P_TEST IS INITIAL.
+IF NOT P_ELOCAL IS INITIAL.
+PERFORM DL_LOCAL TABLES GT_ERR
+USING P_FILE2.
+ELSE.
+PERFORM DL_SERVE TABLES GT_ERR
+USING P_FILE2.
+ENDIF.
+
+CHECK NOT P_BACK IS INITIAL.
+IF NOT P_BLOCAL IS INITIAL.
+PERFORM DL_LOCAL TABLES GT_BAK
+USING P_FILE3.
+ELSE.
+PERFORM DL_SERVE TABLES GT_BAK
+USING P_FILE3.
+ENDIF.
+
+ENDFORM.                    " DOWNLOAD_DATA
+*&---------------------------------------------------------------------*
+*&      Form  DL_LOCAL
+*&---------------------------------------------------------------------*
+*       ローカルＰＣへのダウンロード
+*----------------------------------------------------------------------*
+FORM DL_LOCAL TABLES PT_TAB
+USING PV_PATH.
+
+CHECK NOT PT_TAB[] IS INITIAL.
+* Mod ES-UP 2012/08/17 -->
+*  CALL FUNCTION 'WS_DOWNLOAD'
+*       EXPORTING
+*            FILENAME                = PV_PATH
+*       TABLES
+*            DATA_TAB                = PT_TAB
+*       EXCEPTIONS
+*            FILE_OPEN_ERROR         = 1
+*            FILE_WRITE_ERROR        = 2
+*            INVALID_FILESIZE        = 3
+*            INVALID_TYPE            = 4
+*            NO_BATCH                = 5
+*            UNKNOWN_ERROR           = 6
+*            INVALID_TABLE_WIDTH     = 7
+*            GUI_REFUSE_FILETRANSFER = 8
+*            CUSTOMER_ERROR          = 9
+*            OTHERS                  = 10.
+DATA: L_FILENAME TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING.
+L_FILENAME = PV_PATH.
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** START UPD 2015/02/04 ISID18 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+IF GW_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( GW_SAPCODEPAGE ).
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+****END UPD 2014/08/29 ISID18****
+CL_GUI_FRONTEND_SERVICES=>GUI_DOWNLOAD(
+EXPORTING
+*      BIN_FILESIZE              = BIN_FILESIZE
+FILENAME                  = L_FILENAME
+*      FILETYPE                  = 'DAT'
+*      APPEND                    = SPACE
+*      WRITE_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER                    = '00'
+*      TRUNC_TRAILING_BLANKS     = L_TRUNC
+*      WRITE_LF                  = 'X'
+*      COL_SELECT                = SPACE
+*      COL_SELECT_MASK           = SPACE
+*      DAT_MODE                  = SPACE
+*      CONFIRM_OVERWRITE         = SPACE
+*      NO_AUTH_CHECK             = SPACE
+CODEPAGE                  = L_CODEPAGE
+*      IGNORE_CERR               = ABAP_TRUE
+*      REPLACEMENT               = '#'
+*      WRITE_BOM                 = SPACE
+*      TRUNC_TRAILING_BLANKS_EOL = L_TRUNC
+*      WK1_N_FORMAT              = SPACE
+*      WK1_N_SIZE                = SPACE
+*      WK1_T_FORMAT              = SPACE
+*      WK1_T_SIZE                = SPACE
+*      SHOW_TRANSFER_STATUS      = 'X'
+*      FIELDNAMES                = FIELDNAMES
+*      WRITE_LF_AFTER_LAST_LINE  = 'X'
+*    IMPORTING
+*      FILELENGTH                = FILELENGTH
+CHANGING
+DATA_TAB                  = PT_TAB[]
+EXCEPTIONS
+FILE_WRITE_ERROR          = 1
+NO_BATCH                  = 2
+GUI_REFUSE_FILETRANSFER   = 3
+INVALID_TYPE              = 4
+NO_AUTHORITY              = 5
+UNKNOWN_ERROR             = 6
+HEADER_NOT_ALLOWED        = 7
+SEPARATOR_NOT_ALLOWED     = 8
+FILESIZE_NOT_ALLOWED      = 9
+HEADER_TOO_LONG           = 10
+DP_ERROR_CREATE           = 11
+DP_ERROR_SEND             = 12
+DP_ERROR_WRITE            = 13
+UNKNOWN_DP_ERROR          = 14
+ACCESS_DENIED             = 15
+DP_OUT_OF_MEMORY          = 16
+DISK_FULL                 = 17
+DP_TIMEOUT                = 18
+FILE_NOT_FOUND            = 19
+DATAPROVIDER_EXCEPTION    = 20
+CONTROL_FLUSH_ERROR       = 21
+NOT_SUPPORTED_BY_GUI      = 22
+ERROR_NO_GUI              = 23
+OTHERS                    = 24 ).
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+MESSAGE S000 WITH 'ダウンロードに失敗しました。'.
+ENDIF.
+
+ENDFORM.                    " DL_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  DL_SERVE
+*&---------------------------------------------------------------------*
+*       サーバーへのダウンロード
+*----------------------------------------------------------------------*
+FORM DL_SERVE TABLES PT_DL
+USING PV_PATH.
+
+DATA: LW_DL  TYPE TYP_DL.
+* Add ES-UP 2012/08/17 -->
+**** START DEL 2014/09/04 ISID19 ****
+
+****START DEL 2014/09/04 ISID19****
+*    DATA L_CODEPAGE TYPE ABAP_ENCODING.
+****END DEL 2014/09/04 ISID19****
+
+**** END DEL 2014/09/04 ISID19 ****
+* Add ES-UP 2012/08/17 <--
+CHECK NOT PT_DL[] IS INITIAL.
+
+* 出力用ファイルオープン
+* Mod ES-UP 2012/08/17 -->
+*  OPEN DATASET PV_PATH FOR OUTPUT IN TEXT MODE.
+
+****START DEL 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+****END DEL 2014/08/29 ISID18****
+
+**** START ADD 2015/02/04 ISID18 ****
+IF GW_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET PV_PATH FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE GW_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+**** END ADD 2015/02/04 ISID18 ****
+OPEN DATASET PV_PATH FOR OUTPUT
+**** START UPD 2014/09/04 ISID19 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/09/04 ISID19 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID18 ****
+ENDIF.
+**** END ADD 2015/02/04 ISID18 ****
+
+* Mod ES-UP 2012/08/17 <--
+IF SY-SUBRC <> 0.
+MESSAGE E209 WITH PV_PATH.    "ファイルオープンエラーです
+ENDIF.
+* TRANSFER処理
+LOOP AT PT_DL INTO LW_DL.
+* Mod ES-UP 2012/10/25 -->
+*    TRANSFER LW_DL TO PV_PATH.
+TRANSFER LW_DL-LINE TO PV_PATH.
+* Mod ES-UP 2012/10/25 <--
+IF SY-SUBRC <> 0.
+MESSAGE E400 WITH 'ダウンロードに失敗しました。'.
+ENDIF.
+ENDLOOP.
+* 出力用ファイルクローズ
+CLOSE DATASET PV_PATH.
+IF SY-SUBRC <> 0.
+MESSAGE E400 WITH 'クローズエラー。'.
+ENDIF.
+
+ENDFORM.                    " DL_SERVE
+
+*&---------------------------------------------------------------------*
+*&      Form  make_dl_rec
+*&---------------------------------------------------------------------*
+*       複数項目を1項目TAB区切り変換
+*----------------------------------------------------------------------*
+FORM MAKE_DL_REC TABLES PT_OUT
+USING PW_IN    TYPE TYP_FILE.
+
+DATA: LW_OUT  TYPE TYP_DL.
+
+CONCATENATE PW_IN-LIFNR
+PW_IN-HBKID
+* Mod ES-UP 2012/08/17 -->
+*    INTO LW_OUT
+*    SEPARATED BY CNS_TAB.
+INTO LW_OUT-LINE
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/08/17 <--
+
+APPEND LW_OUT TO PT_OUT.
+
+ENDFORM.                    " make_dl_rec
+
+*&---------------------------------------------------------------------*
+*&      Form  set_header
+*&---------------------------------------------------------------------*
+*       帳票ヘッダの出力
+*----------------------------------------------------------------------*
+FORM SET_HEADER.
+
+DATA: LV_PAGE(03)  TYPE C.
+WRITE SY-PAGNO TO LV_PAGE LEFT-JUSTIFIED .
+
+IF P_TEST = 'X'.
+WRITE: '※テスト実行(更新は行われません)'.
+ENDIF.
+
+WRITE:  62 '*** 仕入先マスタＢＤＣ（取引銀行） ***',
+114 '処理日付:',
+SY-DATUM,
+137 '処理時刻:',
+SY-UZEIT,
+158 'PAGE:',
+LV_PAGE..
+ULINE.
+WRITE: / '仕入先コード',
+20 '仕入先名称',
+60 '変更前',
+70 '変更後',
+80 '処理結果',
+90 'メッセージ'.
+ULINE.
+
+ENDFORM.                    " set_header
+**** START ADD 2015/02/04 ISID18 ****
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_CPAGE
+*&---------------------------------------------------------------------*
+*       コードページ取得
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_GET_CPAGE .
+
+CLEAR:
+GW_SAPCODEPAGE,
+GW_CODEPAGE,
+GW_OUTPUT_CP,
+GW_FLGUTF8.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = P_BUKRS
+IMPORTING
+EXPCODEPAGE = GW_OUTPUT_CP
+EXPFLGUTF8  = GW_FLGUTF8.
+
+GW_SAPCODEPAGE = GW_OUTPUT_CP.
+IF GW_SAPCODEPAGE IS NOT INITIAL.
+GW_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( GW_SAPCODEPAGE ).
+ENDIF.
+
+ENDFORM.                    " FRM_GET_CPAGE
+**** END ADD 2015/02/04 ISID18 ****

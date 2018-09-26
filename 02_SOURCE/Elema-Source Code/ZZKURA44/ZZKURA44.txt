@@ -1,0 +1,1100 @@
+*---------------------------------------------------------------------*
+*  検収データ取込                                                     *
+*    機能：EIAJ1101形式のファイルを読み込み                           *
+*          ローカルからアップロードする場合はTAB区切りを読み込み可能  *
+*          処理後に入力ファイルを削除可能                             *
+*          ファイルのオープンエラーと、削除エラーのタイプを指定可能   *
+*          EIAJのフォーマットによるチェックと、R/3上のチェックを行う  *
+*                                                                     *
+*                                                                     *
+*                                                                     *
+*    作成：2002/07/03 kurano                                          *
+*    変更：2002/08/07 kurano 日付チェックのバグ修正                   *
+*                                                                     *
+*---------------------------------------------------------------------*
+REPORT zzkura44 .
+*      MESSAGE-ID y1
+
+* 使用テーブル
+TABLES edsdc. "販売組織、流通チャネルに対する EDI 取引先の割当
+TABLES tvko.  "組織単位: 販売組織
+TABLES tvta.  "組織単位: 販売エリア
+TABLES kna1.  "得意先マスタ: 一般データ
+TABLES knvv.  "得意先マスタ: 販売データ
+TABLES knvp.  "得意先マスタ 取引先機能
+TABLES t001.  "会社コード
+TABLES tcurt. "通貨コードテキスト
+TABLES yk110. "検収データ
+TABLES yk120. "検収合計データ
+
+* グローバル変数
+"買掛明細情報　情報区分コード：1101　版：2G
+INCLUDE YK019E00.
+DATA i_data TYPE STANDARD TABLE OF st_eiaj1101 WITH HEADER LINE.
+DATA w_incnt LIKE sy-dbcnt.     "入力件数
+DATA w_delcnt LIKE sy-dbcnt.    "対象外のため削除した件数
+"検収データ登録用
+DATA i_yk110 LIKE STANDARD TABLE OF yk110 WITH HEADER LINE.
+DATA w_ins_yk110 LIKE sy-dbcnt. "検収データ登録件数
+"検収合計データ登録用
+DATA i_yk120_i LIKE STANDARD TABLE OF yk120 WITH HEADER LINE.
+"検収合計データ更新用
+DATA i_yk120_u LIKE STANDARD TABLE OF yk120 WITH HEADER LINE.
+DATA w_ins_yk120 LIKE sy-dbcnt. "検収合計データ登録件数
+DATA w_upd_yk120 LIKE sy-dbcnt. "検収合計データ更新件数
+
+* 選択画面
+"実行条件
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE text-t01.
+PARAMETERS p_in1 LIKE rlgrap-filename.    "入力ファイル名
+PARAMETERS p_local RADIOBUTTON GROUP r1.  "ローカルからアップロード
+PARAMETERS p_server RADIOBUTTON GROUP r1. "サーバファイルを使用
+PARAMETERS p_check AS CHECKBOX.           "チェックのみ
+PARAMETERS p_opnerr LIKE sy-msgty.        "オープンエラータイプ
+PARAMETERS p_del AS CHECKBOX.             "処理後に削除？
+PARAMETERS p_delerr LIKE sy-msgty.        "削除エラータイプ
+SELECTION-SCREEN END   OF BLOCK b1.
+"営業所/営業グループ
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE text-t02.
+PARAMETERS p_master RADIOBUTTON GROUP r2. "得意先マスタより決定
+PARAMETERS p_tarns RADIOBUTTON GROUP r2.  "受注伝票より決定
+SELECTION-SCREEN END   OF BLOCK b2.
+"事業領域
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-t03.
+PARAMETERS p_fix RADIOBUTTON GROUP r3.    "固定値を利用
+PARAMETERS p_gsber LIKE yk110-gsber.      "事業領域
+PARAMETERS p_tvta RADIOBUTTON GROUP r3.   "販売エリアより決定
+SELECTION-SCREEN END   OF BLOCK b3.
+"省略時値
+SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE text-t04.
+PARAMETERS p_vkorg LIKE yk110-vkorg. "販売組織
+PARAMETERS p_vtweg LIKE yk110-vtweg. "流通チャネル
+PARAMETERS p_spart LIKE yk110-spart. "製品部門
+PARAMETERS p_bukrs LIKE yk110-bukrs. "会社コード
+PARAMETERS p_waers LIKE t001-waers.  "通貨コード
+*ARAMETERS p_mwskz1 LIKE bseg-mwskz. "税コード（課税取引）
+*ARAMETERS p_mwskz2 LIKE bseg-mwskz. "税コード（経過措置）
+SELECTION-SCREEN END   OF BLOCK b4.
+"固定値
+SELECTION-SCREEN BEGIN OF BLOCK b5 WITH FRAME TITLE text-t05.
+PARAMETERS p_parvw LIKE knvp-parvw.    "取引先機能
+PARAMETERS p_kschl LIKE kotd601-kschl. "品目変換タイプ
+SELECTION-SCREEN END   OF BLOCK b5.
+
+*----------------------------------------------------------------------*
+INITIALIZATION.
+* 選択画面の初期設定
+GET PARAMETER ID 'VKO' FIELD p_vkorg.
+GET PARAMETER ID 'VTW' FIELD p_vtweg.
+GET PARAMETER ID 'SPA' FIELD p_spart.
+GET PARAMETER ID 'BUK' FIELD p_bukrs.
+GET PARAMETER ID 'GSB' FIELD p_gsber.
+p_check = 'X'.    "チェックのみ
+p_del = 'X'.      "処理後削除
+p_opnerr = 'W'.   "オープンエラーは警告のみ
+p_delerr = 'E'.   "削除エラーはエラー
+p_parvw = 'Y4'.   "検収先
+p_kschl = 'Y001'. "得意先品目
+SELECT SINGLE waers
+INTO   p_waers
+FROM   t001
+WHERE  bukrs  = p_bukrs.
+IF sy-subrc <> 0.
+p_waers = 'JPY'.
+ENDIF.
+
+START-OF-SELECTION.
+* 検収データ入力
+IF p_local = 'X'.
+PERFORM f_upload.       "ローカルよりアップロード
+ELSE.
+PERFORM f_read_file.    "サーバファイルを読み込み
+ENDIF.
+DESCRIBE TABLE i_data LINES w_incnt.
+MESSAGE i402(y1) WITH '入力件数' p_in1 w_incnt.
+* 検収データチェックとデータ編集
+LOOP AT i_data.
+PERFORM f_eiaj_check.   "EIAJ形式によるチェック
+PERFORM f_edit_yk110.   "検収データ更新用の編集
+IF p_check <> 'X'.
+PERFORM f_number_get. "検収番号の採番
+APPEND i_yk110.
+ENDIF.
+ENDLOOP.
+MESSAGE i402(y1) WITH '削除件数' p_in1 w_delcnt.
+* データベース更新
+IF p_check <> 'X'.
+PERFORM f_make_yk120.   "検収データを集計して登録/更新を振分
+PERFORM f_insert_yk110. "検収データを登録
+PERFORM f_insert_yk120. "検収合計データを登録
+PERFORM f_update_yk120. "検収合計データを更新
+*   入力ファイル削除
+DELETE DATASET p_in1.
+IF sy-subrc <> 0.
+MESSAGE ID 'Y1' TYPE p_delerr NUMBER '401'
+WITH '入力ファイルが削除できません' p_in1.
+"エラーで落とした場合、ROLLBACKされるが、警告にした場合は
+"COMMITされるためリカバリ処理に注意が必要
+ENDIF.
+ENDIF.
+
+*---------------------------------------------------------------------*
+*       FORM f_upload                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_upload.
+CALL FUNCTION 'UPLOAD'
+EXPORTING
+filename                = p_in1
+filetype                = 'DAT'
+TABLES
+data_tab                = i_data
+EXCEPTIONS
+conversion_error        = 1
+invalid_table_width     = 2
+invalid_type            = 3
+no_batch                = 4
+unknown_error           = 5
+gui_refuse_filetransfer = 6
+OTHERS                  = 7.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_read_file                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_read_file.
+* ファイルオープン
+OPEN DATASET p_in1 FOR INPUT IN TEXT MODE.
+IF sy-subrc <> 0.
+MESSAGE ID 'Y1' TYPE p_opnerr NUMBER '401'
+WITH '入力ファイルが開けません' p_in1.
+ENDIF.
+* 読み込み
+REFRESH i_data.
+DO.
+CLEAR i_data.
+READ DATASET p_in1 INTO i_data.
+IF sy-subrc <> 0.
+EXIT.
+ENDIF.
+APPEND i_data.
+ENDDO.
+* ファイルクローズ
+CLOSE DATASET p_in1.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_eiaj_check                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_eiaj_check.
+* 対象外の削除
+IF i_data-f00009 = '2' OR i_data-f00009 = '3'.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'訂正コード（00009）が', i_data-f00009,
+'のデータは対象外のため削除します'.
+DELETE i_data.
+ADD 1 TO w_delcnt.
+ENDIF.
+* 必須項目チェック
+IF i_data-f00001 IS INITIAL. "データ処理№
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'データ処理№（00001）が空白です'.
+ENDIF.
+IF i_data-f00002 <> '1101'. "情報区分コード
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'情報区分コード（00002）が不正です'.
+ENDIF.
+IF i_data-f00004 IS INITIAL. "発注者コード
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'発注者コード（00004）が空白です'.
+ENDIF.
+IF i_data-f00005 IS INITIAL. "受注者コード
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'受注者コード（00005）が空白です'.
+ENDIF.
+IF i_data-f00007 IS INITIAL. "注文番号
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'注文番号（00007）が空白です'.
+ENDIF.
+IF i_data-f00009 CO '123'. "訂正コード
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'訂正コード（00009）が不正です'.
+ENDIF.
+IF i_data-f00012 IS INITIAL. "単位
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'単位（00012）が空白です'.
+ENDIF.
+IF i_data-f00024 IS INITIAL. "発注者品目コード
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'発注者品目コード（00024）が空白です'.
+ENDIF.
+IF i_data-f00048 IS INITIAL. "検収単価
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'検収単価（00048）が空白です'.
+ENDIF.
+IF i_data-f00049 IS INITIAL. "検収金額
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'検収金額（00049）が空白です'.
+ENDIF.
+IF i_data-f00050 IS INITIAL. "検収数量
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'検収数量（00050）が空白です'.
+ENDIF.
+IF i_data-f00051 IS INITIAL. "検収日
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'検収日（00051）が空白です'.
+ENDIF.
+IF i_data-f00142 IS INITIAL. "計上月度
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'計上月度（00142）が空白です'.
+ENDIF.
+IF i_data-f00281 IS INITIAL AND
+i_data-f00285 IS INITIAL AND
+i_data-f00286 IS INITIAL.
+ELSE.
+IF i_data-f00281 IS INITIAL. "通貨コード
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'通貨コード（00281）が空白です'.
+ENDIF.
+IF i_data-f00285 IS INITIAL. "検収単価（外貨）
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'検収単価（外貨）（00285）が空白です'.
+ENDIF.
+IF i_data-f00286 IS INITIAL. "検収金額（外貨）
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'検収金額（外貨）（00286）が空白です'.
+ENDIF.
+ENDIF.
+* 任意項目チェック
+PERFORM f_check_yymmdd USING i_data-f00003
+'データ作成日（00003）が不正です'
+i_data-f00004 i_data-f00007.
+IF i_data-f00010 CO ' 12'. "コック区分
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'コック区分（00010）が不正です'.
+ENDIF.
+IF i_data-f00014 CO ' 123'. "単価区分
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'単価区分（00014）が不正です'.
+ENDIF.
+IF i_data-f00017 CO ' 1234'. "支給区分
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'支給区分（00017）が不正です'.
+ENDIF.
+IF i_data-f00027 CO ' 12'. "直納区分
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'直納区分（00027）が不正です'.
+ENDIF.
+PERFORM f_check_yymmdd USING i_data-f00039
+'出荷日（00039）が不正です'
+i_data-f00004 i_data-f00007.
+PERFORM f_check_yymmdd USING i_data-f00040
+'納入日（00040）が不正です'
+i_data-f00004 i_data-f00007.
+PERFORM f_check_yymmdd USING i_data-f00051
+'検収日（00051）が不正です'
+i_data-f00004 i_data-f00007.
+IF i_data-f00057 CO ' 12'. "消費税区分
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'消費税区分（00057）が不正です'.
+ENDIF.
+IF i_data-f00058 CO ' 12'. "取引符号区分
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'取引符号区分（00058）が不正です'.
+ENDIF.
+IF i_data-f00059 CO ' 12349'. "課税区分
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'課税区分（00059）が不正です'.
+ENDIF.
+PERFORM f_check_yymm USING i_data-f00142
+'計上月度（00142）が不正です'
+i_data-f00004 i_data-f00007.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_check_yymmdd                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  YYMMDD                                                        *
+*  -->  MSG                                                           *
+*  -->  F00004                                                        *
+*  -->  F00007                                                        *
+*---------------------------------------------------------------------*
+FORM f_check_yymmdd USING yymmdd msg f00004 f00007.
+IF yymmdd IS INITIAL.
+ELSE.
+IF yymmdd+2(2) BETWEEN '01' AND '12'.
+ELSE.
+WRITE: /001 f00004,
+014 f00007,
+msg.
+ENDIF.
+IF yymmdd+4(2) BETWEEN '01' AND '31'.
+ELSE.
+WRITE: /001 f00004,
+014 f00007,
+msg.
+ENDIF.
+ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_check_yymm                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  YYMM                                                          *
+*  -->  MSG                                                           *
+*  -->  F00004                                                        *
+*  -->  F00007                                                        *
+*---------------------------------------------------------------------*
+FORM f_check_yymm USING yymm msg f00004 f00007.
+IF yymm IS INITIAL.
+ELSE.
+IF yymm+2(2) BETWEEN '01' AND '12'.
+ELSE.
+WRITE: /001 f00004,
+014 f00007,
+msg.
+ENDIF.
+ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_edit_yk110                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_edit_yk110.
+* ローカル変数
+DATA w_kunnr LIKE yk110-kunnr.
+DATA w_spart LIKE yk110-spart. "参照製品部門
+DATA w_vbeln LIKE vbak-vbeln.  "受注伝票番号
+DATA w_flg(1) TYPE n.          "受注伝票検索結果
+DATA w_matwa TYPE matwa.       "入力品目
+DATA w_taklv LIKE mara-taklv.  "品目税区分
+DATA w_num10(10) TYPE n.       "形式変換用
+DATA w_num12(12) TYPE n.       "〃
+DATA w_num13(13) TYPE n.       "〃
+DATA w_num15(15) TYPE n.       "〃
+DATA w_num16(16) TYPE n.       "〃
+DATA w_dec LIKE tcurx-currdec. "通貨の週小数部桁数
+* 初期化
+CLEAR i_yk110.
+* 発注者コード→得意先コード
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+input  = i_data-f00004  "発注者コード
+IMPORTING
+output = i_yk110-kunnr. "得意先コード
+* 得意先発注番号の編集
+i_yk110-bstkd = i_data-f00007.
+* 得意先コードの存在チェック
+SELECT SINGLE * FROM  kna1
+WHERE  kunnr  = i_yk110-kunnr.
+IF sy-subrc <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'得意先コード', i_yk110-kunnr, 'が未登録です'.
+CALL FUNCTION 'YK_GET_KUNNR_FROM_BSTKD'
+EXPORTING
+i_kunr1 = i_yk110-kunnr
+i_bstkd = i_yk110-bstkd
+IMPORTING
+e_kunnr = w_kunnr
+EXCEPTIONS
+no_get  = 1
+OTHERS  = 2.
+IF sy-subrc <> 0.
+*     MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*             WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ELSE.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'発注番号', i_yk110-bstkd, 'から得意先コード',
+w_kunnr, 'を設定しました'.
+i_yk110-kunnr = w_kunnr.
+ENDIF.
+ENDIF.
+* 販売組織、流通チャネル、製品部門の取得
+SELECT SINGLE vkorg vtweg spart
+INTO   (i_yk110-vkorg,i_yk110-vtweg,i_yk110-spart)
+FROM   edsdc
+WHERE  kunnr  = i_yk110-kunnr
+AND    lifnr  = i_data-f00005.
+IF sy-subrc <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'得意先コード', i_yk110-kunnr, 'のEDSDCが未登録のため',
+'販売組織', p_vkorg, '流通チャネル', p_vtweg,
+'製品部門', p_spart, 'を使用します'.
+i_yk110-vkorg = p_vkorg.
+i_yk110-vtweg = p_vtweg.
+i_yk110-spart = p_spart.
+ENDIF.
+* 会社コードの取得
+SELECT SINGLE bukrs
+INTO   i_yk110-bukrs
+FROM   tvko
+WHERE  vkorg  = i_yk110-vkorg.
+IF sy-subrc <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'販売組織', i_yk110-vkorg,
+'から会社コードが決定できないため',
+p_bukrs, 'を使用します'.
+i_yk110-bukrs = p_bukrs.
+ENDIF.
+* 検収先の取得
+CLEAR w_spart.
+SELECT SINGLE spaku gsber
+INTO   (w_spart,i_yk110-gsber) "参照製品部門、事業領域
+FROM   tvta
+WHERE  vkorg  = i_yk110-vkorg
+AND    vtweg  = i_yk110-vtweg
+AND    spart  = i_yk110-spart.
+IF sy-subrc <> 0.
+w_spart = i_yk110-spart.
+ENDIF.
+SELECT SINGLE kunn2
+INTO   i_yk110-kunr2
+FROM   knvp
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = i_yk110-vkorg
+AND    vtweg  = i_yk110-vtweg
+AND    spart  = w_spart
+AND    parvw  = p_parvw.
+IF sy-subrc <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'得意先コード', i_yk110-kunnr,
+'から検収先決定できないため',
+i_yk110-kunnr, 'を使用します'.
+i_yk110-kunr2 = i_yk110-kunnr.
+ENDIF.
+* 営業所/営業グループの検索
+IF p_master = 'X'. "マスタより決定
+SELECT SINGLE vkgrp vkbur
+INTO   (i_yk110-vkgrp,i_yk110-vkbur)
+FROM   knvv
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = i_yk110-vkorg
+AND    vtweg  = i_yk110-vtweg
+AND    spart  = w_spart.
+IF sy-subrc <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'得意先マスタ', i_yk110-kunnr, i_yk110-vkorg,
+i_yk110-vtweg, w_spart,
+'が未登録なため営業所/営業グループが設定できません'.
+ENDIF.
+ELSE. "受注伝票より決定
+w_flg = 1.
+SELECT vbeln
+INTO   w_vbeln
+FROM   vbkd
+WHERE  bstkd  = i_yk110-bstkd.
+SELECT SINGLE vkgrp vkbur
+INTO   (i_yk110-vkgrp,i_yk110-vkbur)
+FROM   vbak
+WHERE  vbeln  = w_vbeln
+AND    kunnr  = i_yk110-kunnr.
+IF sy-subrc = 0.
+w_flg = 0.
+EXIT. "SELECTループを抜ける
+ENDIF.
+ENDSELECT.
+IF w_flg <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'得意先発注番号', i_yk110-bstkd,
+'より営業所/営業グループが設定できません'.
+ENDIF.
+ENDIF.
+* 事業領域の検索
+IF p_fix = 'X'. "固定値を設定する
+i_yk110-gsber = p_gsber.
+ELSE. "販売エリアより設定
+"参照製品部門の検索時に取得済み
+ENDIF.
+* 検収日/納入日
+i_yk110-auddat+0(2) = '20'.
+i_yk110-auddat+2(6) = i_data-f00051.
+IF NOT i_data-f00040 IS INITIAL.
+i_yk110-dvldat+0(2) = '20'.
+i_yk110-dvldat+2(6) = i_data-f00040.
+ENDIF.
+* 支払基準日/暦年
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+i_cord         = i_yk110-kunnr
+i_vkorg        = i_yk110-vkorg
+i_vtweg        = i_yk110-vtweg
+i_spart        = i_yk110-spart
+i_day          = i_yk110-auddat
+IMPORTING
+e_zfbdt        = i_yk110-zfbdt
+EXCEPTIONS
+no_get_t052    = 1
+no_good_getday = 2
+no_get_zterm   = 3
+OTHERS         = 4.
+IF sy-subrc <> 0.
+*   MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*           WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'締日が取得できません'.
+ENDIF.
+i_yk110-ykyear = i_yk110-zfbdt+0(4).
+IF NOT i_data-f00142 IS INITIAL. "計上月度との比較
+IF i_data-f00142 <> i_yk110-zfbdt+2(4).
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'計上月度', i_data-f00142,
+'と、支払基準日', i_yk110-zfbdt, 'がマッチしません'.
+ENDIF.
+ENDIF.
+* 受注者品名コード→品目コード
+IF NOT i_data-f00023 IS INITIAL. "受注者品名コードが存在
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+input        = i_data-f00023
+IMPORTING
+output       = i_yk110-matnr
+EXCEPTIONS
+length_error = 1
+OTHERS       = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+SELECT SINGLE taklv
+INTO   w_taklv
+FROM   mara
+WHERE  matnr  = i_yk110-matnr.
+IF sy-subrc <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'品目コード（受注者品名コード）',
+i_yk110-matnr, 'は未登録です'.
+ENDIF.
+ENDIF.
+* 得意先品目
+i_yk110-kdmat = i_data-f00024.
+w_matwa = i_data-f00024.
+* 品目コード
+SELECT SINGLE matnr "発注者品名コードで得意先品目を検索
+INTO   i_yk110-matnr
+FROM   knmt
+WHERE  vkorg  = i_yk110-vkorg
+AND    vtweg  = i_yk110-vtweg
+AND    kunnr  = i_yk110-kunnr
+AND    kdmat  = i_yk110-kdmat.
+IF sy-subrc <> 0. "発注者品名コードで品目変換を検索
+CALL FUNCTION 'YK_GET_SMATN_FROM_MATWA'
+EXPORTING
+i_kappl = 'V'
+i_kschl = p_kschl
+i_vkorg = i_yk110-vkorg
+i_vtweg = i_yk110-vtweg
+i_kunag = i_yk110-kunnr
+i_matwa = w_matwa
+i_date  = i_yk110-auddat
+IMPORTING
+e_smatn = i_yk110-matnr
+EXCEPTIONS
+no_get  = 1
+OTHERS  = 2.
+IF sy-subrc <> 0.
+i_yk110-matnr = i_yk110-kdmat.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'発注者品目コード', i_yk110-kdmat,
+'より品目コードが決定できないため',
+i_yk110-matnr, 'を品目コードとして使用します'.
+ENDIF.
+ENDIF.
+* 品目テキスト
+IF i_data-f00022 IS INITIAL.
+SELECT SINGLE maktx
+INTO   i_yk110-maktx
+FROM   makt
+WHERE  matnr  = i_yk110-matnr
+AND    spras  = sy-langu.
+IF sy-subrc <> 0.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'品目コード', i_yk110-matnr,
+'言語', sy-langu, 'の品目テキストが未登録です'.
+ENDIF.
+ELSE.
+i_yk110-maktx = i_data-f00022.
+ENDIF.
+* 数量のフォーマット変換
+w_num12 = i_data-f00050.
+IF i_data-f00058 = '2'.
+i_yk110-knquan = w_num12 / 1000 * -1.
+ELSE.
+i_yk110-knquan = w_num12 / 1000.
+ENDIF.
+* 単位の変換
+CALL FUNCTION 'UNIT_OF_MEASURE_ISO_TO_SAP'
+EXPORTING
+iso_code  = i_data-f00012  "ISOコードで入力することを想定
+IMPORTING
+sap_code  = i_yk110-knunit  "単位
+EXCEPTIONS
+not_found = 1
+OTHERS    = 2.
+IF sy-subrc <> 0.
+*   MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*           WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'R/3単位に変換できないため', i_data-f00012,
+'を使用します'.
+i_yk110-knunit = i_data-f00012.
+ENDIF.
+* 通貨コード
+IF i_data-f00281 IS INITIAL. "通貨コード未入力
+SELECT SINGLE waers "会社コード通貨
+INTO   i_yk110-waers
+FROM   t001
+WHERE  bukrs  = i_yk110-bukrs.
+IF sy-subrc <> 0.
+i_yk110-waers = p_waers. "画面の値
+ENDIF.
+ELSE. "通貨コード入力済
+i_yk110-waers = i_data-f00281.
+SELECT SINGLE * FROM  tcurt
+WHERE  spras  = sy-langu
+AND    waers  = i_yk110-waers.
+IF sy-subrc <> 0.
+SELECT SINGLE waers "会社コード通貨
+INTO   i_yk110-waers
+FROM   t001
+WHERE  bukrs  = i_yk110-bukrs.
+IF sy-subrc <> 0.
+i_yk110-waers = p_waers. "画面の値
+ENDIF.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'通貨コード', i_data-f00281,
+'は未登録のため', i_yk110-waers, 'を使用します'.
+ENDIF.
+ENDIF.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+i_currency         = i_yk110-waers
+IMPORTING
+e_decimals         = w_dec  "小数部桁数の取得
+EXCEPTIONS
+i_currency_initial = 1
+OTHERS             = 2.
+IF sy-subrc <> 0.
+*   MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*           WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'通貨コード', i_data-f00281,
+'の小数部桁数が取得できません'.
+ENDIF.
+* 単価
+w_num13 = i_data-f00048.
+IF w_num13 > 0. "円貨から編集
+IF i_data-f00058 = '2'.
+i_yk110-knuntprc = w_num13 / 1000 * -1.
+ELSE.
+i_yk110-knuntprc = w_num13 / 1000.
+ENDIF.
+ELSE. "外貨から編集
+w_num16 = i_data-f00285.
+IF i_data-f00058 = '2'.
+i_yk110-knuntprc = w_num13 / 100000 * -1.
+ELSE.
+i_yk110-knuntprc = w_num13 / 100000.
+ENDIF.
+ENDIF.
+* 税抜金額/消費税額/税込金額
+IF i_data-f00057 = '1'. "税込み
+w_num10 = i_data-f00049.
+IF w_num10 > 0. "円貨
+IF i_data-f00058 = '2'. "税込金額
+i_yk110-knetxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ) * -1.
+ELSE.
+i_yk110-knetxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ).
+ENDIF.
+w_num10 = i_data-f00060. "消費税額
+IF i_data-f00058 = '2'.
+i_yk110-kntaxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ) * -1.
+ELSE.
+i_yk110-kntaxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ).
+ENDIF.
+ELSE. "外貨
+w_num15 = i_data-f00286. "税込金額
+IF i_data-f00058 = '2'.
+i_yk110-knetxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ) * -1.
+ELSE.
+i_yk110-knetxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ).
+ENDIF.
+w_num15 = i_data-f00287. "消費税額
+IF i_data-f00058 = '2'.
+i_yk110-kntaxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ) * -1.
+ELSE.
+i_yk110-kntaxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ).
+ENDIF.
+ENDIF.
+i_yk110-knitxamt = i_yk110-knetxamt - i_yk110-kntaxamt. "税抜金額
+ELSE. "税抜き
+w_num10 = i_data-f00049.
+IF w_num10 > 0. "円貨
+IF i_data-f00058 = '2'. "税抜金額
+i_yk110-knitxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ) * -1.
+ELSE.
+i_yk110-knitxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ).
+ENDIF.
+w_num10 = i_data-f00060. "消費税額
+IF i_data-f00058 = '2'.
+i_yk110-kntaxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ) * -1.
+ELSE.
+i_yk110-kntaxamt = w_num10 * ( 10 ** ( w_dec - 2 ) ).
+ENDIF.
+ELSE. "外貨
+w_num15 = i_data-f00286. "税抜金額
+IF i_data-f00058 = '2'.
+i_yk110-knitxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ) * -1.
+ELSE.
+i_yk110-knitxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ).
+ENDIF.
+w_num15 = i_data-f00287. "消費税額
+IF i_data-f00058 = '2'.
+i_yk110-kntaxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ) * -1.
+ELSE.
+i_yk110-kntaxamt = w_num15 * ( 10 ** ( w_dec - 5 ) ).
+ENDIF.
+ENDIF.
+i_yk110-knetxamt = i_yk110-knitxamt + i_yk110-kntaxamt. "税込金額
+ENDIF.
+* その他
+i_yk110-prcflg = '1'. "入力
+i_yk110-fixflg = 'X'. "確定
+i_yk110-sgtxt = i_data-f00056. "明細テキスト
+i_yk110-insdat = sy-datum.
+i_yk110-instim = sy-uzeit.
+i_yk110-insusr = sy-uname.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_calc_tax                                               *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  W_KBN                                                         *
+*  -->  W_MWSKZ                                                       *
+*  -->  W_ZEINUKI                                                     *
+*  -->  W_ZEIGAKU                                                     *
+*  -->  W_ZEIKOMI                                                     *
+*---------------------------------------------------------------------*
+FORM f_calc_tax USING w_kbn w_mwskz w_zeinuki w_zeigaku w_zeikomi.
+* ローカル変数
+DATA i_mwdat LIKE rtax1u15 OCCURS 0.
+DATA w_wrbtr LIKE bseg-wrbtr.
+DATA w_fwste LIKE bset-fwste.
+*
+IF w_kbn = '1'. "税込み
+w_wrbtr = w_zeikomi.
+CALL FUNCTION 'CALCULATE_TAX_FROM_GROSSAMOUNT'
+EXPORTING
+i_bukrs                 = i_yk110-bukrs
+i_mwskz                 = w_mwskz
+i_waers                 = i_yk110-waers
+i_wrbtr                 = w_wrbtr
+IMPORTING
+e_fwste                 = w_fwste
+TABLES
+t_mwdat                 = i_mwdat
+EXCEPTIONS
+bukrs_not_found         = 1
+country_not_found       = 2
+mwskz_not_defined       = 3
+mwskz_not_valid         = 4
+account_not_found       = 5
+different_discount_base = 6
+different_tax_base      = 7
+txjcd_not_valid         = 8
+not_found               = 9
+ktosl_not_found         = 10
+kalsm_not_found         = 11
+parameter_error         = 12
+knumh_not_found         = 13
+kschl_not_found         = 14
+unknown_error           = 15
+OTHERS                  = 16.
+IF sy-subrc <> 0.
+*     MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*             WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'消費税が計算できません'.
+ENDIF.
+ELSE. "税抜き
+w_wrbtr = w_zeinuki.
+CALL FUNCTION 'CALCULATE_TAX_FROM_NET_AMOUNT'
+EXPORTING
+i_bukrs           = i_yk110-bukrs
+i_mwskz           = w_mwskz
+i_waers           = i_yk110-waers
+i_wrbtr           = w_wrbtr
+IMPORTING
+e_fwste           = w_fwste
+TABLES
+t_mwdat           = i_mwdat
+EXCEPTIONS
+bukrs_not_found   = 1
+country_not_found = 2
+mwskz_not_defined = 3
+mwskz_not_valid   = 4
+ktosl_not_found   = 5
+kalsm_not_found   = 6
+parameter_error   = 7
+knumh_not_found   = 8
+kschl_not_found   = 9
+unknown_error     = 10
+account_not_found = 11
+txjcd_not_valid   = 12
+OTHERS            = 13.
+IF sy-subrc <> 0.
+*     MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*             WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'消費税が計算できません'.
+ENDIF.
+ENDIF.
+w_zeigaku = w_fwste. "税額
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_number_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_number_get.
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+nr_range_nr             = '10'
+object                  = 'YKAUDDOC'
+subobject               = i_yk110-bukrs
+toyear                  = i_yk110-ykyear
+IMPORTING
+number                  = i_yk110-auddoc
+EXCEPTIONS
+interval_not_found      = 1
+number_range_not_intern = 2
+object_not_found        = 3
+quantity_is_0           = 4
+quantity_is_not_1       = 5
+interval_overflow       = 6
+buffer_overflow         = 7
+OTHERS                  = 8.
+IF sy-subrc <> 0.
+*   MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*           WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+WRITE: /001 i_data-f00004,
+014 i_data-f00007,
+'検収番号が取得できません'.
+ENDIF.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_make_yk120                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_make_yk120.
+* ローカル変数
+DATA w_yk120 LIKE yk120.
+DATA i_yk120 LIKE STANDARD TABLE OF yk120 WITH HEADER LINE.
+* データ作成
+SORT i_yk110 BY bukrs ykyear kunnr kunr2 vkorg vtweg spart vkbur
+vkgrp gsber zfbdt.
+LOOP AT i_yk110.
+MOVE-CORRESPONDING i_yk110 TO i_yk120.
+COLLECT i_yk120.
+ENDLOOP.
+* 重複チェック
+LOOP AT i_yk120.
+SELECT SINGLE *
+INTO   w_yk120
+FROM   yk120
+WHERE  bukrs   = i_yk120-bukrs
+AND    ykyear  = i_yk120-ykyear
+AND    kunnr   = i_yk120-kunnr
+AND    kunr2   = i_yk120-kunr2
+AND    vkorg   = i_yk120-vkorg
+AND    vtweg   = i_yk120-vtweg
+AND    spart   = i_yk120-spart
+AND    vkbur   = i_yk120-vkbur
+AND    vkgrp   = i_yk120-vkgrp
+AND    gsber   = i_yk120-gsber
+AND    zfbdt   = i_yk120-zfbdt.
+IF sy-dbcnt > 0.
+ADD i_yk120-knitxamt TO w_yk120-knitxamt. "税抜金額
+ADD i_yk120-kntaxamt TO w_yk120-kntaxamt. "消費税額
+ADD i_yk120-knetxamt TO w_yk120-knetxamt. "税込税額
+w_yk120-upddat = sy-datum. "変更日
+w_yk120-updtim = sy-uzeit. "変更時刻
+w_yk120-updusr = sy-uname. "変更ユーザ
+APPEND w_yk120 TO i_yk120_i.
+ELSE.
+i_yk120-insdat = sy-datum. "登録日
+i_yk120-instim = sy-uzeit. "登録時刻
+i_yk120-insusr = sy-uname. "登録ユーザ
+APPEND i_yk120 TO i_yk120_u.
+ENDIF.
+ENDLOOP.
+FREE i_yk120.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_insert_yk110                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_insert_yk110.
+INSERT yk110 FROM TABLE i_yk110.
+MESSAGE i401(y1) WITH '検収データ登録' sy-dbcnt.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_insert_yk120                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_insert_yk120.
+LOOP AT i_yk120_i.
+CALL FUNCTION 'ENQUEUE_EY_YK120'
+EXPORTING
+bukrs          = i_yk120_i-bukrs
+ykyear         = i_yk120_i-ykyear
+kunnr          = i_yk120_i-kunnr
+kunr2          = i_yk120_i-kunr2
+vkorg          = i_yk120_i-vkorg
+vtweg          = i_yk120_i-vtweg
+spart          = i_yk120_i-spart
+vkbur          = i_yk120_i-vkbur
+vkgrp          = i_yk120_i-vkgrp
+gsber          = i_yk120_i-gsber
+zfbdt          = i_yk120_i-zfbdt
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+ENDLOOP.
+INSERT yk120 FROM TABLE i_yk120_i.
+MESSAGE i401(y1) WITH '検収合計データ登録' sy-dbcnt.
+LOOP AT i_yk120_i.
+CALL FUNCTION 'DEQUEUE_EY_YK120'
+EXPORTING
+bukrs  = i_yk120_i-bukrs
+ykyear = i_yk120_i-ykyear
+kunnr  = i_yk120_i-kunnr
+kunr2  = i_yk120_i-kunr2
+vkorg  = i_yk120_i-vkorg
+vtweg  = i_yk120_i-vtweg
+spart  = i_yk120_i-spart
+vkbur  = i_yk120_i-vkbur
+vkgrp  = i_yk120_i-vkgrp
+gsber  = i_yk120_i-gsber
+zfbdt  = i_yk120_i-zfbdt.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_update_yk120                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_update_yk120.
+LOOP AT i_yk120_i.
+CALL FUNCTION 'ENQUEUE_EY_YK120'
+EXPORTING
+bukrs          = i_yk120_u-bukrs
+ykyear         = i_yk120_u-ykyear
+kunnr          = i_yk120_u-kunnr
+kunr2          = i_yk120_u-kunr2
+vkorg          = i_yk120_u-vkorg
+vtweg          = i_yk120_u-vtweg
+spart          = i_yk120_u-spart
+vkbur          = i_yk120_u-vkbur
+vkgrp          = i_yk120_u-vkgrp
+gsber          = i_yk120_u-gsber
+zfbdt          = i_yk120_u-zfbdt
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+ENDLOOP.
+UPDATE yk120 FROM TABLE i_yk120_u.
+MESSAGE i401(y1) WITH '検収合計データ更新' sy-dbcnt.
+LOOP AT i_yk120_u.
+CALL FUNCTION 'DEQUEUE_EY_YK120'
+EXPORTING
+bukrs  = i_yk120_u-bukrs
+ykyear = i_yk120_u-ykyear
+kunnr  = i_yk120_u-kunnr
+kunr2  = i_yk120_u-kunr2
+vkorg  = i_yk120_u-vkorg
+vtweg  = i_yk120_u-vtweg
+spart  = i_yk120_u-spart
+vkbur  = i_yk120_u-vkbur
+vkgrp  = i_yk120_u-vkgrp
+gsber  = i_yk120_u-gsber
+zfbdt  = i_yk120_u-zfbdt.
+ENDLOOP.
+ENDFORM.

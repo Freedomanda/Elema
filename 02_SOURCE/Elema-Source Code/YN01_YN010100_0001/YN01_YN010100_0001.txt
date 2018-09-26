@@ -1,0 +1,707 @@
+*&---------------------------------------------------------------------*
+*&  INCLUDE           YN01_YN010100_0001
+*&                    YN010100 EXIT番号:0001
+*&---------------------------------------------------------------------*
+
+
+
+*&---------------------------------------------------------------------*
+*&      Form  YNEIAJ1101_0001
+*&---------------------------------------------------------------------*
+*       EXIT番号0001処理
+*----------------------------------------------------------------------*
+FORM YNEIAJ1101_0001 USING LW_YNEIAJ1101 LIKE YNEIAJ1101.
+DATA: L_BLDAT LIKE BKPF-BLDAT,
+L_BUDAT LIKE BKPF-BUDAT,
+L_POSTING_DATE LIKE BAPI0002_4-POSTING_DATE,
+L_COMP_CODE LIKE BAPI0002_2-COMP_CODE,
+L_WAERS LIKE TCURC-WAERS,               " 通貨コード
+L_BAPICURR LIKE BAPICURR-BAPICURR,      " 消費税額
+L_ISOCODE LIKE T006-ISOCODE,
+L_DATE(8) TYPE C.
+
+DATA: L_ZTERM LIKE KNB1-ZTERM,                " 支払条件の取得
+L_ZFBDT LIKE BSEG-ZFBDT,                " 日付(支払基準日)の取得
+L_FISCAL_YEAR LIKE BAPI0002_4-FISCAL_YEAR, " 会計年度(YGJAHR)の取得
+L_SAP_CODE LIKE T006-MSEHI,             " 単位
+L_UNIQUE LIKE ISOFIELDS-UNIQUE,         " 単位
+L_RETURN LIKE BAPIRETURN,               " MSG
+L_KNTAXAMT LIKE YN110-KNTAXAMT,         " 消費税額
+L_KNETXAMT LIKE YN110-KNETXAMT,         " 税込税額
+L_ERR_MSG(128) TYPE C,
+L_LINE TYPE STRING,
+L_ERR_FLG TYPE C.
+*elematec 対応 INSERT START 2011/12/08
+DATA :
+L_YYYYMMDD(8)  TYPE C,
+L_DAY          TYPE D,
+L_VKORG        TYPE EDSDC-VKORG,
+L_VTWEG        TYPE EDSDC-VTWEG,
+L_SPAKU        TYPE TVTA-SPAKU,
+L_TRUNC(16)    TYPE P, "整数部
+L_FRAC(16)     TYPE P, "小数部
+L_ABC(16)      TYPE P, "整数部
+L_DECIMALS     TYPE TCURX-CURRDEC,
+LC_KNTAXAMT(15) TYPE C, "消費税額
+LC_KNETXAMT(15) TYPE C, "税込金額
+L_SUBRC        TYPE SY-SUBRC.
+*** 2012/07/09 INSERT START ***
+DATA L_COMMT TYPE YN110-COMMT. "計上締日不整合時に元検収日をｺﾒﾝﾄにｾｯﾄ
+DATA L_HANDLE_FLG TYPE C.      "計上締日不整合時のハンドリングフラグ
+*** 2012/07/09 INSERT END ***
+*クリア
+CLEAR:TBL_YN110.
+*** 2012/07/09 INSERT START ***
+CLEAR L_HANDLE_FLG.
+*** 2012/07/09 INSERT END ***
+*マスタ読込
+*
+READ TABLE TBL_KNVV_KNVI WITH TABLE KEY KUNNR = LW_YNEIAJ1101-YN00004
+INTO W_KNVV_KNVI.
+READ TABLE TBL_KNVP_KNVV WITH TABLE KEY KUNNR = LW_YNEIAJ1101-YN00004
+INTO W_KNVP_KNVV.
+PERFORM GET_EDSDC_TVTA USING LW_YNEIAJ1101-YN00004    "受注先
+LW_YNEIAJ1101-YNBUKRS(10) "受注者コード
+P_VKORG                   "販売組織
+P_VTWEG                   "流通チャネル
+P_SPART                   "製品部門
+CHANGING L_VKORG L_VTWEG L_SPAKU L_SUBRC.
+*検収日（売掛日）、計上締日、会計年度の取得
+*-基準日の決定
+CONCATENATE '20' LW_YNEIAJ1101-YN00142 '01' "計上月度
+INTO L_YYYYMMDD.
+CALL FUNCTION 'CONVERT_DATE_TO_INTERNAL'
+EXPORTING
+DATE_EXTERNAL                  = L_YYYYMMDD
+EXCEPTIONS
+DATE_EXTERNAL_IS_INVALID       = 1
+OTHERS                         = 2.
+IF SY-SUBRC <> 0.
+CONCATENATE '20' LW_YNEIAJ1101-YN00051    "検収日
+INTO L_YYYYMMDD.
+ENDIF.
+*-計上締日の取得
+L_DAY = L_YYYYMMDD. "規準日
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD               = W_KNVP_KNVV-KUNN2 "支払人
+I_VKORG              = L_VKORG
+I_VTWEG              = L_VTWEG
+I_SPART              = L_SPAKU
+I_DAY                = L_DAY
+IMPORTING
+E_ZFBDT              = L_ZFBDT
+EXCEPTIONS
+NO_GET_T052          = 1
+NO_GOOD_GETDAY       = 2
+NO_GET_ZTERM         = 3
+OTHERS               = 4.
+IF SY-SUBRC <> 0.
+CLEAR: L_ERR_MSG.
+*計上締日取得エラー
+MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M31.
+PERFORM F_ERR_LOG_FILE_SET USING TBL_EXIT-INDEX
+LW_YNEIAJ1101-YN00004
+L_ERR_MSG.
+EXIT.
+ENDIF.
+*-計上締日のチェック
+READ TABLE TBL_ZN004 INTO W_ZN004
+WITH TABLE KEY KUNNR = W_KNVP_KNVV-KUNN2. "支払人
+IF SY-SUBRC <> 0.
+READ TABLE TBL_ZN004 INTO W_ZN004
+WITH TABLE KEY KUNNR = '+'.
+IF SY-SUBRC <> 0.
+CLEAR: L_ERR_MSG.
+*ZN004取得エラー
+MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M30.
+PERFORM F_ERR_LOG_FILE_SET USING TBL_EXIT-INDEX
+LW_YNEIAJ1101-YN00004
+L_ERR_MSG.
+EXIT.
+ENDIF.
+ENDIF.
+*計上締日(支払基準日) > 照合終了日はＯＫ
+IF L_ZFBDT <= W_ZN004-EDATE.
+*既に照合終了に該当するレコードです。マスタの照合終了日を確認して下さい
+MESSAGE I809 INTO L_ERR_MSG.
+*** 2012/07/09 MOD START ***
+*    PERFORM F_ERR_LOG_FILE_SET USING TBL_EXIT-INDEX
+*                                     LW_YNEIAJ1101-YN00004
+*                                     L_ERR_MSG.
+*    EXIT.
+PERFORM F_ERR_LOG_FILE_SET2 USING TBL_EXIT-INDEX
+LW_YNEIAJ1101-YN00004
+L_ERR_MSG.
+L_HANDLE_FLG = CNS_ON.
+*-- 計上締日の再取得のために、基準日の再定義
+L_DAY = W_ZN004-EDATE + 1.
+
+*-- コメントにファイル設定の検収日をセットする。
+CONCATENATE '20' LW_YNEIAJ1101-YN00051    "検収日
+INTO L_COMMT.
+
+*-- 計上締日の再取得　取得値の整合性チェックは不要。
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD               = W_KNVP_KNVV-KUNN2 "支払人
+I_VKORG              = L_VKORG
+I_VTWEG              = L_VTWEG
+I_SPART              = L_SPAKU
+I_DAY                = L_DAY
+IMPORTING
+E_ZFBDT              = L_ZFBDT
+EXCEPTIONS
+NO_GET_T052          = 1
+NO_GOOD_GETDAY       = 2
+NO_GET_ZTERM         = 3
+OTHERS               = 4.
+IF SY-SUBRC <> 0.
+CLEAR: L_ERR_MSG.
+*計上締日取得エラー
+MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M31.
+PERFORM F_ERR_LOG_FILE_SET USING TBL_EXIT-INDEX
+LW_YNEIAJ1101-YN00004
+L_ERR_MSG.
+EXIT.
+ENDIF.
+*** 2012/07/09 MOD END ***
+ENDIF.
+*-会計年度の取得
+*** 2012/07/09 MOD START
+*  CONCATENATE '20' LW_YNEIAJ1101-YN00051    "検収日
+*         INTO L_POSTING_DATE.
+*-- 会計年度の整合性を取るために、計上締日不整合時は、
+*-- 会計年度取得の基準日を照合終了日の翌日とする。
+IF L_HANDLE_FLG = CNS_ON.
+L_POSTING_DATE = L_DAY.
+ELSE.
+CONCATENATE '20' LW_YNEIAJ1101-YN00051    "検収日
+INTO L_POSTING_DATE.
+ENDIF.
+*** 2012/07/09 MOD END ***
+CALL FUNCTION 'BAPI_COMPANYCODE_GET_PERIOD'
+EXPORTING
+COMPANYCODEID          = P_BUKRS
+POSTING_DATE           = L_POSTING_DATE
+IMPORTING
+FISCAL_YEAR            = L_FISCAL_YEAR
+EXCEPTIONS
+OTHERS                 = 1.
+IF SY-SUBRC <> 0.
+* 会計年度取得エラー
+CLEAR: L_ERR_MSG.
+MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M05.
+PERFORM F_ERR_LOG_FILE_SET USING TBL_EXIT-INDEX
+LW_YNEIAJ1101-YN00004
+L_ERR_MSG.
+EXIT.
+ENDIF.
+*-単位の変換
+L_ISOCODE  = LW_YNEIAJ1101-YN00012.
+CALL FUNCTION 'UNIT_OF_MEASURE_ISO_TO_SAP'
+EXPORTING
+ISO_CODE = L_ISOCODE
+IMPORTING
+SAP_CODE = L_SAP_CODE
+UNIQUE   = L_UNIQUE
+EXCEPTIONS
+OTHERS                 = 1.
+*
+TBL_YN110-GJAHR   = L_FISCAL_YEAR.             " 会計年度
+TBL_YN110-VRFCTON = W_KNVP_KNVV-KUNN2.         " 支払人
+TBL_YN110-BUKRS   = P_BUKRS.                   " 会社コード
+TBL_YN110-ZFBDT   = L_ZFBDT.                   " 検収日
+TBL_YN110-PERNR   = SYST-UNAME.                " ユーザログオン名
+TBL_YN110-DVSON   = W_KNVV_KNVI-VKBUR.         " 営業所
+TBL_YN110-CSTS    = '1'.                       " 照合ステータス
+*** 2012/07/09 INSERT START ***
+*--計上締日不整合時に、コメントに元の検収日をセットする。
+IF L_HANDLE_FLG = CNS_ON.
+TBL_YN110-COMMT   = L_COMMT.
+ENDIF.
+*** 2012/07/09 INSERT END ***
+*-数量の編集 9.3
+L_TRUNC           =  LW_YNEIAJ1101-YN00050+0(9). "整数部
+L_FRAC            =  LW_YNEIAJ1101-YN00050+9(2). "小数部
+L_ABC             =  L_TRUNC * 100 + L_FRAC.
+TBL_YN110-KNQUAN = L_ABC / 100.                 " 数量
+IF L_UNIQUE <> 'X'.
+*** 2012/10/24 MOD START "単位変換できない場合はスペースにする
+TBL_YN110-KNUNIT = SPACE.     " 単位
+*    TBL_YN110-KNUNIT = LW_YNEIAJ1101-YN00012.     " 単位
+*** 2012/10/24 MOD END
+ELSE.
+TBL_YN110-KNUNIT = L_SAP_CODE.                " 単位
+ENDIF.
+*-単価の編集
+*単価:検収単価（外貨）11.5
+L_TRUNC           =  LW_YNEIAJ1101-YN00285+0(11). "整数部
+L_FRAC            =  LW_YNEIAJ1101-YN00285+11(5). "小数部
+L_ABC             =  L_TRUNC * 100000 + L_FRAC.
+TBL_YN110-KNUNTPRC = L_ABC / 100000.              " 単価
+*-消費税額、税込金額の編集
+
+*--税込金額の決定
+*    LC_KNTAXAMT(16) TYPE C, "消費税額
+*    LC_KNETXAMT(16) TYPE C, "税込金額
+*金額調整係数を取得する。
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+I_CURRENCY               = W_KNVV_KNVI-WAERS
+IMPORTING
+E_DECIMALS               = L_DECIMALS
+EXCEPTIONS
+I_CURRENCY_INITIAL       = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+* 金額調整係数 取得エラー
+CLEAR: L_ERR_MSG.
+MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M32.
+PERFORM F_ERR_LOG_FILE_SET USING TBL_EXIT-INDEX
+LW_YNEIAJ1101-YN00004
+L_ERR_MSG.
+EXIT.
+ELSE.
+W_DECS = L_DECIMALS.
+W_DECS = W_DECS - 2.
+ENDIF.
+LC_KNETXAMT        = LW_YNEIAJ1101-YN00288.        "合計額(外貨)
+IF LC_KNETXAMT = 0.
+IF LW_YNEIAJ1101-YN00057 = '1'.                 "消費税区分
+*税込金額 = ファイル項目：検収金額（外貨）
+LC_KNETXAMT        =  LW_YNEIAJ1101-YN00286.   "検収金額（外貨）
+ELSE.
+*税込金額 = 検収金額（外貨） + 消費税額（外貨）
+LC_KNETXAMT  = LW_YNEIAJ1101-YN00286           "検収金額（外貨）
++ LW_YNEIAJ1101-YN00287.          "消費税額（外貨）
+ENDIF.
+ENDIF.
+*消費税
+LC_KNTAXAMT    = LW_YNEIAJ1101-YN00287.            "
+PERFORM EDIT_KINGAKU USING LC_KNTAXAMT  3.
+TBL_YN110-KNTAXAMT = W_AMOUNT2.
+TBL_YN110-KNTAXAMT =  TBL_YN110-KNTAXAMT * ( 10 ** W_DECS ).
+*税込金額
+PERFORM EDIT_KINGAKU USING LC_KNETXAMT  3.
+TBL_YN110-KNETXAMT = W_AMOUNT2.
+TBL_YN110-KNETXAMT =  TBL_YN110-KNETXAMT * ( 10 ** W_DECS ).
+*マイナス符号の編集
+*--訂正区分
+IF LW_YNEIAJ1101-YN00009 = '3'.
+TBL_YN110-KNQUAN = TBL_YN110-KNQUAN * ( -1 ).           " 数量
+TBL_YN110-KNTAXAMT = TBL_YN110-KNTAXAMT * ( -1 ).       " 消費税額
+TBL_YN110-KNETXAMT = TBL_YN110-KNETXAMT * ( -1 ).       " 税込金額
+ENDIF.
+*--取引符号区分
+IF LW_YNEIAJ1101-YN00058 = '2'.
+TBL_YN110-KNQUAN = TBL_YN110-KNQUAN * ( -1 ).           " 数量
+TBL_YN110-KNTAXAMT = TBL_YN110-KNTAXAMT * ( -1 ).       " 消費税額
+TBL_YN110-KNETXAMT = TBL_YN110-KNETXAMT * ( -1 ).       " 税込金額
+ENDIF.
+*税抜金額
+TBL_YN110-KNITXAMT = TBL_YN110-KNETXAMT - TBL_YN110-KNTAXAMT.
+TBL_YN110-WAERS  = LW_YNEIAJ1101-YN00281.           " 通貨コード
+TBL_YN110-UPDDAT = SYST-DATUM.                      " 更新日
+TBL_YN110-UPDTIM = SYST-UZEIT.                      " 更新時刻
+TBL_YN110-UPDUSR = SYST-UNAME.                      " 更新ユーザ
+TBL_YN110-UPDPRG = 'YN010100'.                      " 更新プログラム
+TBL_YN110-CKEY1 = LW_YNEIAJ1101-YN00007.            " 得意先発注番号
+TBL_YN110-LIST1 = LW_YNEIAJ1101-YN00004.            " 受注先コード
+TBL_YN110-LIST2 = LW_YNEIAJ1101-YN00007.            " 得意先発注番号
+TBL_YN110-LIST4 = W_KNVV_KNVI-VKGRP.                 " 営業グループ
+*品目コードの取得
+*YN00024 発注者品名コード
+PERFORM GET_MATNR USING L_VKORG L_VTWEG
+LW_YNEIAJ1101-YN00004
+LW_YNEIAJ1101-YN00024
+L_ZFBDT
+CHANGING TBL_YN110-LIST5.
+*品目テキストの取得
+PERFORM GET_MAKT USING TBL_YN110-LIST5
+CHANGING TBL_YN110-LIST6.
+TBL_YN110-LIST7 = LW_YNEIAJ1101-YN00024.            " 得意先品目
+*登録日
+TBL_YN110-INSDT = SYST-DATUM.
+*検収日
+TBL_YN110-LDATE1 = L_POSTING_DATE.
+
+*--消費税額、税込金額の編集
+*elematec 対応 INSERT END   2011/12/08
+*elematec 対応 DETELE START 2011/12/08
+* 得意先コードのチェック＆支払条件の取得
+**-- 20090113 UPD STA 支払条件の取得をREADに変更
+*  CLEAR : W_XXB1.
+*  READ TABLE TBL_XXB1 INTO W_XXB1
+*                        WITH TABLE KEY VRFCTON =
+*LW_YNEIAJ1101-YNVRFCTON
+*                                         BUKRS = LW_YNEIAJ1101-YNBUKRS.
+**-- 20090113 UPD END
+*  IF SY-SUBRC = 4.
+** 得意先コードはありません
+*    CLEAR: L_ERR_MSG.
+*    MESSAGE I772 INTO L_ERR_MSG WITH LW_YNEIAJ1101-YNVRFCTON.
+*    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+*                             LW_YNEIAJ1101-YNVRFCTON
+*                             LW_YNEIAJ1101-YNBUKRS
+*                             L_ERR_MSG.
+*    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+*    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+*    G_ERR_COUNT = G_ERR_COUNT  + 1.
+*    EXIT.
+*  ENDIF.
+*  IF SY-SUBRC <> 0.
+** 支払条件取得エラー
+*    CLEAR: L_ERR_MSG.
+*    MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M03.
+*    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+*                             LW_YNEIAJ1101-YNVRFCTON
+*                             LW_YNEIAJ1101-YNBUKRS
+*                             L_ERR_MSG.
+*    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+*    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+*    G_ERR_COUNT = G_ERR_COUNT  + 1.
+*    EXIT.
+*  ENDIF.
+**-- 20090113 INS STA
+*  L_ZTERM = W_XXB1-ZTERM.
+**-- 20090113 INS END
+*  IF LW_YNEIAJ1101-YN00051+0(2) > 50.
+*    CONCATENATE '19' LW_YNEIAJ1101-YN00051 INTO L_DATE.
+*  ELSE.
+*    CONCATENATE '20' LW_YNEIAJ1101-YN00051 INTO L_DATE.
+*  ENDIF.
+*
+** 日付(支払基準日)の取得
+*  L_BLDAT = L_DATE.
+*  L_BUDAT = L_DATE.
+*  CALL FUNCTION 'FI_FIND_PAYMENT_CONDITIONS'
+*    EXPORTING
+*      I_ZTERM         = L_ZTERM
+*      I_BLDAT         = L_BLDAT
+*      I_BUDAT         = L_BUDAT
+*    IMPORTING
+*      E_ZFBDT         = L_ZFBDT
+*    EXCEPTIONS
+*      TERMS_NOT_FOUND = 1
+*      OTHERS          = 2.
+*  IF SY-SUBRC <> 0.
+** 日付取得エラー
+*    CLEAR: L_ERR_MSG.
+*    MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M04.
+*    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+*                             LW_YNEIAJ1101-YNVRFCTON
+*                             LW_YNEIAJ1101-YNBUKRS
+*                             L_ERR_MSG.
+*    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+*    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+*    G_ERR_COUNT = G_ERR_COUNT  + 1.
+*    EXIT.
+*  ENDIF.
+*
+** 会計年度(YGJAHR)の取得
+*  L_COMP_CODE = LW_YNEIAJ1101-YNBUKRS.
+*  L_POSTING_DATE = L_DATE.
+*  CALL FUNCTION 'BAPI_COMPANYCODE_GET_PERIOD'
+*    EXPORTING
+*      COMPANYCODEID          = L_COMP_CODE
+*      POSTING_DATE           = L_POSTING_DATE
+*    IMPORTING
+*      FISCAL_YEAR            = L_FISCAL_YEAR
+*    EXCEPTIONS
+*      OTHERS                 = 1.
+*  IF SY-SUBRC <> 0.
+** 会計年度取得エラー
+*    CLEAR: L_ERR_MSG.
+*    MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M05.
+*    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+*                             LW_YNEIAJ1101-YNVRFCTON
+*                             LW_YNEIAJ1101-YNBUKRS
+*                             L_ERR_MSG.
+*    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+*    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+*    G_ERR_COUNT = G_ERR_COUNT  + 1.
+*    EXIT.
+*  ENDIF.
+*
+** 単位の変換
+*  L_ISOCODE  = LW_YNEIAJ1101-YN00012.
+**&Ver2 対応 2007/02/28 >>>
+*  L_SAP_CODE =  LW_YNEIAJ1101-YN00012.
+**&Ver2 対応 2007/02/28 <<<
+**&Ver2 対応 delete 2007/02/28 >>>
+**  CALL FUNCTION 'UNIT_OF_MEASURE_ISO_TO_SAP'
+**    EXPORTING
+**      ISO_CODE = L_ISOCODE
+**    IMPORTING
+**      SAP_CODE = L_SAP_CODE
+**      UNIQUE   = L_UNIQUE
+**    EXCEPTIONS
+**      OTHERS                 = 1.
+**  IF SY-SUBRC <> 0.
+*** 単位変換取得エラー
+**    CLEAR: L_ERR_MSG.
+**    MESSAGE I757 INTO L_ERR_MSG.
+**    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+**                             LW_YNEIAJ1101-YNVRFCTON
+**                             LW_YNEIAJ1101-YNBUKRS
+**                             L_ERR_MSG.
+**    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+**    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+**    G_ERR_COUNT = G_ERR_COUNT  + 1.
+**    EXIT.
+**  ENDIF.
+**&Ver2 対応 delete 2007/02/28 <<<
+** 通貨コードの妥当性チェック
+**-- 20090113 UPD STA 存在チェックをREADに変更
+*  CLEAR : W_TCURC.
+*  READ TABLE TBL_TCURC INTO W_TCURC
+*                       WITH TABLE KEY WAERS = LW_YNEIAJ1101-YN00281.
+**-- 20090113 UPD END
+*  IF SY-SUBRC <> 0.
+** 通貨コード取得エラー
+*    CLEAR: L_ERR_MSG.
+*    MESSAGE I754 INTO L_ERR_MSG WITH TEXT-M06.
+*    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+*                             LW_YNEIAJ1101-YNVRFCTON
+*                             LW_YNEIAJ1101-YNBUKRS
+*                             L_ERR_MSG.
+*    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+*    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+*    G_ERR_COUNT = G_ERR_COUNT  + 1.
+*    EXIT.
+*  ENDIF.
+*
+** 消費税額、税込金額の編集
+** 消費税額
+*  CLEAR L_ERR_FLG.
+*  PERFORM CURRENCY_CONV_TO_INTERNAL USING LW_YNEIAJ1101-YN00281
+*                                          LW_YNEIAJ1101-YN00287
+*                                          L_KNTAXAMT
+*                                          LW_YNEIAJ1101-YNVRFCTON
+*                                          LW_YNEIAJ1101-YNBUKRS
+*                                          L_ERR_FLG.
+*  IF L_ERR_FLG = 'X'.
+*    EXIT.
+*  ENDIF.
+*
+** 税込金額
+*  CLEAR L_ERR_FLG.
+**&Ver2 対応 2007/02/28 >>>
+*  IF LW_YNEIAJ1101-YN00288 IS INITIAL OR
+*     LW_YNEIAJ1101-YN00288 = 0.
+**   検収金額(外貨)より取得
+*    PERFORM CURRENCY_CONV_TO_INTERNAL USING LW_YNEIAJ1101-YN00281
+*                                            LW_YNEIAJ1101-YN00286
+*                                            L_KNETXAMT
+*                                            LW_YNEIAJ1101-YNVRFCTON
+*                                            LW_YNEIAJ1101-YNBUKRS
+*                                            L_ERR_FLG.
+**   消費税区分 = '2'：検収金額(外貨) = 税抜きの為、消費税をプラスする
+*    IF LW_YNEIAJ1101-YN00057 = '2'.
+*      L_KNETXAMT = L_KNETXAMT + L_KNTAXAMT.
+*    ENDIF.
+*  ELSE.
+*    PERFORM CURRENCY_CONV_TO_INTERNAL USING LW_YNEIAJ1101-YN00281
+*                                            LW_YNEIAJ1101-YN00288
+*                                            L_KNETXAMT
+*                                            LW_YNEIAJ1101-YNVRFCTON
+*                                            LW_YNEIAJ1101-YNBUKRS
+*                                            L_ERR_FLG.
+*  ENDIF.
+**&Ver2 対応 2007/02/28 <<<
+*  IF L_ERR_FLG = 'X'.
+*    EXIT.
+*  ENDIF.
+*
+** 品目コードの変換
+*  CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+*      EXPORTING
+*          INPUT = LW_YNEIAJ1101-YN00024
+*      IMPORTING
+*          OUTPUT = LW_YNEIAJ1101-YN00024
+*      EXCEPTIONS
+*          OTHERS = 1.
+*
+*
+*  TBL_YN110-GJAHR = L_FISCAL_YEAR.                    " 会計年度
+*  TBL_YN110-VRFCTON = LW_YNEIAJ1101-YNVRFCTON.        " 得意先コード
+*  TBL_YN110-BUKRS = LW_YNEIAJ1101-YNBUKRS.            " 会社コード
+*  TBL_YN110-ZFBDT = L_ZFBDT.                          " 日付
+*  TBL_YN110-CSTS = '1'.                               " 照合ステータス
+*  CATCH SYSTEM-EXCEPTIONS CONVT_OVERFLOW  = 1.
+*    TBL_YN110-KNQUAN = LW_YNEIAJ1101-YN00050.           " 数量
+*  ENDCATCH.
+*  IF SY-SUBRC <> 0.
+**   [数量]の桁数が正しくありません
+*    CLEAR: L_ERR_MSG.
+*    MESSAGE I779 INTO L_ERR_MSG WITH LW_YNEIAJ1101-YN00050.
+*    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+*                             LW_YNEIAJ1101-YNVRFCTON
+*                             LW_YNEIAJ1101-YNBUKRS
+*                             L_ERR_MSG.
+*    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+*    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+*    G_ERR_COUNT = G_ERR_COUNT  + 1.
+*    EXIT.
+*  ENDIF.
+*  IF L_UNIQUE <> 'X'.
+*    TBL_YN110-KNUNIT = LW_YNEIAJ1101-YN00012.         " 単位
+*  ELSE.
+*    TBL_YN110-KNUNIT = L_SAP_CODE.                    " 単位
+*  ENDIF.
+*  CATCH SYSTEM-EXCEPTIONS CONVT_OVERFLOW  = 1.
+*    TBL_YN110-KNUNTPRC = LW_YNEIAJ1101-YN00285.         " 単価
+*  ENDCATCH.
+*  IF SY-SUBRC <> 0.
+**   [単価]の桁数が正しくありません
+*    CLEAR: L_ERR_MSG.
+*    MESSAGE I779 INTO L_ERR_MSG WITH LW_YNEIAJ1101-YN00285.
+*    PERFORM SET_ERRLOG USING TBL_EXIT-INDEX
+*                             LW_YNEIAJ1101-YNVRFCTON
+*                             LW_YNEIAJ1101-YNBUKRS
+*                             L_ERR_MSG.
+*    READ TABLE TBL_CSV INDEX TBL_EXIT-INDEX INTO L_LINE.
+*    PERFORM SET_ERRFILE USING L_LINE L_ERR_MSG.
+*    G_ERR_COUNT = G_ERR_COUNT  + 1.
+*    EXIT.
+*  ENDIF.
+*
+*  TBL_YN110-KNTAXAMT = L_KNTAXAMT.                    " 消費税額
+*  TBL_YN110-KNITXAMT = L_KNETXAMT - L_KNTAXAMT.       " 税抜金額
+*  TBL_YN110-KNETXAMT = L_KNETXAMT.                    " 税込金額
+*  TBL_YN110-WAERS = LW_YNEIAJ1101-YN00281.            " 通貨コード
+*  TBL_YN110-UPDDAT = SYST-DATUM.                      " 更新日
+*  TBL_YN110-UPDTIM = SYST-UZEIT.                      " 更新時刻
+*  TBL_YN110-UPDUSR = SYST-UNAME.                      " 更新ユーザ
+*  TBL_YN110-UPDPRG = 'YN010100'.                      " 更新プログラム
+*  TBL_YN110-CKEY1 = LW_YNEIAJ1101-YN00007.            " 得意先発注番号
+**&Ver2 対応 2007/02/28 >>> 得意先/仕入先品目コードを一覧表示項目へ変更
+** TBL_YN110-CKEY2 = LW_YNEIAJ1101-YN00024.            " 意先品目コード
+*  TBL_YN110-LIST5 = LW_YNEIAJ1101-YN00024.            " 意先品目コード
+**&Ver2 対応 2007/02/28 <<<
+*  TBL_YN110-LIST3 = LW_YNEIAJ1101-YNY0002.            " 受注先コード
+*
+** マイナスフラグ
+*  IF LW_YNEIAJ1101-YNY0003 = 'X'.
+*    TBL_YN110-KNQUAN = TBL_YN110-KNQUAN * ( -1 ).           " 数量
+*    TBL_YN110-KNTAXAMT = TBL_YN110-KNTAXAMT * ( -1 ).       " 消費税額
+*    TBL_YN110-KNITXAMT = TBL_YN110-KNITXAMT * ( -1 ).       " 税抜金額
+*    TBL_YN110-KNETXAMT = TBL_YN110-KNETXAMT * ( -1 ).       " 税込金額
+*  ENDIF.
+*elematec 対応 DELETE END   2011/12/08
+
+APPEND TBL_YN110.
+*
+ENDFORM.                    " YNEIAJ1101_0001
+*&---------------------------------------------------------------------*
+*&      Form  GET_MATNR
+*&---------------------------------------------------------------------*
+*       品目コード取得
+*----------------------------------------------------------------------*
+FORM GET_MATNR USING P_VKORG P_VTWEG
+P_KUNNR "受注先
+P_KDMAT "発注者品目コード
+P_DATE  "検収日
+CHANGING P_MATNR.
+DATA :
+L_MATNR TYPE KNMT-MATNR,
+L_KUNNR TYPE KNA1-KUNNR,
+W_MATNR TYPE MARA-MATNR.
+*
+L_KUNNR = P_KUNNR.
+*
+*得意先/品目情報レコードデータテーブル
+SELECT MATNR INTO L_MATNR
+FROM KNMT UP TO 1 ROWS
+WHERE VKORG = P_VKORG
+AND   VTWEG = P_VTWEG
+AND   KUNNR = L_KUNNR
+AND   KDMAT = P_KDMAT.
+ENDSELECT.
+IF SY-SUBRC = 0.
+CALL FUNCTION 'YK_GET_SMATN_FROM_MATWA'
+EXPORTING
+I_KAPPL       = 'V'
+I_KSCHL       = 'Y001'
+I_VKORG       = P_VKORG
+I_VTWEG       = P_VTWEG
+I_KUNAG       = L_KUNNR
+I_MATWA       = L_MATNR
+I_DATE        = P_DATE
+IMPORTING
+*       E_KONDD       =
+E_SMATN       = W_MATNR
+EXCEPTIONS
+NO_GET        = 1
+OTHERS        = 2
+.
+IF SY-SUBRC =  0.
+P_MATNR = W_MATNR.
+ELSE.
+P_MATNR = L_MATNR.
+ENDIF.
+ELSE.
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT              = P_KDMAT(18)
+IMPORTING
+OUTPUT             = L_MATNR.
+*
+CALL FUNCTION 'YK_GET_SMATN_FROM_MATWA'
+EXPORTING
+I_KAPPL       = 'V'
+I_KSCHL       = 'Y001'
+I_VKORG       = P_VKORG
+I_VTWEG       = P_VTWEG
+I_KUNAG       = L_KUNNR
+I_MATWA       = L_MATNR
+I_DATE        = P_DATE
+IMPORTING
+*       E_KONDD       =
+E_SMATN       = W_MATNR
+EXCEPTIONS
+NO_GET        = 1
+OTHERS        = 2
+.
+IF SY-SUBRC = 0.
+P_MATNR = W_MATNR.
+ELSE.
+P_MATNR = L_MATNR.
+ENDIF.
+ENDIF.
+
+*
+ENDFORM.                    " GET_MATNR
+*&---------------------------------------------------------------------*
+*&      Form  GET_MAKT
+*&---------------------------------------------------------------------*
+*       品目テキスト
+*----------------------------------------------------------------------*
+FORM GET_MAKT USING P_MATNR
+CHANGING P_MAKTX.
+*
+SELECT SINGLE MAKTX INTO P_MAKTX
+FROM MAKT
+WHERE MATNR = P_MATNR
+AND   SPRAS = 'J'.
+IF SY-SUBRC <> 0.
+CLEAR:P_MAKTX.
+ENDIF.
+*
+ENDFORM.                    " GET_MAKT
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_KINGAKU
+*&---------------------------------------------------------------------*
+*       金額の小数部整数部分割
+*----------------------------------------------------------------------*
+*      -->P_CHAR   連結文字列
+*      -->P_DEC    小数部桁数
+*----------------------------------------------------------------------*
+FORM EDIT_KINGAKU USING    P_CHAR
+P_DEC.
+*
+W_NUMC    = P_CHAR.
+W_AMOUNT2 = W_NUMC * 10 ** ( P_DEC * -1 ).
+*
+ENDFORM.                    " EDIT_KINGAKU

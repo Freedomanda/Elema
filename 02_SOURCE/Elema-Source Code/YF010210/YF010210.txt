@@ -1,0 +1,2686 @@
+* 2000/01/13 MOD START
+*REPORT YF010200 MESSAGE-ID Y1
+*              LINE-SIZE  120
+*              LINE-COUNT 90
+REPORT YF010210 MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT  58
+* 2000/01/13 MOD END
+NO STANDARD PAGE HEADING.
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID：YF010200                                               *
+*    ﾌﾟﾛｸﾞﾗﾑ名：買掛金元帳作成                                         *
+*    処理種別 ：ﾊﾞｯﾁ(ABAP/4)                                           *
+*    処理概要 ：仕入先ﾏｽﾀ(LFA1)より仕入先の情報を取得し、仕入先毎に    *
+*               仕入先二次ｲﾝﾃﾞｯｸｽ(BSIK)、                              *
+*               仕入先二次ｲﾝﾃﾞｯｸｽ(決済明細)(BSAK)からｷｰを取得し、      *
+*               会計伝票明細(BSEG)、転記ｷｰ名(TBSLT)、                  *
+*               支払条件の自己説明(T052U)より各情報を付加し、          *
+*               買掛金元帳を作成する。                                 *
+*    入力     ：対象年月日、仕入先ｺｰﾄﾞ、会社ｺｰﾄﾞ、 勘定ｺｰﾄﾞ            *
+*----------------------------------------------------------------------*
+*    作成日   ：1998/11/12                                             *
+*    作成者   ：大屋                                                   *
+*    変更履歴 ：1999/01/07 大屋                                        *
+*                 明細が0件のﾃﾞｰﾀについてﾍｯﾀﾞと繰越額を出力するように  *
+*                 修正。                                               *
+*               1999/01/08 大屋                                        *
+*                 ﾍｯﾀﾞに対象年月日・自～対象年月日・至を出力するように *
+*                 修正。                                               *
+*               1999/01/19 大屋                                        *
+*                 支払条件を全桁出力するように修正。                   *
+*               1999/02/09 大屋                                        *
+*                 明細0件対応の処理を削除する。                        *
+*               2000/01/13 加治佐                                      *
+*                 伝票通貨&国内通貨額&換算レートを出力                 *
+*                 通貨コードを選択可能に修正                           *
+*                 通貨ブレイクで改ページ(ページNoはクリアしない)       *
+*               2000/05/22 加治佐                                      *
+*                 通貨金額作成汎用ﾓｼﾞｭｰﾙの受取を数値でなく文字列型に修正
+*               2000/06/02 加治佐                                      *
+*                      通貨コードブレイク時の国内通貨の繰越            *
+*                      伝票通貨の残高の出力                            *
+*                      国内通貨残高の値を"前月"から"前日まで"に変更    *
+*               2000/06/05 加治佐                                      *
+*                      換算差損益の出力                                *
+*               2000/06/15 k.kajisa(NDSC)                              *
+*                      パラメータの初期値をユーザ情報から取得          *
+*               2000/07/11 k.kajisa(NDSC)                              *
+*                      転記キー'09'の明細は残高算出に含まなくする      *
+*&[改定履歴]                                                           *
+*& YYYY/MM/DD  Programar         Description                           *
+*& 2012/09/12  ISID              ES-UP                                 *
+************************************************************************
+*使用テーブル定義
+TABLES: BSIK,
+BSAK,
+BKPF,
+BSEG,
+LFC1,
+LFA1,
+LFB1,
+T052U,
+TBSLT,
+T001,
+SKA1.
+
+*内部テーブルの定義
+DATA: BEGIN OF T_INDEX OCCURS 10,
+GJAHR      LIKE BSEG-GJAHR,
+BUDAT      LIKE BKPF-BUDAT,
+BELNR      LIKE BSEG-BELNR,
+BUZEI      LIKE BSEG-BUZEI,
+END   OF T_INDEX.
+
+DATA: BEGIN OF T_BSEG OCCURS 10,
+* 2000/01/13 ADD START 通貨コードの追加
+WAERS  LIKE  BKPF-WAERS,
+* 2000/01/13 ADD END
+BUDAT      LIKE BKPF-BUDAT,
+CPUTM      LIKE BKPF-CPUTM,
+BELNR      LIKE BSEG-BELNR,
+BUZEI      LIKE BSEG-BUZEI,
+BSCHL      LIKE BSEG-BSCHL,
+UMSKZ      LIKE BSEG-UMSKZ,
+SHKZG      LIKE BSEG-SHKZG,
+* 2000/01/13 MOD START
+*       WRBTR      LIKE BSEG-WRBTR,
+WRBTR      LIKE BSEG-WRBTR,
+* 2000/01/13 MOD END
+* 2000/01/13 ADD START
+KURSF      LIKE  BKPF-KURSF,
+DMBTR      LIKE BSEG-DMBTR,
+* 2000/01/13 ADD END
+SGTXT      LIKE BSEG-SGTXT,
+END   OF T_BSEG.
+
+DATA: BEGIN OF T_TBSLT OCCURS 10.
+INCLUDE STRUCTURE TBSLT.
+DATA: END   OF T_TBSLT.
+
+*住所編集用エリアの定義
+DATA: BEGIN OF JUSYO,
+STRAS      LIKE LFA1-STRAS, SEPARATION1,
+ORT01      LIKE LFA1-ORT01,
+END   OF JUSYO.
+
+*支払条件テキストエリアの定義
+DATA: BEGIN OF SIHARAI,
+WORK1(2)   TYPE C,
+TEXT1      LIKE T052U-TEXT1,
+WORK2(2)   TYPE C,
+END   OF SIHARAI.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*日付編集用エリアの定義
+*DATA: BEGIN OF DATE,
+*        NEN(4)     TYPE N,
+*        TUKI(2)    TYPE N,
+*        HI(2)      TYPE N,
+*      END   OF DATE.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+
+*ワークエリアの定義
+DATA: W_GJAHR      LIKE BKPF-GJAHR, "会計年度格納エリア
+W_MONAT      LIKE BKPF-MONAT, "会計期間格納エリア
+W_BELNR      LIKE BSEG-BELNR, "伝票番号待避域
+W_SPRAS      LIKE T002-SPRAS, "言語コード待避域
+W_BUDAT      LIKE BKPF-BUDAT, "転記日付待避域
+TEKIYO(30)   TYPE C,          "摘要用ワークエリア
+W_KARI       TYPE P,          "借方合計額計算エリア
+W_KASI       TYPE P,          "貸方合計額計算エリア
+W_KURI       TYPE P,          "前月繰越額格納エリア
+W_ZAN        TYPE P,          "残高計算用ワークエリア
+W_KIN        TYPE P,          "伝票通貨額格納エリア
+W_TEXT(8)    TYPE C,          "前月繰越テキストワークエリア
+LINE_CNT     TYPE I,          "明細行カウンタ
+PAGE_CNT     TYPE I,          "ページカウンタ
+KURI_FLG     TYPE C,          "繰越判定フラグ
+BRK_FLG      TYPE C.          "ブレイク判定フラグ
+* 2000/01/13 ADD START
+DATA: W_KIN2(10)    TYPE P DECIMALS 5, "伝票通貨額格納用
+*2000/05/22 汎用ﾓｼﾞｭｰﾙバグ対応 ADD START
+W_KIN_C(17)   TYPE C, "伝票通貨額格納用
+*2000/05 汎用ﾓｼﾞｭｰﾙバグ対応 ADD END
+W_KARI2(10)   TYPE P DECIMALS 5, "借方合計金額計算用
+W_KASI2(10)   TYPE P DECIMALS 5, "貸方合計金額計算用
+W_ZAN2(10)    TYPE P DECIMALS 5,  "残高計算用
+W_KURI2(10)   TYPE P DECIMALS 5,  "前月繰越額格納用
+W_TUKA   LIKE BKPF-WAERS,        "通貨コード
+W_SEI         TYPE I,             "整数部桁数
+W_SYO         LIKE TCURX-CURRDEC, "少数部桁数
+W_B_FLG(1)    TYPE C.             "ヘッダブレイク判定(ページ番号)
+* 2000/01/13 ADD END
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*      W_NEN(4)     TYPE N,
+*      W_TUKI(2)    TYPE N,
+*      C_NEN(4)     TYPE N,
+*      C_TUKI(2)    TYPE N,
+*      W_DATE       LIKE SY-DATUM.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+*2000/06/02 ADD START
+DATA: BEGIN OF T_D_ZAN OCCURS 10, "伝票通貨残高計算テーブル
+SHKZG LIKE BSIK-SHKZG,
+WRBTR LIKE BSIK-WRBTR.
+DATA: END OF T_D_ZAN.
+DATA: W_MIN_DAT LIKE BSIK-BUDAT,   "選択範囲の最小日付
+W_FST_DAT LIKE BSIK-BUDAT,   "選択範囲の最小月の初日
+W_KIN3(10)    TYPE P DECIMALS 5. "伝票通貨残高額格納用
+*2000/06/02 ADD END
+*2000/06/05 ADD START
+DATA:W_SASON TYPE P.               "換算差損益
+*2000/06/05 ADD END
+
+*インクルード
+INCLUDE YF01NUMC.
+
+************************************************************************
+*         パラメータ入力画面                                           *
+************************************************************************
+SELECTION-SCREEN SKIP 2.
+
+*2000/06/15 MOD START
+*parameters: p_bukrs like t001-bukrs      "会社コード
+*                         default 'C001'
+*                         obligatory.
+PARAMETERS: P_BUKRS LIKE T001-BUKRS OBLIGATORY MEMORY ID BUK.
+*2000/06/15 MOD END
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_DATUM FOR SY-DATUM     "対象年月日
+OBLIGATORY.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_LIFNR FOR LFA1-LIFNR   "仕入先コード
+MATCHCODE OBJECT KRED.
+
+SELECTION-SCREEN SKIP 1.
+
+PARAMETERS: P_SAKNR LIKE SKA1-SAKNR      "勘定コード
+MATCHCODE OBJECT SAKO
+OBLIGATORY.     "必須入力
+
+* 2000/01/13 ADD START
+SELECT-OPTIONS: P_WAERS FOR BKPF-WAERS         "通貨ｺｰﾄﾞ
+NO INTERVALS.
+* 2000/01/13 ADD END
+************************************************************************
+*         会社コードの存在チェック                                     *
+************************************************************************
+AT SELECTION-SCREEN ON P_BUKRS.
+CLEAR T001.
+SELECT SINGLE * FROM T001 WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC = 0.
+W_SPRAS = T001-SPRAS.
+ELSE.
+MESSAGE E350(F4) WITH P_BUKRS.
+STOP.
+ENDIF.
+
+************************************************************************
+*         仕入先コードの存在チェック                                   *
+************************************************************************
+AT SELECTION-SCREEN ON P_LIFNR.
+CLEAR LFA1.
+SELECT * FROM LFA1 WHERE LIFNR IN P_LIFNR.
+ENDSELECT.
+IF SY-SUBRC = 4.
+MESSAGE E163(F2) WITH P_LIFNR-LOW.
+STOP.
+ENDIF.
+
+************************************************************************
+*         勘定コードの存在チェック                                     *
+************************************************************************
+AT SELECTION-SCREEN ON P_SAKNR.
+CLEAR SKA1.
+SELECT SINGLE * FROM SKA1 WHERE KTOPL = T001-KTOPL
+AND   SAKNR = P_SAKNR.
+IF SY-SUBRC = 4.
+MESSAGE E001(F4) WITH P_SAKNR T001-KTOPL.
+STOP.
+ENDIF.
+
+*1999/02/09 UPDT START
+*1999/01/07 DEL START
+************************************************************************
+*         仕入先二次インデックスの存在チェック                         *
+************************************************************************
+AT SELECTION-SCREEN.
+
+SELECT COUNT(*) FROM BSIK WHERE BUKRS = P_BUKRS
+AND   LIFNR IN P_LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+
+IF SY-SUBRC = 4.
+SELECT COUNT(*) FROM BSAK WHERE BUKRS = P_BUKRS
+AND   LIFNR IN P_LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+IF SY-SUBRC = 4.
+MESSAGE E008(Y1).
+STOP.
+ENDIF.
+ENDIF.
+*1999/01/07 DEL END
+*1999/02/09 UPDT END
+
+************************************************************************
+*         メイン                                                       *
+************************************************************************
+START-OF-SELECTION.
+
+*テキスト取得用テーブルの作成
+SELECT * FROM TBSLT INTO TABLE T_TBSLT WHERE SPRAS = W_SPRAS.
+
+SELECT * FROM LFA1 WHERE LIFNR IN P_LIFNR
+AND   LOEVM  = SPACE.
+
+*初期化
+REFRESH: T_INDEX,
+T_BSEG.
+
+CLEAR: W_BELNR,
+W_KARI,
+W_KASI,
+W_KURI,
+W_ZAN,
+W_KIN,
+LINE_CNT,
+PAGE_CNT.
+
+*該当仕入先の存在チェック
+SELECT COUNT(*) FROM BSIK WHERE BUKRS = P_BUKRS
+AND   LIFNR = LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+
+IF SY-SUBRC = 4.
+SELECT COUNT(*) FROM BSAK WHERE BUKRS = P_BUKRS
+AND   LIFNR = LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+ENDIF.
+
+*主処理
+IF SY-SUBRC = 0.
+PERFORM DATA_SELECT.
+PERFORM PRINT.
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*    ELSE.
+*      C_NEN  = P_DATUM-LOW+0(4).
+*      C_TUKI = P_DATUM-LOW+4(2).
+*      IF P_DATUM-HIGH <> '00000000'.
+*        W_NEN  = P_DATUM-HIGH+0(4).
+*        W_TUKI = P_DATUM-HIGH+4(2).
+*        IF W_NEN  <> C_NEN
+*        OR W_TUKI <> C_TUKI.
+*          PERFORM TUKI_GET.
+*        ENDIF.
+*      ENDIF.
+*      PERFORM M_ZERO.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+ENDIF.
+
+ENDSELECT.
+END-OF-SELECTION.
+
+*----------------------------------------------------------------------*
+*         データ読み込み処理                                           *
+*----------------------------------------------------------------------*
+FORM DATA_SELECT.
+*未決済明細の伝票番号の取得、インデックステーブルの作成
+SELECT GJAHR BUDAT BELNR BUZEI FROM BSIK INTO TABLE T_INDEX
+WHERE BUKRS =  P_BUKRS
+AND   LIFNR =  LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT =  P_SAKNR.
+
+*決済明細の伝票番号の取得、インデックステーブルの作成
+SELECT  GJAHR BUDAT BELNR BUZEI FROM BSAK APPENDING TABLE T_INDEX
+WHERE BUKRS =  P_BUKRS
+AND   LIFNR =  LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT =  P_SAKNR.
+
+SORT T_INDEX BY BUDAT BELNR BUZEI.
+
+*インデックステーブルより詳細情報の読み込み
+LOOP AT T_INDEX.
+SELECT * FROM BSEG WHERE BUKRS = P_BUKRS
+AND   BELNR = T_INDEX-BELNR
+AND   GJAHR = T_INDEX-GJAHR
+AND   BUZEI = T_INDEX-BUZEI.
+
+IF W_BELNR <> T_INDEX-BELNR.
+SELECT * FROM BKPF WHERE BUKRS = P_BUKRS
+AND   BELNR = T_INDEX-BELNR
+AND   GJAHR = T_INDEX-GJAHR.
+ENDSELECT.
+W_BELNR = T_INDEX-BELNR.
+ENDIF.
+
+T_BSEG-BUDAT = BKPF-BUDAT.
+T_BSEG-CPUTM = BKPF-CPUTM.
+T_BSEG-BELNR = BSEG-BELNR.
+T_BSEG-BUZEI = BSEG-BUZEI.
+T_BSEG-BSCHL = BSEG-BSCHL.
+T_BSEG-UMSKZ = BSEG-UMSKZ.
+T_BSEG-SHKZG = BSEG-SHKZG.
+T_BSEG-WRBTR = BSEG-WRBTR.
+* 2000/01/13 ADD START
+T_BSEG-DMBTR = BSEG-DMBTR.
+T_BSEG-WAERS = BKPF-WAERS.
+T_BSEG-KURSF = BKPF-KURSF.
+* 2000/01/13 ADD END
+T_BSEG-SGTXT = BSEG-SGTXT.
+APPEND T_BSEG.
+
+ENDSELECT.
+ENDLOOP.
+* 2000/01/13 MOD START
+*  SORT T_BSEG BY BUDAT CPUTM BELNR BUZEI.
+*2000/06/02 START
+*  sort t_bseg by waers budat cputm belnr buzei.
+SORT T_BSEG BY BUDAT WAERS CPUTM BELNR BUZEI.
+*2000/06/02 END
+* 2000/01/13 MOD END
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         出力処理                                                     *
+*----------------------------------------------------------------------*
+FORM PRINT.
+LINE_CNT =  0.
+PAGE_CNT =  1.
+KURI_FLG = '0'.
+BRK_FLG  = '0'.
+CLEAR: W_BUDAT.
+
+* 2000/01/13 ADD START 通貨コード初期値の設定
+READ TABLE T_BSEG  INDEX 1.
+W_TUKA = T_BSEG-WAERS.
+* 2000/01/13 ADD END
+
+PERFORM SIIRE.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*  C_NEN  = P_DATUM-LOW+0(4).
+*  C_TUKI = P_DATUM-LOW+4(2).
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+
+LOOP AT T_BSEG.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*    W_NEN  = T_BSEG-BUDAT+0(4).
+*    W_TUKI = T_BSEG-BUDAT+4(2).
+*
+*    IF W_NEN  <> C_NEN
+*    OR W_TUKI <> C_TUKI.
+*      IF SY-TABIX = 1.
+*        PERFORM TUKI_GET.
+*      ENDIF.
+*    ENDIF.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+*2000/01/13 ADD START
+CLEAR W_B_FLG.
+*2000/01/13 ADD END
+"会計年度、会計期間の取得
+IF W_BUDAT+0(6) <> T_BSEG-BUDAT+0(6).
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUKRS = P_BUKRS
+I_BUDAT = T_BSEG-BUDAT
+IMPORTING
+E_GJAHR = W_GJAHR
+E_MONAT = W_MONAT.
+
+IF LINE_CNT <> 0.
+KURI_FLG = '1'.
+BRK_FLG  = '1'.
+*2000/01/13 ADD START
+W_B_FLG = 'X'.
+*2000/01/13 ADD END
+ENDIF.
+ELSE.
+* 2000/01/13 MOD START
+*前月繰越を除く明細行が75行目まで印刷してある場合、改ページする
+**     IF LINE_CNT > 74.
+IF LINE_CNT > 42.
+* 2000/01/13 MOD END
+KURI_FLG = '0'.
+BRK_FLG  = '1'.
+ENDIF.
+ENDIF.
+* 2000/01/13 ADD START 通貨コードブレイク
+IF T_BSEG-WAERS <> W_TUKA.
+*2000/06/02 MOD START
+*      kuri_flg = '1'.
+*     kuri_flg = ''."2000/06/05
+*2000/06/02 MOD END
+BRK_FLG  = '1'.
+ENDIF.
+* 2000/01/13 ADD END
+IF BRK_FLG  = '1'
+AND LINE_CNT <> 0.
+IF KURI_FLG = '1'.
+PERFORM FOOTER.
+PERFORM GOUKEI.
+*2000/06/02 DEL START
+** 2000/01/13 ADD START 通貨コードブレイク
+*       IF T_BSEG-WAERS <> W_TUKA AND W_B_FLG <> 'X'.
+*         PAGE_CNT = PAGE_CNT + 1.
+*         CLEAR W_B_FLG.
+*       ELSE.
+** 2000/01/13 ADD END
+*        PAGE_CNT = 1.
+** 2000/01/13 ADD START 通貨コードブレイク
+*       ENDIF.
+*2000/06/02 DEL END
+PAGE_CNT = 1.
+* 2000/01/13 ADD END
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*        C_TUKI = C_TUKI + 1.
+*        IF C_TUKI = '13'.
+*          C_NEN  = C_NEN + 1.
+*          C_TUKI = 1.
+*        ENDIF.
+*        IF ( W_NEN > C_NEN )
+*        OR ( W_NEN = C_NEN AND W_TUKI > C_TUKI ).
+*          PERFORM TUKI_GET.
+*        ENDIF.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+ELSE.
+PERFORM FOOTER.
+*2000/06/02 ADD START
+IF T_BSEG-WAERS <> W_TUKA.
+PERFORM GOUKEI_D_ONLY."通貨コードブレイク時の伝票通貨集計出力
+ENDIF.
+*2000/06/02 ADD END
+PAGE_CNT = PAGE_CNT + 1.
+ENDIF.
+LINE_CNT =  0.
+BRK_FLG  = '0'.
+ENDIF.
+
+IF LINE_CNT = 0.
+IF PAGE_CNT = 1.
+PERFORM KURIKOSI.
+W_ZAN = W_KURI.
+ENDIF.
+PERFORM HEADER.
+ENDIF.
+
+PERFORM DATA_EDIT.
+PERFORM MEISAI.
+
+LINE_CNT = LINE_CNT + 1.
+W_BUDAT  = T_BSEG-BUDAT.
+
+
+ENDLOOP.
+
+KURI_FLG = '1'.
+PERFORM FOOTER.
+PERFORM GOUKEI.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*  IF P_DATUM-HIGH <> '00000000'.
+*    W_NEN  = P_DATUM-HIGH+0(4).
+*    W_TUKI = P_DATUM-HIGH+4(2).
+*    C_NEN  = T_BSEG-BUDAT+0(4).
+*    C_TUKI = T_BSEG-BUDAT+4(2).
+*    IF W_NEN  <> C_NEN
+*    OR W_TUKI <> C_TUKI.
+*      C_TUKI = C_TUKI + 1.
+*      IF C_TUKI = '13'.
+*        C_NEN  = C_NEN + 1.
+*        C_TUKI = 1.
+*      ENDIF.
+*
+*      IF W_NEN  <> C_NEN
+*      OR W_TUKI <> C_TUKI.
+*        PERFORM TUKI_GET.
+*      ENDIF.
+*      PERFORM M_ZERO.
+*    ENDIF.
+*  ENDIF.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         前月繰越額計算                                               *
+*----------------------------------------------------------------------*
+FORM KURIKOSI.
+SELECT SINGLE * FROM LFC1 WHERE LIFNR = LFA1-LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = W_GJAHR.
+*1999/01/07 ADD START
+IF SY-SUBRC = 4.
+W_KURI = 0.
+ELSE.
+*1999/01/07 ADD END
+
+CASE W_MONAT.
+WHEN 1.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+) * 100.
+WHEN 2.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+-   LFC1-UM01S
++   LFC1-UM01H
+) * 100.
+WHEN 3.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S )
++ ( LFC1-UM01H + LFC1-UM02H )
+) * 100.
+WHEN 4.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H )
+) * 100.
+WHEN 5.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H )
+) * 100.
+WHEN 6.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H )
+) * 100.
+WHEN 7.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H )
+) * 100.
+WHEN 8.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H )
+) * 100.
+WHEN 9.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H )
+) * 100.
+WHEN 10.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S
++ LFC1-UM09S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H
++ LFC1-UM09H )
+) * 100.
+WHEN 11.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S
++ LFC1-UM09S + LFC1-UM10S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H
++ LFC1-UM09H + LFC1-UM10H )
+) * 100.
+WHEN 12.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S
++ LFC1-UM09S + LFC1-UM10S + LFC1-UM11S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H
++ LFC1-UM09H + LFC1-UM10H + LFC1-UM11H )
+) * 100.
+ENDCASE.
+ENDIF.
+*2000/06/02 "伝票通貨の残高取得 ADD START
+W_TUKA = T_BSEG-WAERS. "ヘッダ通貨の設定
+W_MIN_DAT = T_BSEG-BUDAT.
+W_FST_DAT = T_BSEG-BUDAT.
+W_FST_DAT+6(2) = '01'.
+PERFORM ADD_ZENJITU.
+PERFORM GET_D_ZAN.
+*2000/06/02 END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         ヘッダー出力処理                                             *
+*----------------------------------------------------------------------*
+FORM HEADER.
+NEW-PAGE.
+
+IF PAGE_CNT = 1.
+W_TEXT = '前月繰越'.
+ELSE.
+W_TEXT = '前頁繰越'.
+W_KURI = W_ZAN.
+ENDIF.
+* 2000/01/13 MOD START
+*  WRITE: /110 'ページ',
+*          117(3) PAGE_CNT USING EDIT MASK 'RR___',
+*         /8   W_GJAHR,
+*          12  '年度',
+*          50  '買　掛　金　元　帳',
+*          88  '作成年月日',
+*          98  SY-DATUM+0(4) NO-ZERO,
+*          102 '年',
+*          104 SY-DATUM+4(2) NO-ZERO,
+*          106 '月',
+*          108 SY-DATUM+6(2) NO-ZERO,
+*          110 '日',
+*          115 SY-UZEIT USING EDIT MASK '__:__',
+*         /113 '単位:円',
+WRITE: /160 'ページ',
+167(3) PAGE_CNT USING EDIT MASK 'RR___',
+/8   W_GJAHR,
+12  '年度',
+76  '買　掛　金　元　帳',
+138 '作成年月日',
+148 SY-DATUM+0(4) NO-ZERO,
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+165 SY-UZEIT USING EDIT MASK '__:__',
+/151 '国内通貨単位: 円',
+* 2000/01/13 MOD END
+*1999/01/08 ADD START（対象年月日・自～至の表示）
+* 2000/01/13 MOD START
+*         /42  '（',
+*          44  P_DATUM-LOW+0(4) NO-ZERO,
+*          48  '年',
+*          50  P_DATUM-LOW+4(2) NO-ZERO,
+*          52  '月',
+*          54  P_DATUM-LOW+6(2) NO-ZERO,
+*          56  '日',
+*          58  '～'.
+/70  '（',
+72  P_DATUM-LOW+0(4) NO-ZERO,
+76  '年',
+78  P_DATUM-LOW+4(2) NO-ZERO,
+80  '月',
+82  P_DATUM-LOW+6(2) NO-ZERO,
+84  '日',
+86  '～'.
+* 2000/01/13 MOD END
+IF P_DATUM-HIGH <> '00000000'.
+* 2000/01/13 MOD START
+*   WRITE: 60  P_DATUM-HIGH+0(4) NO-ZERO,
+*          64  '年',
+*          66  P_DATUM-HIGH+4(2) NO-ZERO,
+*          68  '月',
+*          70  P_DATUM-HIGH+6(2) NO-ZERO,
+*          72  '日'.
+WRITE: 88  P_DATUM-HIGH+0(4) NO-ZERO,
+92  '年',
+94  P_DATUM-HIGH+4(2) NO-ZERO,
+96  '月',
+98  P_DATUM-HIGH+6(2) NO-ZERO,
+100 '日'.
+* 2000/01/13 MOD END
+ELSE.
+* 2000/01/13 MOD START
+*   WRITE: 60  P_DATUM-LOW+0(4) NO-ZERO,
+*          64  '年',
+*          66  P_DATUM-LOW+4(2) NO-ZERO,
+*          68  '月',
+*          70  P_DATUM-LOW+6(2) NO-ZERO,
+*          72  '日'.
+WRITE: 88  P_DATUM-LOW+0(4) NO-ZERO,
+92  '年',
+94  P_DATUM-LOW+4(2) NO-ZERO,
+96  '月',
+98  P_DATUM-LOW+6(2) NO-ZERO,
+100 '日'.
+* 2000/01/13 MOD END
+ENDIF.
+* 2000/01/13 MOD START
+*  WRITE:  74  '）'.
+WRITE:  102 '）'.
+* 2000/01/13 MOD END
+*1999/01/08 ADD END
+* 2000/01/13 ADD START
+W_TUKA = T_BSEG-WAERS.
+WRITE:  151 '伝票通貨単位:',
+165 W_TUKA.
+* 2000/01/13 ADD END
+WRITE: /2  LFA1-LIFNR,
+12 LFA1-NAME1,
+/2  JUSYO,
+/2  LFA1-ORT02.
+*1999/1/19 UPDT START
+* WRITE:  85(34) SIHARAI
+*                USING EDIT MASK 'RR__________________________________'.
+* 2000/01/13 MOD START
+*  WRITE:  66(54) SIHARAI
+* Mod ES-UP 2012/09/12 -->
+*  WRITE:  111(54) SIHARAI
+* 2000/01/13 MOD END
+*                 USING EDIT MASK
+*             'RR______________________________________________________'.
+WRITE:  111(**) SIHARAI RIGHT-JUSTIFIED. "(右寄せ)"
+* Mod ES-UP 2012/09/12 <--
+*1999/1/19 UPDT END
+* 2000/01/13 MOD START
+*  ULINE (120).
+ULINE (170).
+* 2000/01/13 MOD END
+* 2000/01/13 MOD START
+WRITE: /2   '日付',
+*          25  '摘　要',
+*          49  '元帳照合',
+*          68  '借　方',
+*          88  '貸　方',
+*          110 '残　高'.
+* WRITE: /13      W_TEXT.
+*  ULINE (120).
+* 2000/06/05 MOD START
+*         010 '摘  要',
+*         043 '元帳照合',
+*         058 '国内通貨借方',
+*         072 '国内通貨貸方',
+*         088 '国内通貨残高',
+*         102 '換算レート',
+*         117 '伝票通貨借方',
+*         133 '伝票通貨貸方'.
+008 '摘  要',
+039 '元帳照合',
+050 '国内通貨借方',
+065 '国内通貨貸方',
+080 '国内通貨残高',
+096 '換算レート',
+107 '伝票通貨借方',
+122 '伝票通貨貸方',
+137 '伝票通貨残高',
+156 '換算差損益'.
+* 2000/06/05 MOD END
+
+ULINE (170).
+* 2000/06/05 MOD START
+*  write: /10      w_text.
+WRITE: /008 W_TEXT.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+PERFORM YF01NUMC USING W_KURI 15 0.
+* 2000/01/13 MOD END
+*  WRITE:  104 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+*  write:  084 o_num using edit mask 'RR________________'.
+WRITE: 080  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+*2000/06/02 ADD START
+PERFORM GET_DECIMALS.
+W_SEI = W_SEI + 1.
+CLEAR:  W_KIN3,W_KIN_C.
+PERFORM GET_D_TUKA USING W_KURI2 W_TUKA CHANGING W_KIN3.
+PERFORM YF01NUMC USING W_KIN3 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write: 149  o_num using edit mask 'RR________________'.
+WRITE: 137  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細出力処理                                                 *
+*----------------------------------------------------------------------*
+FORM MEISAI.
+* 2000/06/05 MOD START
+*  WRITE:    /2(5)    T_BSEG-BUDAT+4(4) USING EDIT MASK '__.__',
+** 2000/01/13 MOD START
+**            13      TEKIYO,
+**            48      T_BSEG-BELNR.
+*             10      TEKIYO,
+*             42      T_BSEG-BELNR.
+** 2000/01/13 MOD END
+WRITE:    /1(5)    T_BSEG-BUDAT+4(4) USING EDIT MASK '__.__',
+08      TEKIYO,
+39      T_BSEG-BELNR.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KIN 13 0.
+CASE T_BSEG-SHKZG.
+WHEN 'S'.
+* 2000/01/13 MOD START
+*     WRITE: 64 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD START
+*      write: 53 o_num using edit mask 'RR______________'.
+WRITE: 050 O_NUM USING EDIT MASK 'RR_____________' .
+* 2000/06/05 MOD END
+WHEN 'H'.
+*      WRITE: 84 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD START
+*      write: 70 o_num using edit mask 'RR______________'.
+WRITE: 065  O_NUM USING EDIT MASK 'RR_____________'.
+* 2000/06/05 MOD END
+ENDCASE.
+PERFORM YF01NUMC USING W_ZAN 15 0.
+*  WRITE:  104 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+*  write:  84 o_num using edit mask 'RR________________'.
+WRITE: 080  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+* 2000/01/13 ADD START
+* 2000/06/05 MOD START
+*    write 102 t_bseg-kursf.
+WRITE 96 T_BSEG-KURSF.
+* 2000/06/05 MOD END
+PERFORM GET_DECIMALS.
+PERFORM YF01NUMC USING W_KIN2 W_SEI W_SYO.
+CASE T_BSEG-SHKZG.
+WHEN 'S'.
+* 2000/06/05 MOD START
+*        write: 113 o_num using edit mask 'RR________________'.
+WRITE: 107 O_NUM USING EDIT MASK 'RR_____________'.
+* 2000/06/05 MOD END
+WHEN'H'.
+* 2000/06/05 MOD START
+*        write: 129  o_num using edit mask 'RR________________'.
+WRITE: 122  O_NUM USING EDIT MASK 'RR_____________'.
+* 2000/06/05 MOD END
+ENDCASE.
+* 2000/01/13 ADD END
+*2000/06/02 ADD START
+PERFORM GET_DECIMALS.
+CLEAR W_KIN3.
+* perform get_d_tuka using w_zan2 changing w_kin3.
+W_SEI = W_SEI + 1.
+PERFORM YF01NUMC USING W_ZAN2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  149 o_num using edit mask 'RR________________'.
+WRITE:  137 O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD END
+* 2000/06/05 ADD START
+IF T_BSEG-BSCHL = '25' AND W_KIN2 <> W_KIN.
+W_SASON = T_BSEG-KURSF * W_KIN2 - W_KIN.
+PERFORM YF01NUMC USING W_SASON 13 0.
+WRITE:  156 O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+* 2000/06/05 ADD END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         繰越額出力処理                                               *
+*----------------------------------------------------------------------*
+FORM FOOTER.
+IF KURI_FLG = '1'.
+W_TEXT = '次月繰越'.
+ELSE.
+W_TEXT = '次頁繰越'.
+ENDIF.
+* 2000/01/13 MOD START
+*  ULINE (120).
+*  WRITE: /13 W_TEXT.
+*  PERFORM YF01NUMC USING W_ZAN 15 0.
+*  WRITE:  104 O_NUM USING EDIT MASK 'RR________________'.
+*  ULINE (120).
+ULINE (170).
+* 2000/06/05 MOD START
+* write: /10 w_text.
+WRITE: /08 W_TEXT.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_ZAN 15 0.
+* 2000/06/05 MOD START
+*  write:  84 o_num using edit mask 'RR________________'.
+WRITE: 080  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD START
+PERFORM GET_DECIMALS.
+CLEAR W_KIN3.
+W_SEI = W_SEI + 1.
+PERFORM YF01NUMC USING W_ZAN2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  149 o_num using edit mask 'RR________________'.
+WRITE:  137 O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD END
+ULINE (170).
+* 2000/01/13 MOD END
+IF KURI_FLG = '1'.
+CLEAR: W_ZAN.
+*2000/06/02 ADD START
+CLEAR: W_ZAN2.
+*2000/06/02 ADD END
+ENDIF.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         借方/貸方合計額出力処理                                      *
+*----------------------------------------------------------------------*
+FORM GOUKEI.
+* 2000/01/13 MOD START
+PERFORM YF01NUMC USING W_KARI 15 0.
+*  WRITE: /62 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+* write: /052 o_num using edit mask 'RR________________'.
+WRITE: /049 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KASI 15 0.
+*  WRITE:  82 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+*  write:  068 o_num using edit mask 'RR________________'.
+WRITE:  064 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+CLEAR: W_KARI,
+W_KASI.
+
+* 2000/01/13 ADD START
+PERFORM GET_DECIMALS.
+PERFORM YF01NUMC USING W_KARI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  113 o_num using edit mask 'RR________________'.
+WRITE:  106 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KASI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  129 o_num using edit mask 'RR________________'.
+WRITE:   121 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+CLEAR: W_KARI2,
+W_KASI2.
+* 2000/01/13 ADD END
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         データ編集                                                   *
+*----------------------------------------------------------------------*
+FORM DATA_EDIT.
+*摘要の編集
+IF T_BSEG-SGTXT = SPACE.
+READ TABLE T_TBSLT WITH KEY SPRAS = W_SPRAS
+BSCHL = T_BSEG-BSCHL
+UMSKZ = T_BSEG-UMSKZ.
+TEKIYO = T_TBSLT-LTEXT+0(20).
+ELSE.
+TEKIYO = T_BSEG-SGTXT+0(30).
+ENDIF.
+
+*残高と借方/貸方合計額の計算
+* 2000/01/13 MOD START
+* W_KIN = T_BSEG-WRBTR * 100.
+W_KIN = T_BSEG-DMBTR * 100.
+* 2000/01/13 MOD END
+* 2000/01/13 ADD START
+*2000/06/02 MOD START
+*  perform get_d_tuka.
+CLEAR:  W_KIN2,W_KIN_C.
+PERFORM GET_D_TUKA USING T_BSEG-WRBTR W_TUKA
+CHANGING W_KIN2.
+*2000/06/02 MOD END
+* 2000/01/13 ADD END
+CASE T_BSEG-SHKZG.
+WHEN 'S'.
+W_ZAN  = W_ZAN  - W_KIN.
+W_KARI = W_KARI + W_KIN.
+* 2000/01/13 ADD START
+W_ZAN2  = W_ZAN2  - W_KIN2.
+W_KARI2 = W_KARI2 + W_KIN2.
+* 2000/01/13 ADD END
+WHEN 'H'.
+W_ZAN  = W_ZAN  + W_KIN.
+W_KASI = W_KASI + W_KIN.
+* 2000/01/13 ADD START
+W_ZAN2  = W_ZAN2  + W_KIN2.
+W_KASI2 = W_KASI2 + W_KIN2.
+* 2000/01/13 ADD END
+ENDCASE.
+ENDFORM.
+
+*1999/01/07 ADD START
+*----------------------------------------------------------------------*
+*         仕入先情報の取得                                             *
+*----------------------------------------------------------------------*
+FORM SIIRE.
+CLEAR: JUSYO,
+SIHARAI.
+
+*支払条件キーの取得
+SELECT * FROM LFB1 WHERE LIFNR = LFA1-LIFNR
+AND   BUKRS = P_BUKRS.
+ENDSELECT.
+
+*支払条件テキストの取得
+SELECT * FROM T052U WHERE SPRAS = W_SPRAS
+AND   ZTERM = LFB1-ZTERM.
+EXIT.
+ENDSELECT.
+
+*支払条件テキストの編集
+IF T052U-TEXT1 = SPACE
+OR SY-SUBRC = 4.
+SIHARAI-WORK1 = SPACE.
+SIHARAI-TEXT1 = SPACE.
+SIHARAI-WORK2 = SPACE.
+ELSE.
+SIHARAI-WORK1 = '【'.
+SIHARAI-TEXT1 = T052U-TEXT1.
+SIHARAI-WORK2 = '】'.
+CONDENSE SIHARAI NO-GAPS.
+ENDIF.
+
+*仕入先住所の編集
+JUSYO-STRAS = LFA1-STRAS.
+JUSYO-ORT01 = LFA1-ORT01.
+CONDENSE JUSYO NO-GAPS.
+
+ENDFORM.
+
+*1999/02/09 DEL START
+*----------------------------------------------------------------------*
+*         明細0件の月の抽出                                            *
+*----------------------------------------------------------------------*
+*FORM TUKI_GET.
+*  DO.
+*    PERFORM M_ZERO.
+*    C_TUKI = C_TUKI + 1.
+*    IF C_TUKI = '13'.
+*      C_NEN  = C_NEN + 1.
+*      C_TUKI = 1.
+*    ENDIF.
+*    IF W_NEN  = C_NEN
+*   AND W_TUKI = C_TUKI.
+*      EXIT.
+*    ENDIF.
+*  ENDDO.
+*ENDFORM.
+*
+*----------------------------------------------------------------------*
+*         明細0件の場合の編集                                          *
+*----------------------------------------------------------------------*
+*FORM M_ZERO.
+*  DATE-NEN  = C_NEN.
+*  DATE-TUKI = C_TUKI.
+*  DATE-HI   = '01'.
+*  CONDENSE DATE NO-GAPS.
+*
+*  W_DATE = DATE.
+*
+*  PERFORM SIIRE.
+*
+*  CALL FUNCTION 'FI_PERIOD_DETERMINE'
+*     EXPORTING
+*          I_BUKRS = P_BUKRS
+*          I_BUDAT = W_DATE
+*     IMPORTING
+*          E_GJAHR = W_GJAHR
+*          E_MONAT = W_MONAT.
+*
+*  PERFORM KURIKOSI.
+*  W_ZAN    = W_KURI.
+*  PAGE_CNT = 1.
+*  PERFORM HEADER.
+*
+*  SKIP 1.
+*  WRITE: /2 C_NEN NO-ZERO,
+*            '年',
+*            C_TUKI NO-ZERO,
+*            '月'.
+*  SKIP 1.
+*  WRITE: /2 '【該当データなし】'.
+*  SKIP 71.
+*
+*  KURI_FLG = '1'.
+*  PERFORM FOOTER.
+*  PERFORM GOUKEI.
+*
+*ENDFORM.
+*1999/02/09 DEL END
+*1999/01/07 ADD END
+*&---------------------------------------------------------------------*
+*&      Form  GET_DECIMALS 2000/01/13 ADD
+*&---------------------------------------------------------------------*
+*       小数部の桁数取得
+*----------------------------------------------------------------------*
+FORM GET_DECIMALS.
+CLEAR: W_SEI,W_SYO.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+I_CURRENCY    = W_TUKA
+IMPORTING
+E_DECIMALS    = W_SYO
+EXCEPTIONS
+OTHERS      = 1.
+W_SEI = 14 - W_SYO.
+
+ENDFORM.                    " GET_DECIMALS
+*&---------------------------------------------------------------------*
+*&      Form  GET_D_TUKA 2000/01/13 ADD
+*&---------------------------------------------------------------------*
+*       伝票通貨の通貨コードによる編集
+*----------------------------------------------------------------------*
+*2000/06/02 MOD START
+*form get_d_tuka.
+*2000/06/02 MOD START
+**2000/05/22 ADD START
+*  CLEAR:  W_KIN2,W_KIN_C.
+**2000/05/22 ADD END
+FORM GET_D_TUKA USING P_KINGAKU P_TUKA CHANGING P_KIN.
+*2000/06/02 MOD END
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+*2000/06/02 MOD START
+**            currency    = w_tuka
+*             sap_amount  = t_bseg-wrbtr
+CURRENCY    = P_TUKA
+SAP_AMOUNT  = P_KINGAKU
+*2000/06/02 MOD END
+IMPORTING
+*2000/05/22 MOD START
+*            idoc_amount = w_kin2
+IDOC_AMOUNT = W_KIN_C
+*2000/05/22 MOD END
+EXCEPTIONS
+OTHERS      = 1.
+*2000/05/22 ADD START
+*2000/06/02 MOD START
+*  w_kin2 = w_kin_c.
+P_KIN = W_KIN_C.
+*2000/06/02 MOD END
+*2000/05/22 ADD END
+ENDFORM.                    " GET_D_TUKA
+*&---------------------------------------------------------------------*
+*&      Form  GOUKEI_D_ONLY ADD 2000/06/02
+*&---------------------------------------------------------------------*
+*       通貨コードブレイク時の伝票通貨集計出力
+*----------------------------------------------------------------------*
+FORM GOUKEI_D_ONLY.
+PERFORM GET_DECIMALS.
+W_SEI = W_SEI + 1.
+PERFORM YF01NUMC USING W_KARI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*   write:  /113 o_num using edit mask 'RR________________'.
+WRITE:  /106 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KASI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*   write:  129 o_num using edit mask 'RR________________'.
+WRITE:  121 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+CLEAR: W_KARI2,
+W_KASI2.
+W_MIN_DAT = T_BSEG-BUDAT.
+PERFORM GET_D_ZAN.
+
+ENDFORM.                    " GOUKEI_D_ONLY
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_D_ZAN ADD 2000/06/02
+*&---------------------------------------------------------------------*
+*       伝票通貨の残高取得
+*----------------------------------------------------------------------*
+FORM GET_D_ZAN.
+CLEAR: W_KURI2,W_ZAN2.
+SELECT SHKZG WRBTR FROM BSIK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND WAERS = T_BSEG-WAERS
+AND BUDAT < W_MIN_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+AND SAKNR = P_SAKNR.
+
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -1.
+ENDIF.
+W_KURI2 = W_KURI2 + T_D_ZAN-WRBTR.
+ENDLOOP.
+
+SELECT SHKZG WRBTR FROM BSAK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND WAERS = T_BSEG-WAERS
+AND BUDAT < W_MIN_DAT
+AND AUGDT => W_MIN_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+
+AND SAKNR = P_SAKNR.
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -1.
+ENDIF.
+W_KURI2 = W_KURI2 + T_D_ZAN-WRBTR.
+ENDLOOP.
+W_ZAN2 = W_KURI2.
+PERFORM GET_D_TUKA USING W_KURI2 T_BSEG-WAERS CHANGING W_ZAN2.
+ENDFORM.                    " GET_D_ZAN
+*&---------------------------------------------------------------------*
+*&      Form  ADD_ZENJITU 2000/06/02 ADD
+*&---------------------------------------------------------------------*
+*      国内通貨残に当月の初日から第一明細までの値を加算
+*----------------------------------------------------------------------*
+FORM ADD_ZENJITU.
+SELECT SHKZG DMBTR FROM BSIK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND BUDAT < W_MIN_DAT
+AND BUDAT >= W_FST_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+AND SAKNR = P_SAKNR.
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -100.
+ELSE.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * 100.
+ENDIF.
+W_KURI = W_KURI + T_D_ZAN-WRBTR.
+ENDLOOP.
+
+SELECT SHKZG DMBTR FROM BSAK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND BUDAT < W_MIN_DAT
+AND BUDAT >= W_FST_DAT
+AND AUGDT => W_MIN_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+AND SAKNR = P_SAKNR.
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -1.
+ELSE.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * 100.
+ENDIF.
+W_KURI = W_KURI + T_D_ZAN-WRBTR.
+ENDLOOP.
+
+
+ENDFORM.                    " ADD_ZENJITU
+* 2000/01/13 MOD START
+*REPORT YF010200 MESSAGE-ID Y1
+*              LINE-SIZE  120
+*              LINE-COUNT 90
+REPORT YF010210 MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT  58
+* 2000/01/13 MOD END
+NO STANDARD PAGE HEADING.
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID：YF010200                                               *
+*    ﾌﾟﾛｸﾞﾗﾑ名：買掛金元帳作成                                         *
+*    処理種別 ：ﾊﾞｯﾁ(ABAP/4)                                           *
+*    処理概要 ：仕入先ﾏｽﾀ(LFA1)より仕入先の情報を取得し、仕入先毎に    *
+*               仕入先二次ｲﾝﾃﾞｯｸｽ(BSIK)、                              *
+*               仕入先二次ｲﾝﾃﾞｯｸｽ(決済明細)(BSAK)からｷｰを取得し、      *
+*               会計伝票明細(BSEG)、転記ｷｰ名(TBSLT)、                  *
+*               支払条件の自己説明(T052U)より各情報を付加し、          *
+*               買掛金元帳を作成する。                                 *
+*    入力     ：対象年月日、仕入先ｺｰﾄﾞ、会社ｺｰﾄﾞ、 勘定ｺｰﾄﾞ            *
+*----------------------------------------------------------------------*
+*    作成日   ：1998/11/12                                             *
+*    作成者   ：大屋                                                   *
+*    変更履歴 ：1999/01/07 大屋                                        *
+*                 明細が0件のﾃﾞｰﾀについてﾍｯﾀﾞと繰越額を出力するように  *
+*                 修正。                                               *
+*               1999/01/08 大屋                                        *
+*                 ﾍｯﾀﾞに対象年月日・自～対象年月日・至を出力するように *
+*                 修正。                                               *
+*               1999/01/19 大屋                                        *
+*                 支払条件を全桁出力するように修正。                   *
+*               1999/02/09 大屋                                        *
+*                 明細0件対応の処理を削除する。                        *
+*               2000/01/13 加治佐                                      *
+*                 伝票通貨&国内通貨額&換算レートを出力                 *
+*                 通貨コードを選択可能に修正                           *
+*                 通貨ブレイクで改ページ(ページNoはクリアしない)       *
+*               2000/05/22 加治佐                                      *
+*                 通貨金額作成汎用ﾓｼﾞｭｰﾙの受取を数値でなく文字列型に修正
+*               2000/06/02 加治佐                                      *
+*                      通貨コードブレイク時の国内通貨の繰越            *
+*                      伝票通貨の残高の出力                            *
+*                      国内通貨残高の値を"前月"から"前日まで"に変更    *
+*               2000/06/05 加治佐                                      *
+*                      換算差損益の出力                                *
+*               2000/06/15 k.kajisa(NDSC)                              *
+*                      パラメータの初期値をユーザ情報から取得          *
+*               2000/07/11 k.kajisa(NDSC)                              *
+*                      転記キー'09'の明細は残高算出に含まなくする      *
+*&[改定履歴]                                                           *
+*& YYYY/MM/DD  Programar         Description                           *
+*& 2012/09/12  ISID              ES-UP                                 *
+************************************************************************
+*使用テーブル定義
+TABLES: BSIK,
+BSAK,
+BKPF,
+BSEG,
+LFC1,
+LFA1,
+LFB1,
+T052U,
+TBSLT,
+T001,
+SKA1.
+
+*内部テーブルの定義
+DATA: BEGIN OF T_INDEX OCCURS 10,
+GJAHR      LIKE BSEG-GJAHR,
+BUDAT      LIKE BKPF-BUDAT,
+BELNR      LIKE BSEG-BELNR,
+BUZEI      LIKE BSEG-BUZEI,
+END   OF T_INDEX.
+
+DATA: BEGIN OF T_BSEG OCCURS 10,
+* 2000/01/13 ADD START 通貨コードの追加
+WAERS  LIKE  BKPF-WAERS,
+* 2000/01/13 ADD END
+BUDAT      LIKE BKPF-BUDAT,
+CPUTM      LIKE BKPF-CPUTM,
+BELNR      LIKE BSEG-BELNR,
+BUZEI      LIKE BSEG-BUZEI,
+BSCHL      LIKE BSEG-BSCHL,
+UMSKZ      LIKE BSEG-UMSKZ,
+SHKZG      LIKE BSEG-SHKZG,
+* 2000/01/13 MOD START
+*       WRBTR      LIKE BSEG-WRBTR,
+WRBTR      LIKE BSEG-WRBTR,
+* 2000/01/13 MOD END
+* 2000/01/13 ADD START
+KURSF      LIKE  BKPF-KURSF,
+DMBTR      LIKE BSEG-DMBTR,
+* 2000/01/13 ADD END
+SGTXT      LIKE BSEG-SGTXT,
+END   OF T_BSEG.
+
+DATA: BEGIN OF T_TBSLT OCCURS 10.
+INCLUDE STRUCTURE TBSLT.
+DATA: END   OF T_TBSLT.
+
+*住所編集用エリアの定義
+DATA: BEGIN OF JUSYO,
+STRAS      LIKE LFA1-STRAS, SEPARATION1,
+ORT01      LIKE LFA1-ORT01,
+END   OF JUSYO.
+
+*支払条件テキストエリアの定義
+DATA: BEGIN OF SIHARAI,
+WORK1(2)   TYPE C,
+TEXT1      LIKE T052U-TEXT1,
+WORK2(2)   TYPE C,
+END   OF SIHARAI.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*日付編集用エリアの定義
+*DATA: BEGIN OF DATE,
+*        NEN(4)     TYPE N,
+*        TUKI(2)    TYPE N,
+*        HI(2)      TYPE N,
+*      END   OF DATE.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+
+*ワークエリアの定義
+DATA: W_GJAHR      LIKE BKPF-GJAHR, "会計年度格納エリア
+W_MONAT      LIKE BKPF-MONAT, "会計期間格納エリア
+W_BELNR      LIKE BSEG-BELNR, "伝票番号待避域
+W_SPRAS      LIKE T002-SPRAS, "言語コード待避域
+W_BUDAT      LIKE BKPF-BUDAT, "転記日付待避域
+TEKIYO(30)   TYPE C,          "摘要用ワークエリア
+W_KARI       TYPE P,          "借方合計額計算エリア
+W_KASI       TYPE P,          "貸方合計額計算エリア
+W_KURI       TYPE P,          "前月繰越額格納エリア
+W_ZAN        TYPE P,          "残高計算用ワークエリア
+W_KIN        TYPE P,          "伝票通貨額格納エリア
+W_TEXT(8)    TYPE C,          "前月繰越テキストワークエリア
+LINE_CNT     TYPE I,          "明細行カウンタ
+PAGE_CNT     TYPE I,          "ページカウンタ
+KURI_FLG     TYPE C,          "繰越判定フラグ
+BRK_FLG      TYPE C.          "ブレイク判定フラグ
+* 2000/01/13 ADD START
+DATA: W_KIN2(10)    TYPE P DECIMALS 5, "伝票通貨額格納用
+*2000/05/22 汎用ﾓｼﾞｭｰﾙバグ対応 ADD START
+W_KIN_C(17)   TYPE C, "伝票通貨額格納用
+*2000/05 汎用ﾓｼﾞｭｰﾙバグ対応 ADD END
+W_KARI2(10)   TYPE P DECIMALS 5, "借方合計金額計算用
+W_KASI2(10)   TYPE P DECIMALS 5, "貸方合計金額計算用
+W_ZAN2(10)    TYPE P DECIMALS 5,  "残高計算用
+W_KURI2(10)   TYPE P DECIMALS 5,  "前月繰越額格納用
+W_TUKA   LIKE BKPF-WAERS,        "通貨コード
+W_SEI         TYPE I,             "整数部桁数
+W_SYO         LIKE TCURX-CURRDEC, "少数部桁数
+W_B_FLG(1)    TYPE C.             "ヘッダブレイク判定(ページ番号)
+* 2000/01/13 ADD END
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*      W_NEN(4)     TYPE N,
+*      W_TUKI(2)    TYPE N,
+*      C_NEN(4)     TYPE N,
+*      C_TUKI(2)    TYPE N,
+*      W_DATE       LIKE SY-DATUM.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+*2000/06/02 ADD START
+DATA: BEGIN OF T_D_ZAN OCCURS 10, "伝票通貨残高計算テーブル
+SHKZG LIKE BSIK-SHKZG,
+WRBTR LIKE BSIK-WRBTR.
+DATA: END OF T_D_ZAN.
+DATA: W_MIN_DAT LIKE BSIK-BUDAT,   "選択範囲の最小日付
+W_FST_DAT LIKE BSIK-BUDAT,   "選択範囲の最小月の初日
+W_KIN3(10)    TYPE P DECIMALS 5. "伝票通貨残高額格納用
+*2000/06/02 ADD END
+*2000/06/05 ADD START
+DATA:W_SASON TYPE P.               "換算差損益
+*2000/06/05 ADD END
+
+*インクルード
+INCLUDE YF01NUMC.
+
+************************************************************************
+*         パラメータ入力画面                                           *
+************************************************************************
+SELECTION-SCREEN SKIP 2.
+
+*2000/06/15 MOD START
+*parameters: p_bukrs like t001-bukrs      "会社コード
+*                         default 'C001'
+*                         obligatory.
+PARAMETERS: P_BUKRS LIKE T001-BUKRS OBLIGATORY MEMORY ID BUK.
+*2000/06/15 MOD END
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_DATUM FOR SY-DATUM     "対象年月日
+OBLIGATORY.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_LIFNR FOR LFA1-LIFNR   "仕入先コード
+MATCHCODE OBJECT KRED.
+
+SELECTION-SCREEN SKIP 1.
+
+PARAMETERS: P_SAKNR LIKE SKA1-SAKNR      "勘定コード
+MATCHCODE OBJECT SAKO
+OBLIGATORY.     "必須入力
+
+* 2000/01/13 ADD START
+SELECT-OPTIONS: P_WAERS FOR BKPF-WAERS         "通貨ｺｰﾄﾞ
+NO INTERVALS.
+* 2000/01/13 ADD END
+************************************************************************
+*         会社コードの存在チェック                                     *
+************************************************************************
+AT SELECTION-SCREEN ON P_BUKRS.
+CLEAR T001.
+SELECT SINGLE * FROM T001 WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC = 0.
+W_SPRAS = T001-SPRAS.
+ELSE.
+MESSAGE E350(F4) WITH P_BUKRS.
+STOP.
+ENDIF.
+
+************************************************************************
+*         仕入先コードの存在チェック                                   *
+************************************************************************
+AT SELECTION-SCREEN ON P_LIFNR.
+CLEAR LFA1.
+SELECT * FROM LFA1 WHERE LIFNR IN P_LIFNR.
+ENDSELECT.
+IF SY-SUBRC = 4.
+MESSAGE E163(F2) WITH P_LIFNR-LOW.
+STOP.
+ENDIF.
+
+************************************************************************
+*         勘定コードの存在チェック                                     *
+************************************************************************
+AT SELECTION-SCREEN ON P_SAKNR.
+CLEAR SKA1.
+SELECT SINGLE * FROM SKA1 WHERE KTOPL = T001-KTOPL
+AND   SAKNR = P_SAKNR.
+IF SY-SUBRC = 4.
+MESSAGE E001(F4) WITH P_SAKNR T001-KTOPL.
+STOP.
+ENDIF.
+
+*1999/02/09 UPDT START
+*1999/01/07 DEL START
+************************************************************************
+*         仕入先二次インデックスの存在チェック                         *
+************************************************************************
+AT SELECTION-SCREEN.
+
+SELECT COUNT(*) FROM BSIK WHERE BUKRS = P_BUKRS
+AND   LIFNR IN P_LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+
+IF SY-SUBRC = 4.
+SELECT COUNT(*) FROM BSAK WHERE BUKRS = P_BUKRS
+AND   LIFNR IN P_LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+IF SY-SUBRC = 4.
+MESSAGE E008(Y1).
+STOP.
+ENDIF.
+ENDIF.
+*1999/01/07 DEL END
+*1999/02/09 UPDT END
+
+************************************************************************
+*         メイン                                                       *
+************************************************************************
+START-OF-SELECTION.
+
+*テキスト取得用テーブルの作成
+SELECT * FROM TBSLT INTO TABLE T_TBSLT WHERE SPRAS = W_SPRAS.
+
+SELECT * FROM LFA1 WHERE LIFNR IN P_LIFNR
+AND   LOEVM  = SPACE.
+
+*初期化
+REFRESH: T_INDEX,
+T_BSEG.
+
+CLEAR: W_BELNR,
+W_KARI,
+W_KASI,
+W_KURI,
+W_ZAN,
+W_KIN,
+LINE_CNT,
+PAGE_CNT.
+
+*該当仕入先の存在チェック
+SELECT COUNT(*) FROM BSIK WHERE BUKRS = P_BUKRS
+AND   LIFNR = LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+
+IF SY-SUBRC = 4.
+SELECT COUNT(*) FROM BSAK WHERE BUKRS = P_BUKRS
+AND   LIFNR = LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT = P_SAKNR.
+ENDIF.
+
+*主処理
+IF SY-SUBRC = 0.
+PERFORM DATA_SELECT.
+PERFORM PRINT.
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*    ELSE.
+*      C_NEN  = P_DATUM-LOW+0(4).
+*      C_TUKI = P_DATUM-LOW+4(2).
+*      IF P_DATUM-HIGH <> '00000000'.
+*        W_NEN  = P_DATUM-HIGH+0(4).
+*        W_TUKI = P_DATUM-HIGH+4(2).
+*        IF W_NEN  <> C_NEN
+*        OR W_TUKI <> C_TUKI.
+*          PERFORM TUKI_GET.
+*        ENDIF.
+*      ENDIF.
+*      PERFORM M_ZERO.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+ENDIF.
+
+ENDSELECT.
+END-OF-SELECTION.
+
+*----------------------------------------------------------------------*
+*         データ読み込み処理                                           *
+*----------------------------------------------------------------------*
+FORM DATA_SELECT.
+*未決済明細の伝票番号の取得、インデックステーブルの作成
+SELECT GJAHR BUDAT BELNR BUZEI FROM BSIK INTO TABLE T_INDEX
+WHERE BUKRS =  P_BUKRS
+AND   LIFNR =  LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT =  P_SAKNR.
+
+*決済明細の伝票番号の取得、インデックステーブルの作成
+SELECT  GJAHR BUDAT BELNR BUZEI FROM BSAK APPENDING TABLE T_INDEX
+WHERE BUKRS =  P_BUKRS
+AND   LIFNR =  LFA1-LIFNR
+AND   BUDAT IN P_DATUM
+* 2000/01/13 ADD START
+AND   WAERS IN P_WAERS
+* 2000/01/13 ADD END
+AND   HKONT =  P_SAKNR.
+
+SORT T_INDEX BY BUDAT BELNR BUZEI.
+
+*インデックステーブルより詳細情報の読み込み
+LOOP AT T_INDEX.
+SELECT * FROM BSEG WHERE BUKRS = P_BUKRS
+AND   BELNR = T_INDEX-BELNR
+AND   GJAHR = T_INDEX-GJAHR
+AND   BUZEI = T_INDEX-BUZEI.
+
+IF W_BELNR <> T_INDEX-BELNR.
+SELECT * FROM BKPF WHERE BUKRS = P_BUKRS
+AND   BELNR = T_INDEX-BELNR
+AND   GJAHR = T_INDEX-GJAHR.
+ENDSELECT.
+W_BELNR = T_INDEX-BELNR.
+ENDIF.
+
+T_BSEG-BUDAT = BKPF-BUDAT.
+T_BSEG-CPUTM = BKPF-CPUTM.
+T_BSEG-BELNR = BSEG-BELNR.
+T_BSEG-BUZEI = BSEG-BUZEI.
+T_BSEG-BSCHL = BSEG-BSCHL.
+T_BSEG-UMSKZ = BSEG-UMSKZ.
+T_BSEG-SHKZG = BSEG-SHKZG.
+T_BSEG-WRBTR = BSEG-WRBTR.
+* 2000/01/13 ADD START
+T_BSEG-DMBTR = BSEG-DMBTR.
+T_BSEG-WAERS = BKPF-WAERS.
+T_BSEG-KURSF = BKPF-KURSF.
+* 2000/01/13 ADD END
+T_BSEG-SGTXT = BSEG-SGTXT.
+APPEND T_BSEG.
+
+ENDSELECT.
+ENDLOOP.
+* 2000/01/13 MOD START
+*  SORT T_BSEG BY BUDAT CPUTM BELNR BUZEI.
+*2000/06/02 START
+*  sort t_bseg by waers budat cputm belnr buzei.
+SORT T_BSEG BY BUDAT WAERS CPUTM BELNR BUZEI.
+*2000/06/02 END
+* 2000/01/13 MOD END
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         出力処理                                                     *
+*----------------------------------------------------------------------*
+FORM PRINT.
+LINE_CNT =  0.
+PAGE_CNT =  1.
+KURI_FLG = '0'.
+BRK_FLG  = '0'.
+CLEAR: W_BUDAT.
+
+* 2000/01/13 ADD START 通貨コード初期値の設定
+READ TABLE T_BSEG  INDEX 1.
+W_TUKA = T_BSEG-WAERS.
+* 2000/01/13 ADD END
+
+PERFORM SIIRE.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*  C_NEN  = P_DATUM-LOW+0(4).
+*  C_TUKI = P_DATUM-LOW+4(2).
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+
+LOOP AT T_BSEG.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*    W_NEN  = T_BSEG-BUDAT+0(4).
+*    W_TUKI = T_BSEG-BUDAT+4(2).
+*
+*    IF W_NEN  <> C_NEN
+*    OR W_TUKI <> C_TUKI.
+*      IF SY-TABIX = 1.
+*        PERFORM TUKI_GET.
+*      ENDIF.
+*    ENDIF.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+*2000/01/13 ADD START
+CLEAR W_B_FLG.
+*2000/01/13 ADD END
+"会計年度、会計期間の取得
+IF W_BUDAT+0(6) <> T_BSEG-BUDAT+0(6).
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUKRS = P_BUKRS
+I_BUDAT = T_BSEG-BUDAT
+IMPORTING
+E_GJAHR = W_GJAHR
+E_MONAT = W_MONAT.
+
+IF LINE_CNT <> 0.
+KURI_FLG = '1'.
+BRK_FLG  = '1'.
+*2000/01/13 ADD START
+W_B_FLG = 'X'.
+*2000/01/13 ADD END
+ENDIF.
+ELSE.
+* 2000/01/13 MOD START
+*前月繰越を除く明細行が75行目まで印刷してある場合、改ページする
+**     IF LINE_CNT > 74.
+IF LINE_CNT > 42.
+* 2000/01/13 MOD END
+KURI_FLG = '0'.
+BRK_FLG  = '1'.
+ENDIF.
+ENDIF.
+* 2000/01/13 ADD START 通貨コードブレイク
+IF T_BSEG-WAERS <> W_TUKA.
+*2000/06/02 MOD START
+*      kuri_flg = '1'.
+*     kuri_flg = ''."2000/06/05
+*2000/06/02 MOD END
+BRK_FLG  = '1'.
+ENDIF.
+* 2000/01/13 ADD END
+IF BRK_FLG  = '1'
+AND LINE_CNT <> 0.
+IF KURI_FLG = '1'.
+PERFORM FOOTER.
+PERFORM GOUKEI.
+*2000/06/02 DEL START
+** 2000/01/13 ADD START 通貨コードブレイク
+*       IF T_BSEG-WAERS <> W_TUKA AND W_B_FLG <> 'X'.
+*         PAGE_CNT = PAGE_CNT + 1.
+*         CLEAR W_B_FLG.
+*       ELSE.
+** 2000/01/13 ADD END
+*        PAGE_CNT = 1.
+** 2000/01/13 ADD START 通貨コードブレイク
+*       ENDIF.
+*2000/06/02 DEL END
+PAGE_CNT = 1.
+* 2000/01/13 ADD END
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*        C_TUKI = C_TUKI + 1.
+*        IF C_TUKI = '13'.
+*          C_NEN  = C_NEN + 1.
+*          C_TUKI = 1.
+*        ENDIF.
+*        IF ( W_NEN > C_NEN )
+*        OR ( W_NEN = C_NEN AND W_TUKI > C_TUKI ).
+*          PERFORM TUKI_GET.
+*        ENDIF.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+ELSE.
+PERFORM FOOTER.
+*2000/06/02 ADD START
+IF T_BSEG-WAERS <> W_TUKA.
+PERFORM GOUKEI_D_ONLY."通貨コードブレイク時の伝票通貨集計出力
+ENDIF.
+*2000/06/02 ADD END
+PAGE_CNT = PAGE_CNT + 1.
+ENDIF.
+LINE_CNT =  0.
+BRK_FLG  = '0'.
+ENDIF.
+
+IF LINE_CNT = 0.
+IF PAGE_CNT = 1.
+PERFORM KURIKOSI.
+W_ZAN = W_KURI.
+ENDIF.
+PERFORM HEADER.
+ENDIF.
+
+PERFORM DATA_EDIT.
+PERFORM MEISAI.
+
+LINE_CNT = LINE_CNT + 1.
+W_BUDAT  = T_BSEG-BUDAT.
+
+
+ENDLOOP.
+
+KURI_FLG = '1'.
+PERFORM FOOTER.
+PERFORM GOUKEI.
+
+*1999/02/09 DEL START
+*1999/01/07 ADD START
+*  IF P_DATUM-HIGH <> '00000000'.
+*    W_NEN  = P_DATUM-HIGH+0(4).
+*    W_TUKI = P_DATUM-HIGH+4(2).
+*    C_NEN  = T_BSEG-BUDAT+0(4).
+*    C_TUKI = T_BSEG-BUDAT+4(2).
+*    IF W_NEN  <> C_NEN
+*    OR W_TUKI <> C_TUKI.
+*      C_TUKI = C_TUKI + 1.
+*      IF C_TUKI = '13'.
+*        C_NEN  = C_NEN + 1.
+*        C_TUKI = 1.
+*      ENDIF.
+*
+*      IF W_NEN  <> C_NEN
+*      OR W_TUKI <> C_TUKI.
+*        PERFORM TUKI_GET.
+*      ENDIF.
+*      PERFORM M_ZERO.
+*    ENDIF.
+*  ENDIF.
+*1999/01/07 ADD END
+*1999/02/09 DEL END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         前月繰越額計算                                               *
+*----------------------------------------------------------------------*
+FORM KURIKOSI.
+SELECT SINGLE * FROM LFC1 WHERE LIFNR = LFA1-LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = W_GJAHR.
+*1999/01/07 ADD START
+IF SY-SUBRC = 4.
+W_KURI = 0.
+ELSE.
+*1999/01/07 ADD END
+
+CASE W_MONAT.
+WHEN 1.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+) * 100.
+WHEN 2.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+-   LFC1-UM01S
++   LFC1-UM01H
+) * 100.
+WHEN 3.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S )
++ ( LFC1-UM01H + LFC1-UM02H )
+) * 100.
+WHEN 4.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H )
+) * 100.
+WHEN 5.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H )
+) * 100.
+WHEN 6.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H )
+) * 100.
+WHEN 7.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H )
+) * 100.
+WHEN 8.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H )
+) * 100.
+WHEN 9.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H )
+) * 100.
+WHEN 10.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S
++ LFC1-UM09S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H
++ LFC1-UM09H )
+) * 100.
+WHEN 11.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S
++ LFC1-UM09S + LFC1-UM10S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H
++ LFC1-UM09H + LFC1-UM10H )
+) * 100.
+WHEN 12.
+W_KURI = ( ( LFC1-UMSAV * -1 )
+- ( LFC1-UM01S + LFC1-UM02S + LFC1-UM03S + LFC1-UM04S
++ LFC1-UM05S + LFC1-UM06S + LFC1-UM07S + LFC1-UM08S
++ LFC1-UM09S + LFC1-UM10S + LFC1-UM11S )
++ ( LFC1-UM01H + LFC1-UM02H + LFC1-UM03H + LFC1-UM04H
++ LFC1-UM05H + LFC1-UM06H + LFC1-UM07H + LFC1-UM08H
++ LFC1-UM09H + LFC1-UM10H + LFC1-UM11H )
+) * 100.
+ENDCASE.
+ENDIF.
+*2000/06/02 "伝票通貨の残高取得 ADD START
+W_TUKA = T_BSEG-WAERS. "ヘッダ通貨の設定
+W_MIN_DAT = T_BSEG-BUDAT.
+W_FST_DAT = T_BSEG-BUDAT.
+W_FST_DAT+6(2) = '01'.
+PERFORM ADD_ZENJITU.
+PERFORM GET_D_ZAN.
+*2000/06/02 END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         ヘッダー出力処理                                             *
+*----------------------------------------------------------------------*
+FORM HEADER.
+NEW-PAGE.
+
+IF PAGE_CNT = 1.
+W_TEXT = '前月繰越'.
+ELSE.
+W_TEXT = '前頁繰越'.
+W_KURI = W_ZAN.
+ENDIF.
+* 2000/01/13 MOD START
+*  WRITE: /110 'ページ',
+*          117(3) PAGE_CNT USING EDIT MASK 'RR___',
+*         /8   W_GJAHR,
+*          12  '年度',
+*          50  '買　掛　金　元　帳',
+*          88  '作成年月日',
+*          98  SY-DATUM+0(4) NO-ZERO,
+*          102 '年',
+*          104 SY-DATUM+4(2) NO-ZERO,
+*          106 '月',
+*          108 SY-DATUM+6(2) NO-ZERO,
+*          110 '日',
+*          115 SY-UZEIT USING EDIT MASK '__:__',
+*         /113 '単位:円',
+WRITE: /160 'ページ',
+167(3) PAGE_CNT USING EDIT MASK 'RR___',
+/8   W_GJAHR,
+12  '年度',
+76  '買　掛　金　元　帳',
+138 '作成年月日',
+148 SY-DATUM+0(4) NO-ZERO,
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+165 SY-UZEIT USING EDIT MASK '__:__',
+/151 '国内通貨単位: 円',
+* 2000/01/13 MOD END
+*1999/01/08 ADD START（対象年月日・自～至の表示）
+* 2000/01/13 MOD START
+*         /42  '（',
+*          44  P_DATUM-LOW+0(4) NO-ZERO,
+*          48  '年',
+*          50  P_DATUM-LOW+4(2) NO-ZERO,
+*          52  '月',
+*          54  P_DATUM-LOW+6(2) NO-ZERO,
+*          56  '日',
+*          58  '～'.
+/70  '（',
+72  P_DATUM-LOW+0(4) NO-ZERO,
+76  '年',
+78  P_DATUM-LOW+4(2) NO-ZERO,
+80  '月',
+82  P_DATUM-LOW+6(2) NO-ZERO,
+84  '日',
+86  '～'.
+* 2000/01/13 MOD END
+IF P_DATUM-HIGH <> '00000000'.
+* 2000/01/13 MOD START
+*   WRITE: 60  P_DATUM-HIGH+0(4) NO-ZERO,
+*          64  '年',
+*          66  P_DATUM-HIGH+4(2) NO-ZERO,
+*          68  '月',
+*          70  P_DATUM-HIGH+6(2) NO-ZERO,
+*          72  '日'.
+WRITE: 88  P_DATUM-HIGH+0(4) NO-ZERO,
+92  '年',
+94  P_DATUM-HIGH+4(2) NO-ZERO,
+96  '月',
+98  P_DATUM-HIGH+6(2) NO-ZERO,
+100 '日'.
+* 2000/01/13 MOD END
+ELSE.
+* 2000/01/13 MOD START
+*   WRITE: 60  P_DATUM-LOW+0(4) NO-ZERO,
+*          64  '年',
+*          66  P_DATUM-LOW+4(2) NO-ZERO,
+*          68  '月',
+*          70  P_DATUM-LOW+6(2) NO-ZERO,
+*          72  '日'.
+WRITE: 88  P_DATUM-LOW+0(4) NO-ZERO,
+92  '年',
+94  P_DATUM-LOW+4(2) NO-ZERO,
+96  '月',
+98  P_DATUM-LOW+6(2) NO-ZERO,
+100 '日'.
+* 2000/01/13 MOD END
+ENDIF.
+* 2000/01/13 MOD START
+*  WRITE:  74  '）'.
+WRITE:  102 '）'.
+* 2000/01/13 MOD END
+*1999/01/08 ADD END
+* 2000/01/13 ADD START
+W_TUKA = T_BSEG-WAERS.
+WRITE:  151 '伝票通貨単位:',
+165 W_TUKA.
+* 2000/01/13 ADD END
+WRITE: /2  LFA1-LIFNR,
+12 LFA1-NAME1,
+/2  JUSYO,
+/2  LFA1-ORT02.
+*1999/1/19 UPDT START
+* WRITE:  85(34) SIHARAI
+*                USING EDIT MASK 'RR__________________________________'.
+* 2000/01/13 MOD START
+*  WRITE:  66(54) SIHARAI
+* Mod ES-UP 2012/09/12 -->
+*  WRITE:  111(54) SIHARAI
+* 2000/01/13 MOD END
+*                 USING EDIT MASK
+*             'RR______________________________________________________'.
+WRITE:  111(**) SIHARAI RIGHT-JUSTIFIED. "(右寄せ)"
+* Mod ES-UP 2012/09/12 <--
+*1999/1/19 UPDT END
+* 2000/01/13 MOD START
+*  ULINE (120).
+ULINE (170).
+* 2000/01/13 MOD END
+* 2000/01/13 MOD START
+WRITE: /2   '日付',
+*          25  '摘　要',
+*          49  '元帳照合',
+*          68  '借　方',
+*          88  '貸　方',
+*          110 '残　高'.
+* WRITE: /13      W_TEXT.
+*  ULINE (120).
+* 2000/06/05 MOD START
+*         010 '摘  要',
+*         043 '元帳照合',
+*         058 '国内通貨借方',
+*         072 '国内通貨貸方',
+*         088 '国内通貨残高',
+*         102 '換算レート',
+*         117 '伝票通貨借方',
+*         133 '伝票通貨貸方'.
+008 '摘  要',
+039 '元帳照合',
+050 '国内通貨借方',
+065 '国内通貨貸方',
+080 '国内通貨残高',
+096 '換算レート',
+107 '伝票通貨借方',
+122 '伝票通貨貸方',
+137 '伝票通貨残高',
+156 '換算差損益'.
+* 2000/06/05 MOD END
+
+ULINE (170).
+* 2000/06/05 MOD START
+*  write: /10      w_text.
+WRITE: /008 W_TEXT.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+PERFORM YF01NUMC USING W_KURI 15 0.
+* 2000/01/13 MOD END
+*  WRITE:  104 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+*  write:  084 o_num using edit mask 'RR________________'.
+WRITE: 080  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+*2000/06/02 ADD START
+PERFORM GET_DECIMALS.
+W_SEI = W_SEI + 1.
+CLEAR:  W_KIN3,W_KIN_C.
+PERFORM GET_D_TUKA USING W_KURI2 W_TUKA CHANGING W_KIN3.
+PERFORM YF01NUMC USING W_KIN3 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write: 149  o_num using edit mask 'RR________________'.
+WRITE: 137  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細出力処理                                                 *
+*----------------------------------------------------------------------*
+FORM MEISAI.
+* 2000/06/05 MOD START
+*  WRITE:    /2(5)    T_BSEG-BUDAT+4(4) USING EDIT MASK '__.__',
+** 2000/01/13 MOD START
+**            13      TEKIYO,
+**            48      T_BSEG-BELNR.
+*             10      TEKIYO,
+*             42      T_BSEG-BELNR.
+** 2000/01/13 MOD END
+WRITE:    /1(5)    T_BSEG-BUDAT+4(4) USING EDIT MASK '__.__',
+08      TEKIYO,
+39      T_BSEG-BELNR.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KIN 13 0.
+CASE T_BSEG-SHKZG.
+WHEN 'S'.
+* 2000/01/13 MOD START
+*     WRITE: 64 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD START
+*      write: 53 o_num using edit mask 'RR______________'.
+WRITE: 050 O_NUM USING EDIT MASK 'RR_____________' .
+* 2000/06/05 MOD END
+WHEN 'H'.
+*      WRITE: 84 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD START
+*      write: 70 o_num using edit mask 'RR______________'.
+WRITE: 065  O_NUM USING EDIT MASK 'RR_____________'.
+* 2000/06/05 MOD END
+ENDCASE.
+PERFORM YF01NUMC USING W_ZAN 15 0.
+*  WRITE:  104 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+*  write:  84 o_num using edit mask 'RR________________'.
+WRITE: 080  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+* 2000/01/13 ADD START
+* 2000/06/05 MOD START
+*    write 102 t_bseg-kursf.
+WRITE 96 T_BSEG-KURSF.
+* 2000/06/05 MOD END
+PERFORM GET_DECIMALS.
+PERFORM YF01NUMC USING W_KIN2 W_SEI W_SYO.
+CASE T_BSEG-SHKZG.
+WHEN 'S'.
+* 2000/06/05 MOD START
+*        write: 113 o_num using edit mask 'RR________________'.
+WRITE: 107 O_NUM USING EDIT MASK 'RR_____________'.
+* 2000/06/05 MOD END
+WHEN'H'.
+* 2000/06/05 MOD START
+*        write: 129  o_num using edit mask 'RR________________'.
+WRITE: 122  O_NUM USING EDIT MASK 'RR_____________'.
+* 2000/06/05 MOD END
+ENDCASE.
+* 2000/01/13 ADD END
+*2000/06/02 ADD START
+PERFORM GET_DECIMALS.
+CLEAR W_KIN3.
+* perform get_d_tuka using w_zan2 changing w_kin3.
+W_SEI = W_SEI + 1.
+PERFORM YF01NUMC USING W_ZAN2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  149 o_num using edit mask 'RR________________'.
+WRITE:  137 O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD END
+* 2000/06/05 ADD START
+IF T_BSEG-BSCHL = '25' AND W_KIN2 <> W_KIN.
+W_SASON = T_BSEG-KURSF * W_KIN2 - W_KIN.
+PERFORM YF01NUMC USING W_SASON 13 0.
+WRITE:  156 O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+* 2000/06/05 ADD END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         繰越額出力処理                                               *
+*----------------------------------------------------------------------*
+FORM FOOTER.
+IF KURI_FLG = '1'.
+W_TEXT = '次月繰越'.
+ELSE.
+W_TEXT = '次頁繰越'.
+ENDIF.
+* 2000/01/13 MOD START
+*  ULINE (120).
+*  WRITE: /13 W_TEXT.
+*  PERFORM YF01NUMC USING W_ZAN 15 0.
+*  WRITE:  104 O_NUM USING EDIT MASK 'RR________________'.
+*  ULINE (120).
+ULINE (170).
+* 2000/06/05 MOD START
+* write: /10 w_text.
+WRITE: /08 W_TEXT.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_ZAN 15 0.
+* 2000/06/05 MOD START
+*  write:  84 o_num using edit mask 'RR________________'.
+WRITE: 080  O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD START
+PERFORM GET_DECIMALS.
+CLEAR W_KIN3.
+W_SEI = W_SEI + 1.
+PERFORM YF01NUMC USING W_ZAN2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  149 o_num using edit mask 'RR________________'.
+WRITE:  137 O_NUM USING EDIT MASK 'RR_______________'.
+* 2000/06/05 MOD END
+*2000/06/02 ADD END
+ULINE (170).
+* 2000/01/13 MOD END
+IF KURI_FLG = '1'.
+CLEAR: W_ZAN.
+*2000/06/02 ADD START
+CLEAR: W_ZAN2.
+*2000/06/02 ADD END
+ENDIF.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         借方/貸方合計額出力処理                                      *
+*----------------------------------------------------------------------*
+FORM GOUKEI.
+* 2000/01/13 MOD START
+PERFORM YF01NUMC USING W_KARI 15 0.
+*  WRITE: /62 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+* write: /052 o_num using edit mask 'RR________________'.
+WRITE: /049 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KASI 15 0.
+*  WRITE:  82 O_NUM USING EDIT MASK 'RR________________'.
+* 2000/06/05 MOD START
+*  write:  068 o_num using edit mask 'RR________________'.
+WRITE:  064 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+* 2000/01/13 MOD END
+CLEAR: W_KARI,
+W_KASI.
+
+* 2000/01/13 ADD START
+PERFORM GET_DECIMALS.
+PERFORM YF01NUMC USING W_KARI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  113 o_num using edit mask 'RR________________'.
+WRITE:  106 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KASI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*  write:  129 o_num using edit mask 'RR________________'.
+WRITE:   121 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+CLEAR: W_KARI2,
+W_KASI2.
+* 2000/01/13 ADD END
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         データ編集                                                   *
+*----------------------------------------------------------------------*
+FORM DATA_EDIT.
+*摘要の編集
+IF T_BSEG-SGTXT = SPACE.
+READ TABLE T_TBSLT WITH KEY SPRAS = W_SPRAS
+BSCHL = T_BSEG-BSCHL
+UMSKZ = T_BSEG-UMSKZ.
+TEKIYO = T_TBSLT-LTEXT+0(20).
+ELSE.
+TEKIYO = T_BSEG-SGTXT+0(30).
+ENDIF.
+
+*残高と借方/貸方合計額の計算
+* 2000/01/13 MOD START
+* W_KIN = T_BSEG-WRBTR * 100.
+W_KIN = T_BSEG-DMBTR * 100.
+* 2000/01/13 MOD END
+* 2000/01/13 ADD START
+*2000/06/02 MOD START
+*  perform get_d_tuka.
+CLEAR:  W_KIN2,W_KIN_C.
+PERFORM GET_D_TUKA USING T_BSEG-WRBTR W_TUKA
+CHANGING W_KIN2.
+*2000/06/02 MOD END
+* 2000/01/13 ADD END
+CASE T_BSEG-SHKZG.
+WHEN 'S'.
+W_ZAN  = W_ZAN  - W_KIN.
+W_KARI = W_KARI + W_KIN.
+* 2000/01/13 ADD START
+W_ZAN2  = W_ZAN2  - W_KIN2.
+W_KARI2 = W_KARI2 + W_KIN2.
+* 2000/01/13 ADD END
+WHEN 'H'.
+W_ZAN  = W_ZAN  + W_KIN.
+W_KASI = W_KASI + W_KIN.
+* 2000/01/13 ADD START
+W_ZAN2  = W_ZAN2  + W_KIN2.
+W_KASI2 = W_KASI2 + W_KIN2.
+* 2000/01/13 ADD END
+ENDCASE.
+ENDFORM.
+
+*1999/01/07 ADD START
+*----------------------------------------------------------------------*
+*         仕入先情報の取得                                             *
+*----------------------------------------------------------------------*
+FORM SIIRE.
+CLEAR: JUSYO,
+SIHARAI.
+
+*支払条件キーの取得
+SELECT * FROM LFB1 WHERE LIFNR = LFA1-LIFNR
+AND   BUKRS = P_BUKRS.
+ENDSELECT.
+
+*支払条件テキストの取得
+SELECT * FROM T052U WHERE SPRAS = W_SPRAS
+AND   ZTERM = LFB1-ZTERM.
+EXIT.
+ENDSELECT.
+
+*支払条件テキストの編集
+IF T052U-TEXT1 = SPACE
+OR SY-SUBRC = 4.
+SIHARAI-WORK1 = SPACE.
+SIHARAI-TEXT1 = SPACE.
+SIHARAI-WORK2 = SPACE.
+ELSE.
+SIHARAI-WORK1 = '【'.
+SIHARAI-TEXT1 = T052U-TEXT1.
+SIHARAI-WORK2 = '】'.
+CONDENSE SIHARAI NO-GAPS.
+ENDIF.
+
+*仕入先住所の編集
+JUSYO-STRAS = LFA1-STRAS.
+JUSYO-ORT01 = LFA1-ORT01.
+CONDENSE JUSYO NO-GAPS.
+
+ENDFORM.
+
+*1999/02/09 DEL START
+*----------------------------------------------------------------------*
+*         明細0件の月の抽出                                            *
+*----------------------------------------------------------------------*
+*FORM TUKI_GET.
+*  DO.
+*    PERFORM M_ZERO.
+*    C_TUKI = C_TUKI + 1.
+*    IF C_TUKI = '13'.
+*      C_NEN  = C_NEN + 1.
+*      C_TUKI = 1.
+*    ENDIF.
+*    IF W_NEN  = C_NEN
+*   AND W_TUKI = C_TUKI.
+*      EXIT.
+*    ENDIF.
+*  ENDDO.
+*ENDFORM.
+*
+*----------------------------------------------------------------------*
+*         明細0件の場合の編集                                          *
+*----------------------------------------------------------------------*
+*FORM M_ZERO.
+*  DATE-NEN  = C_NEN.
+*  DATE-TUKI = C_TUKI.
+*  DATE-HI   = '01'.
+*  CONDENSE DATE NO-GAPS.
+*
+*  W_DATE = DATE.
+*
+*  PERFORM SIIRE.
+*
+*  CALL FUNCTION 'FI_PERIOD_DETERMINE'
+*     EXPORTING
+*          I_BUKRS = P_BUKRS
+*          I_BUDAT = W_DATE
+*     IMPORTING
+*          E_GJAHR = W_GJAHR
+*          E_MONAT = W_MONAT.
+*
+*  PERFORM KURIKOSI.
+*  W_ZAN    = W_KURI.
+*  PAGE_CNT = 1.
+*  PERFORM HEADER.
+*
+*  SKIP 1.
+*  WRITE: /2 C_NEN NO-ZERO,
+*            '年',
+*            C_TUKI NO-ZERO,
+*            '月'.
+*  SKIP 1.
+*  WRITE: /2 '【該当データなし】'.
+*  SKIP 71.
+*
+*  KURI_FLG = '1'.
+*  PERFORM FOOTER.
+*  PERFORM GOUKEI.
+*
+*ENDFORM.
+*1999/02/09 DEL END
+*1999/01/07 ADD END
+*&---------------------------------------------------------------------*
+*&      Form  GET_DECIMALS 2000/01/13 ADD
+*&---------------------------------------------------------------------*
+*       小数部の桁数取得
+*----------------------------------------------------------------------*
+FORM GET_DECIMALS.
+CLEAR: W_SEI,W_SYO.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+I_CURRENCY    = W_TUKA
+IMPORTING
+E_DECIMALS    = W_SYO
+EXCEPTIONS
+OTHERS      = 1.
+W_SEI = 14 - W_SYO.
+
+ENDFORM.                    " GET_DECIMALS
+*&---------------------------------------------------------------------*
+*&      Form  GET_D_TUKA 2000/01/13 ADD
+*&---------------------------------------------------------------------*
+*       伝票通貨の通貨コードによる編集
+*----------------------------------------------------------------------*
+*2000/06/02 MOD START
+*form get_d_tuka.
+*2000/06/02 MOD START
+**2000/05/22 ADD START
+*  CLEAR:  W_KIN2,W_KIN_C.
+**2000/05/22 ADD END
+FORM GET_D_TUKA USING P_KINGAKU P_TUKA CHANGING P_KIN.
+*2000/06/02 MOD END
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+*2000/06/02 MOD START
+**            currency    = w_tuka
+*             sap_amount  = t_bseg-wrbtr
+CURRENCY    = P_TUKA
+SAP_AMOUNT  = P_KINGAKU
+*2000/06/02 MOD END
+IMPORTING
+*2000/05/22 MOD START
+*            idoc_amount = w_kin2
+IDOC_AMOUNT = W_KIN_C
+*2000/05/22 MOD END
+EXCEPTIONS
+OTHERS      = 1.
+*2000/05/22 ADD START
+*2000/06/02 MOD START
+*  w_kin2 = w_kin_c.
+P_KIN = W_KIN_C.
+*2000/06/02 MOD END
+*2000/05/22 ADD END
+ENDFORM.                    " GET_D_TUKA
+*&---------------------------------------------------------------------*
+*&      Form  GOUKEI_D_ONLY ADD 2000/06/02
+*&---------------------------------------------------------------------*
+*       通貨コードブレイク時の伝票通貨集計出力
+*----------------------------------------------------------------------*
+FORM GOUKEI_D_ONLY.
+PERFORM GET_DECIMALS.
+W_SEI = W_SEI + 1.
+PERFORM YF01NUMC USING W_KARI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*   write:  /113 o_num using edit mask 'RR________________'.
+WRITE:  /106 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+PERFORM YF01NUMC USING W_KASI2 W_SEI W_SYO.
+* 2000/06/05 MOD START
+*   write:  129 o_num using edit mask 'RR________________'.
+WRITE:  121 O_NUM USING EDIT MASK 'RR______________'.
+* 2000/06/05 MOD END
+CLEAR: W_KARI2,
+W_KASI2.
+W_MIN_DAT = T_BSEG-BUDAT.
+PERFORM GET_D_ZAN.
+
+ENDFORM.                    " GOUKEI_D_ONLY
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_D_ZAN ADD 2000/06/02
+*&---------------------------------------------------------------------*
+*       伝票通貨の残高取得
+*----------------------------------------------------------------------*
+FORM GET_D_ZAN.
+CLEAR: W_KURI2,W_ZAN2.
+SELECT SHKZG WRBTR FROM BSIK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND WAERS = T_BSEG-WAERS
+AND BUDAT < W_MIN_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+AND SAKNR = P_SAKNR.
+
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -1.
+ENDIF.
+W_KURI2 = W_KURI2 + T_D_ZAN-WRBTR.
+ENDLOOP.
+
+SELECT SHKZG WRBTR FROM BSAK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND WAERS = T_BSEG-WAERS
+AND BUDAT < W_MIN_DAT
+AND AUGDT => W_MIN_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+
+AND SAKNR = P_SAKNR.
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -1.
+ENDIF.
+W_KURI2 = W_KURI2 + T_D_ZAN-WRBTR.
+ENDLOOP.
+W_ZAN2 = W_KURI2.
+PERFORM GET_D_TUKA USING W_KURI2 T_BSEG-WAERS CHANGING W_ZAN2.
+ENDFORM.                    " GET_D_ZAN
+*&---------------------------------------------------------------------*
+*&      Form  ADD_ZENJITU 2000/06/02 ADD
+*&---------------------------------------------------------------------*
+*      国内通貨残に当月の初日から第一明細までの値を加算
+*----------------------------------------------------------------------*
+FORM ADD_ZENJITU.
+SELECT SHKZG DMBTR FROM BSIK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND BUDAT < W_MIN_DAT
+AND BUDAT >= W_FST_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+AND SAKNR = P_SAKNR.
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -100.
+ELSE.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * 100.
+ENDIF.
+W_KURI = W_KURI + T_D_ZAN-WRBTR.
+ENDLOOP.
+
+SELECT SHKZG DMBTR FROM BSAK INTO TABLE T_D_ZAN
+WHERE LIFNR = LFA1-LIFNR
+AND BUDAT < W_MIN_DAT
+AND BUDAT >= W_FST_DAT
+AND AUGDT => W_MIN_DAT
+*2000/07/11 ADD START
+AND BSCHL <> '39'
+*2000/07/11 ADD END
+AND SAKNR = P_SAKNR.
+LOOP AT T_D_ZAN.
+IF T_D_ZAN-SHKZG = 'S'.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * -1.
+ELSE.
+T_D_ZAN-WRBTR = T_D_ZAN-WRBTR * 100.
+ENDIF.
+W_KURI = W_KURI + T_D_ZAN-WRBTR.
+ENDLOOP.
+
+
+ENDFORM.                    " ADD_ZENJITU

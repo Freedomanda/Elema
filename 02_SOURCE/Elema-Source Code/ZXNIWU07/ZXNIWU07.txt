@@ -1,0 +1,851 @@
+*----------------------------------------------------------------------
+*
+*   INCLUDE ZXNIWU07
+*
+*----------------------------------------------------------------------
+*
+* 低価法対応：時価取得ロジック
+*
+*  時価判断：①　受注残が存在した場合には受注残テーブルより伝票単価を
+*　　　　　　　　取得。スケールについては考慮しない。
+*　　　　　　　　受注残の中で納期が一番遅い伝票を採用する。
+*　　　　　　②　受注残が存在しない場合には価格マスタより時価を取得
+*　　　　　　　　スケールが登録されていた場合には在庫数量に見合った
+*　　　　　　　　価格を取得する
+*
+*　特殊判断条件：①受注残にはプラントが設定されていない為プラントから
+*　　　　　　　　営業所への変換が必要になる
+*　　　　　　　　プラントと営業所の関係は４桁のプラントの２文字目以降
+*　　　　　　　　に０を付加した形となる
+*　　　　　　　　例）プラント「P040」の場合⇒営業所「0400」
+*
+*　　　　　　　　②価格マスタから取得する条件はZPR0であり、決定条件は
+*　　　　　　　　「得意先／得意先品目」となる。
+*　　　　　　　　そのため営業所に紐付く得意先とそこに紐付く得意先品目で
+*　　　　　　　　価格を取得する必要がある。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar        Description
+*  2009/04/28   NDSC(KURATA)     数量単位変換を追加
+*  2009/05/26   NDSC(KURATA)     外貨の場合の換算レート取得ロジック変更
+*  2009/06/12   NDSC(KURATA)     決算日レートが取得できない場合、
+*                                メッセージ出力するよう変更
+*  2009/07/02   SOLFIS(KURATA)   数量単位変換不具合修正
+*  2009/10/09   SOLFIS(KAJISA)   売上実績の価格（直近1ヶ月）から取得する
+*                                パターンを追加
+*  2010/03/01   SOLFIS(KAJISA)   販売価格はアドオンテーブルから取得する
+*----------------------------------------------------------------------
+*2010/03/01 ADD START
+DATA: LW_MBEWV      TYPE MBEWV,             "品目評価ビュー
+LW_ZB0011     TYPE ZB0011.
+
+*-- 初期化
+CLEAR:E_PREIS,LW_MBEWV,LW_ZB0011.
+
+*-- MBEW取得
+READ TABLE T_MBEWV INDEX 1 INTO LW_MBEWV.
+
+*-- 販売価格取得
+SELECT SINGLE *
+INTO LW_ZB0011
+FROM ZB0011
+WHERE MATNR = LW_MBEWV-MATNR
+AND BWKEY = LW_MBEWV-BWKEY
+AND BWTAR = LW_MBEWV-BWTAR.
+
+IF SY-SUBRC = 0.
+IF LW_ZB0011-DATUM = I_STDAT.
+E_PREIS = LW_ZB0011-NIWE_PREIS.
+ENDIF.
+ENDIF.
+*2010/03/01 ADD END
+
+*2010/03/01 DEL START
+*- 従来の処理を全て破棄
+*TYPES: BEGIN OF TYP_KNVV,
+*         KUNNR TYPE KNVV-KUNNR,
+*         VKORG TYPE KNMT-VKORG,
+*         VTWEG TYPE KNMT-VTWEG,
+*         SPART TYPE KNVV-SPART,
+*         KDMAT TYPE KNMT-KDMAT,
+*         KNUMH TYPE A901-KNUMH,
+*       END OF TYP_KNVV.
+*
+*DATA: LT_KNVV TYPE TABLE OF TYP_KNVV, "得意先：販売エリア
+*      LW_KNVV TYPE TYP_KNVV,          "得意先：販売エリア
+*      LT_KONM TYPE TABLE OF KONM,     "条件(スケール)
+*      LW_KONM TYPE KONM,              "条件(スケール)
+*      LT_YS0011 TYPE TABLE OF YS0011, "受注残分析テーブル
+*      LW_YS0011 TYPE YS0011.          "受注残分析テーブル
+*
+*DATA: LW_MBEWV  TYPE MBEWV,     "品目評価ビュー
+*      LW_KNMT   TYPE KNMT,      "得意先/品目情報レコードデータテーブル
+*      LW_A901   TYPE A901,      "価格マスタ(得意先/得意先品目)
+*      LW_KONP   TYPE KONP.      "条件(明細)
+*
+*DATA: LV_VKBUR      TYPE VBAK-VKBUR,           "営業所
+*      LV_KURSK      TYPE VBKD-KURSK,           "換算レート
+*      LV_NOUKI      TYPE D,
+*      LV_KBETR      TYPE RM08Y-NIWE_PREIS ,
+*      LV_KBETR_MIN  TYPE RM08Y-NIWE_PREIS VALUE '999999999.99',
+*      LV_MEINS      TYPE MARA-MEINS,
+*      LV_MENGE      TYPE EKPO-MENGE,
+**   insert 2008/12/18 DMC {
+*      LV_KNUMV      TYPE VBAK-KNUMV,           "伝票条件
+*      LV_KMEIN      TYPE KONV-KMEIN,           "条件単位
+** } insert 2008/12/18 DMC
+**2009/04/28 ADD START
+*      LV_UMREZ      TYPE MARM-UMREZ,           "分子
+*      LV_UMREN      TYPE MARM-UMREN,           "分母
+*      LV_VRKME      TYPE MVKE-VRKME,           "販売単位
+**2009/04/28 ADD END
+**2009/05/26 ADD START
+*      LV_DATE       TYPE SY-DATUM,             "末日
+*      LV_KURST      TYPE TCURR-KURST,          "換算レートタイプ
+*      LV_STDAT      TYPE TCURR-GDATU.          "キー日付(内部形式)
+**2009/05/26 ADD END
+*
+**2009/10/21 ADD START
+** 売上実績の価格（直近1ヶ月）から販売価格を取得する処理用変数
+*DATA:LV_MAE          TYPE D.                  "直近1ヶ月の日付
+*
+**-- 伝票条件テーブル格納用内部テーブル
+*TYPES:BEGIN OF TYP_KONV,
+*      KNUMV TYPE KONV-KNUMV, "伝票条件番号
+*      KPOSN TYPE KONV-KPOSN, "条件明細番号(DUMMY)
+*      STUNR TYPE KONV-STUNR, "ステップ番号(DUMMY)
+*      ZAEHK TYPE KONV-ZAEHK, "条件カウンタ(DUMMY)
+*      KMEIN TYPE KONV-KMEIN, "伝票の条件単位
+*      KBETR TYPE KONV-KBETR, "条件レート
+*      WAERS TYPE KONV-WAERS, "通貨コード
+*      KPEIN TYPE KONV-KPEIN, "価格条件単位
+*      END OF TYP_KONV.
+*DATA:LT_KONV TYPE SORTED TABLE OF TYP_KONV
+*        WITH UNIQUE KEY KNUMV KPOSN STUNR ZAEHK,
+*     LW_KONV TYPE TYP_KONV.
+*
+**-- 請求伝票データ格納用内部テーブル
+*TYPES:BEGIN OF TYP_VBR,
+*      FKDAT TYPE VBRK-FKDAT,"請求日
+*      KNUMV TYPE VBRK-KNUMV,"伝票条件番号
+*      KURSK TYPE VBRP-KURSK,"換算レート
+*      END OF TYP_VBR.
+*DATA:LT_VBR TYPE STANDARD TABLE OF TYP_VBR,
+*     LW_VBR TYPE TYP_VBR.
+**2009/10/21 ADD END
+*
+**営業所取得
+*READ TABLE T_MBEWV INDEX 1 INTO LW_MBEWV.
+*LV_VKBUR = LW_MBEWV-BWKEY+1(3).
+*LV_VKBUR+3(1) = '0'.
+*
+**基本数量単位を取得
+*SELECT SINGLE
+*       MEINS
+*  INTO LV_MEINS
+*  FROM MARA
+* WHERE MATNR = LW_MBEWV-MATNR.
+*
+**受注残の販売価格取得
+*SELECT *
+*  INTO TABLE LT_YS0011
+*  FROM YS0011
+* WHERE MATNR = LW_MBEWV-MATNR
+*   AND VKBUR = LV_VKBUR
+*   AND  ( AUART = 'TA' OR AUART = 'ZOR' ) .
+** 2009/10/21 MOD START(コメント強化)
+**①受注残がある場合は受注残の販売価格を取得----------------------------
+** 2009/10/21 MOD END
+*IF SY-SUBRC = 0.
+*
+*  SORT LT_YS0011 BY NOUKI  DESCENDING.
+*
+*  LOOP AT LT_YS0011 INTO LW_YS0011.
+*    CLEAR: LV_MENGE.
+*
+*    IF LV_NOUKI > LW_YS0011-NOUKI.
+*      EXIT.
+*    ENDIF.
+*
+**   insert 2008/12/18 DMC {
+**   伝票条件番号の取得
+*    SELECT SINGLE KNUMV
+*      FROM VBAK
+*      INTO LV_KNUMV
+*     WHERE VBELN = LW_YS0011-VBELN.
+*
+**   伝票の条件単位取得
+*    SELECT SINGLE KMEIN
+*      FROM KONV
+*      INTO LV_KMEIN
+*     WHERE KNUMV = LV_KNUMV
+*       AND KSCHL = 'ZPR0'.
+** } insert 2008/12/18 DMC
+*
+**2009/07/02 MOD START
+*    IF LV_KMEIN <> LV_MEINS.
+*      CLEAR : LV_UMREZ,LV_UMREN.
+**      品目数量単位取得
+*      SELECT SINGLE UMREZ UMREN
+*        INTO (LV_UMREZ, LV_UMREN)
+*        FROM MARM
+*       WHERE MATNR = LW_YS0011-MATNR
+*         AND MEINH = LV_KMEIN.
+*
+*      IF SY-SUBRC = 0.
+**        基本数量単位での受注単価を算出
+*        LW_YS0011-JTANKA = LW_YS0011-JTANKA * LV_UMREN / LV_UMREZ.
+*      ELSE.
+*        CONTINUE.
+*      ENDIF.
+*    ENDIF.
+******汎用モジュールで数量単位変換
+**    CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+**         EXPORTING
+**              I_MATNR              = LW_YS0011-MATNR
+**              I_IN_ME              = LW_YS0011-VRKME
+***   delete 2008/12/18 DMC {
+***              I_OUT_ME             = LV_MEINS
+*** } delete 2008/12/18 DMC
+***   insert 2008/12/18 DMC {
+**              I_OUT_ME             = LV_KMEIN
+*** } insert 2008/12/18 DMC
+**              I_MENGE              = 1
+**         IMPORTING
+**              E_MENGE              = LV_MENGE
+**         EXCEPTIONS
+**              ERROR_IN_APPLICATION = 1
+**              ERROR                = 2
+**              OTHERS               = 3.
+**
+**    IF SY-SUBRC <> 0
+**    OR LV_MENGE <  1.
+**      CONTINUE.
+**    ENDIF.
+**
+***   基本数量単位での受注単価を算出
+**    LW_YS0011-JTANKA = LW_YS0011-JTANKA / LV_MENGE.
+**2009/07/02 MOD END
+*
+****円貨以外の場合は通貨変換をする
+*    IF LW_YS0011-WAERK <> 'JPY'.
+**2009/05/26 ADD START
+**     末日判定
+*      CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+*           EXPORTING
+*                DAY_IN            = I_STDAT
+*           IMPORTING
+*                LAST_DAY_OF_MONTH = LV_DATE
+*           EXCEPTIONS
+*                DAY_IN_NO_DATE    = 1
+*                OTHERS            = 2.
+*
+**     指定されたキー日付が末日の場合
+*      IF SY-SUBRC = 0        AND
+*         I_STDAT  = LV_DATE.
+**      換算レートタイプを取得　　　　
+*        CASE LW_YS0011-WAERK.
+*          WHEN 'USD'.
+*            LV_KURST = 'K'.
+*          WHEN 'EUR'.
+*            LV_KURST = 'EURK'.
+*          WHEN OTHERS.
+*            LV_KURST = 'M'.
+*        ENDCASE.
+**      決算日レートの取得
+*        IF LV_KURST = 'K'     OR
+*           LV_KURST = 'EURK'.
+**        キー日付を外部⇒内部形式に変換
+*          CALL FUNCTION 'CONVERSION_EXIT_INVDT_INPUT'
+*               EXPORTING
+*                    INPUT  = I_STDAT
+*               IMPORTING
+*                    OUTPUT = LV_STDAT.
+*
+*          CASE LV_KURST.
+**          換算レートタイプ'K'の場合、元USD→先JPY
+*            WHEN 'K'.
+*              SELECT SINGLE UKURS
+*                INTO LV_KURSK
+*                FROM TCURR
+*               WHERE KURST = 'K'
+*                 AND FCURR = 'USD'
+*                 AND TCURR = 'JPY'
+*                 AND GDATU = LV_STDAT.
+**          換算レートタイプ'EURK'の場合、元JPY→先EUR
+*            WHEN 'EURK'.
+*              SELECT SINGLE UKURS
+*                INTO LV_KURSK
+*                FROM TCURR
+*               WHERE KURST = 'EURK'
+*                 AND FCURR = 'JPY'
+*                 AND TCURR = 'EUR'
+*                 AND GDATU = LV_STDAT.
+*            WHEN OTHERS.
+*          ENDCASE.
+*          IF SY-SUBRC = 0.
+**          換算レートタイプ'EURK'の場合は、レートをプラス値に変換
+*            IF LV_KURST = 'EURK'.
+*              LV_KURSK = LV_KURSK * -1.
+*            ENDIF.
+*          ELSE.
+**2009/06/12 MOD START
+**          決算日レートが取得できない場合は、メッセージ出力
+*            MESSAGE S400(Z1) WITH '決算日レートが未登録です'.
+*            LEAVE LIST-PROCESSING.
+***          決算日レートが取得できない場合は、社内レート取得
+**           LV_KURST = 'M'.
+**2009/06/12 MOD END
+*          ENDIF.
+*        ENDIF.
+**     指定されたキー日付が末日でない場合
+*      ELSE.
+**       換算レートタイプは'M'
+*        LV_KURST = 'M'.
+*      ENDIF.
+**2009/05/26 ADD END
+*
+**2009/05/26 MOD START
+**     社内レートの取得
+*      IF LV_KURST = 'M'.
+**       明細の換算レート取得
+*        SELECT SINGLE
+*               KURSK
+*          INTO LV_KURSK
+*          FROM VBKD
+*         WHERE VBELN = LW_YS0011-VBELN
+*           AND POSNR = LW_YS0011-POSNR.
+**       明細の換算レートが無ければヘッダの換算レート
+*        IF SY-SUBRC <> 0.
+*          SELECT SINGLE
+*                 KURSK
+*            INTO LV_KURSK
+*            FROM VBKD
+*           WHERE VBELN = LW_YS0011-VBELN
+*             AND POSNR = '000000'.
+*        ENDIF.
+*      ENDIF.
+***     明細の換算レート取得
+**      SELECT SINGLE
+**             KURSK
+**        INTO LV_KURSK
+**        FROM VBKD
+**       WHERE VBELN = LW_YS0011-VBELN
+**         AND POSNR = LW_YS0011-POSNR.
+***     明細の換算レートが無ければヘッダの換算レート
+**      IF SY-SUBRC <> 0.
+**        SELECT SINGLE
+**               KURSK
+**          INTO LV_KURSK
+**          FROM VBKD
+**         WHERE VBELN = LW_YS0011-VBELN
+**           AND POSNR = '000000'.
+**      ENDIF.
+**2009/05/26 MOD END
+*
+**     汎用モジュールで円貨に変換
+*      CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+*           EXPORTING
+*                DATE             = SY-DATUM
+*                FOREIGN_AMOUNT   = LW_YS0011-JTANKA
+*                FOREIGN_CURRENCY = LW_YS0011-WAERK
+*                LOCAL_CURRENCY   = 'JPY'
+*                RATE             = LV_KURSK
+**2009/05/26 MOD START
+*                TYPE_OF_RATE     = LV_KURST
+**                TYPE_OF_RATE     = 'M'
+**2009/05/26 MOD END
+*                READ_TCURR       = ' '
+*           IMPORTING
+*                LOCAL_AMOUNT     = LW_YS0011-JTANKA
+*           EXCEPTIONS
+*                NO_RATE_FOUND    = 1
+*                OVERFLOW         = 2
+*                NO_FACTORS_FOUND = 3
+*                NO_SPREAD_FOUND  = 4
+*                DERIVED_2_TIMES  = 5
+*                OTHERS           = 6.
+*    ENDIF.
+*
+**   販売価格を比較し最低価格を取得
+*    LV_KBETR = LW_YS0011-JTANKA / LW_YS0011-TANITANKA.
+**2009/07/02 DEL START
+***2009/04/28 ADD START
+**    CLEAR : LV_UMREZ,LV_UMREN.
+***   品目数量単位取得
+**    SELECT SINGLE UMREZ UMREN
+**      INTO (LV_UMREZ, LV_UMREN)
+**      FROM MARM
+**     WHERE MATNR = LW_YS0011-MATNR
+**       AND MEINH = LW_YS0011-VRKME.
+**
+**    IF SY-SUBRC = 0.
+***     最低販売価格の販売単位数量変換
+**      LV_KBETR = LV_KBETR * LV_UMREN / LV_UMREZ.
+**    ENDIF.
+***2009/04/28 ADD END
+**2009/07/02 DEL END
+*    IF LV_KBETR_MIN > LV_KBETR .
+*      LV_KBETR_MIN = LV_KBETR .
+*    ENDIF .
+*
+*    LV_NOUKI = LW_YS0011-NOUKI.
+*  ENDLOOP.
+*
+*ELSE.
+** 2009/10/21 ADD START
+**②売上実績の価格（直近1ヶ月）から販売価格を取得---------------------
+*
+**-- 初期化
+*  REFRESH:LT_VBR,
+*          LT_KONV.
+*  CLEAR:LW_VBR,
+*        LV_MAE.
+*   LV_MAE = I_STDAT - 31. "キー日付の３１日前を取得
+*
+**-- 請求伝票の一括取得
+*  SELECT VBRK~FKDAT
+*         VBRK~KNUMV
+*         VBRP~KURSK
+*    INTO TABLE LT_VBR
+*    FROM VBRK
+*    INNER JOIN VBRP
+*       ON VBRK~VBELN = VBRP~VBELN
+*    WHERE VBRK~FKDAT <= I_STDAT         "請求日 <= キー日付
+*      AND VBRK~FKDAT >= LV_MAE          "請求日 >= 31日前
+*      AND VBRP~WERKS =  LW_MBEWV-BWKEY  "プラント
+*      AND VBRP~MATNR =  LW_MBEWV-MATNR. "品目コード
+*
+*  IF LT_VBR[] IS INITIAL.               "該当データが
+*  ELSE.                                 "ある場合のみ②の処理を行う。
+*
+**-- 最大請求日のデータのみを残して廃棄
+*    SORT LT_VBR BY FKDAT DESCENDING .         "請求日で降順ソート
+*    READ TABLE LT_VBR INTO LW_VBR INDEX 1.    "先頭一件読込
+*    DELETE LT_VBR WHERE FKDAT <> LW_VBR-FKDAT."先頭と同じ日付以外排除
+*
+**-- 伝票の条件単位の一括取得
+*      SELECT KNUMV   "伝票条件番号
+*             KPOSN   "条件明細
+*             STUNR   "ステップ番号
+*             ZAEHK   "条件カウンタ
+*             KMEIN   "条件単位
+*             KBETR   "条件レート
+*             WAERS   "通貨コード
+*             KPEIN   "価格条件単位
+*        FROM KONV
+*        INTO TABLE LT_KONV
+*         FOR ALL ENTRIES IN LT_VBR
+*       WHERE KNUMV = LT_VBR-KNUMV "伝票条件番号
+*         AND KSCHL = 'ZPR0'.
+*
+**-- 処理対象データでループ
+*    LOOP AT LT_VBR INTO LW_VBR.
+**---- 使用変数の初期化
+*      CLEAR:LW_KONV,             "伝票条件取得項目
+*            LV_UMREZ,
+*            LV_UMREN,
+*            LV_DATE,
+*            LV_KURSK,            "換算レート
+*            LV_KURST.            "換算レートタイプ
+*
+**---- 伝票の条件単位取得
+*      LOOP AT LT_KONV INTO LW_KONV WHERE KNUMV = LW_VBR-KNUMV.
+*        EXIT.                    "伝票条件番号でヒットした先頭を採用
+*      ENDLOOP.
+*
+**---- 型変換（KONV → YS0011)
+*      CLEAR:LW_YS0011.
+*      LW_YS0011-JTANKA    = LW_KONV-KBETR. "単価として条件レートを格納
+*      LW_YS0011-WAERK     = LW_KONV-WAERS. "通貨コード格納
+*      LW_YS0011-TANITANKA = LW_KONV-KPEIN.
+* "単位単価として価格単位を格納
+*
+**---- 伝票条件単位と基本数量単位を比較
+*      IF LV_MEINS <> LW_KONV-KMEIN.
+*        SELECT SINGLE UMREZ UMREN
+*          INTO (LV_UMREZ, LV_UMREN)
+*          FROM MARM
+*         WHERE MATNR = LW_MBEWV-MATNR
+*           AND MEINH = LW_KONV-KMEIN.
+*        IF SY-SUBRC = 0.
+**        基本数量単位での受注単価を算出
+*          LW_YS0011-JTANKA = LW_YS0011-JTANKA * LV_UMREN / LV_UMREZ.
+*        ELSE.
+*          CONTINUE.             "次の請求伝票データへ
+*        ENDIF.
+*      ENDIF.
+*
+**---- 円貨以外の場合は通貨変換をする
+*      IF LW_YS0011-WAERK <> 'JPY'.
+**       末日判定
+*        CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+*             EXPORTING
+*                  DAY_IN            = I_STDAT
+*             IMPORTING
+*                  LAST_DAY_OF_MONTH = LV_DATE
+*             EXCEPTIONS
+*                  DAY_IN_NO_DATE    = 1
+*                  OTHERS            = 2.
+**       指定されたキー日付が末日の場合
+*        IF SY-SUBRC = 0        AND
+*           I_STDAT  = LV_DATE.
+**        換算レートタイプを取得　　　　
+*          CASE LW_YS0011-WAERK.
+*            WHEN 'USD'.
+*              LV_KURST = 'K'.
+*            WHEN 'EUR'.
+*              LV_KURST = 'EURK'.
+*            WHEN OTHERS.
+*              LV_KURST = 'M'.
+*          ENDCASE.
+*
+**        決算日レートの取得
+*          IF LV_KURST = 'K'     OR
+*             LV_KURST = 'EURK'.
+**          キー日付を外部⇒内部形式に変換
+*            CALL FUNCTION 'CONVERSION_EXIT_INVDT_INPUT'
+*                 EXPORTING
+*                      INPUT  = I_STDAT
+*                 IMPORTING
+*                      OUTPUT = LV_STDAT.
+*
+*            CASE LV_KURST.
+**            換算レートタイプ'K'の場合、元USD→先JPY
+*              WHEN 'K'.
+*                SELECT SINGLE UKURS
+*                  INTO LV_KURSK
+*                  FROM TCURR
+*                 WHERE KURST = 'K'
+*                   AND FCURR = 'USD'
+*                   AND TCURR = 'JPY'
+*                   AND GDATU = LV_STDAT.
+**            換算レートタイプ'EURK'の場合、元JPY→先EUR
+*              WHEN 'EURK'.
+*                SELECT SINGLE UKURS
+*                  INTO LV_KURSK
+*                  FROM TCURR
+*                 WHERE KURST = 'EURK'
+*                   AND FCURR = 'JPY'
+*                   AND TCURR = 'EUR'
+*                   AND GDATU = LV_STDAT.
+*              WHEN OTHERS.
+*            ENDCASE.
+*
+*            IF SY-SUBRC = 0.
+**            換算レートタイプ'EURK'の場合は、レートをプラス値に変換
+*              IF LV_KURST = 'EURK'.
+*                LV_KURSK = LV_KURSK * -1.
+*              ENDIF.
+*            ELSE.
+**            決算日レートが取得できない場合は、メッセージ出力
+*              MESSAGE S400(Z1) WITH '決算日レートが未登録です'.
+*              LEAVE LIST-PROCESSING.
+*            ENDIF.
+*          ENDIF.
+*
+**       指定されたキー日付が末日でない場合
+*        ELSE.
+**         換算レートタイプは'M'
+*          LV_KURST = 'M'.
+*        ENDIF.
+*
+**       社内レートの取得
+*        IF LV_KURST = 'M'.
+**         明細の換算レート取得
+*          LV_KURSK = LW_VBR-KURSK. "社内レートは請求伝票の換算レート
+*        ENDIF.
+*
+**       汎用モジュールで円貨に変換
+*        CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+*             EXPORTING
+*                  DATE             = SY-DATUM
+*                  FOREIGN_AMOUNT   = LW_YS0011-JTANKA
+*                  FOREIGN_CURRENCY = LW_YS0011-WAERK
+*                  LOCAL_CURRENCY   = 'JPY'
+*                  RATE             = LV_KURSK
+*                  TYPE_OF_RATE     = LV_KURST
+*                  READ_TCURR       = ' '
+*             IMPORTING
+*                  LOCAL_AMOUNT     = LW_YS0011-JTANKA
+*             EXCEPTIONS
+*                  NO_RATE_FOUND    = 1
+*                  OVERFLOW         = 2
+*                  NO_FACTORS_FOUND = 3
+*                  NO_SPREAD_FOUND  = 4
+*                  DERIVED_2_TIMES  = 5
+*                  OTHERS           = 6.
+*      ENDIF.
+*
+**     価格条件単位で割り算
+*      LV_KBETR = LW_YS0011-JTANKA / LW_YS0011-TANITANKA.
+*
+**     算出結果の最小値をセット
+*      IF LV_KBETR_MIN > LV_KBETR .
+*        LV_KBETR_MIN = LV_KBETR .
+*      ENDIF .
+*
+*    ENDLOOP.
+*
+*    IF LV_KBETR_MIN <> '999999999.99'.
+*      E_PREIS = LV_KBETR_MIN .
+*    ENDIF.
+*
+**-- 販売価格設定済みなので処理を抜ける
+*    EXIT.
+*  ENDIF.
+** 2009/10/21 ADD END
+*
+** 2009/10/21 MOD START(コメント強化)
+**③受注残が無い場合は価格マスタから販売価格を取得--------------------
+*
+** 2009/10/21 MOD END
+**営業所に紐づく得意先を取得
+*  SELECT DISTINCT
+*         KNVV~KUNNR
+*         KNMT~VKORG
+*         KNMT~VTWEG
+*         KNVV~SPART
+*         KNMT~KDMAT
+*    INTO TABLE LT_KNVV
+*    FROM KNVV
+*         INNER JOIN KNMT
+*            ON KNVV~VKORG = KNMT~VKORG
+*           AND KNVV~VTWEG = KNMT~VTWEG
+*           AND KNVV~KUNNR = KNMT~KUNNR
+*           AND KNMT~MATNR = LW_MBEWV-MATNR
+*   WHERE KNVV~LOEVM =  SPACE
+*     AND KNVV~VKBUR =  LV_VKBUR
+*     AND KNMT~MATNR =  LW_MBEWV-MATNR.
+*
+** 得意先の販売価格のうち、最低価格を取得する
+*  LOOP AT LT_KNVV INTO LW_KNVV.
+*    CLEAR:LV_MENGE.
+*
+**   価格マスタ(得意先/得意先品目)から条件番号を取得
+*    SELECT KNUMH
+*      INTO LW_A901-KNUMH
+*      FROM A901
+*        UP TO 1 ROWS
+*     WHERE KAPPL    = 'V'
+*       AND KSCHL    = 'ZPR0'
+*       AND VKORGAU  = LW_KNVV-VKORG
+*       AND VTWEG    = LW_KNVV-VTWEG
+*       AND SPART    = LW_KNVV-SPART
+*       AND KUNNR    = LW_KNVV-KUNNR
+*       AND ZZZKDMAT = LW_KNVV-KDMAT
+*       AND DATBI   => SY-DATUM
+*       AND DATAB   <= SY-DATUM.
+*    ENDSELECT.
+*
+*    IF SY-SUBRC <> 0.
+*      CONTINUE.
+*    ENDIF.
+*
+**   条件明細より販売価格を取得
+*    SELECT *
+*      INTO LW_KONP
+*      FROM KONP
+*        UP TO 1 ROWS
+*     WHERE KNUMH = LW_A901-KNUMH
+*       AND KSCHL = 'ZPR0'.
+*    ENDSELECT.
+*
+*    IF SY-SUBRC <> 0.
+*      CONTINUE.
+*    ENDIF.
+*
+**   スケール条件よりスケール価格を取得
+*    SELECT *
+*      INTO TABLE LT_KONM
+*      FROM KONM
+*     WHERE KNUMH = LW_A901-KNUMH.
+*
+**   スケールが登録されている場合は在庫数に見合う価格を取得
+*    SORT LT_KONM BY KSTBM DESCENDING.
+*    LOOP AT LT_KONM INTO LW_KONM.
+*      IF LW_KONM-KSTBM <= LW_MBEWV-LBKUM.
+*        LW_KONP-KBETR = LW_KONM-KBETR.
+*        EXIT.
+*      ENDIF.
+*    ENDLOOP.
+*
+**2009/07/02 MOD START
+*    IF LW_KONP-KMEIN <> LV_MEINS.
+*      CLEAR : LV_UMREZ,LV_UMREN.
+**      品目数量単位取得
+*      SELECT SINGLE UMREZ UMREN
+*        INTO (LV_UMREZ, LV_UMREN)
+*        FROM MARM
+*       WHERE MATNR = LW_MBEWV-MATNR
+*         AND MEINH = LW_KONP-KMEIN.
+*
+*      IF SY-SUBRC = 0.
+**        基本数量単位での単価を算出
+*        LW_KONP-KBETR = LW_KONP-KBETR * LV_UMREN / LV_UMREZ.
+*      ELSE.
+*        CONTINUE.
+*      ENDIF.
+*    ENDIF.
+******汎用モジュールで数量単位変換
+**    CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+**         EXPORTING
+**              I_MATNR              = LW_MBEWV-MATNR
+**              I_IN_ME              = LW_KONP-KMEIN
+**              I_OUT_ME             = LV_MEINS
+**              I_MENGE              = 1
+**         IMPORTING
+**              E_MENGE              = LV_MENGE
+**         EXCEPTIONS
+**              ERROR_IN_APPLICATION = 1
+**              ERROR                = 2
+**              OTHERS               = 3.
+**    IF SY-SUBRC <> 0
+**    OR LV_MENGE <  1.
+**      CONTINUE.
+**    ENDIF.
+***   基本数量単位での単価を算出
+**    LW_KONP-KBETR = LW_KONP-KBETR / LV_MENGE.
+**2009/07/02 MOD END
+*
+*****円貨以外の場合は円貨に換算する
+*    IF LW_KONP-KONWA <> 'JPY'.
+**2009/05/26 ADD START
+**     末日判定
+*      CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+*           EXPORTING
+*                DAY_IN            = I_STDAT
+*           IMPORTING
+*                LAST_DAY_OF_MONTH = LV_DATE
+*           EXCEPTIONS
+*                DAY_IN_NO_DATE    = 1
+*                OTHERS            = 2.
+*
+**     指定されたキー日付が末日の場合
+*      IF SY-SUBRC = 0  AND
+*         I_STDAT  = LV_DATE.
+**       換算レートタイプ取得
+*        CASE LW_KONP-KONWA.
+*          WHEN 'USD'.
+*            LV_KURST = 'K'.
+*          WHEN 'EUR'.
+*            LV_KURST = 'EURK'.
+*          WHEN OTHERS.
+*            LV_KURST = 'M'.
+*        ENDCASE.
+**       決算レート取得
+*        IF LV_KURST = 'K'     OR
+*           LV_KURST = 'EURK'.
+**         キー日付を外部⇒内部形式に変換
+*          CALL FUNCTION 'CONVERSION_EXIT_INVDT_INPUT'
+*               EXPORTING
+*                    INPUT  = I_STDAT
+*               IMPORTING
+*                    OUTPUT = LV_STDAT.
+*
+*          CASE LV_KURST.
+**           換算レートタイプ'K'の場合、元USD→先JPY
+*            WHEN 'K'.
+*              SELECT SINGLE UKURS
+*                INTO LV_KURSK
+*                FROM TCURR
+*               WHERE KURST = 'K'
+*                 AND FCURR = 'USD'
+*                 AND TCURR = 'JPY'
+*                 AND GDATU = LV_STDAT.
+**           換算レートタイプ'EURK'の場合、元JPY→先EUR
+*            WHEN 'EURK'.
+*              SELECT SINGLE UKURS
+*                INTO LV_KURSK
+*                FROM TCURR
+*               WHERE KURST = 'EURK'
+*                 AND FCURR = 'JPY'
+*                 AND TCURR = 'EUR'
+*                 AND GDATU = LV_STDAT.
+*            WHEN OTHERS.
+*          ENDCASE.
+*          IF SY-SUBRC = 0.
+**           換算レートタイプ'EURK'の場合は、レートをプラス値に変換
+*            IF LV_KURST = 'EURK'.
+*              LV_KURSK = LV_KURSK * -1.
+*            ENDIF.
+*          ELSE.
+**2009/06/12 MOD START
+**           決算日レートが取得できない場合は、メッセージ出力
+*            MESSAGE S400(Z1) WITH '決算日レートが未登録です'.
+*            LEAVE LIST-PROCESSING.
+***           決算レートが取得できない場合は、社内レート取得
+**            LV_KURST = 'M'.
+**2009/06/12 MOD END
+*          ENDIF.
+*        ENDIF.
+*      ELSE.
+*        LV_KURST = 'M'.
+*      ENDIF.
+**     社内レート換算の場合、レートは初期値にしておく
+*      IF LV_KURST = 'M'.
+*        CLEAR LV_KURSK.
+*      ENDIF.
+**2009/05/26 ADD END
+**     汎用モジュールで換算する
+*      CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+*           EXPORTING
+*                DATE             = SY-DATUM
+*                FOREIGN_AMOUNT   = LW_KONP-KBETR
+*                FOREIGN_CURRENCY = LW_KONP-KONWA
+*                LOCAL_CURRENCY   = 'JPY'
+**2009/05/26 ADD START
+*                RATE             = LV_KURSK
+**2009/05/26 ADD END
+**2009/05/26 MOD START
+*                TYPE_OF_RATE     = LV_KURST
+**                TYPE_OF_RATE     = 'M'
+**2009/05/26 MOD END
+*                READ_TCURR       = 'X'
+*           IMPORTING
+*                LOCAL_AMOUNT     = LW_KONP-KBETR
+*           EXCEPTIONS
+*                NO_RATE_FOUND    = 1
+*                OVERFLOW         = 2
+*                NO_FACTORS_FOUND = 3
+*                NO_SPREAD_FOUND  = 4
+*                DERIVED_2_TIMES  = 5
+*                OTHERS           = 6.
+*    ENDIF.
+*
+**   販売価格を比較し最低価格を取得
+*    LV_KBETR = LW_KONP-KBETR / LW_KONP-KPEIN .
+**2009/07/02 DEL START
+***2009/04/28 ADD START
+**    CLEAR : LV_VRKME,LV_UMREZ,LV_UMREN.
+***   販売単位取得
+**    SELECT SINGLE VRKME
+**      INTO LV_VRKME
+**      FROM MVKE
+**     WHERE MATNR = LW_MBEWV-MATNR
+**       AND VKORG = LW_KNVV-VKORG
+**       AND VTWEG = LW_KNVV-VTWEG.
+***   品目数量単位取得
+**    SELECT SINGLE UMREZ UMREN
+**      INTO (LV_UMREZ, LV_UMREN)
+**      FROM MARM
+**     WHERE MATNR = LW_MBEWV-MATNR
+**       AND MEINH = LV_VRKME.
+**
+**    IF SY-SUBRC = 0.
+***     最低販売価格の販売単位数量変換
+**      LV_KBETR = LV_KBETR * LV_UMREN / LV_UMREZ.
+**    ENDIF.
+***2009/04/28 ADD END
+**2009/07/02 DEL END
+*    IF LV_KBETR_MIN > LV_KBETR .
+*      LV_KBETR_MIN = LV_KBETR .
+*    ENDIF .
+*
+*  ENDLOOP.
+*ENDIF.
+*
+*IF LV_KBETR_MIN <> '999999999.99'.
+*  E_PREIS = LV_KBETR_MIN .
+*ENDIF.
+*2010/03/01 DEL END

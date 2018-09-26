@@ -1,0 +1,3027 @@
+************************************************************************
+* Report ZF020800
+************************************************************************
+* [プログラム名]
+*   ZF020800     相殺処理ＢＤＣ
+* [処理概要]
+*   相殺データファイル、選択パラメータの情報を元に、
+*   売掛金明細DB（未決済）、買掛金明細（未決済）を検索し、
+*   売掛金（入金予定）⇔買掛金（支払依頼）相殺処理の
+*   バッチインプットを実行する。
+*   売掛、買掛の何れかがもう一方の残高を上回る場合、
+*   差額を残余明細として転記する。
+*   処理結果の出力は結果の正常・異常を問わず、帳票により行う。
+* [改定履歴]
+*   YYYY/MM/DD   Programar         Description
+*   2005/11/28   DMC K.ONODA       新規開発
+*   2006/05/02   DMC A.MASUDA      『入金予定』項目額がゼロの時のエラー
+*                                  処理退避修正
+*   2006/08/31   DMC J.CB      　　対象外データが正常データリストに
+*                                  出力される対応
+*   2008/01/24   DMC          　　 入出力ファイルのフォーマット
+*                                  変更
+************************************************************************
+REPORT ZF020800
+MESSAGE-ID Y1
+LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+************************************************************************
+* テーブル定義
+************************************************************************
+TABLES:T001.                              "会社コード
+*       LFA1                              "仕入先マスタ(一般セクション)
+*       KNA1                              "得意先マスタ(一般データ)
+*       SKAT                              "勘定コードマスタレコード
+*       T009B                             "会計年度バリアント(期間)
+*       BKPF                              "会計伝票ヘッダ
+*       BSEG                              "会計伝票明細
+*       BSIK                              "仕入先の二次索引
+*       BSID                              "得意先の二次索引
+************************************************************************
+* タイプ定義
+************************************************************************
+* 入力ファイル(変換前)
+TYPES:BEGIN OF STR_I_CSV,
+*20080124  DMC MOD_START
+*        FILE(120)     TYPE C,                 "入力ファイル
+FILE(2000)     TYPE C,                 "入力ファイル
+*20080124  DMC MOD_END
+END   OF STR_I_CSV.
+* 入力ファイル(変換後)
+TYPES:BEGIN OF STR_O_CSV,
+BUDAT(08)          TYPE C,            "計上日
+LIFNR(10)          TYPE C,            "仕入先コード
+WRBTR_L(20)        TYPE C,            "支払金額
+KUNNR(10)          TYPE C,            "得意先コード
+*20080124  DMC ADD_START
+VKBUR              LIKE KNVV-VKBUR,   "部門名称
+*20080124  DMC ADD_END
+WRBTR_K(20)        TYPE C,            "入金予定
+*20080124  DMC ADD_START
+INCDAT             LIKE YK310-INCDAT,  "入金予定日
+NAME1              LIKE KNA1-NAME1,   "得意先名称
+COMNT(50)          TYPE C,            "コメント入力欄
+ZFAEL(2)           TYPE C,            "得意先締日
+ZSTG1(2)           TYPE C,            "得意先支払日
+ZTERM              LIKE KNVV-ZTERM,   "支払条件（B919等）
+INCAMTS(20)        TYPE C,            "入金予定額（合計）
+NYUKINYOTEI(20)    TYPE C,            "得意先入金予定額
+SAI(20)            TYPE C,            "残高差異
+URIKAKEZAN(20)     TYPE C,            "売掛残
+TOUMIKEN(20)       TYPE C,            "当月未検収
+*20080124  DMC ADD_END
+ZANYO_F(01)        TYPE C,            "残余優先フラグ
+BELNR_O(14)        TYPE C,            "登録済伝票番号
+GJAHR(18)          TYPE C,            "登録済伝票会計年度
+STATU(14)          TYPE C,            "処理ステータス
+BELNR_I(14)        TYPE C,            "保持用の伝票番号
+WRBTR_K_DUMMY(16) TYPE P,             "入金予定(DUMMY)
+COUNT(03)         TYPE N,             "処理手順カウント
+END   OF STR_O_CSV.
+* 入力ファイル(変換後)
+TYPES:BEGIN OF STR_SELECT,
+LIFNR         LIKE LFA1-LIFNR,        "仕入先コード
+KUNNR         LIKE KNA1-KUNNR,        "得意先コード
+BELNR         LIKE BKPF-BELNR,        "会計伝票番号
+GJAHR         LIKE BKPF-GJAHR,        "会計年度
+END   OF STR_SELECT.
+* 仕入先マスタ
+TYPES:BEGIN OF STR_LFA1,
+LIFNR         LIKE LFA1-LIFNR,        "仕入先コード
+NAME1         LIKE LFA1-NAME1,        "名称１
+XCPDK         LIKE LFA1-XCPDK,        "ワンタイム勘定コード
+END   OF STR_LFA1.
+* 得意先マスタ
+TYPES:BEGIN OF STR_KNA1,
+KUNNR         LIKE KNA1-KUNNR,        "得意先コード
+NAME1         LIKE KNA1-NAME1,                      "名称 1
+XCPDK         LIKE KNA1-XCPDK,        "ワンタイム勘定コード
+END   OF STR_KNA1.
+* 勘定
+TYPES:BEGIN OF STR_SKAT,
+SAKNR         LIKE SKAT-SAKNR,        "G/L 勘定ｺｰﾄﾞ
+TXT20         LIKE SKAT-TXT20,        "G/L勘定ｺｰﾄﾞﾃｷｽﾄ(短)
+END   OF STR_SKAT.
+* 仕入先の二次索引
+TYPES:BEGIN OF STR_BSIK,
+LIFNR         LIKE BSIK-LIFNR,        "仕入先コード
+GJAHR         LIKE BSIK-GJAHR,        "会計年度
+BELNR         LIKE BSIK-BELNR,        "会計伝票番号
+SHKZG         LIKE BSIK-SHKZG,        "借方/貸方フラグ
+DMBTR         LIKE BSIK-DMBTR,        "国内通貨額
+ZFBDT         LIKE BSIK-ZFBDT,        "支払基準日
+ZTERM         LIKE BSIK-ZTERM,        "支払条件
+END   OF STR_BSIK.
+* 得意先の二次索引
+TYPES:BEGIN OF STR_BSID,
+KUNNR         LIKE BSID-KUNNR,        "得意先コード
+ZUONR         LIKE BSID-ZUONR,        "ソートキー
+GJAHR         LIKE BSID-GJAHR,        "会計年度
+BELNR         LIKE BSID-BELNR,        "会計伝票番号
+DMBTR         LIKE BSID-DMBTR,        "国内通貨額
+ZFBDT         LIKE BSID-ZFBDT,        "支払基準日
+ZTERM         LIKE BSID-ZTERM,        "支払条件
+END   OF STR_BSID.
+* 会計伝票明細
+TYPES:BEGIN OF STR_BSEG,
+AUGBL         LIKE BSEG-AUGBL,        "決済伝票番号
+KOART         LIKE BSEG-KOART,        "勘定タイプ
+END   OF STR_BSEG.
+* 帳票
+TYPES:BEGIN OF STR_LIST,
+BELNR(10)      TYPE N,                 "伝票NO
+BUDAT(08)      TYPE C,                 "転記日付
+TORI_CD(08)    TYPE N,                 "取引先コード
+TORI_NAME(30)  TYPE C,                 "取引先名称
+KARI_CD(07)    TYPE N,                 "借方科目
+KARI_NAME(10)  TYPE C,                 "借方勘定科目名
+KARI_KIN(12)   TYPE P,                 "借方金額
+KASHI_CD(07)   TYPE N,                 "貸方科目
+KASHI_NAME(10) TYPE C,                 "貸方勘定科目名
+KASHI_KIN(12)  TYPE P,                 "貸方金額
+MSG_K(38)      TYPE C,                 "ソートキー/エラー内容
+BDC(106)       TYPE C,                 "ＢＤＣエラー
+KARI_KINGAKU(12)  TYPE C,              "エラー借方金額
+KASHI_KINGAKU(12) TYPE C,              "エラー貸方金額
+KINGAKU_F(1)   TYPE C,                 "金額フラグ
+ZOUSAI_KIN(12) TYPE P,                 "相殺金額
+LINE_F(1)      TYPE C,                 "ラインフラグ
+BELNR_I(10)    TYPE N,                 "保持用の伝票番号
+END   OF STR_LIST.
+
+RANGES R_ZFBDT FOR BSIK-ZFBDT.
+RANGES R_SAKNR FOR SKAT-SAKNR.
+************************************************************************
+* 変数定義
+************************************************************************
+DATA:WK_I_CSV         TYPE STR_I_CSV.
+DATA:WK_HEAD          TYPE STR_I_CSV.
+DATA:WK_O_CSV         TYPE STR_O_CSV.
+DATA:WK_O_CSV_DUMMY   TYPE STR_O_CSV.
+DATA:WK_O_BREAK       TYPE STR_O_CSV.
+DATA:WK_ZANYO_K       TYPE STR_O_CSV.
+DATA:WK_ZANYO_D       TYPE STR_O_CSV.
+DATA:WK_SELECT        TYPE STR_SELECT.
+DATA:WK_LFA1          TYPE STR_LFA1.
+DATA:WK_KNA1          TYPE STR_KNA1.
+DATA:WK_SKAT_KAI      TYPE STR_SKAT.
+DATA:WK_SKAT_URI      TYPE STR_SKAT.
+DATA:WK_BSIK          TYPE STR_BSIK.
+DATA:WK_BSID          TYPE STR_BSID.
+DATA:WK_BSEG          TYPE STR_BSEG.
+DATA:WK_CNT_LIFNR     TYPE I.
+DATA:WK_FLG_LIFNR(01) TYPE C.
+DATA:WK_FLG_SYORI(01) TYPE C.
+DATA:WK_WRBTR_L(15)   TYPE P.                 "支払金額
+DATA:WK_WRBTR_K(15)   TYPE P.                 "入金予定
+DATA:WK_SOUSAI_L(15)   TYPE P.                 "支払金額
+DATA:WK_SOUSAI_K(15)   TYPE P.                 "入金予定
+DATA:WK_WRBTR_C(16)   TYPE C.                 "支払金額
+DATA:WK_SOUSAI(15)   TYPE C.                 "相殺金額
+DATA:WK_CNT_STATU     TYPE I.
+DATA:WK_CNT_MEISAI     TYPE I.
+DATA:WK_BELNR_K(10)   TYPE N.
+DATA:WK_BELNR_Z(10)   TYPE N.
+DATA:WK_POPER         LIKE T009B-POPER.
+DATA:WK_BDATJ         LIKE T009B-BDATJ.
+DATA:WK_LIST          TYPE STR_LIST.
+DATA:WK_LINE          TYPE STR_LIST.
+DATA:WK_BDC           LIKE BDCDATA.
+DATA:WK_BUKRS         LIKE T001-BUKRS.
+DATA:WK_PERIV         LIKE T001-PERIV.
+DATA:WK_FILE_BAK      LIKE RLGRAP-FILENAME.
+DATA:WK_BELNR         LIKE BKPF-BELNR.
+DATA:WK_GJAHR         LIKE BKPF-GJAHR.
+DATA:WK_TEXT          LIKE MESSAGE.
+DATA:WK_BUDAT_D       LIKE SY-DATUM.
+DATA:WK_FLG_BREAK(01) TYPE C.
+DATA:WK_FLG_REC(01)   TYPE C.
+DATA:WK_FLG_LIST(01)  TYPE C.
+DATA:WK_FLG_UP(01)    TYPE C.
+DATA:WK_FLG_PAGE(01)  TYPE C.
+DATA:WK_FLG_WRBTR_K(01) TYPE C.
+DATA:WK_FLG_WRBTR_D(01) TYPE C.
+DATA:WK_CNT_S(06)     TYPE N.
+DATA:WK_CNT_E(06)     TYPE N.
+DATA:WK_CNT_O(06)     TYPE N.
+DATA:WK_CNT_BREAK(03) TYPE N.
+DATA:WK_FLG_E(01)     TYPE C.
+DATA:WK_FLG_O(01)     TYPE C.
+DATA:WK_CNT_KETA      TYPE I.
+DATA:WK_CNT_WRBTR_1   TYPE I.
+DATA:WK_CNT_WRBTR_2   TYPE I.
+DATA:WK_LIFNR_C(10)   TYPE C.
+DATA:WK_KUNNR_C(10)   TYPE C.
+DATA:WK_BELNR_C(10)   TYPE C.
+DATA:WK_MODE(1)       TYPE C.
+DATA:WK_BKTXT(25)     TYPE C.
+DATA:WK_WRBTR_L1(15)  TYPE P.
+DATA:WK_WRBTR_L2(15)  TYPE P.
+DATA:WK_WRBTR_K1      LIKE BSID-WRBTR.
+DATA:WK_SHKZG         LIKE BSID-SHKZG.
+DATA:WK_LIFNR_BE(10)  TYPE C.
+DATA:WK_LIFNR_AF(10)  TYPE C.
+DATA:WK_AUGBL    LIKE BSID-AUGBL.
+DATA:WK_SGTXT(18)        TYPE C.
+DATA:WK_KIN(12)   TYPE C.
+DATA:LW_FLG_L(01) TYPE C.
+DATA:LW_FLG_K(01) TYPE C.
+DATA:WK_DUMMY_1(01) TYPE C.
+DATA:WK_DUMMY_2(01) TYPE C.
+DATA:WK_DUMMY_3(01) TYPE C.
+************************************************************************
+* 内部テーブル定義
+************************************************************************
+DATA:GTAB_I_CSV       TYPE STANDARD TABLE OF STR_I_CSV.
+DATA:GTAB_O_CSV       TYPE STANDARD TABLE OF STR_O_CSV.
+DATA:GTAB_O_CSV_DUMMY TYPE STANDARD TABLE OF STR_O_CSV.
+DATA:GTAB_O_BREAK     TYPE STANDARD TABLE OF STR_O_CSV.
+DATA:GTAB_LFA1        TYPE TABLE OF STR_LFA1.
+DATA:GTAB_KNA1        TYPE TABLE OF STR_KNA1.
+DATA:GTAB_SKAT        TYPE TABLE OF STR_SKAT.
+DATA:GTAB_BSIK        TYPE TABLE OF STR_BSIK.
+DATA:GTAB_BSIK_DUMMY  TYPE TABLE OF STR_BSIK.
+DATA:GTAB_BSID        TYPE TABLE OF STR_BSID.
+DATA:GTAB_BSID_DUMMY  TYPE TABLE OF STR_BSID.
+DATA:GTAB_BSEG        TYPE TABLE OF STR_BSEG.
+DATA:GTAB_LIST_S      TYPE TABLE OF STR_LIST.
+DATA:GTAB_LIST_E      TYPE TABLE OF STR_LIST.
+DATA:GTAB_LIST_DUMMY  TYPE TABLE OF STR_LIST.
+DATA:GTAB_BDC         LIKE TABLE OF BDCDATA.
+************************************************************************
+* 固定値定義
+************************************************************************
+CONSTANTS:
+CNS_DEF_PATH(03)  TYPE C VALUE 'C:\',
+CNS_MASK(70)      TYPE C VALUE '*.CSV,ALL FILES,*.*.',
+CNS_MODE(01)      TYPE C VALUE 'S',
+CNS_TITLE1(06)    TYPE C VALUE '入力元',
+CNS_DAT(03)       TYPE C VALUE 'DAT',
+CNS_BAK(04)       TYPE C VALUE '.BAK',
+CNS_KANMA(1)      TYPE C VALUE ',',
+CNS_BUKRS(10)     TYPE C VALUE '会社コード',
+CNS_LFA1(38)      TYPE C
+VALUE '仕入先マスタ(LFA1)にデータがありません',
+CNS_KNA1(38)      TYPE C
+VALUE '得意先マスタ(KNA1)にデータがありません',
+CNS_T009B(41)     TYPE C
+VALUE '会計年度ﾊﾞﾘｱﾝﾄ(T009B)にデータがありません',
+CNS_SKAT(42)      TYPE C
+VALUE '勘定コードマスタ(SKAT)にデータがありません',
+CNS_MSG_00(32)    TYPE C VALUE '別仕訳と仕入先コードが重複します',
+CNS_MSG_01(28)    TYPE C VALUE '得意先コードがワンタイムです',
+CNS_MSG_23(28)    TYPE C VALUE '仕入先コードがワンタイムです',
+CNS_MSG_02(22)    TYPE C VALUE 'カレンダ日付は無効です',
+CNS_MSG_03(24)    TYPE C VALUE '仕入先コードが未入力です',
+CNS_MSG_04(26)    TYPE C VALUE '仕入先コードが存在しません',
+CNS_MSG_05(36)    TYPE C VALUE '仕訳内に仕入先コードが複数存在します',
+CNS_MSG_06(32)    TYPE C VALUE '支払金額に文字が入力されています',
+CNS_MSG_07(18)    TYPE C VALUE '支払金額が無効です',
+CNS_MSG_08(24)    TYPE C VALUE '支払金額の桁数が無効です',
+CNS_MSG_09(24)    TYPE C VALUE '得意先コードが未入力です',
+CNS_MSG_10(26)    TYPE C VALUE '得意先コードが存在しません',
+CNS_MSG_11(20)    TYPE C VALUE '入金予定が未入力です',
+CNS_MSG_12(32)    TYPE C VALUE '入金予定に文字が入力されています',
+CNS_MSG_13(18)    TYPE C VALUE '入金予定が無効です',
+CNS_MSG_14(24)    TYPE C VALUE '入金予定の桁数が無効です',
+CNS_MSG_15(33)    TYPE C VALUE '残余優先フラグはXのみ設定可能です',
+CNS_MSG_16(32)    TYPE C VALUE '計上日の会計期間が取得出来ません',
+CNS_MSG_17(38)    TYPE C
+VALUE '複数の年度で同一条件AP伝票が存在します',
+CNS_MSG_18(22)    TYPE C VALUE '支払金額が一致しません',
+CNS_MSG_19(26)    TYPE C VALUE '支払依頼明細が存在しません',
+CNS_MSG_20(38)    TYPE C
+VALUE '複数の年度で同一条件AR伝票が存在します',
+CNS_MSG_21(26)    TYPE C VALUE '入金予定明細が存在しません',
+CNS_MSG_22(36)    TYPE C VALUE '伝票番号と会計年度の組合せエラーです',
+CNS_MSG_24(32)    TYPE C VALUE '未入力の仕入先コードが存在します'.
+************************************************************************
+* 入力画面設定
+************************************************************************
+* 会社コード
+PARAMETERS:P_BUKRS LIKE T001-BUKRS OBLIGATORY DEFAULT 'C001'.
+* 転記日(初期値)
+PARAMETERS:P_BUDAT LIKE BKPF-BUDAT OBLIGATORY.
+* テスト実行
+PARAMETERS:P_TEST AS CHECKBOX DEFAULT 'X'.
+* 入力ファイル
+SELECTION-SCREEN BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+* 入力元
+PARAMETERS:P_FILE LIKE RLGRAP-FILENAME OBLIGATORY.
+SELECTION-SCREEN BEGIN OF LINE.
+* ローカル
+PARAMETERS:P_LOCAL RADIOBUTTON GROUP RB1 DEFAULT 'X'.
+SELECTION-SCREEN: COMMENT 4(8) TEXT-002, POSITION 14.
+* サーバ
+PARAMETERS:P_SERVE RADIOBUTTON GROUP RB1.
+SELECTION-SCREEN: COMMENT 17(6) TEXT-003.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK BL1.
+************************************************************************
+INITIALIZATION.
+************************************************************************
+CLEAR:WK_I_CSV,WK_HEAD,WK_O_CSV,WK_O_CSV_DUMMY,WK_O_BREAK,WK_ZANYO_K,
+WK_ZANYO_D,WK_SELECT,WK_LFA1,WK_KNA1,WK_SKAT_KAI,
+WK_SKAT_URI,WK_BSIK,WK_BSID,WK_BSEG,WK_CNT_LIFNR,WK_FLG_LIFNR,
+WK_FLG_SYORI,WK_WRBTR_L,WK_WRBTR_K,WK_SOUSAI_L,WK_SOUSAI_K,
+WK_WRBTR_C,WK_SOUSAI,WK_CNT_STATU,WK_CNT_MEISAI,WK_BELNR_K,
+WK_BELNR_Z,WK_POPER,WK_BDATJ,WK_LIST,WK_LINE,WK_BDC,WK_BUKRS,
+WK_PERIV,WK_FILE_BAK,WK_BELNR,WK_GJAHR,WK_TEXT,WK_BUDAT_D,
+WK_FLG_BREAK,WK_FLG_REC,WK_FLG_LIST,WK_FLG_UP,WK_FLG_PAGE,
+WK_FLG_WRBTR_K,WK_FLG_WRBTR_D,WK_CNT_S,WK_CNT_E,WK_CNT_O,
+WK_CNT_BREAK,WK_FLG_E,WK_FLG_O,WK_CNT_KETA,WK_CNT_WRBTR_1,
+WK_CNT_WRBTR_2,WK_LIFNR_C,WK_KUNNR_C,WK_BELNR_C,WK_MODE,
+WK_BKTXT,WK_WRBTR_L1,WK_WRBTR_L2,WK_WRBTR_K1,WK_SHKZG,
+WK_LIFNR_BE,WK_LIFNR_AF,WK_AUGBL,WK_SGTXT,WK_KIN,LW_FLG_L,
+LW_FLG_K,WK_DUMMY_1,WK_DUMMY_2,WK_DUMMY_3.
+
+CLEAR:GTAB_I_CSV,GTAB_O_CSV,GTAB_O_CSV_DUMMY,GTAB_O_BREAK,
+GTAB_LFA1,GTAB_KNA1,GTAB_SKAT,GTAB_BSIK,
+GTAB_BSIK_DUMMY,GTAB_BSID,GTAB_BSID_DUMMY,GTAB_BSEG,
+GTAB_LIST_S,GTAB_LIST_E,GTAB_LIST_DUMMY,GTAB_BDC.
+************************************************************************
+AT SELECTION-SCREEN.
+************************************************************************
+PERFORM CHECK_T001.                     "会社コードのチェック
+PERFORM CHECK_PATH.                     "ファイルパスのチェック
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+************************************************************************
+* ファイル入出力先の検索ウィンドウ呼び出し処理
+PERFORM CALL_WS_FILENAME_GET USING SPACE
+CNS_DEF_PATH
+CNS_MASK
+CNS_MODE
+CNS_TITLE1
+CHANGING P_FILE.
+************************************************************************
+TOP-OF-PAGE.
+************************************************************************
+PERFORM LIST_OUT_1.                     "帳票出力(ヘッダ)
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+* タイムスタンプ
+CONCATENATE 'ZF30' '_' SY-DATUM '_' SY-UZEIT INTO WK_BKTXT.
+* ローカル選択
+IF P_LOCAL = 'X'.
+PERFORM READ_LOCAL.                   "入力ﾌｧｲﾙのﾛｰｶﾙ読込み
+IF P_TEST = SPACE.
+PERFORM DOWN_LOCAL USING 'X'.       "ﾊﾞｯｸｱｯﾌﾟﾌｧｲﾙのﾛｰｶﾙ出力
+ENDIF.
+* サーバ選択
+ELSE.
+PERFORM READ_SERVE.                   "入力ﾌｧｲﾙのｻｰﾊﾞ読込み
+IF P_TEST = SPACE.
+PERFORM DOWN_SERVE USING 'X'.       "ﾊﾞｯｸｱｯﾌﾟﾌｧｲﾙのｻｰﾊﾞ出力
+ENDIF.
+ENDIF.
+*
+PERFORM DATA_CSV.                       "CSVﾌｧｲﾙの変換
+*
+PERFORM GET_LFA1.                       "仕入先マスタの抽出
+*
+PERFORM GET_KNA1.                       "得意先マスタの抽出
+*
+PERFORM GET_SKAT.                       "勘定の抽出
+*
+PERFORM BREAK_DATA_1.                   "ﾌｧｲﾙﾌﾞﾚｲｸ
+*
+PERFORM LIST_OUT_2 TABLES GTAB_LIST_S
+USING  'S'.          "帳票出力(正常)
+*
+PERFORM LIST_OUT_2 TABLES GTAB_LIST_E
+USING  'E'.          "帳票出力(エラー)
+*
+PERFORM LIST_OUT_2 TABLES GTAB_LIST_E
+USING  'N'.          "帳票出力(件数)
+*
+IF P_TEST = SPACE.
+* ローカル選択
+IF P_LOCAL = 'X'.
+PERFORM DOWN_LOCAL USING ' '.       "上書きﾌｧｲﾙのﾛｰｶﾙ出力
+* サーバ選択
+ELSE.
+PERFORM DOWN_SERVE USING ' '.       "上書きﾌｧｲﾙのｻｰﾊﾞ出力
+ENDIF.
+ENDIF.
+************************************************************************
+END-OF-PAGE.
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_T001
+*&---------------------------------------------------------------------*
+*       会社コードのチェック
+*----------------------------------------------------------------------*
+FORM CHECK_T001.
+
+CLEAR:WK_BUKRS,WK_PERIV.
+
+SELECT SINGLE BUKRS                           "会社コード
+PERIV                           "会計年度バリアント
+INTO (WK_BUKRS,WK_PERIV)
+FROM T001
+WHERE BUKRS = P_BUKRS.
+
+IF SY-SUBRC <> 0.
+MESSAGE E600(Z1) WITH CNS_BUKRS.
+ENDIF.
+
+ENDFORM.                    " CHECK_T001
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PATH
+*&---------------------------------------------------------------------*
+*       ファイルパスのチェック
+*----------------------------------------------------------------------*
+FORM CHECK_PATH.
+
+DATA: LV_RETURN TYPE C.
+
+* サーバーの場合のチェック
+IF NOT P_SERVE IS INITIAL.
+OPEN DATASET P_FILE IN TEXT MODE .
+IF SY-SUBRC <> 0.
+MESSAGE E400
+WITH '指定の入力ファイルはサーバ上に存在しません'.
+ENDIF.
+CLOSE DATASET P_FILE.
+* ローカルPCの場合のチェック
+ELSE.
+PERFORM CHECK_LOCAL_IN USING P_FILE
+CHANGING LV_RETURN.
+IF LV_RETURN = '0'.
+MESSAGE E400
+WITH '指定の入力ファイルはローカルPCに存在しません'.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_PATH
+*&---------------------------------------------------------------------*
+*&      Form  check_local_in
+*&---------------------------------------------------------------------*
+*       ローカル入力ファイルの存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_LOCAL_IN USING PV_FILE
+CHANGING PV_RETURN.
+
+CALL FUNCTION 'WS_QUERY'
+EXPORTING
+FILENAME       = PV_FILE
+QUERY          = 'FE'
+IMPORTING
+RETURN         = PV_RETURN
+EXCEPTIONS
+INV_QUERY      = 1
+NO_BATCH       = 2
+FRONTEND_ERROR = 3
+OTHERS         = 4.
+
+IF SY-SUBRC  <> 0.
+PV_RETURN = '0'.
+ENDIF.
+
+ENDFORM.                    " check_local_in
+*&---------------------------------------------------------------------*
+*&      FORM CALL_WS_FILENAME_GET
+*&---------------------------------------------------------------------*
+*       ファイル入出力先の検索ウィンドウ呼び出し処理
+*----------------------------------------------------------------------*
+FORM CALL_WS_FILENAME_GET USING PV_FILENAME
+PV_PATH
+PV_MASK
+PV_MODE
+PV_TITLE
+CHANGING PV_PATH_C.
+
+CALL FUNCTION 'WS_FILENAME_GET'
+EXPORTING
+DEF_FILENAME     = PV_FILENAME
+DEF_PATH         = PV_PATH
+MASK             = PV_MASK
+MODE             = PV_MODE
+TITLE            = PV_TITLE
+IMPORTING
+FILENAME         = PV_PATH_C
+EXCEPTIONS
+INV_WINSYS       = 1
+NO_BATCH         = 2
+SELECTION_CANCEL = 3
+SELECTION_ERROR  = 4
+OTHERS           = 5.
+
+IF SY-SUBRC <> 0 AND
+SY-SUBRC <> 3.
+MESSAGE S400 WITH 'ファイルパスが取得できません'.
+STOP.
+ENDIF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  READ_LOCAL
+*&---------------------------------------------------------------------*
+*       入力ファイルのローカル読込み
+*----------------------------------------------------------------------*
+FORM READ_LOCAL.
+
+CALL FUNCTION 'WS_UPLOAD'
+EXPORTING
+FILENAME                = P_FILE
+FILETYPE                = CNS_DAT
+TABLES
+DATA_TAB                = GTAB_I_CSV
+EXCEPTIONS
+CONVERSION_ERROR        = 1
+FILE_OPEN_ERROR         = 2
+FILE_READ_ERROR         = 3
+INVALID_TYPE            = 4
+NO_BATCH                = 5
+UNKNOWN_ERROR           = 6
+INVALID_TABLE_WIDTH     = 7
+GUI_REFUSE_FILETRANSFER = 8
+CUSTOMER_ERROR          = 9
+OTHERS                  = 10.
+
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH '入力ファイルの読込みに失敗しました'.
+STOP.
+ENDIF.
+
+IF GTAB_I_CSV[] IS INITIAL.
+MESSAGE S400 WITH '対象となる入力データが存在しません'.
+STOP.
+ENDIF.
+
+ENDFORM.                    " READ_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  READ_SERVE
+*&---------------------------------------------------------------------*
+*       入力ファイルのサーバ読込み
+*----------------------------------------------------------------------*
+FORM READ_SERVE.
+
+* テキストモードでファイルをオープン
+OPEN DATASET P_FILE IN TEXT MODE.
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH '入力ファイルオープンエラーです'.
+STOP.
+ENDIF.
+
+* レコードが無くなるまで読込
+DO.
+READ DATASET P_FILE INTO WK_I_CSV.
+IF  SY-SUBRC = 0.
+APPEND WK_I_CSV TO GTAB_I_CSV.
+ELSE.
+EXIT.
+ENDIF.
+CLEAR:WK_I_CSV.
+ENDDO.
+
+IF GTAB_I_CSV[] IS INITIAL.
+MESSAGE S400 WITH '対象となる入力データが存在しません'.
+STOP.
+ENDIF.
+
+* ファイルをクローズ
+CLOSE DATASET P_FILE.
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH '入力ファイルクローズエラーです'.
+STOP.
+ENDIF.
+
+ENDFORM.                    " READ_SERVE
+*&---------------------------------------------------------------------*
+*&      Form  DOWN_LOCAL
+*&---------------------------------------------------------------------*
+*       バックアップファイルのローカル出力
+*----------------------------------------------------------------------*
+*      -->P_DOWN   バックアップ/上書き判定フラグ
+*----------------------------------------------------------------------*
+FORM DOWN_LOCAL USING P_DOWN.
+
+IF P_DOWN = 'X'.
+CONCATENATE P_FILE CNS_BAK INTO WK_FILE_BAK.
+ELSE.
+MOVE P_FILE TO WK_FILE_BAK.
+ENDIF.
+
+CALL FUNCTION 'WS_DOWNLOAD'
+EXPORTING
+FILENAME                = WK_FILE_BAK
+TABLES
+DATA_TAB                = GTAB_I_CSV
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_WRITE_ERROR        = 2
+INVALID_FILESIZE        = 3
+INVALID_TYPE            = 4
+NO_BATCH                = 5
+UNKNOWN_ERROR           = 6
+INVALID_TABLE_WIDTH     = 7
+GUI_REFUSE_FILETRANSFER = 8
+CUSTOMER_ERROR          = 9
+OTHERS                  = 10.
+
+IF SY-SUBRC <> 0.
+IF P_DOWN = 'X'.
+MESSAGE S400 WITH 'バックアップファイルの出力に失敗しました'.
+STOP.
+ELSE.
+MESSAGE S400 WITH '上書きファイルの出力に失敗しました'.
+STOP.
+ENDIF.
+ENDIF.
+
+IF SY-SUBRC = 0 AND P_DOWN = 'X'.
+CALL FUNCTION 'WS_FILE_DELETE'
+EXPORTING
+FILE = WK_FILE_BAK.
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH 'バックアップファイルの削除に失敗しました'.
+STOP.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " DOWN_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  DOWN_SERVE
+*&---------------------------------------------------------------------*
+*       バックアップファイルのサーバ出力
+*----------------------------------------------------------------------*
+*      -->P_DOWN   バックアップ/上書き判定フラグ
+*----------------------------------------------------------------------*
+FORM DOWN_SERVE USING P_DOWN.
+
+IF P_DOWN = 'X'.
+CONCATENATE P_FILE CNS_BAK INTO WK_FILE_BAK.
+ELSE.
+MOVE P_FILE TO WK_FILE_BAK.
+ENDIF.
+
+* テキストモードでファイルをオープン
+OPEN DATASET WK_FILE_BAK FOR OUTPUT IN TEXT MODE.
+IF SY-SUBRC <> 0.
+IF P_DOWN = 'X'.
+MESSAGE S400 WITH 'バックアップファイルオープンエラーです'.
+STOP.
+ELSE.
+MESSAGE S400 WITH '上書きファイルオープンエラーです'.
+STOP.
+ENDIF.
+ENDIF.
+
+* レコードが無くなるまで転送
+LOOP AT GTAB_I_CSV INTO WK_I_CSV.
+TRANSFER WK_I_CSV TO WK_FILE_BAK.
+CLEAR:WK_I_CSV.
+ENDLOOP.
+
+* ファイルをクローズ
+CLOSE DATASET WK_FILE_BAK.
+IF SY-SUBRC <> 0.
+IF P_DOWN = 'X'.
+MESSAGE S400 WITH 'バックアップファイルクローズエラーです'.
+STOP.
+ELSE.
+MESSAGE S400 WITH '上書きファイルクローズエラーです'.
+STOP.
+ENDIF.
+ENDIF.
+
+IF SY-SUBRC = 0 AND P_DOWN = 'X'.
+DELETE DATASET WK_FILE_BAK.
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH 'バックアップファイル削除エラーです'.
+STOP.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " DOWN_SERVE
+*&---------------------------------------------------------------------*
+*&      Form  DATA_CSV
+*&---------------------------------------------------------------------*
+*       ＣＳＶファイルの変換
+*----------------------------------------------------------------------*
+FORM DATA_CSV.
+
+LOOP AT GTAB_I_CSV INTO WK_I_CSV.
+IF SY-TABIX = 1.
+MOVE WK_I_CSV TO WK_HEAD.
+ELSE.
+SPLIT WK_I_CSV AT CNS_KANMA INTO WK_O_CSV-BUDAT    "計上日
+WK_O_CSV-LIFNR    "仕入先コード
+WK_O_CSV-WRBTR_L  "支払金額
+WK_O_CSV-KUNNR    "得意先コード
+*20080124  DMC ADD_START
+WK_O_CSV-VKBUR    "部門名称
+*20080124  DMC ADD_END
+WK_O_CSV-WRBTR_K  "入金予定
+*20080124  DMC ADD_START
+WK_O_CSV-INCDAT   "入金予定日
+WK_O_CSV-NAME1    "得意先名称
+WK_O_CSV-COMNT    "コメント入力欄
+WK_O_CSV-ZFAEL    "得意先締日
+WK_O_CSV-ZSTG1    "得意先支払日
+"支払条件（B919等）
+WK_O_CSV-ZTERM
+"入金予定額（合計）
+WK_O_CSV-INCAMTS
+"得意先入金予定額
+WK_O_CSV-NYUKINYOTEI
+WK_O_CSV-SAI      "残高差異
+WK_O_CSV-URIKAKEZAN "売掛残
+WK_O_CSV-TOUMIKEN "当月未検収
+*20080124  DMC ADD_END
+WK_O_CSV-ZANYO_F  "残余優先フラグ
+WK_O_CSV-BELNR_O  "伝票番号
+WK_O_CSV-GJAHR    "伝票会計年度
+WK_O_CSV-STATU.   "処理ステータス
+APPEND WK_O_CSV TO GTAB_O_CSV.
+* 仕入先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_CSV-LIFNR
+CHANGING WK_SELECT-LIFNR.
+* 得意先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_CSV-KUNNR
+CHANGING WK_SELECT-KUNNR.
+* 伝票番号の前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_CSV-BELNR_O
+CHANGING WK_SELECT-BELNR.
+* 会計年度の編集
+MOVE WK_O_CSV-GJAHR TO WK_SELECT-GJAHR.
+
+CLEAR:WK_O_CSV,WK_SELECT.
+ENDIF.
+ENDLOOP.
+
+IF GTAB_O_CSV[] IS INITIAL.
+MESSAGE S400 WITH '対象となる入力データが存在しません'.
+STOP.
+ELSE.
+APPEND LINES OF GTAB_O_CSV TO GTAB_O_CSV_DUMMY.
+ENDIF.
+
+FREE:GTAB_I_CSV.
+
+ENDFORM.                    " DATA_CSV
+*&---------------------------------------------------------------------*
+*&      Form  GET_LFA1
+*&---------------------------------------------------------------------*
+*       仕入先マスタの抽出
+*----------------------------------------------------------------------*
+FORM GET_LFA1.
+
+SELECT LIFNR                                  "仕入先コード
+NAME1                                  "名称１
+XCPDK                                  "ワンタイム勘定コード
+INTO TABLE GTAB_LFA1
+FROM LFA1.
+
+IF SY-SUBRC <> 0.
+MESSAGE S400(Z1) WITH CNS_LFA1.
+STOP.
+ENDIF.
+
+ENDFORM.                                                    " GET_LFA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNA1
+*&---------------------------------------------------------------------*
+*       得意先マスタの抽出
+*----------------------------------------------------------------------*
+FORM GET_KNA1.
+
+SELECT KUNNR                                  "得意先コード
+NAME1                                  "名称１
+XCPDK                                  "ワンタイム勘定コード
+INTO TABLE GTAB_KNA1
+FROM KNA1.
+
+IF SY-SUBRC <> 0.
+MESSAGE S400(Z1) WITH CNS_KNA1.
+STOP.
+ENDIF.
+
+ENDFORM.                                                    " GET_KNA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_SKAT
+*&---------------------------------------------------------------------*
+*       勘定の抽出
+*----------------------------------------------------------------------*
+FORM GET_SKAT.
+
+CLEAR:R_SAKNR.
+REFRESH:R_SAKNR.
+MOVE 'I'          TO R_SAKNR-SIGN.
+MOVE 'EQ'         TO R_SAKNR-OPTION.
+MOVE '0002102004' TO R_SAKNR-LOW.
+APPEND R_SAKNR.
+MOVE 'I'          TO R_SAKNR-SIGN.
+MOVE 'EQ'         TO R_SAKNR-OPTION.
+MOVE '0001107004' TO R_SAKNR-LOW.
+APPEND R_SAKNR.
+
+SELECT SAKNR                                  "G/L 勘定コード
+TXT20                                  "テキスト(短)
+INTO TABLE GTAB_SKAT
+FROM SKAT
+WHERE KTOPL = P_BUKRS                        "会社コード(入力画面)
+AND SAKNR IN R_SAKNR.                      "統制勘定
+
+IF SY-SUBRC = 0.
+* 買掛金（支払依頼）
+READ TABLE GTAB_SKAT INTO WK_SKAT_KAI
+WITH KEY SAKNR = '0002102004'.
+IF SY-SUBRC <> 0.
+MESSAGE S400(Z1) WITH CNS_SKAT.
+STOP.
+ENDIF.
+* 売掛金（入金予定）
+READ TABLE GTAB_SKAT INTO WK_SKAT_URI
+WITH KEY SAKNR = '0001107004'.
+IF SY-SUBRC <> 0.
+MESSAGE S400(Z1) WITH CNS_SKAT.
+STOP.
+ENDIF.
+ELSE.
+MESSAGE S400(Z1) WITH CNS_SKAT.
+STOP.
+ENDIF.
+
+ENDFORM.                    " GET_SKAT
+*&---------------------------------------------------------------------*
+*&      Form  BREAK_DATA_1
+*&---------------------------------------------------------------------*
+*       ファイルブレイク
+*----------------------------------------------------------------------*
+FORM BREAK_DATA_1.
+
+* 1レコード目の読込み
+READ TABLE GTAB_O_CSV INTO WK_O_CSV INDEX 1.
+IF SY-SUBRC = 0.
+APPEND WK_O_CSV TO GTAB_O_BREAK.
+ENDIF.
+
+LOOP AT GTAB_O_CSV INTO WK_O_CSV.
+IF SY-TABIX <> 1.
+* 『仕入先コード』と『支払金額』の両項目に入力がある毎にブレイク処理
+IF WK_O_CSV-WRBTR_L <> SPACE.                 "支払金額
+* 伝票単位のチェック
+PERFORM BREAK_DATA_2.                   "ﾌｧｲﾙﾌﾞﾚｲｸ
+CLEAR:GTAB_O_BREAK,WK_LIST,
+WK_FLG_BREAK,WK_FLG_E,WK_FLG_O,WK_FLG_LIFNR.
+ENDIF.
+APPEND WK_O_CSV TO GTAB_O_BREAK.
+ENDIF.
+ENDLOOP.
+* 伝票単位のチェック(最終伝票)
+PERFORM BREAK_DATA_2.                   "ﾌｧｲﾙﾌﾞﾚｲｸ
+CLEAR:GTAB_O_BREAK,WK_LIST,
+WK_FLG_BREAK,WK_FLG_E,WK_FLG_O,WK_FLG_LIFNR.
+
+ENDFORM.                    " BREAK_DATA_1
+*&---------------------------------------------------------------------*
+*&      Form  BREAK_DATA_2
+*&---------------------------------------------------------------------*
+*       ファイルブレイク
+*----------------------------------------------------------------------*
+FORM BREAK_DATA_2.
+
+CLEAR:WK_CNT_BREAK,WK_DUMMY_1,WK_DUMMY_2,WK_DUMMY_3.
+CLEAR:GTAB_BSID_DUMMY.
+
+* 項目のチェック
+CLEAR:WK_FLG_BREAK.
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+WK_CNT_BREAK = WK_CNT_BREAK + 1.
+PERFORM CHECK_MEISAI.                "ﾌｧｲﾙﾁｪｯｸ
+* 1レコード目のみの項目チェックフラグ
+MOVE 'X' TO WK_FLG_BREAK.
+MOVE WK_CNT_BREAK TO WK_O_BREAK-COUNT.
+MODIFY GTAB_O_BREAK FROM WK_O_BREAK
+TRANSPORTING BELNR_I WRBTR_K_DUMMY COUNT.
+CLEAR:WK_O_BREAK.
+ENDLOOP.
+
+* 伝票単位のチェック
+IF WK_FLG_E = SPACE AND WK_FLG_O = SPACE.
+CLEAR:WK_FLG_BREAK,WK_DUMMY_1.
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+PERFORM CHECK_DATA_DUMMY.
+* 1レコード目のみの項目チェックフラグ
+MOVE 'X' TO WK_FLG_BREAK.
+CLEAR:WK_O_BREAK.
+ENDLOOP.
+CLEAR:WK_FLG_BREAK.
+
+IF WK_DUMMY_1 = 'X' OR WK_DUMMY_3 = 'X'.
+* 伝票単位のチェック
+IF WK_DUMMY_3 = 'X'.
+MOVE CNS_MSG_24 TO WK_LIST-MSG_K.
+ELSE.
+MOVE CNS_MSG_05 TO WK_LIST-MSG_K.
+ENDIF.
+MODIFY GTAB_LIST_DUMMY FROM WK_LIST INDEX 1 TRANSPORTING MSG_K.
+MOVE 'X' TO WK_FLG_E.
+ELSE.
+READ TABLE GTAB_O_BREAK INTO WK_O_BREAK INDEX 1.
+PERFORM CHECK_DATA_0.
+IF WK_DUMMY_2 = 'X'.
+MOVE CNS_MSG_00 TO WK_LIST-MSG_K.
+MODIFY GTAB_LIST_DUMMY FROM WK_LIST INDEX 1 TRANSPORTING MSG_K.
+MOVE 'X' TO WK_FLG_E.
+ENDIF.
+ENDIF.
+ENDIF.
+
+* 件数カウント
+IF WK_FLG_O = 'X'.
+WK_CNT_O = WK_CNT_O + 1.             "処理対象外件数
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+
+CLEAR:GTAB_LIST_DUMMY.
+
+ELSEIF WK_FLG_E = 'X'.
+WK_CNT_E = WK_CNT_E + 1.             "エラー件数のカウント
+APPEND LINES OF GTAB_LIST_DUMMY TO GTAB_LIST_E.
+CLEAR:WK_LINE.
+MOVE 'X' TO WK_LINE-LINE_F.
+APPEND WK_LINE TO GTAB_LIST_E.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+
+CLEAR:GTAB_LIST_DUMMY.
+
+ELSE.
+
+ENDIF.
+
+IF WK_FLG_E = SPACE AND WK_FLG_O = SPACE.
+PERFORM MAKE_SOUSAI.                "相殺データ作成
+* 件数カウント
+IF WK_FLG_O = 'X'.
+WK_CNT_O = WK_CNT_O + 1.             "処理対象外件数
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+*20060831  J.CB ADD_START
+CLEAR:GTAB_LIST_DUMMY.
+*20060831  J.CB ADD_END
+ENDIF.
+
+CHECK WK_FLG_O = SPACE.
+
+PERFORM MAKE_BDC_1.                 "ＢＤＣ処理(FB05)
+
+CHECK WK_FLG_E = SPACE.
+
+IF P_TEST = SPACE AND WK_AUGBL <> SPACE.
+PERFORM GET_BSEG.                   "会計伝票明細の抽出
+CHECK WK_FLG_E = SPACE.
+PERFORM MAKE_BDC_3.                 "ＢＤＣ処理(FB02)
+CHECK WK_FLG_E = SPACE.
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+IF WK_O_BREAK-STATU <> 'M'.      "処理ステータス
+MOVE WK_BELNR_C TO WK_O_BREAK-BELNR_O.  "登録済伝票番号
+MOVE WK_GJAHR TO WK_O_BREAK-GJAHR.      "登録済伝票会計年度
+ENDIF.
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " BREAK_DATA_2
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_MEISAI
+*&---------------------------------------------------------------------*
+*       ファイルチェック
+*----------------------------------------------------------------------*
+FORM CHECK_MEISAI.
+
+CLEAR:WK_KNA1,WK_CNT_KETA,WK_FLG_REC,WK_FLG_WRBTR_K.
+
+* １伝票１レコードのチェック（買掛項目用）
+IF WK_FLG_BREAK = SPACE.
+* レコード単位で買掛項目のチェックを行い、
+* １項目でもエラーが発生した場合は、買掛項目のチェックを行わない
+IF WK_FLG_LIFNR = SPACE.
+* 『支払金額』のチェック
+PERFORM CHECK_DATA_5.
+IF WK_FLG_REC = 'X'.
+MOVE 'X' TO WK_FLG_LIFNR.
+ENDIF.
+ENDIF.
+
+IF WK_FLG_LIFNR = SPACE.
+* 『計上日』のチェック
+PERFORM CHECK_DATA_3.
+IF WK_FLG_REC = 'X'.
+MOVE 'X' TO WK_FLG_LIFNR.
+ENDIF.
+ENDIF.
+
+IF WK_FLG_LIFNR = SPACE.
+* 『ワンタイム仕入先』のチェック
+PERFORM CHECK_DATA_9.
+IF WK_FLG_REC = 'X'.
+MOVE 'X' TO WK_FLG_LIFNR.
+ENDIF.
+ENDIF.
+
+IF WK_FLG_LIFNR = SPACE.
+* 『仕入先コード』のチェック
+PERFORM CHECK_DATA_4.
+IF WK_FLG_REC = 'X'.
+MOVE 'X' TO WK_FLG_LIFNR.
+ENDIF.
+ENDIF.
+
+IF WK_FLG_LIFNR = SPACE.
+PERFORM GET_ZFBDT_1.           "支払基準日の抽出
+* 『仕入先コード』と『支払金額』のチェック
+PERFORM CHECK_BSIK.          "仕入先(二次索引)のチェック
+IF WK_FLG_REC = 'X'.
+MOVE 'X' TO WK_FLG_LIFNR.
+ENDIF.
+ENDIF.
+
+* 1伝票単位で1回処理
+IF WK_FLG_REC = SPACE.
+PERFORM DATA_MAKE USING 'S' 'K' SPACE SPACE.   "データ作成
+ENDIF.
+CLEAR:WK_FLG_REC.
+ENDIF.
+
+* １伝票レコード毎のチェック（売掛項目用）
+* レコード単位で売掛項目のチェックを行い、
+* １項目でもエラーが発生した場合は、売掛項目のチェックを行わない
+
+* 『入金予定』のチェック
+PERFORM CHECK_DATA_7.
+IF WK_FLG_REC = 'X'.
+EXIT.
+ENDIF.
+
+* 『処理ステータス』のチェック
+PERFORM CHECK_DATA_1.
+IF WK_FLG_REC = 'X'.
+EXIT.
+ENDIF.
+
+* 『ワンタイム得意先』のチェック
+PERFORM CHECK_DATA_2.
+IF WK_FLG_REC = 'X'.
+EXIT.
+ENDIF.
+
+* 『得意先コード』のチェック
+PERFORM CHECK_DATA_6.
+IF WK_FLG_REC = 'X'.
+EXIT.
+ENDIF.
+
+* 『残余優先フラグ』のチェック
+PERFORM CHECK_DATA_8.
+IF WK_FLG_REC = 'X'.
+EXIT.
+ENDIF.
+
+PERFORM CHECK_BSID.                "得意先(二次索引)のチェック
+IF WK_FLG_REC = 'X'.
+EXIT.
+ENDIF.
+
+PERFORM CHECK_BKPF.                "会計伝票ヘッダのチェック
+IF WK_FLG_REC = 'X'.
+EXIT.
+ENDIF.
+
+* 1伝票単位で1回処理
+IF WK_FLG_REC = SPACE.
+PERFORM DATA_MAKE USING 'S' 'D' SPACE SPACE.   "データ作成
+ENDIF.
+
+ENDFORM.                    " CHECK_MEISAI
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_0
+*&---------------------------------------------------------------------*
+*       『伝票単位』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_0.
+
+CLEAR:WK_CNT_LIFNR.
+LOOP AT GTAB_O_CSV_DUMMY INTO WK_O_CSV_DUMMY
+WHERE LIFNR   <> SPACE                      "仕入先コード
+AND WRBTR_L <> SPACE.                     "支払金額
+
+IF WK_O_CSV_DUMMY-LIFNR = WK_O_BREAK-LIFNR.
+
+WK_CNT_LIFNR = WK_CNT_LIFNR + 1.
+
+IF WK_CNT_LIFNR > 1.
+MOVE 'X' TO WK_DUMMY_2.
+EXIT.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_DATA_0
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_1
+*&---------------------------------------------------------------------*
+*       『処理ステータス』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_1.
+
+IF WK_O_BREAK-STATU <> SPACE.
+PERFORM DATA_MAKE USING SPACE SPACE SPACE SPACE.   "データ作成
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_1
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_2
+*&---------------------------------------------------------------------*
+*       『ワンタイム得意先』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_2.
+
+IF WK_O_BREAK-KUNNR <> SPACE.
+* 得意先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-KUNNR
+CHANGING WK_KUNNR_C.
+* 得意先の読込み
+READ TABLE GTAB_KNA1 INTO WK_KNA1
+WITH KEY KUNNR = WK_KUNNR_C.
+
+IF SY-SUBRC = 0 AND WK_KNA1-XCPDK = 'X'.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_01 SPACE.   "データ作成
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_2
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_3
+*&---------------------------------------------------------------------*
+*       『計上日』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_3.
+
+IF WK_O_BREAK-BUDAT = SPACE.
+MOVE P_BUDAT TO WK_BUDAT_D.
+ELSE.
+MOVE WK_O_BREAK-BUDAT TO WK_BUDAT_D.
+CALL FUNCTION 'DATE_CHECK_PLAUSIBILITY'
+EXPORTING
+DATE                      = WK_BUDAT_D
+EXCEPTIONS
+PLAUSIBILITY_CHECK_FAILED = 1
+OTHERS                    = 2.
+IF SY-SUBRC <> 0.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_02 SPACE.   "データ作成
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_3
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_9
+*&---------------------------------------------------------------------*
+*       『ワンタイム仕入先』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_9.
+
+IF WK_O_BREAK-LIFNR <> SPACE.
+* 仕入先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-LIFNR
+CHANGING WK_LIFNR_C.
+* 仕入先の読込み
+READ TABLE GTAB_LFA1 INTO WK_LFA1
+WITH KEY LIFNR = WK_LIFNR_C.
+
+IF SY-SUBRC = 0 AND WK_LFA1-XCPDK = 'X'.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_23 SPACE.   "データ作成
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_9
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_4
+*&---------------------------------------------------------------------*
+*       『仕入先コード』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_4.
+
+IF WK_O_BREAK-LIFNR = SPACE.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_03 SPACE.     "データ作成
+ELSE.
+* 仕入先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-LIFNR
+CHANGING WK_LIFNR_C.
+* 仕入先の読込み
+READ TABLE GTAB_LFA1 INTO WK_LFA1
+WITH KEY LIFNR = WK_LIFNR_C.
+
+IF SY-SUBRC <> 0.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_04 SPACE.   "データ作成
+ELSE.
+* 1伝票単位で1回処理
+IF WK_FLG_BREAK = SPACE.
+* 伝票単位で1レコード目の仕入先コードを退避
+MOVE WK_LIFNR_C TO WK_LIFNR_BE.
+ENDIF.
+* 伝票単位で2レコード目からの仕入先コードを退避
+MOVE WK_LIFNR_C TO WK_LIFNR_AF.
+* 伝票内で仕入先コードが異なる場合
+IF WK_LIFNR_BE <> WK_LIFNR_AF.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_05 SPACE.   "データ作成
+ENDIF.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_4
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_5
+*&---------------------------------------------------------------------*
+*       『支払金額』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_5.
+
+* 【数値以外が入力されている場合】
+CLEAR:WK_FLG_WRBTR_K.
+IF WK_O_BREAK-WRBTR_L CN '-1234567890 '.
+MOVE 'X' TO WK_FLG_WRBTR_K.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_06 SPACE.     "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+
+* 【金額がゼロの場合】
+IF WK_O_BREAK-WRBTR_L CO '-0 '.
+PERFORM DATA_MAKE USING SPACE SPACE SPACE SPACE.     "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+
+* 【マイナスが複数の場合】
+CLEAR:WK_CNT_KETA,WK_CNT_WRBTR_1,WK_CNT_WRBTR_2.
+WK_CNT_KETA = STRLEN( WK_O_BREAK-WRBTR_L ).
+DO WK_CNT_KETA TIMES.
+IF WK_O_BREAK-WRBTR_L+WK_CNT_WRBTR_1(1) = '-'.
+WK_CNT_WRBTR_2 = WK_CNT_WRBTR_2 + 1.
+ENDIF.
+WK_CNT_WRBTR_1 = WK_CNT_WRBTR_1 + 1.
+ENDDO.
+IF WK_CNT_WRBTR_2 >= 2.
+MOVE 'X' TO WK_FLG_WRBTR_K.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_07 SPACE. "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+
+CLEAR:WK_CNT_KETA.
+WK_CNT_KETA = STRLEN( WK_O_BREAK-WRBTR_L ).
+* マイナスチェック
+SEARCH WK_O_BREAK-WRBTR_L FOR '-'.
+IF SY-SUBRC = 0.
+WK_CNT_KETA = WK_CNT_KETA - 1.
+ENDIF.
+* 【桁数が１２桁以上の場合】
+IF WK_CNT_KETA > 11.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_08 SPACE. "データ作成
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_5
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_6
+*&---------------------------------------------------------------------*
+*       『得意先』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_6.
+
+IF WK_O_BREAK-KUNNR = SPACE.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_09 SPACE.     "データ作成
+ELSE.
+* 得意先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-KUNNR
+CHANGING WK_KUNNR_C.
+* 得意先の読込み
+READ TABLE GTAB_KNA1 INTO WK_KNA1
+WITH KEY KUNNR = WK_KUNNR_C.
+
+IF SY-SUBRC <> 0.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_10 SPACE.   "データ作成
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_6
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_7
+*&---------------------------------------------------------------------*
+*       『入金予定』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_7.
+
+* 【金額が空白の場合】
+IF WK_O_BREAK-WRBTR_K = SPACE.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_11 SPACE.     "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+
+* 【数値以外が入力されている場合】
+CLEAR:WK_FLG_WRBTR_D.
+IF WK_O_BREAK-WRBTR_K CN '-1234567890 '.
+MOVE 'X' TO WK_FLG_WRBTR_D.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_12 SPACE.     "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+
+* 【金額がゼロの場合】
+IF WK_O_BREAK-WRBTR_K CO '-0 '
+* 2006/05/02 APPEND DMC MASUDA START -->
+AND WK_O_BREAK-WRBTR_K NE '0'.
+* 2006/05/02 APPEND DMC MASUDA END   <--
+PERFORM DATA_MAKE USING SPACE SPACE SPACE SPACE.     "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+
+* 【マイナスが複数の場合】
+CLEAR:WK_CNT_KETA,WK_CNT_WRBTR_1,WK_CNT_WRBTR_2.
+WK_CNT_KETA = STRLEN( WK_O_BREAK-WRBTR_K ).
+DO WK_CNT_KETA TIMES.
+IF WK_O_BREAK-WRBTR_K+WK_CNT_WRBTR_1(1) = '-'.
+WK_CNT_WRBTR_2 = WK_CNT_WRBTR_2 + 1.
+ENDIF.
+WK_CNT_WRBTR_1 = WK_CNT_WRBTR_1 + 1.
+ENDDO.
+IF WK_CNT_WRBTR_2 >= 2.
+MOVE 'X' TO WK_FLG_WRBTR_D.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_13 SPACE. "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+
+CLEAR:WK_CNT_KETA.
+WK_CNT_KETA = STRLEN( WK_O_BREAK-WRBTR_K ).
+* マイナスチェック
+SEARCH WK_O_BREAK-WRBTR_K FOR '-'.
+IF SY-SUBRC = 0.
+WK_CNT_KETA = WK_CNT_KETA - 1.
+ENDIF.
+* 【桁数が１２桁以上の場合】
+IF WK_CNT_KETA > 11.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_14 SPACE. "データ作成
+ENDIF.
+
+CHECK WK_FLG_REC = SPACE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_O_BREAK-WRBTR_K_DUMMY.
+
+ENDFORM.                    " CHECK_DATA_7
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_8
+*&---------------------------------------------------------------------*
+*       『残余優先フラグ』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_8.
+
+IF WK_O_BREAK-ZANYO_F <> SPACE AND
+WK_O_BREAK-ZANYO_F <> 'X'.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_15 SPACE. "データ作成
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_8
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZFBDT_1
+*&---------------------------------------------------------------------*
+*       支払基準日の抽出
+*----------------------------------------------------------------------*
+FORM GET_ZFBDT_1.
+
+CALL FUNCTION 'DATE_TO_PERIOD_CONVERT'
+EXPORTING
+I_DATE         = WK_BUDAT_D
+I_PERIV        = WK_PERIV
+IMPORTING
+E_BUPER        = WK_POPER  "会計期間
+E_GJAHR        = WK_BDATJ  "転記日付(年度)
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3
+OTHERS         = 4.
+
+IF SY-SUBRC = 0.
+CLEAR:R_ZFBDT.
+REFRESH:R_ZFBDT.
+PERFORM GET_ZFBDT_2.           "支払基準日の抽出
+ELSE.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_16 SPACE. "データ作成
+ENDIF.
+
+ENDFORM.                    " GET_ZFBDT_1
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZFBDT_2
+*&---------------------------------------------------------------------*
+*       支払基準日の抽出
+*----------------------------------------------------------------------*
+FORM GET_ZFBDT_2.
+
+DATA:WK_BDATJ_NEXT LIKE WK_BDATJ.
+DATA:WK_POPER_NEXT LIKE WK_POPER.
+CLEAR:WK_BDATJ_NEXT,WK_POPER_NEXT.
+
+* 開始日の取得
+CALL FUNCTION 'FIRST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = WK_BDATJ
+I_PERIV        = WK_PERIV
+I_POPER        = WK_POPER
+IMPORTING
+E_DATE         = R_ZFBDT-LOW
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3
+OTHERS         = 4.
+IF SY-SUBRC <> 0.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_16 SPACE. "データ作成
+EXIT.
+ENDIF.
+
+IF WK_POPER = 012.
+WK_POPER_NEXT = 001.
+WK_BDATJ_NEXT = WK_BDATJ + 1.
+ELSE.
+WK_POPER_NEXT = WK_POPER + 001.
+WK_BDATJ_NEXT = WK_BDATJ.
+ENDIF.
+
+* 終了日の取得
+CALL FUNCTION 'FIRST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = WK_BDATJ_NEXT
+I_PERIV        = WK_PERIV
+I_POPER        = WK_POPER_NEXT
+IMPORTING
+E_DATE         = R_ZFBDT-HIGH
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3
+OTHERS         = 4.
+IF SY-SUBRC <> 0.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_16 SPACE. "データ作成
+EXIT.
+ENDIF.
+
+R_ZFBDT-HIGH = R_ZFBDT-HIGH - 1.
+
+MOVE 'I'  TO R_ZFBDT-SIGN.
+MOVE 'BT' TO R_ZFBDT-OPTION.
+APPEND R_ZFBDT.
+
+ENDFORM.                    " GET_ZFBDT_2
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BSIK
+*&---------------------------------------------------------------------*
+*       仕入先(二次索引)のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_BSIK.
+
+CLEAR:WK_WRBTR_L1,WK_WRBTR_L2.
+
+* 仕入先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-LIFNR
+CHANGING WK_LIFNR_C.
+
+SELECT LIFNR                             "仕入先コード
+GJAHR                             "会計年度
+BELNR                             "会計伝票番号
+SHKZG                             "借方/貸方フラグ
+DMBTR                             "国内通貨額
+ZFBDT                             "支払基準日
+ZTERM                             "支払条件
+INTO TABLE GTAB_BSIK
+FROM BSIK
+WHERE BUKRS = P_BUKRS                   "入力画面(会社コード)
+AND LIFNR = WK_LIFNR_C                "入力ファイル(仕入先コード)
+AND HKONT = '0002102004'              "総勘定元帳勘定
+AND ZFBDT IN R_ZFBDT.                 "支払基準日
+
+IF SY-SUBRC = 0.
+SORT GTAB_BSIK BY BELNR.
+DELETE ADJACENT DUPLICATES FROM GTAB_BSIK COMPARING BELNR.
+* 異なる会計年度で同一会計伝票番号が複数存在した場合
+IF SY-SUBRC = 0.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_17 SPACE. "データ作成
+ELSE.
+* 合計金額とファイル項目の『支払金額』の比較
+LOOP AT GTAB_BSIK INTO WK_BSIK.
+WK_BSIK-DMBTR = WK_BSIK-DMBTR * 100.
+IF WK_BSIK-SHKZG = 'H'.
+WK_WRBTR_L1 = WK_WRBTR_L1 + WK_BSIK-DMBTR.
+ELSE.
+WK_WRBTR_L1 = WK_WRBTR_L1 - WK_BSIK-DMBTR.
+ENDIF.
+ENDLOOP.
+MOVE WK_O_BREAK-WRBTR_L TO WK_WRBTR_L2.
+* 合計金額とファイル項目の『支払金額』が一致する場合
+IF WK_WRBTR_L1 = WK_WRBTR_L2.
+
+APPEND LINES OF GTAB_BSIK TO GTAB_BSIK_DUMMY.
+* 合計金額とファイル項目の『支払金額』が一致しない場合
+ELSE.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_18 SPACE. "データ作成
+ENDIF.
+ENDIF.
+* 同一金額の明細が存在しない場合
+ELSE.
+PERFORM DATA_MAKE USING 'E' 'K' CNS_MSG_19 SPACE. "データ作成
+ENDIF.
+
+ENDFORM.                    " CHECK_BSIK
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BSID
+*&---------------------------------------------------------------------*
+*       得意先(二次索引)のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_BSID.
+
+* 得意先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-KUNNR
+CHANGING WK_KUNNR_C.
+
+* 入金予定の判定
+MOVE WK_O_BREAK-WRBTR_K TO WK_WRBTR_K1.
+* 2006/05/02 APPEND MASUDA START -->
+IF WK_WRBTR_K1 = 0.
+MOVE '9999999999' TO WK_O_BREAK-BELNR_I.
+EXIT.
+ENDIF.
+* 2006/05/02 APPEND MASUDA END   <--
+WK_WRBTR_K1 = WK_WRBTR_K1 / 100.
+SEARCH WK_O_BREAK-WRBTR_K FOR '-'.
+IF SY-SUBRC = 0.
+WK_WRBTR_K1 = WK_WRBTR_K1 * -1.
+MOVE 'H' TO WK_SHKZG.
+ELSE.
+MOVE 'S' TO WK_SHKZG.
+ENDIF.
+
+SELECT KUNNR                             "得意先コード
+ZUONR                             "ソートキー
+GJAHR                             "会計年度
+BELNR                             "会計伝票番号
+DMBTR                             "国内通貨額
+ZFBDT                             "支払基準日
+ZTERM                             "支払条件
+INTO TABLE GTAB_BSID
+FROM BSID
+WHERE BUKRS = P_BUKRS                   "入力画面(会社コード)
+AND KUNNR = WK_KUNNR_C                "入力ファイル(得意先コード)
+AND SHKZG = WK_SHKZG                  "入金予定で判定(借方/貸方)
+AND DMBTR = WK_WRBTR_K1               "入力ファイル(入金予定)
+AND HKONT = '0001107004'              "総勘定元帳勘定
+AND ZFBDT IN R_ZFBDT.                 "支払基準日
+
+IF SY-SUBRC = 0.
+SORT GTAB_BSID BY BELNR.
+DELETE ADJACENT DUPLICATES FROM GTAB_BSID COMPARING BELNR.
+* 異なる会計年度で同一会計伝票番号が複数存在した場合
+IF SY-SUBRC = 0.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_20 SPACE. "データ作成
+ELSE.
+READ TABLE GTAB_BSID INTO WK_BSID INDEX 1.
+IF WK_BSID-DMBTR = WK_WRBTR_K1.
+MOVE WK_BSID-BELNR TO WK_O_BREAK-BELNR_I.
+APPEND LINES OF GTAB_BSID TO GTAB_BSID_DUMMY.
+ELSE.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_21 SPACE. "データ作成
+ENDIF.
+ENDIF.
+* 同一金額の明細が存在しない場合
+ELSE.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_21 SPACE. "データ作成
+ENDIF.
+
+ENDFORM.                    " CHECK_BSID
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BKPF
+*&---------------------------------------------------------------------*
+*       会計伝票ヘッダのチェック
+*----------------------------------------------------------------------*
+FORM CHECK_BKPF.
+
+CLEAR:WK_BELNR,WK_GJAHR.
+* ２項目に値が設定されている場合のみ処理を行う
+IF WK_O_BREAK-BELNR_O <> SPACE AND
+WK_O_BREAK-GJAHR   <> SPACE.
+
+* 会計伝票番号の前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-BELNR_O
+CHANGING WK_BELNR_C.
+
+SELECT SINGLE
+BELNR                                "会計伝票番号
+GJAHR                                "会計年度
+INTO (WK_BELNR,WK_GJAHR)
+FROM BKPF
+WHERE BUKRS = P_BUKRS                      "入力画面(会社コード)
+AND BELNR = WK_BELNR_C                   "入力ﾌｧｲﾙ(会計伝票番号)
+AND GJAHR = WK_O_BREAK-GJAHR.            "入力ﾌｧｲﾙ(会計年度)
+
+IF SY-SUBRC = 0.
+PERFORM DATA_MAKE USING SPACE SPACE SPACE SPACE.      "データ作成
+ELSE.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_22 SPACE.   "データ作成
+ENDIF.
+
+ENDIF.
+
+* １項目に値が設定されている場合のみ処理を行う
+IF WK_O_BREAK-BELNR_O <> SPACE AND
+WK_O_BREAK-GJAHR = SPACE.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_22 SPACE.     "データ作成
+ENDIF.
+
+* １項目に値が設定されている場合のみ処理を行う
+IF WK_O_BREAK-BELNR_O = SPACE AND
+WK_O_BREAK-GJAHR <> SPACE.
+PERFORM DATA_MAKE USING 'E' 'D' CNS_MSG_22 SPACE.     "データ作成
+ENDIF.
+
+ENDFORM.                    " CHECK_BKPF
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_SOUSAI
+*&---------------------------------------------------------------------*
+*       相殺データ作成
+*----------------------------------------------------------------------*
+FORM MAKE_SOUSAI.
+
+DATA:LW_WRBTR_K(16)   TYPE P.                 "入金予定
+
+CLEAR:WK_CNT_STATU,WK_SOUSAI,LW_FLG_L,LW_FLG_K.
+CLEAR:WK_FLG_SYORI,WK_WRBTR_L,WK_WRBTR_K.
+* 支払金額の計算
+READ TABLE GTAB_O_BREAK INTO WK_O_BREAK INDEX 1.
+IF SY-SUBRC = 0.
+MOVE WK_O_BREAK-WRBTR_L TO WK_WRBTR_L.
+MOVE WK_O_BREAK-WRBTR_L TO WK_SOUSAI_L.
+IF WK_WRBTR_L < 0.
+MOVE 'X' TO LW_FLG_L.
+ELSE.
+MOVE SPACE TO LW_FLG_L.
+ENDIF.
+ENDIF.
+* 入金予定の計算
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+WK_WRBTR_K = WK_WRBTR_K + WK_O_BREAK-WRBTR_K.
+ENDLOOP.
+MOVE WK_WRBTR_K TO WK_SOUSAI_K.
+IF WK_WRBTR_K =< 0.
+MOVE 'X' TO LW_FLG_K.
+ELSE.
+MOVE SPACE TO LW_FLG_K.
+ENDIF.
+
+* 支払金額がゼロの場合
+IF WK_WRBTR_L = 0.
+MOVE 'X' TO WK_FLG_O.
+EXIT.
+ENDIF.
+* 入金予定の合計がゼロの場合
+IF WK_WRBTR_K = 0.
+MOVE 'X' TO WK_FLG_O.
+EXIT.
+ENDIF.
+
+IF ( LW_FLG_L = 'X'   AND LW_FLG_K = 'X'   ) OR
+( LW_FLG_L = SPACE AND LW_FLG_K = SPACE ).
+ELSE.
+MOVE 'X' TO WK_FLG_O.
+EXIT.
+ENDIF.
+
+IF LW_FLG_L = SPACE.
+* 『残余優先フラグ』、『入金予定(DUMMY)』、『得意先コード』で昇順ソート
+SORT GTAB_O_BREAK BY ZANYO_F       ASCENDING
+WRBTR_K_DUMMY ASCENDING
+KUNNR         ASCENDING.
+ELSE.
+* 『入金予定(DUMMY)』のみ降順ソート
+SORT GTAB_O_BREAK BY ZANYO_F       ASCENDING
+WRBTR_K_DUMMY DESCENDING
+KUNNR         ASCENDING.
+ENDIF.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+* 入金予定の退避
+MOVE WK_O_BREAK-WRBTR_K TO LW_WRBTR_K.
+* 2006/05/02 APPEND MASUDA START -->
+*   入金予定の金額判定(０の場合処理ステータスをM)
+IF LW_WRBTR_K = 0.
+*   処理ステータスに『M』
+MOVE 'M' TO WK_O_BREAK-STATU.
+MODIFY GTAB_O_BREAK FROM WK_O_BREAK TRANSPORTING STATU.
+CONTINUE.
+ENDIF.
+* 2006/05/02 APPEND MASUDA END   <--
+
+* 残余金額の足し込み判定
+IF WK_FLG_SYORI = SPACE.
+* 支払金額 = 支払金額 - 入金予定
+WK_WRBTR_L = WK_WRBTR_L - LW_WRBTR_K.
+
+IF LW_FLG_L = SPACE.
+IF WK_WRBTR_L < 0.
+MOVE 'X' TO WK_FLG_SYORI.
+* 処理ステータスに『Z』
+MOVE 'Z' TO WK_O_BREAK-STATU.
+* 処理ステータスに『M』以外のカウント
+WK_CNT_STATU = WK_CNT_STATU + 1.
+ELSE.
+IF WK_WRBTR_L = 0.
+MOVE 'X' TO WK_FLG_SYORI.
+ENDIF.
+* 処理ステータスに『X』
+MOVE 'X' TO WK_O_BREAK-STATU.
+* 処理ステータスに『M』以外のカウント
+WK_CNT_STATU = WK_CNT_STATU + 1.
+ENDIF.
+ELSE.
+IF WK_WRBTR_L > 0.
+MOVE 'X' TO WK_FLG_SYORI.
+* 処理ステータスに『Z』
+MOVE 'Z' TO WK_O_BREAK-STATU.
+* 処理ステータスに『M』以外のカウント
+WK_CNT_STATU = WK_CNT_STATU + 1.
+ELSE.
+IF WK_WRBTR_L = 0.
+MOVE 'X' TO WK_FLG_SYORI.
+ENDIF.
+* 処理ステータスに『X』
+MOVE 'X' TO WK_O_BREAK-STATU.
+* 処理ステータスに『M』以外のカウント
+WK_CNT_STATU = WK_CNT_STATU + 1.
+ENDIF.
+ENDIF.
+ELSE.
+* 処理ステータスに『M』
+MOVE 'M' TO WK_O_BREAK-STATU.
+ENDIF.
+MODIFY GTAB_O_BREAK FROM WK_O_BREAK TRANSPORTING STATU.
+ENDLOOP.
+
+* 『処理手順カウント』で昇順ソート
+SORT GTAB_O_BREAK BY COUNT ASCENDING.
+
+IF LW_FLG_L = SPACE.
+IF WK_WRBTR_L > 0.
+* 2006/05/02 APPEND MASUDA START -->
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK WHERE STATU <> 'M'.
+* 処理ステータスに『K』
+MOVE 'K' TO WK_O_BREAK-STATU.
+MODIFY GTAB_O_BREAK FROM WK_O_BREAK INDEX SY-TABIX
+TRANSPORTING STATU.
+*      MODIFY GTAB_O_BREAK FROM WK_O_BREAK INDEX 1 TRANSPORTING STATU.
+EXIT.
+ENDLOOP.
+* 2006/05/02 APPEND MASUDA END    <--
+ENDIF.
+ELSE.
+IF WK_WRBTR_L < 0.
+* 2006/05/02 APPEND MASUDA START -->
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK WHERE STATU <> 'M'.
+* 処理ステータスに『K』
+MOVE 'K' TO WK_O_BREAK-STATU.
+MODIFY GTAB_O_BREAK FROM WK_O_BREAK INDEX SY-TABIX
+TRANSPORTING STATU.
+*      MODIFY GTAB_O_BREAK FROM WK_O_BREAK INDEX 1 TRANSPORTING STATU.
+EXIT.
+ENDLOOP.
+* 2006/05/02 APPEND MASUDA END    <--
+ENDIF.
+ENDIF.
+
+* 支払金額が相殺金額
+IF WK_WRBTR_L < 0.
+IF LW_FLG_L = SPACE AND LW_FLG_K = SPACE.
+MOVE WK_SOUSAI_L TO WK_SOUSAI.
+ELSE.
+MOVE WK_SOUSAI_K TO WK_SOUSAI.
+ENDIF.
+* 入金予定が相殺金額
+ELSE.
+IF LW_FLG_L = SPACE AND LW_FLG_K = SPACE.
+MOVE WK_SOUSAI_K TO WK_SOUSAI.
+ELSE.
+MOVE WK_SOUSAI_L TO WK_SOUSAI.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " MAKE_SOUSAI
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_DATA
+*&---------------------------------------------------------------------*
+*       上書きファイル作成
+*----------------------------------------------------------------------*
+FORM UPDATE_DATA.
+
+IF WK_FLG_UP = SPACE.
+APPEND WK_HEAD TO GTAB_I_CSV.
+MOVE 'X' TO WK_FLG_UP.
+ENDIF.
+CLEAR:WK_I_CSV.
+CONCATENATE WK_O_BREAK-BUDAT                  "計上日
+WK_O_BREAK-LIFNR                  "仕入先コード
+WK_O_BREAK-WRBTR_L                "支払金額
+WK_O_BREAK-KUNNR                  "得意先コード
+*20080124  DMC ADD_START
+WK_O_BREAK-VKBUR                  "部門名称
+*20080124  DMC ADD_END
+WK_O_BREAK-WRBTR_K                "入金予定
+*20080124  DMC ADD_START
+WK_O_BREAK-INCDAT                 "入金予定日
+WK_O_BREAK-NAME1                  "得意先名称
+WK_O_BREAK-COMNT                  "コメント入力欄
+WK_O_BREAK-ZFAEL                  "得意先締日
+WK_O_BREAK-ZSTG1                  "得意先支払日
+WK_O_BREAK-ZTERM                  "支払条件（B919等）
+WK_O_BREAK-INCAMTS                "入金予定額（合計）
+WK_O_BREAK-NYUKINYOTEI            "得意先入金予定額
+WK_O_BREAK-SAI                    "残高差異
+WK_O_BREAK-URIKAKEZAN             "売掛残
+WK_O_BREAK-TOUMIKEN               "当月未検収
+*20080124  DMC ADD_END
+WK_O_BREAK-ZANYO_F                "残余優先フラグ
+WK_O_BREAK-BELNR_O                "登録済伝票番号
+WK_O_BREAK-GJAHR                  "登録済伝票会計年度
+WK_O_BREAK-STATU                  "処理ステータス
+INTO WK_I_CSV SEPARATED BY CNS_KANMA.
+APPEND WK_I_CSV TO GTAB_I_CSV.
+
+ENDFORM.                    " UPDATE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BDC_1
+*&---------------------------------------------------------------------*
+*       ＢＤＣ処理(FB05)
+*----------------------------------------------------------------------*
+FORM MAKE_BDC_1.
+
+CLEAR:WK_CNT_MEISAI.
+DATA:WK_CNT_BELNR_I TYPE I.
+CLEAR:WK_CNT_BELNR_I.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK
+WHERE BELNR_I = SPACE.
+WK_CNT_BELNR_I = WK_CNT_BELNR_I + 1.
+ENDLOOP.
+
+WK_CNT_STATU = WK_CNT_STATU - WK_CNT_BELNR_I.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK
+WHERE STATU   <> 'M'. "処理ステータス
+
+IF WK_O_BREAK-BELNR_I <> SPACE.
+
+WK_CNT_MEISAI = WK_CNT_MEISAI + 1.
+
+IF WK_CNT_MEISAI = 1.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05A'        '0122',
+' ' 'BDC_CURSOR'      'BKPF-BLART',
+' ' 'BDC_OKCODE'      '=SL',
+' ' 'BKPF-BLDAT'      WK_BUDAT_D,  "転記日付
+' ' 'BKPF-BLART'      'AB',
+' ' 'BKPF-BUKRS'      P_BUKRS,           "画面(会社ｺｰﾄﾞ)
+' ' 'BKPF-BUDAT'      WK_BUDAT_D,  "転記日付
+' ' 'BKPF-MONAT'      SPACE,             "自動提案
+' ' 'BKPF-WAERS'      'JPY',
+' ' 'BKPF-BKTXT'      WK_BKTXT,
+' ' 'FS006-DOCID'     '*',
+' ' 'RF05A-XPOS1(04)' 'X'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05A'        '0710',
+' ' 'BDC_CURSOR'      'RF05A-XPOS1(03)',
+' ' 'BDC_OKCODE'      '=PA',
+' ' 'RF05A-AGBUK'     P_BUKRS,          "画面(会社ｺｰﾄﾞ)
+' ' 'RF05A-AGKON'     WK_O_BREAK-LIFNR,  "ﾌｧｲﾙ(仕入先ｺｰﾄﾞ)
+' ' 'RF05A-AGKOA'     'K',
+' ' 'RF05A-XNOPS'     'X',
+' ' 'RF05A-XPOS1(03)' 'X'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05A'        '0731',
+' ' 'BDC_CURSOR'      'RF05A-SEL01(01)',
+' ' 'BDC_OKCODE'      '=PA',
+' ' 'RF05A-SEL01(01)' '0002102004'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=OSE',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'     '1'.
+ENDIF.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05A'        '0700',
+' ' 'BDC_CURSOR'      'RF05A-NEWBS',
+' ' 'BDC_OKCODE'      '=SL',
+' ' 'BKPF-BKTXT'      WK_BKTXT.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05A'        '0710',
+' ' 'BDC_CURSOR'      'RF05A-XPOS1(03)',
+' ' 'BDC_OKCODE'      '=PA',
+' ' 'RF05A-AGBUK'     P_BUKRS,            "画面(会社ｺｰﾄﾞ)
+' ' 'RF05A-AGKON'     WK_O_BREAK-KUNNR,   "ﾌｧｲﾙ(得意先ｺｰﾄﾞ)
+' ' 'RF05A-AGKOA'     'D',
+' ' 'RF05A-XNOPS'     'X',
+' ' 'RF05A-XPOS1(03)' 'X'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05A'        '0731',
+' ' 'BDC_CURSOR'      'RF05A-SEL01(01)',
+' ' 'BDC_OKCODE'      '=PA',
+' ' 'RF05A-SEL01(01)' '0001107004'.
+
+* 処理対象全明細件数 <> 現在処理されている明細
+IF WK_CNT_STATU <> WK_CNT_MEISAI.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=OSE',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'     '1'.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=OMX',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'     '1'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=Z-',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'     '1'.
+
+* 買掛金明細内で対象の会計伝票番号を取得
+READ TABLE GTAB_O_BREAK INTO WK_O_BREAK INDEX 1.
+IF SY-SUBRC = 0.
+* 仕入先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-LIFNR
+CHANGING WK_LIFNR_C.
+
+LOOP AT GTAB_BSIK_DUMMY INTO WK_BSIK
+WHERE LIFNR = WK_LIFNR_C. "処理ステータス
+PERFORM MAKE_BDC_2 USING WK_BSIK-BELNR.         "ＢＤＣ処理(FB05)
+* 残余明細の会計伝票番号を取得
+MOVE WK_BSIK-BELNR TO WK_BELNR_K.
+ENDLOOP.
+* 残余明細の退避
+CLEAR:WK_ZANYO_K.
+MOVE SPACE TO WK_O_BREAK-BUDAT.                   "転記日付
+MOVE WK_O_BREAK TO WK_ZANYO_K.
+ENDIF.
+* 売掛金明細内で対象の会計伝票番号を取得
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK
+WHERE STATU <> 'M'.            "処理ステータス
+IF WK_O_BREAK-BELNR_I <> SPACE.
+PERFORM MAKE_BDC_2 USING WK_O_BREAK-BELNR_I.    "ＢＤＣ処理(FB05)
+IF WK_O_BREAK-STATU = 'Z'.
+* 残余明細の会計伝票番号を取得
+MOVE WK_O_BREAK-BELNR_I TO WK_BELNR_Z.
+* 残余明細の退避
+CLEAR:WK_ZANYO_D.
+MOVE SPACE TO WK_O_BREAK-BUDAT.                   "転記日付
+MOVE WK_O_BREAK TO WK_ZANYO_D.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=REST',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'     '1'.
+
+* 残余明細が存在する場合
+IF WK_WRBTR_L <> 0.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=OSU',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSDIF(01)',
+' ' 'RF05A-ABPOS'     '1'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '2000',
+' ' 'BDC_CURSOR'      'RF05A-XPOS1(05)',
+' ' 'BDC_OKCODE'      '=GO',
+' ' 'RF05A-XPOS1(05)' 'X'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '0731',
+' ' 'BDC_CURSOR'      'RF05A-SEL01(01)',
+' ' 'BDC_OKCODE'      '=GO'.
+
+IF WK_WRBTR_L > 0.
+IF LW_FLG_L = SPACE AND LW_FLG_K = SPACE.
+PERFORM DYNPRO USING:
+' ' 'RF05A-SEL01(01)' WK_BELNR_K.  "残余明細の会計伝票番号
+ELSE.
+PERFORM DYNPRO USING:
+' ' 'RF05A-SEL01(01)' WK_BELNR_Z.  "残余明細の会計伝票番号
+ENDIF.
+ELSE.
+IF LW_FLG_L = SPACE AND LW_FLG_K = SPACE.
+PERFORM DYNPRO USING:
+' ' 'RF05A-SEL01(01)' WK_BELNR_Z.  "残余明細の会計伝票番号
+ELSE.
+PERFORM DYNPRO USING:
+' ' 'RF05A-SEL01(01)' WK_BELNR_K.  "残余明細の会計伝票番号
+ENDIF.
+ENDIF.
+
+ENDIF.
+
+MOVE WK_WRBTR_L TO WK_WRBTR_C.
+WK_WRBTR_C = WK_WRBTR_C * -1.
+CONDENSE WK_WRBTR_C.
+
+*【本実行の場合】
+IF P_TEST = SPACE.
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=BU',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSDIF(01)',
+' ' 'RF05A-ABPOS'     '1',
+' ' 'DF05B-PSDIF(01)' WK_WRBTR_C.
+
+* 【テスト実行の場合】
+ELSE.
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=BS',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSDIF(01)',
+' ' 'RF05A-ABPOS'     '1',
+' ' 'DF05B-PSDIF(01)' WK_WRBTR_C.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05A'        '0700',
+' ' 'BDC_OKCODE'      '/EEND',
+' ' 'BDC_CURSOR'      'RF05A-NEWBS'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPLSPO1'        '0200',
+' ' 'BDC_OKCODE'      '=YES'.
+ENDIF.
+
+WK_MODE = 'N'.
+
+CALL TRANSACTION 'FB05'
+USING    GTAB_BDC
+MODE     WK_MODE                                  "非表示
+UPDATE   'S'.
+
+IF SY-SUBRC = 0.
+MOVE SY-MSGV1 TO WK_AUGBL.                "伝票番号の取得
+IF P_TEST = SPACE.
+IF WK_AUGBL <> SPACE.
+PERFORM GET_BKPF.                               "会計伝票の抽出
+ENDIF.
+ELSE.
+PERFORM MAKE_LIST.
+ENDIF.
+ELSE.
+PERFORM GET_MSG.                                  "メッセージ取得
+CLEAR:WK_LIST.
+MOVE 'X' TO WK_FLG_E.
+MOVE WK_TEXT-MSGTX TO WK_LIST-BDC.
+APPEND WK_LIST TO GTAB_LIST_DUMMY.
+
+WK_CNT_E = WK_CNT_E + 1.             "エラー件数のカウント
+APPEND LINES OF GTAB_LIST_DUMMY TO GTAB_LIST_E.
+CLEAR:GTAB_LIST_DUMMY.
+CLEAR:WK_LINE.
+MOVE 'X' TO WK_LINE-LINE_F.
+APPEND WK_LINE TO GTAB_LIST_E.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+CLEAR:WK_O_BREAK-STATU.                 "処理ステータス
+CLEAR:WK_O_BREAK-BELNR_O.               "登録済伝票番号
+CLEAR:WK_O_BREAK-GJAHR.                 "登録済伝票会計年度
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+
+ENDIF.
+
+CLEAR:GTAB_BDC.
+
+ENDFORM.                    " MAKE_BDC_1
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BDC_2
+*&---------------------------------------------------------------------*
+*       ＢＤＣ処理(FB05)
+*----------------------------------------------------------------------*
+FORM MAKE_BDC_2 USING P_BELNR.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '3100',
+' ' 'BDC_OKCODE'      '=OSU',
+' ' 'BDC_SUBSCR'      'SAPDF05X',
+' ' 'BDC_CURSOR'      'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'     '1'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'        '2000',
+' ' 'BDC_CURSOR'      'RF05A-XPOS1(05)',
+' ' 'BDC_OKCODE'      '=GO',
+' ' 'RF05A-XPOS1(05)' 'X'.
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'         '0731',
+' ' 'BDC_CURSOR'       'RF05A-SEL01(01)',
+' ' 'BDC_OKCODE'       '=GO',
+' ' 'RF05A-SEL01(01)'  P_BELNR.     "取得された会計伝票番号
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'         '3100',
+' ' 'BDC_OKCODE'       '=Z+',
+' ' 'BDC_SUBSCR'       'SAPDF05X',
+' ' 'BDC_CURSOR'       'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'      '1',
+' ' 'DF05B-PSSKT(01)'  SPACE.       "現金割引
+
+PERFORM DYNPRO USING:
+'X' 'SAPDF05X'         '3100',
+' ' 'BDC_OKCODE'       '=OSE',
+' ' 'BDC_SUBSCR'       'SAPDF05X',
+' ' 'BDC_CURSOR'       'DF05B-PSSKT(01)',
+' ' 'RF05A-ABPOS'      '1'.
+
+ENDFORM.                    " MAKE_BDC_2
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BDC_3
+*&---------------------------------------------------------------------*
+*       ＢＤＣ処理(FB02)
+*----------------------------------------------------------------------*
+FORM MAKE_BDC_3.
+
+CLEAR:WK_CNT_STATU,WK_CNT_MEISAI.
+
+PERFORM DYNPRO USING:
+'X' 'SAPMF05L'         '0100',
+' ' 'BDC_CURSOR'       'RF05L-BELNR',
+' ' 'BDC_OKCODE'       '=AZ',
+' ' 'RF05L-BELNR'      WK_BELNR_C,   "伝票登録された伝票番号
+' ' 'RF05L-BUKRS'      P_BUKRS,      "伝票登録された会社コード
+' ' 'RF05L-GJAHR'      WK_GJAHR.     "伝票登録された会計年度
+
+DESCRIBE TABLE GTAB_BSEG LINES WK_CNT_STATU.
+
+LOOP AT GTAB_BSEG INTO WK_BSEG.
+
+WK_CNT_MEISAI = WK_CNT_MEISAI + 1.
+
+* 決済伝票番号あり(相殺済み明細)
+IF WK_BSEG-AUGBL <> SPACE.
+* テキスト欄の作成
+CONCATENATE WK_BUDAT_D+0(4) '/'
+WK_BUDAT_D+4(2) '/'
+WK_BUDAT_D+6(2) '相殺'
+INTO WK_SGTXT.
+
+IF WK_BSEG-KOART = 'D'.    "勘定タイプ
+PERFORM DYNPRO USING:
+'X' 'SAPMF05L'         '0301'.
+ELSE.
+PERFORM DYNPRO USING:
+'X' 'SAPMF05L'         '0302'.
+ENDIF.
+PERFORM DYNPRO USING:
+' ' 'BDC_CURSOR'       'BSEG-SGTXT'.
+* 処理対象全明細件数 <> 現在処理されている明細
+IF WK_CNT_STATU <> WK_CNT_MEISAI.
+PERFORM DYNPRO USING:
+' ' 'BDC_OKCODE'       '=Z+'.
+ELSE.
+PERFORM DYNPRO USING:
+' ' 'BDC_OKCODE'       '=AE'.
+ENDIF.
+PERFORM DYNPRO USING:
+' ' 'BSEG-SGTXT'       WK_SGTXT.    "「決済日+"相殺"」
+* 決済伝票番号なし(残余明細)
+ELSE.
+* テキスト欄の作成
+CONCATENATE WK_BUDAT_D+0(4) '/'
+WK_BUDAT_D+4(2) '/'
+WK_BUDAT_D+6(2) '相殺残余'
+INTO WK_SGTXT.
+
+IF WK_BSEG-KOART = 'D'.    "勘定タイプ
+PERFORM DYNPRO USING:
+'X' 'SAPMF05L'         '0301',
+' ' 'BDC_CURSOR'       'BSEG-SGTXT'.
+* 処理対象全明細件数 <> 現在処理されている明細
+IF WK_CNT_STATU <> WK_CNT_MEISAI.
+PERFORM DYNPRO USING:
+' ' 'BDC_OKCODE'       '=Z+'.
+ELSE.
+PERFORM DYNPRO USING:
+' ' 'BDC_OKCODE'       '=AE'.
+ENDIF.
+
+READ TABLE GTAB_BSID_DUMMY INTO WK_BSID
+WITH KEY BELNR = WK_BELNR_Z.
+
+PERFORM DYNPRO USING:
+' ' 'BSEG-ZTERM'       WK_BSID-ZTERM,  "支払条件
+' ' 'BSEG-ZFBDT'       WK_BSID-ZFBDT,  "支払基準日
+' ' 'BSEG-ZUONR'       WK_BSID-ZUONR,  "ＸＸ支店
+' ' 'BSEG-SGTXT'       WK_SGTXT.       "
+ELSE.
+PERFORM DYNPRO USING:
+'X' 'SAPMF05L'         '0302',
+' ' 'BDC_CURSOR'       'BSEG-SGTXT'.
+* 処理対象全明細件数 <> 現在処理されている明細
+IF WK_CNT_STATU <> WK_CNT_MEISAI.
+PERFORM DYNPRO USING:
+' ' 'BDC_OKCODE'       '=Z+'.
+ELSE.
+PERFORM DYNPRO USING:
+' ' 'BDC_OKCODE'       '=AE'.
+ENDIF.
+
+READ TABLE GTAB_BSIK_DUMMY INTO WK_BSIK
+WITH KEY BELNR = WK_BELNR_K.
+
+PERFORM DYNPRO USING:
+' ' 'BSEG-ZTERM'       WK_BSIK-ZTERM,  "支払条件
+' ' 'BSEG-ZFBDT'       WK_BSIK-ZFBDT,  "支払基準日
+' ' 'BSEG-ZUONR'       '相殺残余',     "
+' ' 'BSEG-SGTXT'       WK_SGTXT.       "
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+WK_MODE = 'N'.
+
+CALL TRANSACTION 'FB02'
+USING    GTAB_BDC
+MODE     WK_MODE                                  "非表示
+UPDATE   'S'.
+
+IF SY-SUBRC = 0.
+MOVE WK_BELNR_C TO WK_LIST-BELNR.
+MODIFY GTAB_LIST_DUMMY FROM WK_LIST INDEX 1
+TRANSPORTING BELNR.
+
+PERFORM MAKE_LIST.
+ELSE.
+CLEAR:WK_LIST.
+MOVE 'X' TO WK_FLG_E.
+MOVE 'BDCエラーの為、ソートキーと明細テキストが設定出来ません'
+TO WK_LIST-BDC.
+APPEND WK_LIST TO GTAB_LIST_DUMMY.
+
+CLEAR:WK_LIST.
+MOVE WK_AUGBL TO WK_LIST-BELNR.
+MODIFY GTAB_LIST_DUMMY FROM WK_LIST INDEX 1 TRANSPORTING BELNR.
+
+WK_CNT_E = WK_CNT_E + 1.             "エラー件数のカウント
+APPEND LINES OF GTAB_LIST_DUMMY TO GTAB_LIST_E.
+CLEAR:GTAB_LIST_DUMMY.
+CLEAR:WK_LINE.
+MOVE 'X' TO WK_LINE-LINE_F.
+APPEND WK_LINE TO GTAB_LIST_E.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+CLEAR:WK_O_BREAK-STATU.                 "処理ステータス
+CLEAR:WK_O_BREAK-BELNR_O.               "登録済伝票番号
+CLEAR:WK_O_BREAK-GJAHR.                 "登録済伝票会計年度
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+
+ENDIF.
+
+CLEAR:GTAB_BDC.
+
+ENDFORM.                    " MAKE_BDC_3
+*&---------------------------------------------------------------------*
+*&      Form  DYNPRO
+*&---------------------------------------------------------------------*
+*       ＢＤＣ作成
+*----------------------------------------------------------------------*
+*      -->DYNBEG   text                                                *
+*      -->NAME     text                                                *
+*      -->VALUE    text                                                *
+*----------------------------------------------------------------------*
+FORM DYNPRO USING DYNBEGIN NAME VALUE.
+
+CLEAR:WK_BDC.
+IF DYNBEGIN = 'X'.
+MOVE NAME  TO WK_BDC-PROGRAM.
+MOVE VALUE TO WK_BDC-DYNPRO.
+MOVE 'X'   TO WK_BDC-DYNBEGIN.
+ELSE.
+MOVE NAME  TO WK_BDC-FNAM.
+MOVE VALUE TO WK_BDC-FVAL.
+ENDIF.
+APPEND WK_BDC TO GTAB_BDC.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  GET_BKPF
+*&---------------------------------------------------------------------*
+*       会計伝票の抽出
+*----------------------------------------------------------------------*
+FORM GET_BKPF.
+
+* 会計伝票番号の前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_AUGBL
+CHANGING WK_BELNR_C.
+
+CLEAR:WK_GJAHR.
+SELECT SINGLE GJAHR                         "会計年度
+INTO WK_GJAHR
+FROM BKPF
+WHERE BUKRS = P_BUKRS                      "入力画面(会社コード)
+AND BELNR = WK_BELNR_C                   "登録済(会計伝票番号)
+AND BUDAT = WK_BUDAT_D.                  "入力ファイル(転記日付)
+
+IF SY-SUBRC = 0.
+MOVE WK_GJAHR TO WK_O_BREAK-GJAHR.
+ELSE.
+CLEAR:WK_LIST.
+MOVE 'X' TO WK_FLG_E.
+MOVE '決済伝票のデータが消滅しました(BKPF)' TO WK_LIST-BDC.
+APPEND WK_LIST TO GTAB_LIST_DUMMY.
+
+CLEAR:WK_LIST.
+MOVE WK_AUGBL TO WK_LIST-BELNR.
+MODIFY GTAB_LIST_DUMMY FROM WK_LIST INDEX 1 TRANSPORTING BELNR.
+
+WK_CNT_E = WK_CNT_E + 1.             "エラー件数のカウント
+APPEND LINES OF GTAB_LIST_DUMMY TO GTAB_LIST_E.
+CLEAR:GTAB_LIST_DUMMY.
+CLEAR:WK_LINE.
+MOVE 'X' TO WK_LINE-LINE_F.
+APPEND WK_LINE TO GTAB_LIST_E.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+CLEAR:WK_O_BREAK-STATU.                 "処理ステータス
+CLEAR:WK_O_BREAK-BELNR_O.               "登録済伝票番号
+CLEAR:WK_O_BREAK-GJAHR.                 "登録済伝票会計年度
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+
+ENDIF.
+
+ENDFORM.                    " GET_BKPF
+*&---------------------------------------------------------------------*
+*&      Form  GET_MSG
+*&---------------------------------------------------------------------*
+*       エラーメッセージ取得
+*----------------------------------------------------------------------*
+FORM GET_MSG.
+
+CLEAR:WK_TEXT.
+
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID  = SY-MSGID
+MSGNO  = SY-MSGNO
+MSGTY  = SY-MSGTY
+MSGV1  = SY-MSGV1
+MSGV2  = SY-MSGV2
+MSGV3  = SY-MSGV3
+MSGV4  = SY-MSGV4
+IMPORTING
+MESSG  = WK_TEXT
+EXCEPTIONS
+OTHERS = 1.
+
+ENDFORM.                    " GET_MSG
+*&---------------------------------------------------------------------*
+*&      Form  LIST_OUT_1
+*&---------------------------------------------------------------------*
+*       帳票出力(ヘッダ)
+*----------------------------------------------------------------------*
+FORM LIST_OUT_1.
+
+DATA:WK_SYORIMSG(24) TYPE C.
+CLEAR:WK_SYORIMSG.
+
+IF P_TEST ='X'.
+CASE WK_FLG_LIST.
+WHEN 'S'.
+WK_SYORIMSG = '【テスト実行：正常予定】'.
+WHEN 'E'.
+WK_SYORIMSG = '【テスト実行：エラー】'.
+WHEN OTHERS.
+
+ENDCASE.
+ELSE.
+CASE WK_FLG_LIST.
+WHEN 'S'.
+WK_SYORIMSG = '【本実行：正常終了】'.
+WHEN 'E'.
+WK_SYORIMSG = '【本実行：エラー】'.
+WHEN OTHERS.
+
+ENDCASE.
+ENDIF.
+
+WRITE: /079(14) '相殺処理ＢＤＣ',
+161(6)  'ページ',
+167     SY-PAGNO,
+/079(14) '==============',
+138(10) '作成年月日',
+148     SY-DATUM+0(4) NO-ZERO,
+152(2)  '年',
+154     SY-DATUM+4(2) NO-ZERO,
+156(2)  '月',
+158     SY-DATUM+6(2) NO-ZERO,
+160(2)  '日',
+164     SY-UZEIT+0(2),
+166(1)  ':',
+167     SY-UZEIT+2(2).
+IF WK_FLG_LIST = 'S' OR
+WK_FLG_LIST = 'E'.
+WRITE: /074(24) WK_SYORIMSG,
+/001(06) '伝票NO',
+012(08) '転記日付',
+023(10) '取引先ｺｰﾄﾞ',
+034(10) '取引先名称',
+067(08) '借方科目',
+076(10) '勘定科目名',
+087(06) '金  額',
+099(01) '/',
+101(08) '貸方科目',
+110(10) '勘定科目名',
+121(06) '金  額'.
+IF WK_FLG_LIST = 'S'.
+WRITE:133(10) 'ソートキー'.
+ELSE.
+WRITE:133(10) 'エラー内容'.
+ENDIF.
+ULINE.
+ELSE.
+ULINE.
+ENDIF.
+
+ENDFORM.                    " LIST_OUT_1
+*&---------------------------------------------------------------------*
+*&      Form  LIST_OUT_2
+*&---------------------------------------------------------------------*
+*       帳票出力(正常/エラー)
+*----------------------------------------------------------------------*
+*      -->P_GTAB_LIST  正常/エラーデータ
+*      -->P_FLG        正常/エラー判定フラグ
+*----------------------------------------------------------------------*
+FORM LIST_OUT_2 TABLES   P_GTAB_LIST STRUCTURE WK_LIST
+USING    VALUE(P_FLG).
+
+CLEAR:WK_FLG_PAGE.
+* 画面帳票『正常』、『エラー』
+IF P_FLG = 'S' OR
+P_FLG = 'E'.
+LOOP AT P_GTAB_LIST INTO WK_LIST.
+IF WK_LIST-LINE_F = SPACE.
+IF P_TEST ='X'.
+IF P_FLG = 'S'.
+MOVE 'S' TO WK_FLG_LIST.
+ELSE.
+MOVE 'E' TO WK_FLG_LIST.
+IF WK_FLG_PAGE = SPACE.
+NEW-PAGE.
+MOVE 'X' TO WK_FLG_PAGE.
+ENDIF.
+ENDIF.
+IF WK_LIST-BUDAT = SPACE.
+WRITE: /001(10) SPACE.           "伝票NO
+ELSE.
+WRITE: /001(10) '**********'.           "伝票NO
+ENDIF.
+ELSE.
+IF P_FLG = 'S'.
+MOVE 'S' TO WK_FLG_LIST.
+IF WK_LIST-BUDAT = SPACE.
+WRITE: /001(10) SPACE.           "伝票NO
+ELSE.
+WRITE: /001(10) WK_LIST-BELNR.        "伝票NO
+ENDIF.
+ELSE.
+MOVE 'E' TO WK_FLG_LIST.
+IF WK_FLG_PAGE = SPACE.
+NEW-PAGE.
+MOVE 'X' TO WK_FLG_PAGE.
+ENDIF.
+IF WK_LIST-BUDAT = SPACE.
+WRITE: /001(10) SPACE.           "伝票NO
+ELSE.
+IF WK_LIST-BELNR IS INITIAL.
+WRITE: /001(10) '**********'.         "伝票NO
+ELSE.
+WRITE: /001(10) WK_LIST-BELNR.         "伝票NO
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+IF WK_LIST-BUDAT <> SPACE.
+WRITE:012(04) WK_LIST-BUDAT+0(4),         "転記日付
+016(01) '/',
+017(02) WK_LIST-BUDAT+4(2),         "転記日付
+019(01) '/',
+020(02) WK_LIST-BUDAT+6(2).         "転記日付
+ENDIF.
+IF NOT WK_LIST-TORI_CD IS INITIAL.
+WRITE:023(08) WK_LIST-TORI_CD.            "取引先コード
+ENDIF.
+WRITE:034(30) WK_LIST-TORI_NAME,          "取引先名称
+065(01) '|'.
+IF NOT WK_LIST-KARI_CD IS INITIAL.
+WRITE:067(08) WK_LIST-KARI_CD.            "借方科目
+ENDIF.
+WRITE:076(10) WK_LIST-KARI_NAME.          "勘定科目名
+IF WK_LIST-KARI_KINGAKU = SPACE.
+IF WK_LIST-KINGAKU_F = 'X'.
+WRITE:087(11) WK_LIST-KARI_KINGAKU RIGHT-JUSTIFIED.
+"エラー金額
+ELSE.
+IF NOT WK_LIST-KARI_KIN IS INITIAL.
+IF WK_LIST-KARI_KIN < 0.
+PERFORM CHECK_KIN USING    WK_LIST-KARI_KIN
+CHANGING WK_KIN.
+WRITE:087(11) WK_KIN RIGHT-JUSTIFIED.
+ELSE.
+WRITE:087(12) WK_LIST-KARI_KIN.       "金  額
+ENDIF.
+ENDIF.
+ENDIF.
+ELSE.
+WRITE:087(11) WK_LIST-KARI_KINGAKU RIGHT-JUSTIFIED.
+"エラー金額
+ENDIF.
+IF WK_LIST-ZOUSAI_KIN = SPACE.
+WRITE:099(01) '/'.
+ENDIF.
+IF NOT WK_LIST-KASHI_CD IS INITIAL.
+WRITE:101(08) WK_LIST-KASHI_CD.           "貸方科目
+ENDIF.
+WRITE:110(10) WK_LIST-KASHI_NAME.         "勘定科目名
+IF WK_LIST-KASHI_KINGAKU = SPACE.
+IF WK_LIST-KINGAKU_F = 'X'.
+WRITE:121(11) WK_LIST-KASHI_KINGAKU RIGHT-JUSTIFIED.
+"エラー金額
+ELSE.
+IF NOT WK_LIST-KASHI_KIN IS INITIAL.
+IF WK_LIST-KASHI_KIN < 0.
+PERFORM CHECK_KIN USING    WK_LIST-KASHI_KIN
+CHANGING WK_KIN.
+WRITE:121(11) WK_KIN RIGHT-JUSTIFIED.
+ELSE.
+WRITE:121(12) WK_LIST-KASHI_KIN.    "金  額
+ENDIF.
+ENDIF.
+ENDIF.
+ELSE.
+WRITE:121(11) WK_LIST-KASHI_KINGAKU RIGHT-JUSTIFIED.
+"エラー金額
+ENDIF.
+WRITE:133(38) WK_LIST-MSG_K.          "ソートキー/エラー内容
+IF P_FLG = 'S' AND WK_LIST-ZOUSAI_KIN <> SPACE.
+IF NOT WK_LIST-ZOUSAI_KIN IS INITIAL.
+IF WK_LIST-ZOUSAI_KIN < 0.
+PERFORM CHECK_KIN USING    WK_LIST-ZOUSAI_KIN
+CHANGING WK_KIN.
+WRITE:159(11) WK_KIN RIGHT-JUSTIFIED.
+ELSE.
+WRITE:159(11) WK_LIST-ZOUSAI_KIN.    "相殺金額
+ENDIF.
+ENDIF.
+ENDIF.
+IF WK_LIST-BDC <> SPACE.
+WRITE:067(106) WK_LIST-BDC.          "BDC内容
+ENDIF.
+ELSE.
+ULINE.
+ENDIF.
+CLEAR:WK_LIST.
+ENDLOOP.
+* 画面帳票『件数』
+ELSE.
+MOVE 'N' TO WK_FLG_LIST.
+NEW-PAGE.
+WRITE: /002(28) '＊＊＊＊＊＊＊＊＊＊＊＊＊＊'.
+IF P_TEST ='X'.
+WRITE: /002(16) '正常終了（予定）'.
+ELSE.
+WRITE: /002(08) '正常終了'.
+ENDIF.
+WRITE:  018(02) '：',
+020(06) WK_CNT_S,
+027(02) '件',
+/002(06) 'エラー',
+018(02) '：',
+020(06) WK_CNT_E,
+027(02) '件',
+/002(10) '処理対象外',
+018(02) '：',
+020(06) WK_CNT_O,
+027(02) '件',
+/002(28) '＊＊＊＊＊＊＊＊＊＊＊＊＊＊'.
+ENDIF.
+
+ENDFORM.                    " LIST_OUT_2
+*&---------------------------------------------------------------------*
+*&      Form  DATA_MAKE
+*&---------------------------------------------------------------------*
+*       データ作成
+*----------------------------------------------------------------------*
+*      -->P_FLG    正常/エラー/対象外判定フラグ
+*      -->P_TYPE   買掛/売掛判定フラグ
+*      -->P_MSG    メッセージ
+*      -->P_TANI   レコード/伝票
+*----------------------------------------------------------------------*
+FORM DATA_MAKE USING VALUE(P_FLG_I)
+VALUE(P_TYPE_I)
+VALUE(P_MSG_I)
+VALUE(P_TANI_I).
+
+CASE P_FLG_I.
+WHEN 'S'.
+WHEN 'E'.
+MOVE 'X' TO WK_FLG_REC.                   "次レコード判定フラグ
+MOVE 'X' TO WK_FLG_E.
+WHEN OTHERS.
+MOVE 'X' TO WK_FLG_REC.                   "次レコード判定フラグ
+MOVE 'X' TO WK_FLG_O.
+ENDCASE.
+
+IF P_TYPE_I = 'K'. "仕入先
+
+* 仕入先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-LIFNR
+CHANGING WK_LIFNR_C.
+* 仕入先の読込み
+READ TABLE GTAB_LFA1 INTO WK_LFA1
+WITH KEY LIFNR = WK_LIFNR_C.
+IF SY-SUBRC = 0.
+MOVE WK_LFA1-NAME1 TO WK_LIST-TORI_NAME.     "取引先名称
+ENDIF.
+MOVE WK_O_BREAK-BUDAT TO WK_LIST-BUDAT.        "転記日付
+MOVE WK_O_BREAK-LIFNR TO WK_LIST-TORI_CD.      "取引先コード
+IF P_TANI_I = SPACE.
+SEARCH WK_O_BREAK-WRBTR_L FOR '-'.
+IF SY-SUBRC = 0.
+MOVE '2102004' TO WK_LIST-KASHI_CD.            "貸方科目
+MOVE WK_SKAT_KAI-TXT20 TO WK_LIST-KASHI_NAME.  "貸方勘定科目名
+IF WK_FLG_WRBTR_K = SPACE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KASHI_KIN.  "貸方金額
+WK_LIST-KASHI_KIN = WK_LIST-KASHI_KIN * -1.
+ELSE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KASHI_KINGAKU.  "エラー金額
+ENDIF.
+ELSE.
+MOVE '2102004' TO WK_LIST-KARI_CD.             "借方科目
+MOVE WK_SKAT_KAI-TXT20 TO WK_LIST-KARI_NAME.   "借方勘定科目名
+IF WK_FLG_WRBTR_K = SPACE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KARI_KIN.   "借方金額
+ELSE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KARI_KINGAKU.  "エラー金額
+ENDIF.
+ENDIF.
+ELSE.
+SEARCH WK_O_BREAK-WRBTR_L FOR '-'.
+IF SY-SUBRC = 0.
+MOVE '2102004' TO WK_LIST-KARI_CD.             "借方科目
+MOVE WK_SKAT_KAI-TXT20 TO WK_LIST-KARI_NAME.   "借方勘定科目名
+IF WK_FLG_WRBTR_K = SPACE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KARI_KIN.   "借方金額
+ELSE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KARI_KINGAKU.  "エラー金額
+ENDIF.
+ELSE.
+MOVE '2102004' TO WK_LIST-KASHI_CD.            "貸方科目
+MOVE WK_SKAT_KAI-TXT20 TO WK_LIST-KASHI_NAME.  "貸方勘定科目名
+IF WK_FLG_WRBTR_K = SPACE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KASHI_KIN.  "貸方金額
+WK_LIST-KASHI_KIN = WK_LIST-KASHI_KIN * -1.
+ELSE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KASHI_KINGAKU.  "エラー金額
+ENDIF.
+ENDIF.
+ENDIF.
+MOVE P_MSG_I TO WK_LIST-MSG_K.                 "エラー内容
+
+MOVE WK_O_BREAK-BELNR_I TO WK_LIST-BELNR_I.
+
+IF P_TANI_I = SPACE.
+IF WK_O_BREAK-BUDAT = SPACE.
+MOVE P_BUDAT TO WK_LIST-BUDAT.        "転記日付
+ENDIF.
+APPEND WK_LIST TO GTAB_LIST_DUMMY.
+CLEAR:WK_LIST.
+ENDIF.
+ENDIF.
+
+IF P_TYPE_I = 'D'. "得意先
+* 得意先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-KUNNR
+CHANGING WK_KUNNR_C.
+* 得意先の読込み
+READ TABLE GTAB_KNA1 INTO WK_KNA1
+WITH KEY KUNNR = WK_KUNNR_C.
+IF SY-SUBRC = 0.
+MOVE WK_KNA1-NAME1 TO WK_LIST-TORI_NAME.     "取引先名称
+ENDIF.
+MOVE SPACE TO WK_LIST-BUDAT.                   "転記日付
+MOVE WK_O_BREAK-KUNNR TO WK_LIST-TORI_CD.      "取引先コード
+IF P_TANI_I = SPACE.
+SEARCH WK_O_BREAK-WRBTR_K FOR '-'.
+IF SY-SUBRC = 0.
+MOVE '1107004' TO WK_LIST-KARI_CD.             "借方科目
+MOVE WK_SKAT_URI-TXT20 TO WK_LIST-KARI_NAME.   "借方勘定科目名
+IF WK_FLG_WRBTR_D = SPACE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KARI_KIN.   "借方金額
+WK_LIST-KARI_KIN = WK_LIST-KARI_KIN * -1.
+ELSE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KARI_KINGAKU.  "エラー金額
+ENDIF.
+ELSE.
+MOVE '1107004' TO WK_LIST-KASHI_CD.            "貸方科目
+MOVE WK_SKAT_URI-TXT20 TO WK_LIST-KASHI_NAME.  "貸方勘定科目名
+IF WK_FLG_WRBTR_D = SPACE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KASHI_KIN.  "貸方金額
+ELSE.
+MOVE WK_O_BREAK-WRBTR_K TO WK_LIST-KASHI_KINGAKU.  "エラー金額
+ENDIF.
+ENDIF.
+ELSE.
+SEARCH WK_O_BREAK-WRBTR_L FOR '-'.
+IF SY-SUBRC = 0.
+MOVE '1107004' TO WK_LIST-KASHI_CD.            "貸方科目
+MOVE WK_SKAT_URI-TXT20 TO WK_LIST-KASHI_NAME.  "貸方勘定科目名
+IF WK_FLG_WRBTR_D = SPACE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KASHI_KIN.  "貸方金額
+WK_LIST-KASHI_KIN = WK_LIST-KASHI_KIN * -1.
+ELSE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KASHI_KINGAKU.  "エラー金額
+ENDIF.
+ELSE.
+MOVE '1107004' TO WK_LIST-KARI_CD.             "借方科目
+MOVE WK_SKAT_URI-TXT20 TO WK_LIST-KARI_NAME.   "借方勘定科目名
+IF WK_FLG_WRBTR_D = SPACE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KARI_KIN.   "借方金額
+ELSE.
+MOVE WK_O_BREAK-WRBTR_L TO WK_LIST-KARI_KINGAKU.  "エラー金額
+ENDIF.
+ENDIF.
+ENDIF.
+MOVE P_MSG_I TO WK_LIST-MSG_K.                 "エラー内容
+
+MOVE WK_O_BREAK-BELNR_I TO WK_LIST-BELNR_I.
+
+IF P_TANI_I = SPACE.
+APPEND WK_LIST TO GTAB_LIST_DUMMY.
+CLEAR:WK_LIST.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " DATA_MAKE
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSEG
+*&---------------------------------------------------------------------*
+*       会計伝票明細の抽出
+*----------------------------------------------------------------------*
+FORM GET_BSEG.
+
+CLEAR:GTAB_BSEG.
+* 会計伝票番号の前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_AUGBL
+CHANGING WK_BELNR_C.
+
+SELECT AUGBL                 "決済伝票番号
+KOART                 "勘定タイプ
+INTO TABLE GTAB_BSEG
+FROM BSEG
+WHERE BUKRS = P_BUKRS                    "入力画面(会社コード)
+AND BELNR = WK_BELNR_C                 "登録済(会計伝票番号)
+AND GJAHR = WK_GJAHR.                  "登録済(会計年度)
+
+IF SY-SUBRC <> 0.
+CLEAR:WK_LIST.
+MOVE 'X' TO WK_FLG_E.
+MOVE '決済伝票のデータが消滅しました(BSEG)' TO WK_LIST-BDC.
+APPEND WK_LIST TO GTAB_LIST_DUMMY.
+
+CLEAR:WK_LIST.
+MOVE WK_AUGBL TO WK_LIST-BELNR.
+MODIFY GTAB_LIST_DUMMY FROM WK_LIST INDEX 1 TRANSPORTING BELNR.
+
+WK_CNT_E = WK_CNT_E + 1.             "エラー件数のカウント
+APPEND LINES OF GTAB_LIST_DUMMY TO GTAB_LIST_E.
+CLEAR:GTAB_LIST_DUMMY.
+CLEAR:WK_LINE.
+MOVE 'X' TO WK_LINE-LINE_F.
+APPEND WK_LINE TO GTAB_LIST_E.
+
+LOOP AT GTAB_O_BREAK INTO WK_O_BREAK.
+CLEAR:WK_O_BREAK-STATU.                 "処理ステータス
+CLEAR:WK_O_BREAK-BELNR_O.               "登録済伝票番号
+CLEAR:WK_O_BREAK-GJAHR.                 "登録済伝票会計年度
+PERFORM UPDATE_DATA.                    "上書きファイル作成
+ENDLOOP.
+
+ENDIF.
+
+ENDFORM.                    " GET_BSEG
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_ZERO
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_WK_O_CSV_LIFNR  text
+*      -->P_WK_SELECT_LIFNR  text
+*----------------------------------------------------------------------*
+FORM CHECK_ZERO USING    P_DATA_I
+P_DATA_O.
+
+DATA:WK_DATA_N(10)   TYPE N.
+
+IF P_DATA_I CO '1234567890 '.
+CLEAR:WK_DATA_N,P_DATA_O.
+MOVE P_DATA_I  TO WK_DATA_N.
+MOVE WK_DATA_N TO P_DATA_O.
+ELSE.
+MOVE P_DATA_I  TO P_DATA_O.
+ENDIF.
+
+ENDFORM.                    " CHECK_ZERO
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_LIST
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM MAKE_LIST.
+
+WK_CNT_S = WK_CNT_S + 1.             "正常件数のカウント
+
+DATA:WK_DEL TYPE STR_O_CSV.
+LOOP AT GTAB_O_BREAK INTO WK_DEL WHERE STATU = 'M'.
+DELETE GTAB_LIST_DUMMY WHERE BELNR_I = WK_DEL-BELNR_I.
+CLEAR:WK_DEL.
+ENDLOOP.
+
+APPEND LINES OF GTAB_LIST_DUMMY TO GTAB_LIST_S.
+CLEAR:GTAB_LIST_DUMMY.
+
+* 残余明細が存在する場合
+IF WK_WRBTR_L <> 0.
+
+IF WK_WRBTR_L > 0.
+IF LW_FLG_L = SPACE AND LW_FLG_K = SPACE.
+MOVE WK_ZANYO_K TO WK_O_BREAK.
+MOVE WK_WRBTR_C TO WK_O_BREAK-WRBTR_K.
+PERFORM DATA_MAKE USING 'S' 'K' '相殺残余' 'X'. "データ作成
+
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+MOVE WK_SOUSAI TO WK_LIST-ZOUSAI_KIN.
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+ELSE.
+MOVE WK_ZANYO_D TO WK_O_BREAK.
+MOVE WK_WRBTR_C TO WK_O_BREAK-WRBTR_L.
+
+READ TABLE GTAB_BSID_DUMMY INTO WK_BSID
+WITH KEY BELNR = WK_O_BREAK-BELNR_I.
+PERFORM DATA_MAKE USING 'S' 'D' WK_BSID-ZUONR 'X'. "データ作成
+
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+MOVE WK_SOUSAI TO WK_LIST-ZOUSAI_KIN.
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+ENDIF.
+ELSE.
+IF LW_FLG_L = SPACE AND LW_FLG_K = SPACE.
+MOVE WK_ZANYO_D TO WK_O_BREAK.
+MOVE WK_WRBTR_C TO WK_O_BREAK-WRBTR_L.
+
+READ TABLE GTAB_BSID_DUMMY INTO WK_BSID
+WITH KEY BELNR = WK_O_BREAK-BELNR_I.
+PERFORM DATA_MAKE USING 'S' 'D' WK_BSID-ZUONR 'X'. "データ作成
+
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+MOVE WK_SOUSAI TO WK_LIST-ZOUSAI_KIN.
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+ELSE.
+MOVE WK_ZANYO_K TO WK_O_BREAK.
+MOVE WK_WRBTR_C TO WK_O_BREAK-WRBTR_K.
+PERFORM DATA_MAKE USING 'S' 'K' '相殺残余' 'X'. "データ作成
+
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+MOVE WK_SOUSAI TO WK_LIST-ZOUSAI_KIN.
+APPEND WK_LIST TO GTAB_LIST_S.
+CLEAR:WK_LIST.
+ENDIF.
+ENDIF.
+
+ENDIF.
+CLEAR:WK_LINE.
+MOVE 'X' TO WK_LINE-LINE_F.
+APPEND WK_LINE TO GTAB_LIST_S.
+
+ENDFORM.                    " MAKE_LIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_KIN
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_WK_LIST_KARI_KIN  text
+*      <--P_WK_KIN  text
+*----------------------------------------------------------------------*
+FORM CHECK_KIN USING    P_KIN_I
+CHANGING P_KIN_O.
+
+DATA:LW_KIN_P(12) TYPE P.
+DATA:LW_KIN_C(12) TYPE C.
+
+CLEAR:P_KIN_O.
+MOVE P_KIN_I TO LW_KIN_P.
+LW_KIN_P = LW_KIN_P * -1.
+WRITE LW_KIN_P TO LW_KIN_C.
+CONDENSE LW_KIN_C.
+CONCATENATE '-' LW_KIN_C INTO P_KIN_O.
+CONDENSE P_KIN_O.
+
+ENDFORM.                    " CHECK_KIN
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_DUMMY
+*&---------------------------------------------------------------------*
+*       『仕入先コード』のチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA_DUMMY.
+
+* 仕入先コードの前ゼロ編集
+PERFORM CHECK_ZERO USING    WK_O_BREAK-LIFNR
+CHANGING WK_LIFNR_C.
+* 仕入先の読込み
+READ TABLE GTAB_LFA1 INTO WK_LFA1
+WITH KEY LIFNR = WK_LIFNR_C.
+
+IF SY-SUBRC = 0.
+* 1伝票単位で1回処理
+IF WK_FLG_BREAK = SPACE.
+* 伝票単位で1レコード目の仕入先コードを退避
+MOVE WK_LIFNR_C TO WK_LIFNR_BE.
+ENDIF.
+* 伝票単位で2レコード目からの仕入先コードを退避
+MOVE WK_LIFNR_C TO WK_LIFNR_AF.
+* 伝票内で仕入先コードが異なる場合
+IF WK_LIFNR_BE <> WK_LIFNR_AF.
+MOVE 'X' TO WK_DUMMY_1.
+ENDIF.
+ELSE.
+MOVE 'X' TO WK_DUMMY_1.
+ENDIF.
+
+IF WK_O_BREAK-LIFNR = SPACE.
+MOVE 'X' TO WK_DUMMY_3.
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA_DUMMY

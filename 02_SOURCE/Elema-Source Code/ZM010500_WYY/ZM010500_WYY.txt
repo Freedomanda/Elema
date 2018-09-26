@@ -1,0 +1,1899 @@
+*&---------------------------------------------------------------------
+*& 高千穂電気プロジェクト・預託在庫一覧表
+*&---------------------------------------------------------------------
+*& [プログラム名]
+*& 　ZM010500
+*& [処理概要]
+*&   預託品の在庫の管理を行う。
+*& [改定履歴]
+*&　YYYY/MM/DD   Programar         Description
+*&   2001/11/08  PSD T.Saitoh  ABAPリストビューアヘッダ修正
+*&   2001/11/21  PSD H.Tanaka  単体テスト対応
+*&   2001/11/21  PSD H.Tanaka  ABAPリストビューアヘッダ修正
+*&                             ：部門・部門名非表示
+*&   2001/11/28  PSD H.Tanaka  ABAPリストビューアヘッダ修正
+*&                             ：時間（秒）非表示
+*&   2001/12/27  PSD T.SAITOH  ABAPリストビューアヘッダ表示
+*&   2002/01/31  PSD T.SAITOH  当月末在庫数不具合対応
+*&   2002/01/31  PSD T.SAITOH  仕様変更：当月使用数にマイナスを乗算
+*&   2002/01/31  PSD T.SAITOH  仕様変更：会計期間入力→ＣＬ期間入力
+*&   2002/01/31  PSD T.SAITOH  仕様変更：ヘッダレイアウトの変更
+*&   2002/01/31  PSD T.SAITOH  仕様変更：選択期間の前月デフォルト表示
+*&   2002/02/06  PSD T.SAITOH  仕様追加：ALVの一覧ステータスの印刷拒否
+*&   2002/03/12  PSD T.SAITOH  不具合対応：前月末在庫と当月末在庫の修正
+*&   2002/03/25  PSD T.SAITOH  仕様変更：前月末在庫と当月末在庫の設定
+*&   2002/03/25  PSD T.SAITOH  仕様変更：指定期間表示に変更
+*&   2002/04/23  PSD T.SAITOH  在庫金額価格変換
+*&   2002/04/24  PSD T.SAITOH  ０除算時の対応
+*&   2002/05/09  PSD T.SAITOH  会計数値違い明確化文章表示
+*&   2002/05/28  PSD K.ARAI    パフォーマンス対応
+*&   2002/06/20  PSD T.SAITOH  再移送
+*    2002/09/03  PSD T.SAITOH　検索ヘルプ修正
+*    2015/11/23 ISID21　ロット管理追加後の改修
+*   2016/1/21 ISID21　前月末在庫数などの改修
+*&---------------------------------------------------------------------
+REPORT  ZM010500
+LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+
+***   Global data declaration   ***
+TYPE-POOLS: SLIS.
+*---------------------------------------------------------------------
+* 型宣言：ABAPリストビューアヘッダデータ保持
+*---------------------------------------------------------------------
+TYPES: BEGIN OF TYP_ABAP_LIST,
+WERKS TYPE MSKU-WERKS,   "プラント
+VNAME TYPE V_T001W-NAME1,"プラント名称
+END OF TYP_ABAP_LIST.
+
+DATA: GT_ABAP_LIST TYPE TABLE OF TYP_ABAP_LIST,
+GS_ABAP_LIST TYPE TYP_ABAP_LIST.
+*---------------------------------------------------------------------
+* 型宣言：得意先特殊在庫
+*---------------------------------------------------------------------
+TYPES: BEGIN OF TYP_MSKU,
+**** START CHANGE 2015/11/23 ISID21 ****
+MATNR TYPE MSKU-MATNR,   "品目コード
+WERKS TYPE MSKU-WERKS,   "プラント
+SOBKZ TYPE MSKU-SOBKZ,   "特殊在庫区分
+KUNNR TYPE MSKU-KUNNR,   "得意先コード
+LFGJA TYPE MSKU-LFGJA,   "当会計年度
+LFMON TYPE MSKU-LFMON,   "当期（転記期間）
+CHARG TYPE MSKU-CHARG,   "ロット
+*    MATNR TYPE MSKU-MATNR,   "品目コード
+*    WERKS TYPE MSKU-WERKS,   "プラント
+*    CHARG TYPE MSKU-CHARG,   "ロット
+*    SOBKZ TYPE MSKU-SOBKZ,   "特殊在庫区分
+*    KUNNR TYPE MSKU-KUNNR,   "得意先コード
+*    LFGJA TYPE MSKU-LFGJA,   "当会計年度
+*    LFMON TYPE MSKU-LFMON,   "当期（転記期間）
+**** END CHANGE 2015/11/23 ISID21 ****
+KULAB TYPE MSKU-KULAB,   "利用可能評価在庫
+KUVLA TYPE MSKU-KUVLA,   "前期の評価済利用可能在庫
+MAKTX TYPE MAKT-MAKTX,   "品目テキスト
+NAME1 TYPE V_T001W-NAME1,"プラント名称
+*---APPEND START 2001/12/14 PSD T.SAITOH ----------------------------*
+FLGMSKU TYPE C,          "ＭＳＫＵステータスフラグ(履歴でない時：X)
+*---APPEND END   2001/12/14 PSD T.SAITOH ----------------------------*
+END OF TYP_MSKU.
+*---------------------------------------------------------------------
+* 型宣言：伝票セグメント品目
+*---------------------------------------------------------------------
+TYPES: BEGIN OF TYP_MSEG,
+**** START CHANGE 2015/11/23 ISID21 ****
+MJAHR TYPE MSEG-MJAHR, "入出庫伝票年度
+MATNR TYPE MSEG-MATNR, "品目コード
+WERKS TYPE MSEG-WERKS, "プラント
+KUNNR TYPE MSEG-KUNNR, "得意先コード
+BWART TYPE MSEG-BWART, "移動タイプ（在庫管理）
+CHARG TYPE MSEG-CHARG, "ロット番号
+MBLNR TYPE MSEG-MBLNR, "入出庫伝票番号
+ZEILE TYPE MSEG-ZEILE, "入出庫伝票の明細暗号
+*    MBLNR TYPE MSEG-MBLNR, "入出庫伝票番号
+*    MJAHR TYPE MSEG-MJAHR, "入出庫伝票年度
+*    ZEILE TYPE MSEG-ZEILE, "入出庫伝票の明細暗号
+*    BWART TYPE MSEG-BWART, "移動タイプ（在庫管理）
+*    MATNR TYPE MSEG-MATNR, "品目コード
+*    WERKS TYPE MSEG-WERKS, "プラント
+*    CHARG TYPE MSEG-CHARG, "ロット番号
+*    KUNNR TYPE MSEG-KUNNR, "得意先コード
+**** END CHANGE 2015/11/23 ISID21 ****
+SOBKZ TYPE MSEG-SOBKZ, "特殊在庫区分
+SHKZG TYPE MSEG-SHKZG, "貸方／借方フラグ
+MENGE TYPE MSEG-MENGE, "数量
+BUDAT TYPE MKPF-BUDAT, "伝票の転記日付
+*---APPEND START PSD T.SAITOH 2002/04/23 ---------------------------*
+WAERS TYPE T001-WAERS, "通貨コード
+*---APPEND END   PSD T.SAITOH 2002/04/23 ---------------------------*
+END OF TYP_MSEG.
+*---------------------------------------------------------------------
+* 型宣言：預託在庫一覧表出力
+*---------------------------------------------------------------------
+*TYPES: BEGIN OF TYP_OUTPUT,
+*       WERKS     TYPE MSKU-WERKS,    "部門コード（プラント）
+*       VNAME1    TYPE V_T001W-NAME1, "部門名（プラント名）
+*       KUNNR     TYPE MSKU-KUNNR,    "得意先コード
+*       KNAME1    TYPE KNA1-NAME1,    "得意先名
+*       MATNR     TYPE MSKU-MATNR,    "品目コード
+*       MAKTX     TYPE MAKT-MAKTX,    "品目名
+*       BEF_NUM   TYPE P,             "前月末在庫数
+*       NOW_HNUM  TYPE P,             "当月払出数
+*       NOW_SNUM  TYPE P,             "当月使用数
+*       NOW_MNUM  TYPE P,             "当月末残数
+*       SUM_NUM   TYPE P,             "在庫評価合計額
+*       SUM_TOK   TYPE P,             "得意先合計
+*       SUM_BMN   TYPE P,             "部門合計
+* END OF TYP_OUTPUT.
+*---------------------------------------------------------------------
+* 型宣言：品目評価
+*---------------------------------------------------------------------
+TYPES: BEGIN OF TYP_MBEW,
+MATNR TYPE MSKU-MATNR,"品目コード
+BWKEY TYPE MBEW-BWKEY,"評価レベル
+BWTAR TYPE MBEW-BWTAR,"評価タイプ
+VERPR TYPE MBEW-VERPR,"移動平均原価／期間単位価格
+LFGJA TYPE MBEW-LFGJA,"当会計年度
+LFMON TYPE MBEW-LFMON,"当期（転記期間）
+*      PEINH TYPE MBEW-PEINH,"税法／商法に基づく評価価格単位
+PEINH TYPE MBEW-PEINH,"価格単位
+*---APPEND START 2001/12/14 PSD T.SAITOH ----------------------------*
+FLGMBEW TYPE C,       "ＭＢＥＷステータスフラグ（履歴でない時：X）
+*---APPEND END   2001/12/14 PSD T.SAITOH ----------------------------*
+END OF TYP_MBEW.
+*---------------------------------------------------------------------
+* 定数宣言
+*---------------------------------------------------------------------
+CONSTANTS: CNS_MSKUH(8)   TYPE C VALUE 'MSKUH',
+CNS_MSKU(4)    TYPE C VALUE 'MSKU',
+CNS_MSEG(8)    TYPE C VALUE 'MSEG',
+CNS_MBEW(8)    TYPE C VALUE 'MBEW',
+CNS_MBEWH(8)   TYPE C VALUE 'MBEWH',
+CNS_KNA1(8)    TYPE C VALUE 'KNA1',
+CNS_KOUZOU     TYPE DD02L-TABNAME VALUE 'ZMLIST_V05',
+CNS_KAIKEI(24) TYPE C VALUE '年',
+CNS_ZERO(1)    TYPE C VALUE '0',
+CNS_1_12(6)    TYPE C VALUE '1～12',
+CNS_TOUKI(16)  TYPE C VALUE '月'.
+CONSTANTS: CNS_TITLE(20)  TYPE C VALUE '**預託在庫一覧表**',
+CNS_MAKEDAT(8) TYPE C VALUE '作成日時',
+CNS_BUMON(6)   TYPE C VALUE '部門',
+CNS_TOTAL(6)   TYPE C VALUE '総合計'.
+*---APPEND START 2001/12/14 PSD T.SAITOH ----------------------------*
+CONSTANTS: CNS_JMSEG(40)  TYPE C VALUE '伝票セグメント（品目）'.
+CONSTANTS: CNS_JMSKU(20)  TYPE C VALUE '得意先特殊在庫',
+CNS_JMBEW(20)  TYPE C VALUE '品目評価',
+CNS_X          TYPE C VALUE 'X'.
+*---APPEND END   2001/12/14 PSD T.SAITOH ----------------------------*
+*---APPEND START  2002/01/31 PSD.SAITOH (仕様変更部分)------------------
+CONSTANTS: CNS_FI_RANGE(9)  TYPE C VALUE '会計期間 '.
+*---APPEND START  2002/01/31 PSD.SAITOH (仕様変更部分)------------------
+
+*---APPEND START PSD T.SAITOH 2002/03/25 ---------------------------*
+CONSTANTS: CNS_CL_RANGE(9)  TYPE C VALUE '指定期間 '.
+*---APPEND END   PSD T.SAITOH 2002/03/25 ---------------------------*
+
+*---------------------------------------------------------------------
+* データ宣言
+*---------------------------------------------------------------------
+*--- 内部テーブル
+DATA: GT_MSKU   TYPE TABLE OF TYP_MSKU, "得意先特殊在庫内部ＴＢＬ
+GT_MSEG   TYPE TABLE OF TYP_MSEG, "伝票セグメント品目内部ＴＢＬ
+GT_MBEW   TYPE TABLE OF TYP_MBEW, "品目評価内部ＴＢＬ
+GT_YOTAKU TYPE TABLE OF ZMLIST_V05 WITH HEADER LINE.
+"預託在庫一覧表出力用内部ＴＢＬ
+*--- 構造
+DATA: GF_MSKU       TYPE TYP_MSKU,  "得意先特殊在庫構造
+GF_MSKU_BEF   TYPE TYP_MSKU,  "得意先特殊在庫前レコード構造
+GF_WMSKU      TYPE TYP_MSKU,  "作業用得意先特殊構造
+GF_MSEG       TYPE TYP_MSEG,  "伝票セグメント品目構造
+GF_MBEW       TYPE TYP_MBEW,  "品目評価構造
+GF_YOTAKU     TYPE ZMLIST_V05,"預託在庫一覧表出力用構造
+GF_YOTAKU_BEF TYPE ZMLIST_V05."預託在庫一覧表出力用構造
+*--- グローバル項目
+DATA: G_JAMON(6)  TYPE N,              "会計期間（当会計期間＋当期）
+W_JAMON(6)  TYPE N,              "作業会計期間
+G_FLG_SEL01 TYPE C VALUE 'X',    "ＴＢＬ読込条件１フラグ
+G_NOW_IDO_AVE(9) TYPE P DECIMALS 2, "移動平均単価
+*---MODIFY START  2002/01/31 PSD.SAITOH (仕様変更部分)------------------
+G_FI_YANDM(6) TYPE N,            "会計年月
+G_YANDM(6)    TYPE N.            "計上年月
+*---MODIFY END    2002/01/31 PSD.SAITOH (仕様変更部分)------------------
+*--- ＡＢＡＰリストビューア用(ABAPリストビューア関連)
+DATA: GT_ITEM TYPE TABLE OF ZMLIST_V05 WITH HEADER LINE.
+"預託在庫一覧表出力用内部ＴＢＬ
+DATA: GS_ITEM   TYPE          ZMLIST_V05."預託在庫一覧表出力用構造
+
+DATA: G_REPID     LIKE SY-REPID,            "レポートID
+GS_LAYOUT   TYPE SLIS_LAYOUT_ALV,     "レイアウト構造
+*---APPEND START  2002/02/07 PSD.SAITOH (仕様変更部分)------------------
+GS_PRINT    TYPE SLIS_PRINT_ALV,      "プリント設定
+*---APPEND END    2002/02/07 PSD.SAITOH (仕様変更部分)------------------
+GT_FIELDCAT TYPE SLIS_T_FIELDCAT_ALV, "フィールドカタログ
+GS_KEYINFO  TYPE SLIS_KEYINFO_ALV.    "紐付項目
+DATA: G_VARIANT   TYPE DISVARIANT.          "バリアント保存設定用
+DATA: L_SY_TABIX  LIKE SY-TABIX.            "内部テーブルの行を保管
+DATA: LS_FIELDCAT TYPE SLIS_FIELDCAT_ALV.   "フィールドカタログ
+
+*--- REUSE_ALV_LIST_DISPLAY                ABAPリストビューア関連
+DATA: G_HEAD_FRM TYPE SLIS_FORMNAME VALUE 'TOP_OF_PAGE'.
+*--- REUSE_ALV_COMMENTARY_WRITE            ABAPリストビューア関連
+DATA: GS_HEAD_ALV TYPE SLIS_LISTHEADER,    "AVLヘッダ用内部ＴＢＬ
+GT_T_HEAD_ALV TYPE SLIS_T_LISTHEADER.
+*--- REUSE_ALV_EVENT                       ABAPリストビューア関連
+DATA: GT_EVENT TYPE SLIS_T_EVENT,          "イベント情報内部TBL
+GS_EVENT LIKE LINE OF GT_EVENT.      "イベント情報構造
+** Add 2003.03.22 >>>>>
+Data : G_GENTAB     Like AIND_STR2-GENTAB .
+** Add 2003.03.22 >>>>>
+*---------------------------------------------------------------------
+* select-options
+*---------------------------------------------------------------------
+*---MODIFY START PSD T.SAITOH 2002/09/03 ---------------------------*
+**---MODIFY START 2002/01/31 PSD T.SAITOH 必須入力チェック追加
+*SELECT-OPTIONS S_PLANT FOR GF_MSKU-WERKS OBLIGATORY.
+*"プラント　      ：入力
+**---MODIFY END   2002/01/31 PSD T.SAITOH
+* 選択画面用
+DATA: GF_WERKS LIKE T001W-WERKS.
+
+SELECT-OPTIONS S_PLANT FOR GF_WERKS MEMORY ID WRK OBLIGATORY.
+*---MODIFY END   PSD T.SAITOH 2002/09/03 ---------------------------*
+PARAMETERS : P_YEAR(4) TYPE N OBLIGATORY, "当会計年度      ：入力
+P_MON(2)  TYPE N OBLIGATORY. "当期（転記期間）：入力
+
+*********************************************************************
+* INITIALIZATION
+*********************************************************************
+INITIALIZATION.
+*---MODIFY START  2001/01/31 PSD.SAITOH (仕様変更部分)------------------
+*--- 前月の年月を表示
+IF SY-DATUM+4(2) = 1.
+P_YEAR = SY-DATUM+0(4) - 1.
+P_MON = 12.
+ELSE.
+P_YEAR = SY-DATUM+0(4).
+P_MON = SY-DATUM+4(2) - 1.
+ENDIF.
+*---MODIFY END    2001/01/31 PSD.SAITOH (仕様変更部分)------------------
+*---------------------------------------------------------------------
+* at selection-screen
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN.
+PERFORM FRM_CHECK_YEAR.
+PERFORM FRM_CHECK_MON.
+*---------------------------------------------------------------------
+* START-OF-SELECTION
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+*--- 初期化処理
+PERFORM FRM_INIT.
+*--- 得意先にある特殊在庫情報の抽出処理
+PERFORM FRM_GET_MSKU.
+*--- 得意先特殊在庫内部ＴＢＬ処理
+PERFORM FRM_MSKU_PROCESS.
+*--- ＡＢＡＰリストビューア
+PERFORM FRM_GET_DATA.
+*--- データ処理（帳票関連：現在はサンプル）
+PERFORM FRM_DATA_PROCESS.
+
+END-OF-SELECTION.
+*--- 帳票出力処理
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_INIT
+*&---------------------------------------------------------------------*
+*       初期化処理
+*----------------------------------------------------------------------*
+FORM FRM_INIT.
+G_REPID = SY-REPID.
+*---DELETE START  2001/01/31 PSD.SAITOH (仕様変更部分)------------------
+**--- 2001/11/21 PSD H.Tanaka ADD ↓
+** 指定会計期間変換処理
+*  PERFORM FRM_CHANGE_KIKAN.
+**--- 2001/11/21 PSD H.Tanaka ADD ↑
+*---DELETE END    2001/01/31 PSD.SAITOH (仕様変更部分)------------------
+
+*---APPEND START  2001/01/31 PSD.SAITOH (仕様変更部分)------------------
+* 通常年月の作成
+CONCATENATE P_YEAR P_MON INTO G_YANDM.
+* 指定計上年月→会計期間に変換
+
+PERFORM FRM_CHANGE_CLTOFI USING    P_YEAR
+P_MON
+CHANGING G_FI_YANDM+0(4)
+G_FI_YANDM+4(2).
+*---APPEND START  2001/01/31 PSD.SAITOH (仕様変更部分)------------------
+
+** Add 2004.03.22 >>>>>
+Select Single GENTAB
+From AIND_STR2
+Into G_GENTAB
+Where ARCHINDEX EQ 'ZMM_MATBEL_001'
+.
+** Add 2004.03.22 <<<<<
+
+ENDFORM.                    " FRM_INIT
+*&===入力チェック======================================================*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_YEAR
+*&---------------------------------------------------------------------*
+*       入力チェック：年度
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_YEAR.
+* --- 年度に０が入力された場合
+IF P_YEAR = 0.
+*   "[会計期間（当会計年度）]に[0]は指定できません
+MESSAGE S601(Z1) WITH CNS_KAIKEI
+CNS_ZERO.
+STOP.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_YEAR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_MON
+*&---------------------------------------------------------------------*
+*       入力チェック：月
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_MON.
+* --- 当期（転記期間）が０の時
+IF P_MON = 0.
+*   "[当期（転記期間）]に[0]は指定できません
+MESSAGE S601(Z1) WITH CNS_TOUKI
+CNS_ZERO.
+STOP.
+ENDIF.
+* --- 当期（転記期間）が範囲外の時
+IF NOT ( P_YEAR >= 1 AND P_MON <= 12 ).
+"当期（転記期間）には１～１２を指定してください。
+MESSAGE S700(Z1) WITH CNS_TOUKI
+CNS_1_12.
+STOP.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_MON
+
+*&===SELECT文関連======================================================*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_01
+*&---------------------------------------------------------------------*
+*       テーブル読込条件１：得意先のある特殊在庫情報
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_01.
+
+REFRESH GT_MSKU.
+SELECT A~MATNR A~CHARG A~SOBKZ A~KUNNR
+A~LFGJA A~LFMON A~KULAB A~KUVLA
+B~MAKTX C~WERKS C~NAME1
+INTO CORRESPONDING FIELDS OF TABLE GT_MSKU
+FROM ( MSKU AS A INNER JOIN MAKT AS B
+ON A~MATNR = B~MATNR )
+INNER JOIN T001W AS C
+ON A~WERKS = C~WERKS
+WHERE A~WERKS IN S_PLANT
+AND ( A~LFGJA < G_FI_YANDM+0(4)
+OR (    A~LFGJA = G_FI_YANDM+0(4)
+AND A~LFMON <= G_FI_YANDM+4(2)
+)
+)
+AND A~SOBKZ = 'W'.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKU
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_01
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_02
+*&---------------------------------------------------------------------*
+*       テーブル読込条件２：伝票セグメント品目情報
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_02.
+**** START ADD 2015/11/23 ISID21 ****
+DATA LV_TABIX TYPE  SY-TABIX.
+DATA :LT_MSEG TYPE TABLE OF TYP_MSEG,
+LS_MSEG  LIKE LINE OF LT_MSEG.
+DATA: LT_MSEG_TMP TYPE TABLE OF TYP_MSEG,
+LS_MSEG_TMP LIKE LINE OF LT_MSEG_TMP.
+**** END ADD 2015/11/23 ISID21 ****
+*--- 2001/11/21 PSD H.Tanaka ADD ↓
+REFRESH GT_MSEG.
+*--- 2001/11/21 PSD H.Tanaka ADD ↑
+SELECT A~MBLNR A~MJAHR A~ZEILE A~BWART
+A~MATNR A~WERKS A~CHARG A~KUNNR
+**** START ADD 2015/11/23 ISID21 ****
+A~BWART
+**** END ADD 2015/11/23 ISID21 ****
+A~SOBKZ A~SHKZG A~MENGE B~BUDAT
+INTO CORRESPONDING FIELDS OF TABLE GT_MSEG
+FROM  MSEG AS A INNER JOIN MKPF AS B
+ON  A~MBLNR = B~MBLNR
+AND A~MJAHR = B~MJAHR
+WHERE A~MATNR = GF_MSKU-MATNR
+AND A~WERKS = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*     AND A~CHARG = GF_MSKU-CHARG
+**** END CHANGE 2015/11/23 ISID21 ****
+AND A~KUNNR = GF_MSKU-KUNNR
+AND A~SOBKZ = GF_MSKU-SOBKZ
+* MODIFY PSD K.ARAI 2002/05/28
+AND A~BWART IN ('631' , '632',
+'633' , '634') .
+
+**** START ADD 2015/11/23 ISID21 ****
+*すべてのロットの利用在庫を集計する
+LOOP AT GT_MSEG INTO  LS_MSEG.
+LV_TABIX = SY-TABIX.
+AT END OF BWART.
+SUM.
+READ TABLE GT_MSEG INTO LS_MSEG_TMP INDEX  LV_TABIX.
+LS_MSEG_TMP-MENGE  = LS_MSEG-MENGE.
+APPEND LS_MSEG_TMP TO LT_MSEG_TMP.
+ENDAT.
+ENDLOOP.
+GT_MSEG = LT_MSEG_TMP.
+**** END ADD 2015/11/23 ISID21 ****
+*     AND (
+*         A~BWART = '631'
+*      OR A~BWART = '632'
+*      OR A~BWART = '633'
+*      OR A~BWART = '634'
+*     ).
+* MODIFY END
+
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+*---APPEND START 2001/12/14 PSD T.SAITOH ----------------------------*
+WHEN 4.
+Perform FRM_SELECT_02_A .
+*      MESSAGE S600(Z1) WITH CNS_MSEG.
+*      STOP.
+*---APPEND END   2001/12/14 PSD T.SAITOH ----------------------------*
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSEG
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_02
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_03
+*&---------------------------------------------------------------------*
+*       テーブル読込条件３：得意先特殊在庫履歴情報
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_03.
+
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*  SELECT A~MATNR A~CHARG A~SOBKZ A~KUNNR
+*         A~LFGJA A~LFMON A~KULAB
+*         B~MAKTX C~NAME1
+SELECT A~MATNR A~WERKS A~CHARG A~SOBKZ
+A~KUNNR A~LFGJA A~LFMON A~KULAB
+B~MAKTX C~NAME1
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+*---MODIFY START 2001/12/18 PSD T.SAITOH ----------------------------*
+*   INTO CORRESPONDING FIELDS OF TABLE GT_MSKU
+APPENDING CORRESPONDING FIELDS OF TABLE GT_MSKU
+*---MODIFY END   2001/12/18 PSD T.SAITOH ----------------------------*
+FROM ( MSKUH AS A INNER JOIN MAKT AS B
+ON A~MATNR = B~MATNR )
+INNER JOIN T001W AS C
+ON A~WERKS = C~WERKS
+WHERE A~WERKS IN S_PLANT
+AND ( A~LFGJA < G_FI_YANDM+0(4)
+OR (    A~LFGJA = G_FI_YANDM+0(4)
+*---MODIFY START PSD T.SAITOH 2002/03/12 degrade correspondence-----*
+**--- 2001/11/21 PSD H.Tanaka MOD ↓
+**                AND A~LFMON <= G_FI_YANDM+4(2)
+*                AND A~LFMON < G_FI_YANDM+4(2)
+**--- 2001/11/21 PSD H.Tanaka MOD ↑
+AND A~LFMON <= G_FI_YANDM+4(2)
+*---MODIFY END   PSD T.SAITOH 2002/03/12 ---------------------------*
+)
+)
+AND A~SOBKZ = 'W'.
+
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKUH
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_03
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_04
+*&---------------------------------------------------------------------*
+*       テーブル読込条件４：品目評価
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_04.
+
+REFRESH GT_MBEW.
+SELECT
+MATNR BWKEY BWTAR VERPR LFGJA LFMON PEINH
+INTO CORRESPONDING FIELDS OF TABLE GT_MBEW
+FROM MBEW
+WHERE     MATNR =  GF_MSKU-MATNR
+AND     BWKEY =  GF_MSKU-WERKS
+AND (   LFGJA <  G_FI_YANDM+0(4)
+OR    ( LFGJA =  G_FI_YANDM+0(4)
+AND   LFMON <= G_FI_YANDM+4(2)
+) ) .
+
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*      MESSAGE E603(Z1) WITH SY-REPID
+*                            CNS_MSEG
+*                            SY-SUBRC.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MBEW
+SY-SUBRC.
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_04
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_05
+*&---------------------------------------------------------------------*
+*       テーブル読込条件５：品目評価履歴
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_05.
+
+SELECT
+MATNR BWKEY BWTAR VERPR LFGJA LFMON PEINH
+*---MODIFY START 2001/12/18 PSD T.SAITOH ----------------------------*
+*   INTO CORRESPONDING FIELDS OF TABLE GT_MBEW
+APPENDING CORRESPONDING FIELDS OF TABLE GT_MBEW
+*---MODFIY END   2001/12/18 PSD T.SAITOH ----------------------------*
+FROM MBEWH
+WHERE     MATNR =  GF_MSKU-MATNR
+AND     BWKEY =  GF_MSKU-WERKS
+AND (   LFGJA <  G_FI_YANDM+0(4)
+OR    ( LFGJA =  G_FI_YANDM+0(4)
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*        AND LFMON <= G_FI_YANDM+4(2)
+AND LFMON < G_FI_YANDM+4(2)
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+) ) .
+
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+
+WHEN 4.
+*---DELETE START 2001/12/14 PSD T.SAITOH ----------------------------*
+*     MESSAGE E600(Z1) WITH CNS_TITLE.
+*---DELETE END   2001/12/14 PSD T.SAITOH ----------------------------*
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MBEWH
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_05
+*&===計算＆設定 関連処理===============================================*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MOVE_OUTPUT
+*&---------------------------------------------------------------------*
+*       名称を出力領域へコピー
+*----------------------------------------------------------------------*
+FORM FRM_MOVE_OUTPUT.
+CLEAR GF_YOTAKU.
+* 各種名称のコピー
+MOVE-CORRESPONDING GF_MSKU TO GF_YOTAKU.
+* プラント名称をコピー
+GF_YOTAKU-VNAME = GF_MSKU-NAME1.
+* 得意先名称の取得
+CLEAR GF_YOTAKU-KNAME.
+SELECT SINGLE NAME1 INTO (GF_YOTAKU-KNAME)
+FROM KNA1
+WHERE KUNNR = GF_MSKU-KUNNR.
+
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_KNA1
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_MOVE_OUTPUT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_BEF_ZAIKO
+*&---------------------------------------------------------------------*
+*       前月末在庫数の設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_BEF_ZAIKO.
+*---MODIFY START PSD T.SAITOH 2002/03/25 ---------------------------*
+DATA: LW_LFGJA_N LIKE MSKU-LFGJA,"指定会計年（期間をマイナス１）
+LW_LFMON_N LIKE MSKU-LFMON,"指定会計期間（期間をマイナス１）
+LT_MSKU    TYPE TABLE OF TYP_MSKU,   "特殊在庫ローカル内部テーブル
+LF_MSKU    LIKE GF_MSKU.
+**** START ADD 2015/11/23 ISID21 ****
+DATA: LT_MSKU_TMP  TYPE TABLE OF TYP_MSKU, "特殊在庫臨時内部テーブル
+LF_MSKU_TMP   LIKE GF_MSKU.
+DATA LV_TABIX  TYPE SY-TABIX.
+**** END ADD 2015/11/23 ISID21 ****
+***** START ADD 2016/1/21 ISID21 ****
+*  TYPES: BEGIN OF typ_msku,
+**              MATNR TYPE MSKU-MATNR,
+**              WERKS TYPE MSKU-WERKS,
+**             SOBKZ TYPE MSKU-SOBKZ,
+**             KUNNR TYPE MSKU-KUNNR,
+**             LFGJA  TYPE MSKU-LFGJA,
+**             LFMON  TYPE MSKU-LFMON,
+*             KULAB  TYPE MSKU-KULAB,
+*         END OF typ_msku.
+*  DATA:  lt_msku_k TYPE STANDARD TABLE OF typ_msku,
+*             lf_msku_k like LINE OF  lt_msku_k .
+*
+*
+***** END ADD 2016/1/21 ISID21 ****
+* 指定会計期間－１を算出
+IF G_FI_YANDM+4(2) = 1.
+LW_LFGJA_N = G_FI_YANDM+0(4) - 1.
+LW_LFMON_N = 12.
+ELSE.
+LW_LFGJA_N = G_FI_YANDM+0(4).
+LW_LFMON_N = G_FI_YANDM+4(2) - 1.
+ENDIF.
+
+* ①A指定会計期間　－　１　でMSKUを検索
+**** START CHANGE 2016/1/21 ISID21 ****
+*       SELECT KULAB
+**** END CHANGE 2016/1/21 ISID21 ****
+***** START CHANGE 2015/11/23 ISID21 ****
+SELECT SUM( KULAB )
+**  SELECT SINGLE KULAB
+**** END CHANGE 2015/11/23 ISID21 ****
+FROM   MSKU
+**** START CHANGE 2016/1/21 ISID21 ****
+
+*        INTO TABLE   lt_msku_k
+INTO   (GF_YOTAKU-BEF_NUM)
+**** END CHANGE 2016/1/21 ISID21 ****
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE 2015/11/23 ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  LFGJA   = LW_LFGJA_N
+AND  LFMON   = LW_LFMON_N.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+***** START ADD 2016/1/21 ISID21 ****
+*      LOOP AT lt_msku_k INTO lf_msku_k.
+*        GF_YOTAKU-BEF_NUM = GF_YOTAKU-BEF_NUM + lf_msku_k-KULAB.
+*      ENDLOOP.
+***** START ADD 2016/1/21 ISID21 ****
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKU
+SY-SUBRC.
+ENDCASE.
+
+* ①B指定会計期間　－　１　でMSKUHを検索
+**** START CHANGE 2016/1/21 ISID21 ****
+*       SELECT KULAB
+**** END CHANGE 2016/1/21 ISID21 ****
+***** START CHANGE 2015/11/23 ISID21 ****
+SELECT SUM( KULAB )
+**  SELECT SINGLE KULAB
+**** END CHANGE 2015/11/23 ISID21 ****
+FROM   MSKUH
+**** START CHANGE 2016/1/21 ISID21 ****
+
+*        INTO TABLE   lt_msku_k
+INTO   (GF_YOTAKU-BEF_NUM)
+**** END CHANGE 2016/1/21 ISID21 ****
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE 2015/11/23 ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  LFGJA   = LW_LFGJA_N
+AND  LFMON   = LW_LFMON_N.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+***** START ADD 2016/1/21 ISID21 ****
+*      LOOP AT lt_msku_k INTO lf_msku_k.
+*        GF_YOTAKU-BEF_NUM = GF_YOTAKU-BEF_NUM + lf_msku_k-KULAB.
+*      ENDLOOP.
+***** START ADD 2016/1/21 ISID21 ****
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKUH
+SY-SUBRC.
+ENDCASE.
+
+* ②A指定会計期間－１より大きいMSKUHを検索
+SELECT LFGJA LFMON KULAB
+FROM   MSKUH
+INTO CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE 2015/11/23 ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   > LW_LFMON_N
+)
+OR
+(
+LFGJA   > LW_LFGJA_N
+)
+)
+
+.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKUH
+SY-SUBRC.
+ENDCASE.
+
+* ②B指定会計期間－１より大きいMSKUを検索
+SELECT LFGJA LFMON KULAB
+FROM   MSKU
+APPENDING CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE 2015/11/23 ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   > LW_LFMON_N
+)
+OR
+(
+LFGJA   > LW_LFGJA_N
+)
+)
+
+.
+**** START ADD 2015/11/23 ISID21 ****
+LOOP AT LT_MSKU  INTO LF_MSKU .
+LV_TABIX = SY-TABIX.
+AT END OF LFMON.
+SUM.
+READ TABLE LT_MSKU INTO LF_MSKU_TMP INDEX  LV_TABIX.
+LF_MSKU_TMP-KULAB = LF_MSKU-KULAB.
+APPEND LF_MSKU_TMP TO LT_MSKU_TMP.
+ENDAT.
+ENDLOOP.
+LT_MSKU = LT_MSKU_TMP.
+**** END ADD 2015/11/23 ISID21 ****
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+SORT LT_MSKU BY LFGJA ASCENDING
+LFMON ASCENDING.
+*     1 LOOP ONLY
+LOOP AT LT_MSKU INTO LF_MSKU.
+GF_YOTAKU-BEF_NUM = LF_MSKU-KULAB.
+EXIT.
+ENDLOOP.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKU
+SY-SUBRC.
+ENDCASE.
+
+* ③B指定会計期間－１より小さいきいMSKUを検索
+SELECT  LFGJA LFMON  KULAB
+FROM   MSKU
+INTO   CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE 2015/11/23 ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   < LW_LFMON_N
+)
+OR
+(
+LFGJA   < LW_LFGJA_N
+)
+)
+
+.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKU
+SY-SUBRC.
+ENDCASE.
+
+* ③B指定会計期間－１より小さいきいMSKUHを検索
+SELECT  LFGJA LFMON  KULAB
+FROM   MSKU
+APPENDING CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE 2015/11/23 ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   < LW_LFMON_N
+)
+OR
+(
+LFGJA   < LW_LFGJA_N
+)
+)
+
+.
+**** START ADD 2015/11/23 ISID21 ****
+LOOP AT LT_MSKU  INTO LF_MSKU .
+LV_TABIX = SY-TABIX.
+AT END OF LFMON.
+SUM.
+READ TABLE LT_MSKU INTO LF_MSKU_TMP INDEX  LV_TABIX.
+LF_MSKU_TMP-KULAB = LF_MSKU-KULAB.
+APPEND LF_MSKU_TMP TO LT_MSKU_TMP.
+ENDAT.
+ENDLOOP.
+LT_MSKU = LT_MSKU_TMP.
+**** END ADD 2015/11/23 ISID21 ****
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+SORT LT_MSKU BY LFGJA DESCENDING
+LFMON DESCENDING.
+*     1 LOOP ONLY
+LOOP AT LT_MSKU INTO LF_MSKU.
+GF_YOTAKU-BEF_NUM = LF_MSKU-KULAB.
+EXIT.
+ENDLOOP.
+EXIT.
+WHEN 4.
+GF_YOTAKU-BEF_NUM = 0.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKUH
+SY-SUBRC.
+ENDCASE.
+
+**---MODIFY START  2001/01/31 PSD.SAITOH (仕様変更部分)--------------
+**  CASE G_FLG_SEL01.
+*  CASE GF_MSKU-FLGMSKU.
+*    WHEN 'X'.                             "読込条件１：取得時
+*
+*      IF G_JAMON = W_JAMON.               "指定会計期間と同一
+*        READ TABLE GT_MSKU INTO GF_WMSKU
+*                   WITH KEY FLGMSKU = SPACE
+***---APPEND START PSD T.SAITOH 2002/03/11 ---------------------------*
+*                            MATNR   = GF_MSKU-MATNR
+*                            WERKS   = GF_MSKU-WERKS
+*                            CHARG   = GF_MSKU-CHARG
+*                            SOBKZ   = GF_MSKU-SOBKZ
+*                            KUNNR   = GF_MSKU-KUNNR
+***---APPEND END   PSD T.SAITOH 2002/03/11 ---------------------------*
+*                   .
+*        GF_YOTAKU-BEF_NUM = GF_WMSKU-KULAB.
+**---MODIFY END   PSD T.SAITOH 2002/03/12 ---------------------------*
+*
+**---APPEND START PSD T.SAITOH 2002/03/12 ---------------------------*
+*        CLEAR: GF_WMSKU."作業領域初期化
+**---APPEND END   PSD T.SAITOH 2002/03/12 ---------------------------*
+*      ELSEIF G_JAMON > W_JAMON .          "指定会計期間より前
+*        GF_YOTAKU-BEF_NUM = GF_MSKU-KULAB.
+**--- 2001/11/21 PSD H.Tanaka DEL ↓
+**      ELSE.                               "念のため
+***       システムエラー
+**        MESSAGE E603(Z1) WITH SY-REPID
+**                         CNS_KNA1
+**                         SY-SUBRC.
+**--- 2001/11/21 PSD H.Tanaka DEL ↑
+*      ENDIF.
+*    WHEN OTHERS.                          "読込条件３：取得時
+**---MODIFY START PSD T.SAITOH 2002/03/12 ---------------------------*
+*        loop at gt_msku into gf_wmsku
+*                             where FLGMSKU = SPACE
+*                               and    MATNR   = GF_MSKU-MATNR
+*                               and    WERKS   = GF_MSKU-WERKS
+*                               and    CHARG   = GF_MSKU-CHARG
+*                               and    SOBKZ   = GF_MSKU-SOBKZ
+*                               and    KUNNR   = GF_MSKU-KUNNR
+*                               AND ( LFGJA   <  GF_MSKU-LFGJA
+*                               OR   ( LFGJA  =  GF_MSKU-LFGJA
+*                               AND   LFMON   <  GF_MSKU-LFMON ) ).
+*              GF_YOTAKU-BEF_NUM = GF_WMSKU-KULAB.
+*              exit.
+*        endloop.
+**      GF_YOTAKU-BEF_NUM = GF_MSKU-KULAB.
+**---MODIFY END   PSD T.SAITOH 2002/03/12 ---------------------------*
+*  ENDCASE.
+**---MODIFY END    2001/01/31 PSD.SAITOH ---------------------------*
+*---MODIFY END   PSD T.SAITOH 2002/03/25 ---------------------------*
+
+
+
+ENDFORM.                    " FRM_SET_BEF_ZAIKO
+*&---------------------------------------------------------------------*
+*&      Form  FRM_COM_HARAIDASHI
+*&---------------------------------------------------------------------*
+*       当月払出数計算処理
+*----------------------------------------------------------------------*
+FORM FRM_COM_HARAIDASHI.
+
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*  IF   G_JAMON = GF_MSEG-BUDAT+0(6)
+IF   G_YANDM    = GF_MSEG-BUDAT+0(6)
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+AND ( GF_MSEG-BWART = '631'
+OR GF_MSEG-BWART = '632' )
+AND GF_MSEG-SHKZG = 'H'.
+*         当月払出数の減算
+GF_YOTAKU-NOW_HNUM = GF_YOTAKU-NOW_HNUM - GF_MSEG-MENGE.
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*  ELSEIF  G_JAMON = GF_MSEG-BUDAT+0(6)
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+ELSEIF  G_YANDM    = GF_MSEG-BUDAT+0(6)
+AND ( GF_MSEG-BWART = '631'
+OR GF_MSEG-BWART = '632' )
+AND GF_MSEG-SHKZG = 'S'.
+*         当月払出数の加算
+GF_YOTAKU-NOW_HNUM = GF_YOTAKU-NOW_HNUM + GF_MSEG-MENGE.
+ENDIF.
+
+ENDFORM.                    " FRM_COM_HARAIDASHI
+*&---------------------------------------------------------------------*
+*&      Form  FRM_COM_SHISYOU
+*&---------------------------------------------------------------------*
+*       当月使用数計算処理
+*----------------------------------------------------------------------*
+FORM FRM_COM_SHISYOU.
+*     期間が同一のものを対象とする
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*  IF   G_JAMON = GF_MSEG-BUDAT+0(6)
+IF   G_YANDM    = GF_MSEG-BUDAT+0(6)
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+AND ( GF_MSEG-BWART = '633'
+OR GF_MSEG-BWART = '634' )
+AND GF_MSEG-SHKZG = 'H'.
+*         当月使用数の減算
+GF_YOTAKU-NOW_SNUM = GF_YOTAKU-NOW_SNUM - GF_MSEG-MENGE.
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*  ELSEIF G_JAMON = GF_MSEG-BUDAT+0(6)
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+ELSEIF G_YANDM    = GF_MSEG-BUDAT+0(6)
+AND ( GF_MSEG-BWART = '633'
+OR GF_MSEG-BWART = '634' )
+AND GF_MSEG-SHKZG = 'S'.
+*         当月使用数の加算
+GF_YOTAKU-NOW_SNUM = GF_YOTAKU-NOW_SNUM + GF_MSEG-MENGE.
+ENDIF.
+
+ENDFORM.                    " FRM_COM_SHISYOU
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_ZAIKO
+*&---------------------------------------------------------------------*
+*       当月末残数の設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_ZAIKO.
+*---MODIFY START PSD T.SAITOH 2002/03/25 ---------------------------*
+DATA:LW_LFGJA_N LIKE MSKU-LFGJA,"指定会計年
+LW_LFMON_N LIKE MSKU-LFMON,"指定会計期間
+LT_MSKU    TYPE TABLE OF TYP_MSKU,"特殊在庫ローカル内部テーブル
+LF_MSKU    LIKE GF_MSKU.
+**** START ADD 2015/11/23 ISID21 ****
+DATA: LT_MSKU_TMP  TYPE TABLE OF TYP_MSKU, "特殊在庫臨時内部テーブル
+LF_MSKU_TMP   LIKE GF_MSKU.
+DATA LV_TABIX  TYPE SY-TABIX.
+**** END ADD 2015/11/23 ISID21 ****
+**** END ADD 2015/11/23 ISID21 ****
+***** START ADD 2016/1/21 ISID21 ****
+*  TYPES: BEGIN OF typ_msku,
+**              MATNR TYPE MSKU-MATNR,
+**              WERKS TYPE MSKU-WERKS,
+**             SOBKZ TYPE MSKU-SOBKZ,
+**             KUNNR TYPE MSKU-KUNNR,
+**             LFGJA  TYPE MSKU-LFGJA,
+**             LFMON  TYPE MSKU-LFMON,
+*             KULAB  TYPE MSKU-KULAB,
+*         END OF typ_msku.
+*  DATA:  lt_msku_k TYPE STANDARD TABLE OF typ_msku,
+*             lf_msku_k like LINE OF  lt_msku_k .
+*
+*
+***** END ADD 2016/1/21 ISID21 ****
+* 前月末在庫の流用
+* 指定会計期間－１を算出ロジックであったが
+* 面倒なので代入する。（マイナス１はしない）
+
+LW_LFGJA_N = G_FI_YANDM+0(4).
+LW_LFMON_N = G_FI_YANDM+4(2).
+
+* ①A指定会計期間　－　１　でMSKUを検索
+**** START CHANGE 2015/11/23 ISID21 ****
+SELECT SUM( KULAB )
+*  SELECT SINGLE KULAB
+**** END CHANGE  2015/11/23  ISID21 ****
+FROM   MSKU
+*         INTO   TABLE  lt_msku_k
+INTO   (GF_YOTAKU-NOW_MNUM)
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE  2015/11/23  ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  LFGJA   = LW_LFGJA_N
+AND  LFMON   = LW_LFMON_N.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+*      LOOP AT lt_msku_k  INTO LF_MSKU_k.
+*         GF_YOTAKU-NOW_MNUM = GF_YOTAKU-NOW_MNUM + LF_MSKU_k-KULAB.
+*      ENDLOOP.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKU
+SY-SUBRC.
+ENDCASE.
+
+* ①B指定会計期間　－　１　でMSKUHを検索
+**** START CHANGE 2015/11/23 ISID21 ****
+SELECT SUM( KULAB )
+*  SELECT SINGLE KULAB
+**** END CHANGE  2015/11/23  ISID21 ****
+FROM   MSKUH
+*         INTO   TABLE  lt_msku_k
+INTO   (GF_YOTAKU-NOW_MNUM)
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE  2015/11/23  ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  LFGJA   = LW_LFGJA_N
+AND  LFMON   = LW_LFMON_N.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+*      LOOP AT lt_msku_k  INTO LF_MSKU_k.
+*         GF_YOTAKU-NOW_MNUM = GF_YOTAKU-NOW_MNUM + LF_MSKU_k-KULAB.
+*      ENDLOOP.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKUH
+SY-SUBRC.
+ENDCASE.
+
+* ②A指定会計期間－１より大きいMSKUHを検索
+SELECT LFGJA LFMON KULAB
+FROM   MSKUH
+INTO CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE  2015/11/23  ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   > LW_LFMON_N
+)
+OR
+(
+LFGJA   > LW_LFGJA_N
+)
+)
+
+.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKUH
+SY-SUBRC.
+ENDCASE.
+
+* ②B指定会計期間－１より大きいMSKUを検索
+SELECT LFGJA LFMON KULAB
+FROM   MSKU
+APPENDING CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE  2015/11/23  ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   > LW_LFMON_N
+)
+OR
+(
+LFGJA   > LW_LFGJA_N
+)
+)
+
+.
+SORT LT_MSKU by  MATNR WERKS SOBKZ KUNNR LFGJA LFMON CHARG.
+*delete ADJACENT DUPLICATES FROM LT_MSKU COMPARING ALL FIELDS.
+**** START ADD 2015/11/23 ISID21 ****
+LOOP AT LT_MSKU  INTO LF_MSKU .
+LV_TABIX = SY-TABIX.
+AT END OF LFMON.
+SUM.
+READ TABLE LT_MSKU INTO LF_MSKU_TMP INDEX  LV_TABIX.
+LF_MSKU_TMP-KULAB = LF_MSKU-KULAB.
+APPEND LF_MSKU_TMP TO LT_MSKU_TMP.
+ENDAT.
+ENDLOOP.
+LT_MSKU = LT_MSKU_TMP.
+**** END ADD 2015/11/23 ISID21 ****
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+SORT LT_MSKU BY LFGJA ASCENDING
+LFMON ASCENDING.
+*     1 LOOP ONLY
+LOOP AT LT_MSKU INTO LF_MSKU.
+GF_YOTAKU-NOW_MNUM = LF_MSKU-KULAB.
+EXIT.
+ENDLOOP.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKU
+SY-SUBRC.
+ENDCASE.
+
+* ③B指定会計期間－１より小さいきいMSKUを検索
+SELECT  LFGJA LFMON  KULAB
+FROM   MSKU
+INTO   CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE  2015/11/23  ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   < LW_LFMON_N
+)
+OR
+(
+LFGJA   < LW_LFGJA_N
+)
+)
+
+.
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKU
+SY-SUBRC.
+ENDCASE.
+
+* ③B指定会計期間－１より小さいきいMSKUHを検索
+SELECT  LFGJA LFMON  KULAB
+FROM   MSKU
+APPENDING CORRESPONDING FIELDS OF TABLE LT_MSKU
+WHERE  MATNR   = GF_MSKU-MATNR
+AND  WERKS   = GF_MSKU-WERKS
+**** START CHANGE 2015/11/23 ISID21 ****
+*           AND  CHARG   = GF_MSKU-CHARG
+**** END CHANGE  2015/11/23  ISID21 ****
+AND  SOBKZ   = GF_MSKU-SOBKZ
+AND  KUNNR   = GF_MSKU-KUNNR
+AND  (
+( LFGJA   = LW_LFGJA_N AND
+LFMON   < LW_LFMON_N
+)
+OR
+(
+LFGJA   < LW_LFGJA_N
+)
+)
+
+.
+SORT LT_MSKU by  MATNR WERKS SOBKZ KUNNR LFGJA LFMON CHARG.
+*delete ADJACENT DUPLICATES FROM LT_MSKU COMPARING ALL FIELDS.
+**** START ADD 2015/11/23 ISID21 ****
+LOOP AT LT_MSKU  INTO LF_MSKU .
+LV_TABIX = SY-TABIX.
+AT END OF LFMON.
+SUM.
+READ TABLE LT_MSKU INTO LF_MSKU_TMP INDEX  LV_TABIX.
+LF_MSKU_TMP-KULAB = LF_MSKU-KULAB.
+APPEND LF_MSKU_TMP TO LT_MSKU_TMP.
+ENDAT.
+ENDLOOP.
+LT_MSKU = LT_MSKU_TMP.
+**** END ADD 2015/11/23 ISID21 ****
+
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+SORT LT_MSKU BY LFGJA DESCENDING
+LFMON DESCENDING.
+*     1 LOOP ONLY
+LOOP AT LT_MSKU INTO LF_MSKU.
+GF_YOTAKU-NOW_MNUM = LF_MSKU-KULAB.
+EXIT.
+ENDLOOP.
+EXIT.
+WHEN 4.
+GF_YOTAKU-BEF_NUM = 0.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSKUH
+SY-SUBRC.
+ENDCASE.
+
+
+
+**---MODIFY START  2002/01/31 PSD.SAITOH (仕様変更部分)-----------------
+** CASE G_FLG_SEL01.
+**-----DELETE START  2002/01/31 PSD.SAITOH (仕様変更部分)---------------
+**  CASE GF_MSKU-FLGMSKU.
+**-----DELETE END    2002/01/31 PSD.SAITOH (仕様変更部分)---------------
+**---MODIFY END    2002/01/31 PSD.SAITOH (仕様変更部分)-----------------
+*
+**---DELETE START  2002/01/31 PSD.SAITOH (仕様変更部分)-----------------
+**    WHEN 'X'.                             "読込条件１：取得時
+**      GF_YOTAKU-NOW_MNUM = GF_MSKU-KUVLA.
+**    WHEN OTHERS.                          "読込条件３：取得時
+**---DELETE END    2002/01/31 PSD.SAITOH (仕様変更部分)-----------------
+*
+**--- 2001/11/21 PSD H.Tanaka DEL ↓
+**      IF G_JAMON = W_JAMON .               "指定会計期間と同一
+**        GF_YOTAKU-NOW_MNUM = GF_MSKU-KUVLA.
+**      ELSEIF G_JAMON > W_JAMON .           "指定会計期間より前
+**--- 2001/11/21 PSD H.Tanaka DEL ↑
+*  GF_YOTAKU-NOW_MNUM = GF_MSKU-KULAB.
+**--- 2001/11/21 PSD H.Tanaka DEL ↓
+**      ELSE.                               "念のため
+***       システムエラー
+**      ENDIF.
+**--- 2001/11/21 PSD H.Tanaka DEL ↑
+**---DELETE START  2002/01/31 PSD.SAITOH (仕様変更部分)-----------------
+**  ENDCASE.
+**---DELETE END    2002/01/31 PSD.SAITOH (仕様変更部分)-----------------
+
+*---MODIFY END   PSD T.SAITOH 2002/03/25 ---------------------------*
+
+ENDFORM.                    " FRM_SET_ZAIKO
+*&---------------------------------------------------------------------*
+*&      Form  FRM_COM_ZAIKOHYOUKA
+*&---------------------------------------------------------------------*
+*       当月末移動平均を求めてから、在庫評価合計額を計算する
+*----------------------------------------------------------------------*
+FORM FRM_COM_ZAIKOHYOUKA.
+*---APPEND START PSD T.SAITOH 2002/04/23 ---------------------------*
+DATA L_VERPR TYPE MBEW-VERPR."移動平均原価／期間単位価格
+*---APPEND END   PSD T.SAITOH 2002/04/23 ---------------------------*
+
+*---APPEND START  2001/12/18 PSD.SAITOH -------------------------------*
+* 対象データ件数取得
+DATA:L_WNUM_SUM   TYPE I. "対象データ合計
+* CLEAR: L_WNUM_SUM.  "対象データ取得合計件数の初期化（再利用のため）
+*---APPEND END    2001/12/18 PSD.SAITOH -------------------------------*
+
+PERFORM FRM_SELECT_04.
+*---APPEND START  2001/12/18 PSD.SAITOH -------------------------------*
+* 取得した品目評価にMBEWから読込んだというステータスを設定する
+GF_MBEW-FLGMBEW = 'X'.
+MODIFY GT_MBEW FROM GF_MBEW TRANSPORTING FLGMBEW WHERE FLGMBEW = SPACE.
+*---品目評価履歴を読込
+PERFORM FRM_SELECT_05.
+* 対象データ件数合計
+DESCRIBE TABLE GT_MBEW LINES L_WNUM_SUM.
+
+IF L_WNUM_SUM = 0.
+*     対象データはありません：品目評価
+MESSAGE S600(Z1) WITH CNS_JMBEW.
+STOP.
+ENDIF.
+*---APPEND END    2001/12/18 PSD.SAITOH -------------------------------*
+
+*---DELETE START 2001/12/18 PSD T.SAITOH ----------------------------*
+**--- テーブル読込条件４：品目評価
+*  PERFORM FRM_SELECT_04.
+*  IF SY-SUBRC <> 0.
+*    PERFORM FRM_SELECT_05.
+**--- 2001/11/21 PSD H.Tanaka DEL ↓
+**    IF SY-SUBRC <> 0.
+***     システムエラー
+**    ENDIF.
+**--- 2001/11/21 PSD H.Tanaka DEL ↑
+*---DELETE START 2001/12/18 PSD T.SAITOH ----------------------------*
+
+*   当会計年度、当期で降順ソート
+SORT GT_MBEW BY LFGJA DESCENDING
+LFMON DESCENDING.
+*---DELETE START 2001/12/18 PSD T.SAITOH ----------------------------*
+*  ENDIF.
+*---DELETE START 2001/12/18 PSD T.SAITOH ----------------------------*
+
+* 最初の１レコードを読み込む
+READ TABLE GT_MBEW INTO GF_MBEW INDEX 1.
+
+*---APPEND START PSD T.SAITOH 2002/04/23 ---------------------------*
+* 通貨コード取得
+PERFORM FRM_GET_WAERS_FROM_BWKEY USING    GF_MSEG-WERKS
+CHANGING GF_MSEG-WAERS.
+* 価格変換
+CLEAR L_VERPR.
+PERFORM FRM_CURRENCY_AMOUNT      USING    GF_MSEG-WAERS
+GF_MBEW-VERPR
+CHANGING L_VERPR .
+GF_MBEW-VERPR = L_VERPR.
+*---APPEND END   PSD T.SAITOH 2002/04/23 ---------------------------*
+
+
+*--- 当月末移動平均単価設定
+*---APPEND START PSD T.SAITOH 2002/04/24 ０除算回避-----------------*
+IF GF_MBEW-PEINH <> 0.
+*---APPEND END   PSD T.SAITOH 2002/04/24 ---------------------------*
+G_NOW_IDO_AVE = GF_MBEW-VERPR / GF_MBEW-PEINH.
+*---APPEND START PSD T.SAITOH 2002/04/24 ---------------------------*
+ELSE.
+G_NOW_IDO_AVE = 0.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/04/24 ---------------------------*
+*--- 当月末在庫金額設定
+GF_YOTAKU-SUM_NUM = GF_YOTAKU-NOW_MNUM * G_NOW_IDO_AVE.
+
+ENDFORM.                    " FRM_COM_ZAIKOHYOUKA
+
+
+*&===抽出関連処理======================================================*
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_msku
+*&---------------------------------------------------------------------*
+*       得意先にある特殊在庫情報の取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_MSKU.
+*---APPEND START  2001/12/18 PSD.SAITOH -------------------------------*
+* 対象データ件数取得
+DATA:L_WNUM_SUM   TYPE I. "対象データ合計
+*---APPEND END    2001/12/18 PSD.SAITOH -------------------------------*
+
+*---ＴＢＬ読込条件１：抽出
+*---得意先特殊在庫を読込
+PERFORM FRM_SELECT_01 .
+*---APPEND START  2001/12/18 PSD.SAITOH -------------------------------*
+* 取得した得意先特殊在庫にMSKUから読込んだというステータスを設定する
+GF_MSKU-FLGMSKU = 'X'.
+MODIFY GT_MSKU FROM GF_MSKU TRANSPORTING FLGMSKU WHERE FLGMSKU = SPACE.
+*---得意先特殊在庫履歴を読込
+PERFORM FRM_SELECT_03.
+* 対象データ件数合計
+DESCRIBE TABLE GT_MSKU LINES L_WNUM_SUM.
+
+IF L_WNUM_SUM = 0.
+*     対象データはありません：預託在庫
+MESSAGE S600(Z1) WITH CNS_JMSKU.
+STOP.
+ENDIF.
+*---APPEND END    2001/12/18 PSD.SAITOH -------------------------------*
+
+***---DELETE START 2001/12/18 PSD.SAITOH ------------------------------*
+**---ＴＢＬ読込条件１：抽出できない時（０件取得時）
+*  IF SY-SUBRC <> 0.
+*    G_FLG_SEL01 = SPACE.
+**   ＴＢＬ読込条件３：抽出
+**   得意先特殊在庫：履歴を読込
+*    PERFORM FRM_SELECT_03.
+**--- 2001/11/21 PSD H.Tanaka DEL ↓
+**   履歴にもデータがない場合
+**    IF SY-SUBRC <> 0.
+***        対象データはありません：MSKUH
+**      MESSAGE E200(ZMM) WITH CNS_MSKUH.
+**    ENDIF.
+**--- 2001/11/21 PSD H.Tanaka DEL ↑
+*  ENDIF.
+***---DELETE END   2001/12/18 PSD.SAITOH ------------------------------*
+ENDFORM.                    " frm_get_msku
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MSEG_PROCESS
+*&---------------------------------------------------------------------*
+*       伝票セグメント：品目　処理
+*----------------------------------------------------------------------*
+FORM FRM_MSEG_PROCESS.
+
+*   ＴＢＬ読込条件２：抽出
+*   伝票セグメント：品目　＋　入出庫伝票
+PERFORM FRM_SELECT_02.
+*   伝票セグメント：品目情報の取り出し処理
+LOOP AT GT_MSEG INTO GF_MSEG.
+*     当月払出数の計算
+PERFORM FRM_COM_HARAIDASHI.
+*     当月使用数の計算
+PERFORM FRM_COM_SHISYOU.
+ENDLOOP.
+
+*---APPEND START 2002/01/31 PSD T.SAITOH 当月使用数のマイナス表記を取る
+GF_YOTAKU-NOW_SNUM = GF_YOTAKU-NOW_SNUM * -1.
+*---APPEND START 2002/01/31 PSD T.SAITOH 当月使用数のマイナス表記を取る
+
+*     前月末在庫数の設定
+PERFORM FRM_SET_BEF_ZAIKO.
+*     当月末残数の設定
+PERFORM FRM_SET_ZAIKO.
+*     在庫評価合計額計算
+PERFORM FRM_COM_ZAIKOHYOUKA.
+*     預託在庫一覧表出力　構造→内部テーブル
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+* APPEND GF_YOTAKU TO GT_YOTAKU.
+IF GF_YOTAKU-BEF_NUM  = 0 AND
+GF_YOTAKU-NOW_HNUM = 0 AND
+GF_YOTAKU-NOW_SNUM = 0 AND
+GF_YOTAKU-NOW_MNUM = 0.
+ELSE.
+APPEND GF_YOTAKU TO GT_YOTAKU.
+GF_YOTAKU_BEF = GF_YOTAKU.
+ENDIF.
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+
+ENDFORM.                    " FRM_MSEG_PROCESS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MSKU_PROCESS
+*&---------------------------------------------------------------------*
+*       得意先特殊在庫内部ＴＢＬ処理
+*----------------------------------------------------------------------*
+FORM FRM_MSKU_PROCESS.
+*--- 指定会計期間の連結
+CONCATENATE G_FI_YANDM+0(4) G_FI_YANDM+4(2) INTO G_JAMON.
+
+*--- 最新の会計年度・当期を採用するためにソートする
+SORT GT_MSKU BY WERKS ASCENDING
+KUNNR ASCENDING
+MATNR DESCENDING
+LFGJA DESCENDING
+LFMON DESCENDING.
+*--- プラントまたは得意先コードのブレイク
+CLEAR: GF_MSKU,
+GF_MSKU_BEF.
+
+LOOP AT GT_MSKU INTO GF_MSKU .
+*   プラントまたは得意先がブレイクするまで対象データとしない。
+*--- 2001/11/21 PSD H.Tanaka MOD ↓
+*    IF    GF_MSKU-WERKS = GF_MSKU_BEF-WERKS
+*      AND GF_MSKU-KUNNR = GF_MSKU_BEF-KUNNR.
+IF    GF_MSKU-WERKS = GF_MSKU_BEF-WERKS
+AND GF_MSKU-KUNNR = GF_MSKU_BEF-KUNNR
+AND GF_MSKU-MATNR = GF_MSKU_BEF-MATNR.
+*--- 2001/11/21 PSD H.Tanaka MOD ↑
+CONTINUE.
+ENDIF.
+*--- 会計年度の連結
+CONCATENATE GF_MSKU-LFGJA GF_MSKU-LFMON
+G_FI_YANDM+4(2) INTO W_JAMON.
+*   名称等を出力領域にコピー
+PERFORM FRM_MOVE_OUTPUT.
+*   当会計年度と当期の連結
+*   CONCATENATE GF_MSKU-LFGJA GF_MSKU-LFMON INTO W_JAMON.
+*   前レコードを保持
+GF_MSKU_BEF = GF_MSKU.
+*   ＴＢＬ読込条件２：抽出
+*   伝票セグメント：品目処理
+PERFORM FRM_MSEG_PROCESS.
+*   ABAPリストビューア用プラントカタログ作成
+IF GF_YOTAKU-WERKS = GF_YOTAKU_BEF-WERKS.
+ELSE.
+MOVE-CORRESPONDING GF_YOTAKU TO GS_ABAP_LIST.
+APPEND GS_ABAP_LIST TO GT_ABAP_LIST.
+GF_YOTAKU_BEF = GF_YOTAKU.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " FRM_MSKU_PROCESS
+*&===帳票関連処理======================================================*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_PROCESS
+*&---------------------------------------------------------------------*
+*       ＡＢＡＰリストビューアメイン
+*----------------------------------------------------------------------*
+FORM FRM_DATA_PROCESS.
+*--- レイアウト関連
+**  Definition for field choice screen    **
+GS_LAYOUT-HEADER_TEXT      = 'ヘッダ行'.
+GS_LAYOUT-ITEM_TEXT        = '明細行'.
+GS_LAYOUT-DEFAULT_ITEM     = 'X'.
+*--- フィールドカタログの初期化
+PERFORM FIELDCAT_INIT USING GT_FIELDCAT[].
+
+*--- ページ切り替え設定
+GS_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+*--- 紐付けキー情報の定義
+*  GS_KEYINFO-HEADER01 = 'WERKS'.
+*  GS_KEYINFO-ITEM01   = 'WERKS'.
+*  GS_KEYINFO-HEADER02 = 'KUNNR'.
+*  GS_KEYINFO-ITEM02   = 'KUNNR'.
+*--- バリアント保存設定
+*  G_VARIANT-REPORT = G_REPID.
+*  G_VARIANT-HANDLE = 'OOO1'.
+
+*--- ＡＬＶ改ページ関連
+PERFORM FRM_ALV_PAGE_NEXT.
+*---APPEND AND DELETE START 2002/01/31 PSD T.SAITOH -----------------*
+*  GS_LAYOUT-GROUP_CHANGE_EDIT = CNS_X.
+*---APPEND AND DELETE END   2002/01/31 PSD T.SAITOH -----------------*
+*---APPEND START  2002/02/07 PSD.SAITOH (仕様変更部分)----------------*
+GS_PRINT-NO_PRINT_LISTINFOS = CNS_X.
+*---APPEND END    2002/02/07 PSD.SAITOH (仕様変更部分)----------------*
+
+*--- リストの出力
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+*   I_INTERFACE_CHECK              = ' '
+*   I_BYPASSING_BUFFER             =
+*   I_BUFFER_ACTIVE                = ' '
+I_CALLBACK_PROGRAM             = G_REPID       "レポートID
+*   I_CALLBACK_PF_STATUS_SET       = ' '
+*   I_CALLBACK_TOP_OF_PAGE         = G_HEAD_FRM    "TOP_OF_PAGE
+*   I_CALLBACK_USER_COMMAND        = ' '
+I_STRUCTURE_NAME               = CNS_KOUZOU   "構造
+IS_LAYOUT                      = GS_LAYOUT     "レイアウト設定
+IT_FIELDCAT                    = GT_FIELDCAT[] "カタログ設定
+*   IT_EXCLUDING                   =
+*   IT_SPECIAL_GROUPS              =
+*   IT_SORT                        =
+*   IT_FILTER                      =
+*   IS_SEL_HIDE                    =
+*   I_DEFAULT                      = ' '
+I_SAVE                         = 'A'           "レイアウト保存
+*   IS_VARIANT                     = G_VARIANT
+IT_EVENTS                      = GT_EVENT[]    "イベント設定
+*   IT_EVENT_EXIT                  =
+*---APPEND START  2002/02/07 PSD.SAITOH (仕様変更部分)----------------*
+IS_PRINT                       = GS_PRINT
+*---APPEND END    2002/02/07 PSD.SAITOH (仕様変更部分)----------------*
+*   IS_REPREP_ID                   =
+*   I_SCREEN_START_COLUMN          = 0
+*   I_SCREEN_START_LINE            = 0
+*   I_SCREEN_END_COLUMN            = 0
+*   I_SCREEN_END_LINE              = 0
+* IMPORTING
+*   E_EXIT_CAUSED_BY_CALLER        =
+*   ES_EXIT_CAUSED_BY_USER         =
+TABLES
+T_OUTTAB                       = GT_ITEM       "明細データの受取TB
+EXCEPTIONS
+PROGRAM_ERROR                  = 1
+OTHERS                         = 2
+.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " FRM_DATA_PROCESS
+*&---------------------------------------------------------------------*
+*&      Form  FIELDCAT_INIT
+*&---------------------------------------------------------------------*
+*       フィールドカタログの初期化（ＡＢＡＰリストビューア）
+*       キー設定
+*----------------------------------------------------------------------*
+*      -->P_GT_FIELDCAT  text
+*----------------------------------------------------------------------*
+FORM FIELDCAT_INIT USING RT_FIELDCAT TYPE SLIS_T_FIELDCAT_ALV.
+
+
+* 特に必要がなかったので未使用
+
+
+ENDFORM.                    " FIELDCAT_INIT
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_data
+*&---------------------------------------------------------------------*
+*       データ設定
+*----------------------------------------------------------------------*
+FORM FRM_GET_DATA.
+*---APPEND START PSD T.SAITOH 2002/03/12 ---------------------------*
+DATA : L_DATA_REC(14) TYPE N."対象データ件数
+* 対象データ件数合計
+DESCRIBE TABLE GT_YOTAKU LINES L_DATA_REC.
+
+IF L_DATA_REC = 0.
+*     対象データはありません：預託在庫
+MESSAGE S600(Z1) WITH CNS_JMSKU.
+STOP.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/03/12 ---------------------------*
+
+*--- ABAPリストビューアと同じ項目で昇順ソート
+SORT GT_YOTAKU ASCENDING BY WERKS
+KUNNR
+MATNR .
+*--- 汎用モジュールで使用している内部テーブルにコピー
+GT_ITEM[] = GT_YOTAKU[].
+*  GT_HEADER = GT_YOTAKU.   "今回は未使用
+
+ENDFORM.                    " frm_get_data
+
+*---------------------------------------------------------------------
+* ALV TOP OF PAGE
+*---------------------------------------------------------------------
+FORM FRM_TOP_OF_PAGE.
+DATA: L_SY-TABIX TYPE P.
+
+*  L_SY-TABIX = SY-TABIX.
+*  READ TABLE GT_ITEM INTO GS_ITEM INDEX SY-TFILL.
+
+*  IF SY-PAGNO = 1.
+*    READ TABLE GT_ITEM INTO GS_ITEM INDEX 1.
+*  ELSE.
+*    READ TABLE GT_ITEM INTO GS_ITEM INDEX SY-TABIX.
+*  ENDIF.
+
+WRITE:  80  CNS_TITLE.
+*--- 2001/11/28 PSD H.Tanaka MOD ↓
+*  WRITE:  90  CNS_MAKEDAT,SY-DATUM.
+*  WRITE:  112 SY-UZEIT.
+*  WRITE:  90  CNS_MAKEDAT,SY-DATUM DD/MM/YY.
+*  WRITE:  112 SY-UZEIT USING EDIT MASK '__:__'.
+*  WRITE: /90  CNS_BUMON,GT_ITEM-WERKS,' ',GT_ITEM-VNAME.
+*---MODIFY START 2002/01/31 PSD T.SAITOH
+**  WRITE:  160  CNS_MAKEDAT,SY-DATUM DD/MM/YY.
+*---MODIFY START PSD T.SAITOH 2002/03/25 ---------------------------*
+WRITE:  140  CNS_CL_RANGE,P_YEAR,'/',P_MON.
+*  WRITE:  140  CNS_FI_RANGE,G_FI_YANDM+0(4),'/',G_FI_YANDM+4(2).
+*---MODIFY END   PSD T.SAITOH 2002/03/25 ---------------------------*
+WRITE:  162  CNS_MAKEDAT,SY-DATUM DD/MM/YY.
+WRITE:  184  SY-UZEIT USING EDIT MASK '__:__'.
+*---APPEND START PSD T.SAITOH 2002/05/09 ---------------------------*
+* 会計数値違いの明確化文章表示
+WRITE: /0 TEXT-001.
+*---APPEND END   PSD T.SAITOH 2002/05/09 ---------------------------*
+*---MODIFY START PSD T.SAITOH 2002/05/09 ---------------------------*
+*  WRITE: /140  CNS_BUMON,GT_ITEM-WERKS,' ',GT_ITEM-VNAME.
+WRITE: 140  CNS_BUMON,GT_ITEM-WERKS,' ',GT_ITEM-VNAME.
+*---MODIFY END   PSD T.SAITOH 2002/05/09 ---------------------------*
+*---MODIFY END   2002/01/31 PSD T.SAITOH
+*--- 2001/11/28 PSD H.Tanaka MOD ↑
+
+ENDFORM.
+*---------------------------------------------------------------------
+* ALV caller_exit
+*---------------------------------------------------------------------
+FORM FRM_CALLER_EXIT USING RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+RS_DATA-CALLBACK_HEADER_TRANSPORT = 'FILITEXTS_TEXT_TRANSPORT'.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ALV_PAGE_NEXT
+*&---------------------------------------------------------------------*
+*       ABAPリストビューア関連
+*
+* 汎用モジュールで改ページの際にこのプログラムのFRM_TOP_OF_PAGE・
+*        使用する設定
+*----------------------------------------------------------------------*
+FORM FRM_ALV_PAGE_NEXT.
+*--- 使用可能イベントのチェック
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE           = 0
+IMPORTING
+ET_EVENTS             = GT_EVENT  "使用可能なイベント取得
+*   EXCEPTIONS
+*     LIST_TYPE_WRONG       = 1
+*     OTHERS                = 2
+.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+*--- 使用イベントに実行するサブルーチン名を設定
+*--- MODIFY Start 2001/12/27 PSD T.SAITOH -----------------------------*
+LOOP AT GT_EVENT INTO GS_EVENT.
+*    WHERE NAME = 'TOP_OF_PAGE'.
+CASE GS_EVENT-NAME.
+WHEN 'TOP_OF_PAGE'.
+GS_EVENT-FORM = 'FRM_TOP_OF_PAGE'.
+MODIFY GT_EVENT FROM GS_EVENT.
+WHEN 'CALLER_EXIT'.
+GS_EVENT-FORM = 'FRM_CALLER_EXIT'.
+MODIFY GT_EVENT FROM GS_EVENT.
+ENDCASE.
+ENDLOOP.
+*--- MODIFY end   2001/12/27 PSD T.SAITOH -----------------------------*
+ENDFORM.                    " FRM_ALV_PAGE_NEXT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHANGE_KIKAN
+*&---------------------------------------------------------------------*
+*       指定会計期間変換処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_CHANGE_KIKAN.
+*--- カレンダー日付取得
+CALL FUNCTION 'Z_MPERIOD_EXCHANGE'
+EXPORTING
+LFGJA          = G_FI_YANDM+0(4)
+LFMON          = G_FI_YANDM+4(2)
+IMPORTING
+YEAR           = P_YEAR
+MON            = P_MON
+EXCEPTIONS
+EXCHANGE_ERROR = 1
+OTHERS         = 2.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " FRM_CHANGE_KIKAN
+*---MODIFY START  2002/01/31 PSD.SAITOH (仕様変更部分)------------------
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHANGE_CLTOFI
+*&---------------------------------------------------------------------*
+*       カレンダー年月→会計年月　変換処理
+*----------------------------------------------------------------------*
+*  -->  p1        カレンダー年
+*  <--  p2        カレンダー月
+*----------------------------------------------------------------------*
+FORM FRM_CHANGE_CLTOFI USING VALUE(PR_YEAR)
+VALUE(PR_MON)
+CHANGING PR_FI_YEAR
+PR_FI_MON.
+*--- カレンダー月の判断（１～３）
+IF PR_MON >= 1 AND PR_MON <= 3.
+PR_FI_YEAR = PR_YEAR - 1.
+PR_FI_MON  = PR_MON + 9.
+*--- カレンダー月の判断（４～１２）
+ELSEIF PR_MON >= 4 AND PR_MON <= 12.
+PR_FI_YEAR = PR_YEAR.
+PR_FI_MON  = PR_MON - 3.
+ELSE.
+*--- カレンダー月（例外処理）
+ENDIF.
+
+ENDFORM.                    " FRM_CHANGE_CLTOFI
+*---MODIFY END    2002/01/31 PSD.SAITOH (仕様変更部分)------------------
+
+*---APPEND START PSD T.SAITOH 2002/04/23 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_WAERS_FROM_BWKEY
+*&---------------------------------------------------------------------*
+*       プラントコードから会社コード経由で通貨コードを取得する
+*----------------------------------------------------------------------*
+*  -->  P_BWKEY   プラントコード
+*  <--  P_WAERS   通貨コード
+*----------------------------------------------------------------------*
+FORM FRM_GET_WAERS_FROM_BWKEY USING    P_BWKEY
+CHANGING P_WAERS.
+
+CALL FUNCTION 'Z_MGET_WAERS_FROM_BWKEY'
+EXPORTING
+L_BWKEY        = P_BWKEY
+IMPORTING
+L_WAERS        = P_WAERS
+EXCEPTIONS
+NO_EXIST       = 1
+OTHERS         = 2
+.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CURRENCY_AMOUNT
+*&---------------------------------------------------------------------*
+*       金額変換処理
+*----------------------------------------------------------------------*
+*      -->P_WAERS    通貨コード
+*      -->P_BEFORE   変換前金額
+*      <--P_AFTER    変換後金額
+*----------------------------------------------------------------------*
+FORM FRM_CURRENCY_AMOUNT             USING    P_WAERS
+P_BEFORE
+CHANGING P_AFTER.
+DATA L_IDOC_AMOUNT(255) TYPE C.
+*--- 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY    = P_WAERS
+SAP_AMOUNT  = P_BEFORE
+IMPORTING
+IDOC_AMOUNT = L_IDOC_AMOUNT
+EXCEPTIONS
+OTHERS      = 1.
+IF SY-SUBRC <> 1.
+P_AFTER = L_IDOC_AMOUNT.
+ENDIF.
+
+ENDFORM.                    " FRM_CURRENCY_AMOUNT
+*---APPEND END   PSD T.SAITOH 2002/04/23 ---------------------------*
+** Add 2003.03.22 >>>>>
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_02
+*&---------------------------------------------------------------------*
+*       テーブル読込条件２：伝票セグメント品目情報
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_02_A.
+
+REFRESH GT_MSEG.
+SELECT MBLNR MJAHR ZEILE BWART
+MATNR WERKS CHARG KUNNR
+SOBKZ SHKZG MENGE BUDAT
+INTO CORRESPONDING FIELDS OF TABLE GT_MSEG
+FROM  (G_GENTAB)
+WHERE MATNR = GF_MSKU-MATNR
+AND WERKS = GF_MSKU-WERKS
+AND CHARG = GF_MSKU-CHARG
+AND KUNNR = GF_MSKU-KUNNR
+AND SOBKZ = GF_MSKU-SOBKZ
+AND BWART IN ('631' , '632',
+'633' , '634') .
+* --- エラーチェック
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH CNS_MSEG.
+STOP.
+WHEN OTHERS.
+MESSAGE E603(Z1) WITH SY-REPID
+CNS_MSEG
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_02
+** Add 2003.03.22 <<<<<

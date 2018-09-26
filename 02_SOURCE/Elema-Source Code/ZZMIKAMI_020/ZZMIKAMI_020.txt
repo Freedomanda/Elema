@@ -1,0 +1,451 @@
+REPORT zzmikami_017 MESSAGE-ID  y1
+LINE-SIZE   170
+LINE-COUNT  58
+NO STANDARD PAGE HEADING.
+
+TABLES: bsik, bsak.
+
+TYPES:BEGIN OF typ_lfa1,
+lifnr    TYPE lfa1-lifnr,      "仕入先
+name1    TYPE lfa1-name1,      "名称1
+END   OF typ_lfa1.
+
+TYPES:BEGIN OF typ_bsik,
+bukrs    TYPE bsik-bukrs,      "会社コード
+lifnr    TYPE bsik-lifnr,      "仕入先
+hkont    TYPE bsik-hkont,      "勘定コード
+waers    TYPE bsik-waers,      "通貨コード
+gjahr    TYPE bsik-gjahr,      "年度
+belnr    TYPE bsik-belnr,      "伝票No.
+budat    TYPE bsik-budat,      "転記日付
+blart    TYPE bsik-blart,      "伝票タイプ
+shkzg    TYPE bsik-shkzg,      "貸借フラグ
+wrbtr    TYPE bsik-wrbtr,      "伝票通貨
+zfbdt    TYPE bsik-zfbdt,      "支払基準日
+END   OF typ_bsik.
+
+TYPES:BEGIN OF typ_out,
+bukrs    TYPE bsik-bukrs,      "会社コード
+lifnr    TYPE bsik-lifnr,      "仕入先
+hkont    TYPE bsik-hkont,      "勘定コード
+waers    TYPE bsik-waers,      "通貨コード
+gjahr    TYPE bsik-gjahr,      "年度
+belnr    TYPE bsik-belnr,      "伝票No.
+budat    TYPE bsik-budat,      "転記日付
+blart    TYPE bsik-blart,      "伝票タイプ
+wrbtr    TYPE bsik-wrbtr,      "伝票通貨
+END   OF typ_out.
+
+TYPES:BEGIN OF typ_file,
+bukrs(04)    TYPE c,      "会社コード
+lifnr(10)    TYPE c,      "仕入先
+hkont(10)    TYPE c,      "勘定コード
+waers(05)    TYPE c,      "通貨コード
+gjahr(04)    TYPE c,      "年度
+belnr(10)    TYPE c,      "伝票No.
+budat(10)    TYPE c,      "転記日付
+blart(02)    TYPE c,      "伝票タイプ
+wrbtr_c(20)  TYPE c,      "伝票通貨
+END   OF typ_file.
+
+DATA: gt_zf2030  TYPE TABLE OF zf2030.
+DATA: gt_out     TYPE TABLE OF typ_out.
+DATA: gt_lfa1    TYPE TABLE OF typ_lfa1.
+DATA: gt_bsik    TYPE TABLE OF typ_bsik.
+DATA: gt_bsik_1  TYPE TABLE OF typ_bsik.  "請求書照合の
+DATA: gt_bsik_2  TYPE TABLE OF typ_bsik.  "支払依頼の
+DATA: gt_bsik_3  TYPE TABLE OF typ_bsik.  "その他の
+DATA: gt_bsik_4  TYPE TABLE OF typ_bsik.  "未請求の
+DATA: gt_bsik_5  TYPE TABLE OF typ_bsik.  "未請求(部分)の
+
+DATA: gw_lfa1      TYPE typ_lfa1.
+
+DATA: gv_yyyymm(6) TYPE n.
+DATA: gv_crdat     TYPE sy-datum.
+DATA: gv_crtim     TYPE sy-uzeit.
+
+CONSTANTS: cns_tab TYPE x VALUE '09'.
+
+SELECT-OPTIONS: s_lifnr   FOR bsik-lifnr.  "仕入先
+PARAMETERS    : p_budat   TYPE bsik-budat.  "評価期間(from)
+PARAMETERS    : p_budat2  TYPE bsik-budat.  "評価期間(to)
+SELECT-OPTIONS: s_blart1  FOR bsik-blart.  "伝票タイプ(ERS)
+SELECT-OPTIONS: s_blart2  FOR bsik-blart.  "伝票タイプ(支払依頼)
+SELECT-OPTIONS: s_hkont   FOR bsik-hkont.  "買掛勘定
+PARAMETERS    : p_file    TYPE rlgrap-filename.
+
+INITIALIZATION.
+
+* タイムスタンプ
+gv_yyyymm = sy-datum(06).
+gv_crdat  = sy-datum.
+gv_crtim  = sy-uzeit.
+
+START-OF-SELECTION.
+
+PERFORM get_lifnr.
+
+LOOP AT gt_lfa1 INTO gw_lfa1.
+PERFORM edit_data.
+ENDLOOP.
+
+IF NOT gt_out[] IS INITIAL.
+PERFORM out_file.
+ENDIF.
+
+IF NOT gt_zf2030[] IS INITIAL.
+PERFORM ins_table.
+ENDIF.
+
+END-OF-SELECTION.
+
+TOP-OF-PAGE.
+
+*&---------------------------------------------------------------------*
+*&      Form  get_lifnr
+*&---------------------------------------------------------------------*
+*       対象仕入先コード、名称の一括取得
+*----------------------------------------------------------------------*
+FORM get_lifnr.
+
+SELECT lifnr name1 INTO TABLE gt_lfa1 FROM lfa1
+WHERE lifnr IN s_lifnr.
+
+IF sy-subrc <> 0.
+MESSAGE s400 WITH '対象となる仕入先が存在しません'.
+ENDIF.
+
+ENDFORM.                    " get_lifnr
+
+*&---------------------------------------------------------------------*
+*&      Form  edit_data
+*&---------------------------------------------------------------------*
+*       データ編集
+*----------------------------------------------------------------------*
+FORM edit_data.
+
+DATA: lw_bsik  TYPE typ_bsik.
+DATA: lv_waers TYPE waers.
+
+REFRESH: gt_bsik,
+gt_bsik_1,
+gt_bsik_2,
+gt_bsik_3,
+gt_bsik_4,
+gt_bsik_5.
+
+* 一括取得
+PERFORM get_data.
+
+SORT gt_bsik BY bukrs lifnr hkont waers.
+
+IF NOT gt_bsik[] IS INITIAL.
+*   振り分け
+LOOP AT gt_bsik INTO lw_bsik.
+PERFORM check_data USING lw_bsik.
+*     集計
+AT END OF waers.
+PERFORM calc_data USING lw_bsik.
+ENDAT.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " edit_data
+
+*&---------------------------------------------------------------------*
+*&      Form  get_data
+*&---------------------------------------------------------------------*
+*       処理対象データの一括取得
+*----------------------------------------------------------------------*
+FORM get_data.
+
+SELECT bukrs      "会社コード
+lifnr      "仕入先
+hkont      "勘定コード
+waers      "通貨コード
+gjahr      "年度
+belnr      "伝票No.
+budat      "転記日付
+blart      "伝票タイプ
+shkzg      "貸借フラグ
+wrbtr      "伝票通貨
+zfbdt      "支払基準日
+FROM bsik APPENDING TABLE gt_bsik
+WHERE bukrs = 'C001'
+AND lifnr =  gw_lfa1-lifnr
+AND budat <= p_budat2
+AND hkont IN s_hkont.
+
+SELECT bukrs      "会社コード
+lifnr      "仕入先
+hkont      "勘定コード
+waers      "通貨コード
+gjahr      "年度
+belnr      "伝票No.
+budat      "転記日付
+blart      "伝票タイプ
+shkzg      "貸借フラグ
+wrbtr      "伝票通貨
+zfbdt      "支払基準日
+FROM bsak APPENDING TABLE gt_bsik
+WHERE bukrs = 'C001'
+AND lifnr =  gw_lfa1-lifnr
+AND budat <= p_budat2
+AND hkont IN s_hkont.
+
+ENDFORM.                    " get_data
+*&---------------------------------------------------------------------*
+*&      Form  check_data
+*&---------------------------------------------------------------------*
+*       データの振り分け
+*----------------------------------------------------------------------*
+FORM check_data USING value(pw_bsik) TYPE typ_bsik.
+
+DATA: lw_bkpf     TYPE bkpf.
+DATA: lt_yk230    TYPE TABLE OF yk230.
+DATA: lw_yk230    TYPE yk230.
+DATA: lw_yk410    TYPE yk410.
+
+* Ｑ１.ERS伝票タイプの伝票が、本当にERSからのI/Fかチェック
+IF pw_bsik-blart IN s_blart1.
+SELECT * FROM bkpf INTO lw_bkpf UP TO 1 ROWS
+WHERE bukrs = 'C001'
+AND belnr = pw_bsik-belnr
+AND gjahr = pw_bsik-gjahr.
+ENDSELECT.
+
+* Ａ１.正ならⅠ扱い ⇒ チェック続行
+IF lw_bkpf-awtyp = 'RMRP'.
+APPEND pw_bsik TO gt_bsik_1.
+* 評価期間内に計上された伝票の場合。。。
+IF pw_bsik-budat >= p_budat.
+REFRESH :lt_yk230.
+SELECT * FROM yk230 INTO TABLE lt_yk230
+WHERE belnr = lw_bkpf-awkey(10).
+IF sy-subrc <> 0.
+APPEND pw_bsik TO gt_bsik_4.
+EXIT.
+ELSE.
+* 年度は考慮しなくてもOK？
+* 伝票単位で見た場合。。。
+* 全請求済(ほとんど)　 ⇒ 全部4
+* 全未請求(ある程度)　 ⇒ 全部4,5以外
+* 一部未請求(レア)     ⇒
+
+* 4のみなら請求済
+* 4,5,以外だけなら未請求Ⅳ
+* 1)   最初にloop <>4でチェック ⇒ subrc <> 0 で請求済ブレイク
+* 2)-1 次に  read = 4でチェック ⇒ subrc <> 0 で↓
+* 2)-2 次に  read = 5でチェック ⇒ subrc <> 0 で全未請求
+* 2)-3 金額には買掛明細のを採用
+* 3)↓のロジックに流す
+LOOP AT lt_yk230 INTO lw_yk230 WHERE kekkbn <> '4'.
+EXIT.
+ENDLOOP.
+*         ※全部4なら全請求済なので以降の処理はスキップ
+IF sy-subrc = 0.
+CLEAR: lw_yk230.
+*         ※4も含まれるか
+READ TABLE lt_yk230 INTO lw_yk230
+WITH KEY kekkbn = '4'.
+IF sy-subrc <> 0.
+*         ※5が含まれるか
+READ TABLE lt_yk230 INTO lw_yk230
+WITH KEY kekkbn = '5'.
+IF sy-subrc <> 0.
+*         ※4,5以外だけなら全未請求（区分Ⅳ）
+APPEND pw_bsik TO gt_bsik_4.
+EXIT.
+ENDIF.
+ENDIF.
+*         ※以降は区分Ⅴの集計
+CLEAR: pw_bsik-wrbtr.
+LOOP AT lt_yk230 INTO lw_yk230 WHERE kekkbn <> '4'.
+IF lw_yk230-kekkbn = '5'.
+pw_bsik-wrbtr = pw_bsik-wrbtr
++ ( lw_yk230-knetxamt
+- lw_yk230-pidamt
+- lw_yk230-pidtax ).
+ELSE.
+pw_bsik-wrbtr = pw_bsik-wrbtr + lw_yk230-knetxamt.
+ENDIF.
+ENDLOOP.
+APPEND pw_bsik TO gt_bsik_5.
+ENDIF.
+ENDIF.
+ENDIF.
+ELSE.
+* Ａ１.誤ならⅢ扱い ⇒ 終了
+APPEND pw_bsik TO gt_bsik_3.
+ENDIF.
+* Ｑ２.支払依頼伝票タイプの伝票が、本当に支払〆処理からのI/Fかチェック
+ELSEIF pw_bsik-blart IN s_blart2.
+SELECT * FROM yk410 INTO lw_yk410 UP TO 1 ROWS
+WHERE bukrs = 'C001'
+AND lifnr = pw_bsik-lifnr
+AND gjahr = pw_bsik-gjahr
+AND belnr = pw_bsik-belnr.
+ENDSELECT.
+IF sy-subrc = 0.
+APPEND pw_bsik TO gt_bsik_2.
+ELSE.
+APPEND pw_bsik TO gt_bsik_3.
+ENDIF.
+* ERS、支払依頼、何れでもないものはⅢ扱い ⇒ 終了
+ELSE.
+APPEND pw_bsik TO gt_bsik_3.
+ENDIF.
+
+ENDFORM.                    " check_data
+*&---------------------------------------------------------------------*
+*&      Form  CALC_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM calc_data USING value(pw_bsik) TYPE typ_bsik.
+
+DATA: lw_bsik    TYPE typ_bsik.
+DATA: lw_out     TYPE typ_out.
+DATA: lw_zf2030  TYPE zf2030.
+
+* 共通項目設定
+lw_zf2030-yyyymm = gv_yyyymm.
+lw_zf2030-crdat  = gv_crdat.
+lw_zf2030-crtim  = gv_crtim.
+
+* 現在キー共通設定
+lw_zf2030-bukrs  = pw_bsik-bukrs.
+lw_zf2030-lifnr  = pw_bsik-lifnr.
+lw_zf2030-hkont  = pw_bsik-hkont.
+lw_zf2030-waers  = pw_bsik-waers.
+
+CLEAR: lw_bsik.
+LOOP AT gt_bsik_1 INTO lw_bsik.
+PERFORM tasu_hiku USING lw_bsik
+CHANGING lw_zf2030-wrbtr1.
+ENDLOOP.
+
+CLEAR: lw_bsik.
+LOOP AT gt_bsik_2 INTO lw_bsik.
+PERFORM tasu_hiku USING lw_bsik
+CHANGING lw_zf2030-wrbtr2.
+ENDLOOP.
+
+CLEAR: lw_bsik.
+LOOP AT gt_bsik_3 INTO lw_bsik.
+PERFORM tasu_hiku USING lw_bsik
+CHANGING lw_zf2030-wrbtr3.
+
+CLEAR: lw_out.
+MOVE-CORRESPONDING lw_bsik TO lw_out.
+IF lw_bsik-shkzg = 'H'.
+lw_out-wrbtr = lw_out-wrbtr * -1.
+ENDIF.
+COLLECT lw_out INTO gt_out.
+ENDLOOP.
+
+CLEAR: lw_bsik.
+LOOP AT gt_bsik_4 INTO lw_bsik.
+PERFORM tasu_hiku USING lw_bsik
+CHANGING lw_zf2030-wrbtr4.
+ENDLOOP.
+
+CLEAR: lw_bsik.
+LOOP AT gt_bsik_5 INTO lw_bsik.
+PERFORM tasu_hiku USING lw_bsik
+CHANGING lw_zf2030-wrbtr5.
+ENDLOOP.
+
+lw_zf2030-wrbtr6 = lw_zf2030-wrbtr1 +
+lw_zf2030-wrbtr2 +
+lw_zf2030-wrbtr3 -
+lw_zf2030-wrbtr4 -
+lw_zf2030-wrbtr5.
+
+APPEND lw_zf2030 TO gt_zf2030.
+
+REFRESH: gt_bsik_1,
+gt_bsik_2,
+gt_bsik_3,
+gt_bsik_4,
+gt_bsik_5.
+
+ENDFORM.                    " CALC_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  tasu_hiku
+*&---------------------------------------------------------------------*
+*       貸借で足す引く
+*----------------------------------------------------------------------*
+FORM tasu_hiku USING value(pw_bsik)  TYPE typ_bsik
+CHANGING value(pv_wrbtr) TYPE zf2030-wrbtr1.
+DATA: lv_wrbtr TYPE bseg-wrbtr.
+
+IF pw_bsik-shkzg = 'H'.
+lv_wrbtr = pv_wrbtr - pw_bsik-wrbtr.
+ELSE.
+lv_wrbtr = pv_wrbtr + pw_bsik-wrbtr.
+ENDIF.
+
+pv_wrbtr = lv_wrbtr.
+
+ENDFORM.                    " tasu_hiku
+*&---------------------------------------------------------------------*
+*&      Form  ins_table
+*&---------------------------------------------------------------------*
+*       テーブル入力
+*----------------------------------------------------------------------*
+FORM ins_table.
+DATA: lw_zf2030 TYPE zf2030.
+* ここでDelete＆Insert
+
+DELETE FROM zf2030 WHERE bukrs  = 'C001'
+AND yyyymm = gv_yyyymm.
+
+INSERT zf2030 FROM TABLE gt_zf2030.
+
+IF sy-subrc <> 0.
+ROLLBACK WORK.
+MESSAGE s400 WITH '更新に失敗しました'.
+ELSE.
+COMMIT WORK.
+MESSAGE s400 WITH '正常に更新されました'.
+ENDIF.
+
+ENDFORM.                    " ins_table
+
+*&---------------------------------------------------------------------*
+*&      Form  out_file
+*&---------------------------------------------------------------------*
+*       ファイルの出力
+*----------------------------------------------------------------------*
+FORM out_file.
+
+DATA: lw_out       TYPE typ_out.
+DATA: lw_file      TYPE typ_file.
+
+DATA: lv_line(300) TYPE c.
+DATA: lv_wrbtr     TYPE bsik-wrbtr.
+
+DELETE gt_out WHERE wrbtr = lv_wrbtr .
+
+OPEN DATASET p_file FOR OUTPUT IN TEXT MODE.
+
+LOOP AT gt_out INTO lw_out.
+MOVE-CORRESPONDING lw_out TO lw_file.
+WRITE lw_out-wrbtr TO lw_file-wrbtr_c CURRENCY lw_out-waers.
+CONCATENATE lw_file-bukrs
+lw_file-lifnr
+lw_file-hkont
+lw_file-waers
+lw_file-gjahr
+lw_file-belnr
+lw_file-budat
+lw_file-wrbtr_c INTO lv_line SEPARATED BY cns_tab.
+
+TRANSFER lv_line TO p_file.
+ENDLOOP.
+
+CLOSE DATASET p_file.
+
+ENDFORM.                    " out_file

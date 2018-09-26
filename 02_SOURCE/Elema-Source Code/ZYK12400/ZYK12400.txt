@@ -1,0 +1,1449 @@
+REPORT YK012400 LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID Y1
+NO STANDARD PAGE HEADING .
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID： YK012400                                              *
+*    ﾌﾟﾛｸﾞﾗﾑ名： 請求データ取込                                        *
+*    処理種別 ： UL/更新(ABAP/4)                                       *
+*    処理概要 ： ローカル又はサーバよりファイルの入力                  *
+*                入力した内容を｢請求データ｣/｢請求合計データ｣に反映     *
+*                登録した請求データの一覧を出力                        *
+*                入力した請求データは確定された状態で保存              *
+*----------------------------------------------------------------------*
+* 作成日   ：2001/12/05
+* 作成者   ：舘林 裕香
+* 変更履歴 ：2002/02/14  取引先符号区分の判定方変更
+* 変更履歴 ：2002/03/04  選択画面調整
+* 変更履歴 ：2002/03/18  数値項目の受け取り方の変更
+* 変更履歴 ：2002.03.22A 入力番号取得／日付編集の修正      Inagoshi
+* 変更履歴 ：2002.04.09  入力ファイル削除処理の追加 KURANO Sadayuki
+* 変更履歴 ：2002.04.18A 注文番号の形式変更への対応        Inagoshi
+* 変更履歴 ：2002.04.22  仕入先コードの変換の修正          KURANO
+*                        処理件数の出力
+*                        通貨コードのチェックの追加
+* 変更履歴 ：2002.04.24A リスト内行数の修正                Inagoshi
+*                        通貨コードのチェックの修正
+* 変更履歴 ：2002/09/02  EDMMSの検索エラーの対応  TEPK900272
+* 変更履歴 ：2002/10/09  コック区分'J'のデータは対象外
+* 変更履歴 ：2002/10/23  訂正コードロジックの追加
+* 変更履歴 ：2002/11/07  訂正コードロジックの編集
+*&=====================================================================*
+* 変更履歴 ：2003/07/14  YK011400をコピーして作成          Abe
+*                       『確定フラグ』を初期値で更新するように変更
+*            2010/03/09  計上日付にて締め日を計算
+*            2012/08/14  ISID ES-UP
+************************************************************************
+*// データベース定義 //*
+TABLES     : YK210  ,            " 請求データ
+YK220  ,            " 請求合計データ
+YK250  ,            " プラント変換テーブル
+T001W  ,            " プラント/支店
+TCURC  ,            " 通貨コード
+LFM1   .            " 仕入先マスタ購買組織データ
+************************************************************************
+*// 内部テーブル定義 //*
+*- アップロードデータ格納用
+DATA : BEGIN OF ST_UPLOAD ,
+TEXT(1000)   TYPE C ,
+END   OF ST_UPLOAD .
+*- アップロードデータ振り分け用
+DATA : BEGIN OF ST_INTAB ,
+HATCOD(12)         TYPE  C ,            " 発注者cd
+JYUCOD(12)         TYPE  C ,            " 受注者cd
+HATBMN(8)          TYPE  C ,            " 発注部門cd
+CYUBAN(23)         TYPE  C ,            " 注文番号
+MEINS(3)           TYPE  C ,            " 単位
+HINMEI(30)         TYPE  C ,            " 品名
+JHINCD(25)         TYPE  C ,            " 受注者品名cd
+HHINCD(25)         TYPE  C ,            " 発注者品名cd
+SHUKKA_YYMMDD(8)   TYPE  C ,            " 出荷日
+TS_CD(1)           TYPE  C,             "訂正コード 10/23 ADD
+TFKBN(1)           TYPE  C ,            " 取引符号区分
+URIKAKE_SU(12)     TYPE  C ,            " 売掛数量
+URIKAKE_YYMMDD(8)  TYPE  C ,            " 売掛日
+KTUKA(3)           TYPE  C ,            " 通貨コード
+TANKA_GAI(16)      TYPE  C ,            " 単価
+*    SHOHIZEI_GAI(12)   TYPE  C ,            " 消費税額 03/18 MOD
+*    GOUKEI_GAI(12)     TYPE  C ,            " 合計額   03/18 MOD
+SHOHIZEI_GAI(15)   TYPE  C ,            " 消費税額  03/18 MOD
+GOUKEI_GAI(15)     TYPE  C ,            " 合計額    03/18 MOD
+*    gyo_su             type n,
+GYO_SU(7)          TYPE  P ,           " 行数  2002.04.24A MOD
+* Add 2010.03.09 >>>
+KEIGETSU(04)       TYPE C ,
+* Add 2010.03.09 <<<
+END   OF ST_INTAB .
+*- アップロードデータ格納用
+DATA : I_UPLOAD      LIKE TABLE OF ST_UPLOAD WITH HEADER LINE ,
+*- アップロードデータ振り分け用
+I_INTAB       LIKE TABLE OF ST_INTAB  WITH HEADER LINE .
+*- データ取得用
+DATA : BEGIN OF ST_YK210 .
+INCLUDE STRUCTURE ST_INTAB  .
+INCLUDE STRUCTURE YK210     .
+DATA : END   OF ST_YK210 .
+DATA : I_YK210       LIKE TABLE OF ST_YK210  WITH HEADER LINE ,
+*- YK220 更新用
+I_YK220       LIKE TABLE OF YK220     WITH HEADER LINE ,
+*- YK220 集計値格納用
+I_YK220_MOD   LIKE TABLE OF YK220     WITH HEADER LINE ,
+*- YK220 ロック用
+I_YK220_LOCK  LIKE TABLE OF YK220     WITH HEADER LINE .
+*- yk210 成功データ
+DATA : BEGIN OF ST_YK210_SUC ,
+BUKRS       LIKE YK210-BUKRS  ,    " 会社コード
+YKYEAR      LIKE YK210-YKYEAR ,    " 暦年
+BILDOC      LIKE YK210-BILDOC ,    " 入力番号
+JYUCOD(12)  TYPE C            ,    " 受注者コード
+CYUBAN(23)  TYPE C            ,    " 注文番号
+*       gyo_su      type n,
+GYO_SU(7)   TYPE P            ,    " 行数 2002.04.24A MOD
+STATUS(20)  TYPE C            ,    " ｴﾗｰｽﾃｰﾀｽ(エラーの場合)
+END   OF ST_YK210_SUC .
+DATA : I_YK210_SUC LIKE TABLE OF ST_YK210_SUC WITH HEADER LINE .
+*- エラーデータ
+DATA : I_YK210_ERR LIKE TABLE OF ST_YK210_SUC WITH HEADER LINE .
+************************************************************************
+*// 作業領域定義(ワーク変数、フラグ、カウンタ等) //*
+DATA : CT_INTAB     TYPE I             ,   " 内部テーブルの件数確認
+CT_YK220_INS TYPE I             ,   " YK220 の 登録件数確認
+CT_YK220_MOD TYPE I             ,   " YK220 の 更新件数確認
+CT_YK210_INS TYPE I             .   " YK210 の 登録件数確認
+DATA:  CT_COC       TYPE I             .   " 2002/10/23コックエラー
+DATA W_AMOUNT2 LIKE BAPICURR-BAPICURR.     "2002/03/18 ADD
+DATA W_NUMC(22) TYPE N.                    "2002/03/18 ADD
+CONSTANTS :
+C_STATUS_EDMMS(30) TYPE C VALUE 'EDMMS 検索エラー'  ,
+C_STATUS_MARA(30)  TYPE C VALUE 'MARA  検索エラー'  ,
+C_STATUS_T134G(30) TYPE C VALUE 'T134G 検索エラー'  ,
+C_STATUS_WYT3(30)  TYPE C VALUE 'WYT3  検索エラー'  ,
+C_STATUS_T001K(30) TYPE C VALUE 'T001K 検索エラー'  ,
+C_STATUS_UNIT(30)  TYPE C VALUE '単位変換エラー'    ,
+*    c_status_datum(30) type c value '締日取得エラー'    ,
+C_STATUS_CLAIM(30) TYPE C VALUE '請求日エラー'      ,
+*    c_status_shipm(30) type c value '出荷日エラー'      .
+C_STATUS_WAERS(30) TYPE C VALUE '通貨エラー'        . "2002.04.22
+* Add ES-UP 2012/08/14 -->
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/08/14 <--
+************************************************************************
+*選択画面定義
+*- ブランク行
+* SELECTION-SCREEN SKIP 1 .
+*-- 入力ファイル名
+PARAMETERS     : P_FILE(128)  TYPE  C  .
+*- ブランク行
+* SELECTION-SCREEN SKIP 1 .
+*-- 入力元
+* SELECTION-SCREEN BEGIN OF BLOCK SEL WITH FRAME TITLE TEXT-F01 .
+*---- サーバ
+*   SELECTION-SCREEN BEGIN OF LINE .
+PARAMETERS : P_SEL1  RADIOBUTTON GROUP SEL DEFAULT 'X'.
+*     SELECTION-SCREEN COMMENT 08(10) TEXT-F02 FOR FIELD P_SEL1 .
+*   SELECTION-SCREEN END   OF LINE .
+*---- ローカル
+*   SELECTION-SCREEN BEGIN OF LINE .
+PARAMETERS : P_SEL2  RADIOBUTTON GROUP SEL .
+PARAMETERS : P_OPNERR LIKE SY-MSGTY DEFAULT 'W'.
+PARAMETERS : P_DEL AS CHECKBOX DEFAULT 'X'.
+PARAMETERS : P_DELERR LIKE SY-MSGTY DEFAULT 'E'.
+*     SELECTION-SCREEN COMMENT 25(10) TEXT-F03 FOR FIELD P_SEL2 .
+*   SELECTION-SCREEN END   OF LINE .
+* SELECTION-SCREEN END   OF BLOCK SEL .
+*- ブランク行
+* SELECTION-SCREEN SKIP 2 .
+*- 会社コード
+PARAMETERS : P_BUKRS  LIKE YK210-BUKRS MEMORY ID BUK ,
+*- 暦年
+P_YKYEAR LIKE SY-DATUM(4) DEFAULT   SY-DATUM .
+*{   INSERT         TEPK900272                                        2
+*- 購買組織
+PARAMETERS   P_EKORG  LIKE YK210-EKORG MEMORY ID EKO.
+*- プラント
+PARAMETERS   P_WERKS  LIKE YK210-WERKS DEFAULT 'PS00'.
+*- 事業領域
+PARAMETERS   P_GSBER  LIKE YK210-GSBER DEFAULT 'B000'.
+*}   INSERT
+************************************************************************
+AT SELECTION-SCREEN .
+*- サーバより実行の場合
+IF P_SEL1 = 'X' AND P_FILE = SPACE .
+MESSAGE E637 .
+ENDIF .
+************************************************************************
+START-OF-SELECTION .
+*- ファイルの読み込み処理
+PERFORM FRM_FILE_UPLOAD .
+*- データの取得
+PERFORM FRM_GET_DATA .
+*- 請求データの集計
+PERFORM FRM_DATA_TOTAL .
+*- テーブルロック
+PERFORM FRM_ENQUEUE_YK210 .
+*- テーブル更新
+PERFORM FRM_INSERT_TABLE .
+*- 結果出力
+PERFORM FRM_PRINT_OUT .
+* print off .
+*- commit work
+COMMIT WORK .
+*- テーブルロック解除
+PERFORM FRM_DEQUEUE_YK210 .
+*- 入力ファイル削除
+PERFORM FRM_FILE_DEL. "<-暫定コメントアウト 2002.04.24A ###戻すこと !
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_file_upload
+*&---------------------------------------------------------------------*
+*       ファイルの読み込み処理
+*----------------------------------------------------------------------*
+FORM FRM_FILE_UPLOAD.
+
+*- サーバからのUL
+IF     P_SEL1 = 'X'   AND P_SEL2 = SPACE .
+PERFORM FRM_UPLOAD_SERVER .
+*- ローカルからのUL
+ELSEIF P_SEL1 = SPACE AND P_SEL2 = 'X'  .
+PERFORM FRM_UPLOAD_LOCAL .
+ENDIF .
+
+ENDFORM.                    " frm_file_upload
+*&---------------------------------------------------------------------*
+*&      Form  frm_upload_local
+*&---------------------------------------------------------------------*
+*       ローカルからのUL
+*----------------------------------------------------------------------*
+FORM FRM_UPLOAD_LOCAL .
+* Mod ES-UP 2012/08/14 -->
+*  call function 'UPLOAD'
+*       exporting
+*            filename                = p_file
+*            filetype                = 'ASC'
+*            silent                  = 'S'
+*       tables
+*            data_tab                = i_upload
+*       exceptions
+*            conversion_error        = 1
+*            invalid_table_width     = 2
+*            invalid_type            = 3
+*            no_batch                = 4
+*            unknown_error           = 5
+*            others                  = 6 .
+DATA: L_FILENAME TYPE STRING,
+L_RC TYPE I,
+I_FILE_TABLE TYPE FILETABLE,
+L_FILE_TABLE TYPE REF TO FILE_TABLE,
+L_CODEPAGE TYPE ABAP_ENCODING,
+L_DEFNAME  TYPE STRING,
+l_INITIAL_DIRECTORY type string.
+perform split_file using P_FILE
+l_INITIAL_DIRECTORY
+L_DEFNAME.
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+*      WINDOW_TITLE            = WINDOW_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+DEFAULT_FILENAME        = L_DEFNAME
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+INITIAL_DIRECTORY       = l_INITIAL_DIRECTORY
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = I_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 5 ).
+IF SY-SUBRC = 0.
+READ TABLE I_FILE_TABLE REFERENCE INTO L_FILE_TABLE INDEX 1.
+IF SY-SUBRC = 0.
+L_FILENAME = L_FILE_TABLE->FILENAME.
+*--- シフトJISのコードページを取得
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILENAME
+FILETYPE                = 'ASC'
+*        HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*        HEADER_LENGTH           = 0
+*        READ_BY_LINE            = 'X'
+*        DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+*        IGNORE_CERR             = ABAP_FALSE
+*        REPLACEMENT             = '#'
+*        VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*      IMPORTING
+*        FILELENGTH              = FILELENGTH
+*        HEADER                  = HEADER
+CHANGING
+DATA_TAB                = I_UPLOAD[]
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+ENDIF.
+ENDIF.
+* Mod ES-UP 2012/08/14 <--
+*- エラー確認
+IF SY-SUBRC <> 0 .
+MESSAGE S638 .
+STOP .
+ENDIF .
+* データ件数チェック
+DESCRIBE TABLE I_UPLOAD LINES CT_INTAB .
+IF CT_INTAB = 0 .
+MESSAGE S639 .
+STOP .
+ELSE  .
+MESSAGE I402 WITH CT_INTAB '件入力しました' P_FILE . "2002.04.22 ADD
+PERFORM FRM_MAKE_TABLE . "アップロードデータ作成
+ENDIF .
+
+ENDFORM.                    " frm_upload_local
+* Add ES-UP 2012/11/01 -->
+form split_file using p_full type clike
+p_path type string
+p_name type string.
+data: l_delimiter type c length 1,
+l_split     type ref to string,
+i_split     type standard table of string,
+l_tabix     type i.
+*
+clear: p_path, p_name.
+cl_gui_frontend_services=>get_file_separator(
+changing file_separator    = l_delimiter ).
+split p_full at l_delimiter into table i_split.
+l_tabix = lines( i_split ).
+if l_tabix = 0.
+return.
+endif.
+read table i_split into p_name index l_tabix.
+delete i_split index l_tabix.
+concatenate lines of i_split into p_path separated by l_delimiter.
+endform.
+* Add ES-UP 2012/11/01 <--
+*&---------------------------------------------------------------------*
+*&      Form  frm_upload_server
+*&---------------------------------------------------------------------*
+*       サーバからのUL
+*----------------------------------------------------------------------*
+FORM FRM_UPLOAD_SERVER .
+* Mod ES-UP 2012/08/14 -->
+*  open dataset p_file for input in text mode .
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+OPEN DATASET P_FILE FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/08/14 <--
+IF SY-SUBRC <> 0 .
+MESSAGE ID 'Y1' TYPE P_OPNERR NUMBER '640'.
+STOP .
+ENDIF .
+
+DO .
+CLEAR I_UPLOAD .
+READ DATASET P_FILE INTO I_UPLOAD .
+IF SY-SUBRC = 0 .
+APPEND I_UPLOAD .                "テーブルに格納
+ELSE .
+EXIT .
+ENDIF .
+ENDDO .
+
+CLOSE DATASET P_FILE .
+
+* データ件数チェック
+DESCRIBE TABLE I_UPLOAD LINES CT_INTAB .
+IF CT_INTAB = 0.
+MESSAGE S638 .
+STOP .
+ELSE .
+MESSAGE I402 WITH CT_INTAB '件入力しました' P_FILE . "2002.04.22 ADD
+PERFORM FRM_MAKE_TABLE . "アップロードデータ作成
+ENDIF.
+
+ENDFORM.                    " frm_upload_server
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_data
+*&---------------------------------------------------------------------*
+*       データの取得
+*----------------------------------------------------------------------*
+*  アップロードデータを i_yk210 & i_yk220 へ 振り分ける
+*----------------------------------------------------------------------*
+FORM FRM_GET_DATA.
+*-  ローカル変数
+DATA W_LIFNR LIKE YK210-LIFNR . "2002.04.22 ADD
+
+LOOP AT I_INTAB .
+*- アップロードデータ→内部tab
+MOVE-CORRESPONDING I_INTAB TO I_YK210 .
+*- 仕入先コード
+W_LIFNR = I_INTAB-JYUCOD+0(10) . "2002.04.22 ADD
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+*       input  = i_intab-jyucod 2002/04/12 MOD
+INPUT  = W_LIFNR
+IMPORTING
+OUTPUT = I_YK210-LIFNR.
+*- 単位変換
+*-- 仕様上 削除
+* 2002/03/23 復活
+PERFORM FRM_UNIT_CONVERSION CHANGING I_YK210-KNUNIT .
+**- 数量/単価/金額項目の編集　2002.04.24A 下に移動
+*    perform frm_edit_item .
+*- 購買組織とプラントに対するEDIパートナーの割当 を取得
+PERFORM FRM_GET_EDMMS .
+*- 締日の編集
+PERFORM FRM_EDIT_DATUM .
+*- 事業領域 を取得
+PERFORM FRM_GET_T134G .
+*- 請求先 を取得
+PERFORM FRM_GET_WYT3 .
+*- 会社コード を取得
+PERFORM FRM_GET_T001K .
+*- 数量/単価/金額項目の編集  2002.04.24A ここに移動
+PERFORM FRM_EDIT_ITEM .
+*- 入力番号の取得
+PERFORM FRM_GET_NUMBER .
+*- エラー用内部tab に 会社cd/暦年/入力番号 を格納
+PERFORM FRM_MODIFY_ERRTAB .
+*- 日付チェック
+PERFORM FRM_CHEACK_DATUM .
+*- 取引プラントの取得
+PERFORM FRM_GET_YK250 .
+*-  その他 < upload data → i_yk210 >
+*    i_yk210-ykyear   =  i_yk210-zfbdt(4) .   " 暦年 DEL 2002.03.22A
+I_YK210-PRCFLG   =  '1'                    .   " 入力区分
+* 2003/07/14 MOD-S:初期値で更新
+*    i_yk210-fixflg   =  'X'                    .   " 確定フラグ
+I_YK210-FIXFLG   =  ' '                    .   " 確定フラグ
+* 2003/07/14 MOD-E
+**------------------ MOD 2002.04.18a (start)
+*    i_yk210-ebeln    =  i_intab-cyuban(10)  . " 購買伝票
+*    i_yk210-ebelp    =  i_intab-cyuban+10(5). " 購買伝票明細
+I_YK210-EBELN    =  I_INTAB-CYUBAN+3(10).  " 購買伝票
+CONCATENATE '000' I_INTAB-CYUBAN+14(1) '0'
+INTO I_YK210-EBELP .                " 購買伝票明細
+**------------------ MOD 2002.04.18a (end)
+I_YK210-MAKTX    =  I_INTAB-HINMEI         .   " 品目テキスト
+I_YK210-MATNR    =  I_INTAB-HHINCD         .   " 発注者品目コード
+"品目コードが発注者と受注者が逆になっていたので、修正　2002.03.22A
+I_YK210-IDNLF    =  I_INTAB-JHINCD         .   " 受注者品目コード
+I_YK210-KNITXAMT =                             " 税抜 =
+I_YK210-KNETXAMT - I_YK210-KNTAXAMT .   "    税込 - 消費税
+I_YK210-WAERS    =  I_INTAB-KTUKA          .   " 通貨コード
+*- i_yk210 → i_yk220
+MOVE-CORRESPONDING I_YK210 TO I_YK220 .
+APPEND : I_YK210 , I_YK220 .
+CLEAR  : I_YK210 , I_YK220 , I_INTAB .
+ENDLOOP .
+
+ENDFORM.                    " frm_get_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_unit_conversion
+*&---------------------------------------------------------------------*
+*       単位変換
+*----------------------------------------------------------------------*
+FORM FRM_UNIT_CONVERSION CHANGING P_IM_CODE .
+
+CALL FUNCTION 'UNIT_OF_MEASURE_ISO_TO_SAP'
+EXPORTING
+ISO_CODE  = I_INTAB-MEINS
+IMPORTING
+SAP_CODE  = P_IM_CODE
+EXCEPTIONS
+NOT_FOUND = 1
+OTHERS    = 2.
+IF SY-SUBRC <> 0 .
+*{   REPLACE        TEPK900272                                        2
+*\    p_im_code = i_intab-meins .
+CLEAR P_IM_CODE . "変換できない場合は空白
+*}   REPLACE
+MOVE-CORRESPONDING I_INTAB TO I_YK210_ERR .
+I_YK210_ERR-STATUS = C_STATUS_UNIT  .
+APPEND I_YK210_ERR .
+CLEAR  I_YK210_ERR .
+*{   INSERT         TEPK900272                                        1
+*
+
+*}   INSERT
+ENDIF .
+
+ENDFORM.                    " frm_unit_conversion
+*&---------------------------------------------------------------------*
+*&      Form  frm_edit_item
+*&---------------------------------------------------------------------*
+*       数量/単価/金額項目の編集
+*----------------------------------------------------------------------*
+FORM FRM_EDIT_ITEM .
+*2002/03/18 MOD START
+**- 数量
+**-- 売掛数量 <i_intab-urikake_su>
+*  IF I_INTAB-URIKAKE_SU <> SPACE .
+*    PERFORM FRM_EDIT_SURYO .
+*  ENDIF .
+**- 単価
+**-- 単価(外貨) <i_intab-tanka_gai>
+*  IF I_INTAB-TANKA_GAI <> SPACE .
+*    PERFORM FRM_EDIT_TANKA .
+*  ENDIF .
+**- 金額項目
+*  PERFORM FRM_EDIT_KINGAKU .
+DATA: W_DECMLS  LIKE TCURX-CURRDEC,     " 小数桁数
+W_DECS(2)    TYPE P.              " 〃　　　computational
+DATA: ERR-FLG  TYPE P.
+*- 数量
+PERFORM EDIT_KINGAKU USING  I_INTAB-URIKAKE_SU 3.
+I_YK210-KNQUAN = W_AMOUNT2.
+PERFORM CHK_MAINA USING I_YK210-KNQUAN.        "2002/10/23 ADD
+*  通貨コードのチェック
+CLEAR: ERR-FLG.
+I_YK210-WAERS    =  I_INTAB-KTUKA          .   " 通貨コード
+SELECT SINGLE * FROM  TCURC      " 2002.04.22 ADD
+WHERE  WAERS  = I_YK210-WAERS .
+IF SY-SUBRC = 0.
+SELECT SINGLE * FROM  LFM1       " 2002.04.24A ADD
+WHERE  LIFNR = I_YK210-LIFNR
+AND  EKORG = I_YK210-EKORG.
+IF LFM1-WAERS NE I_YK210-WAERS.
+ERR-FLG = 1.
+ENDIF.
+ELSE.
+ERR-FLG = 1.
+ENDIF.
+IF  ERR-FLG = 1.
+MOVE-CORRESPONDING I_INTAB TO I_YK210_ERR .
+I_YK210_ERR-STATUS = C_STATUS_WAERS .
+APPEND I_YK210_ERR .
+CLEAR  I_YK210_ERR .
+ENDIF.
+*  単価，金額の単位換算
+CLEAR: W_DECMLS.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+I_CURRENCY         = I_YK210-WAERS  " 通貨コード
+IMPORTING
+E_DECIMALS         = W_DECMLS       " 金額換算用指数
+EXCEPTIONS
+I_CURRENCY_INITIAL = 1.
+MOVE W_DECMLS TO W_DECS.    " to computatinal form
+W_DECS = W_DECS - 2.
+*  単価
+PERFORM EDIT_KINGAKU USING I_INTAB-TANKA_GAI 5.
+I_YK210-KNUNTPRC = W_AMOUNT2.
+*  金額
+PERFORM EDIT_KINGAKU USING I_INTAB-SHOHIZEI_GAI 3.
+I_YK210-KNTAXAMT = W_AMOUNT2.
+I_YK210-KNTAXAMT = I_YK210-KNTAXAMT * ( 10 ** W_DECS ).
+*2002/10/23 MOD START
+*   if i_intab-tfkbn  = '2'.
+*       i_yk210-kntaxamt = i_yk210-kntaxamt * ( -1 ).
+*   endif.
+PERFORM CHK_MAINA USING I_YK210-KNTAXAMT.
+*2002/10/23 MOD END
+PERFORM EDIT_KINGAKU USING I_INTAB-GOUKEI_GAI 3.
+I_YK210-KNETXAMT = W_AMOUNT2.
+I_YK210-KNETXAMT = I_YK210-KNETXAMT * ( 10 ** W_DECS ).
+*2002/10/23 MOD START
+*   if i_intab-tfkbn  = '2'.
+*       i_yk210-knetxamt = i_yk210-knetxamt * ( -1 ).
+*   endif.
+PERFORM CHK_MAINA USING I_YK210-KNETXAMT.
+*2002/10/23 MOD END
+*2002/03/18 MOD END
+ENDFORM.                    " frm_edit_item
+*&---------------------------------------------------------------------*
+*&      Form  frm_edit_datum
+*&---------------------------------------------------------------------*
+*       締日の編集
+*----------------------------------------------------------------------*
+FORM FRM_EDIT_DATUM .
+
+DATA : W_DAY     LIKE  SY-DATUM   .    " 請求日
+* Mod 2010.03.09 >>>
+*- 請求日
+*  w_day  = i_intab-urikake_yymmdd  .
+IF I_INTAB-KEIGETSU CN '0123456789'.
+MOVE I_INTAB-URIKAKE_YYMMDD TO W_DAY .
+ELSE.
+CONCATENATE '20' I_INTAB-KEIGETSU '01' INTO W_DAY.
+ENDIF.
+* Mod 2010.03.09 <<<
+
+
+
+*{   INSERT         TEPK900272                                        1
+* アレフ用暫定処置
+IF W_DAY = 0 OR W_DAY = SPACE.
+IF SY-DATUM+6(2) < 20. "1～19日は前月末
+W_DAY = SY-DATUM.
+W_DAY+6(2) = 01. "当月月初
+W_DAY = W_DAY - 1. "前月末
+ELSE. "20～末日は当月末
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN            = SY-DATUM
+IMPORTING
+LAST_DAY_OF_MONTH = W_DAY
+EXCEPTIONS
+DAY_IN_NO_DATE    = 1
+OTHERS            = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+ENDIF.
+ENDIF.
+*}   INSERT
+
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+I_CORD         = I_YK210-LIFNR              " 仕入先cd
+I_EKORG        = I_YK210-EKORG              " 購買組織
+I_DAY          = W_DAY                      " 請求日
+IMPORTING
+E_ZFBDT        = I_YK210-ZFBDT              " 締日
+EXCEPTIONS
+NO_GET_T052    = 1
+NO_GOOD_GETDAY = 2
+NO_GET_ZTERM   = 3
+OTHERS         = 4.
+IF SY-SUBRC <> 0 .
+I_YK210-YKYEAR = P_YKYEAR .
+MOVE-CORRESPONDING I_INTAB TO I_YK210_ERR .
+I_YK210_ERR-STATUS = C_STATUS_CLAIM .
+APPEND I_YK210_ERR .
+CLEAR  I_YK210_ERR .
+ELSE.
+I_YK210-YKYEAR   =  I_YK210-ZFBDT(4) .   "ADD 2002.03.22A
+ENDIF .
+
+ENDFORM.                    " frm_edit_datum
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_edmms
+*&---------------------------------------------------------------------*
+*       購買組織とプラントに対するEDIパートナーの割当 を取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_EDMMS.
+DATA : W_KUNAG  LIKE EDMMS-KUNAG , " 受注先
+W_KUNWE  LIKE EDMMS-KUNWE . " 受注先
+DATA  W_WERKS LIKE YK210-WERKS.
+*
+W_KUNAG = I_INTAB-HATCOD .   " 発注者cd
+W_KUNWE = I_INTAB-HATBMN .   " 発注部門cd
+
+SELECT SINGLE EKORG EKGRP WERKS
+INTO (I_YK210-EKORG,I_YK210-EKGRP,I_YK210-WERKS)
+FROM EDMMS
+WHERE LIFNR = I_YK210-LIFNR
+AND KUNAG = W_KUNAG
+AND KUNWE = W_KUNWE        .
+IF SY-SUBRC <> 0 .
+*{   REPLACE        TEPK900272                                        1
+*\    move-corresponding i_intab to i_yk210_err .
+*\    i_yk210_err-status = c_status_edmms .
+*\    append i_yk210_err .
+*\    clear  i_yk210_err .
+I_YK210-EKORG = P_EKORG .
+*}   REPLACE
+ENDIF .
+* プラントの取得は注文番号の頭２桁を優先 2002.04.18a
+CONCATENATE 'P' I_INTAB-CYUBAN+0(2) '0' INTO W_WERKS .
+SELECT SINGLE * FROM T001W   "プラント/支店テーブル
+WHERE WERKS = W_WERKS.
+IF SY-SUBRC = 0.
+MOVE W_WERKS TO I_YK210-WERKS.  "プラント
+ENDIF.
+*{   INSERT         TEPK900272                                        2
+* プラントが無い場合は選択画面の入力値を使用する
+IF I_YK210-WERKS IS INITIAL.
+I_YK210-WERKS = P_WERKS.
+ENDIF.
+*}   INSERT
+ENDFORM.                    " frm_get_edmms
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_t134g
+*&---------------------------------------------------------------------*
+*       事業領域 を取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_T134G .
+
+DATA : W_SPART LIKE MARA-SPART .
+
+SELECT SINGLE SPART
+INTO W_SPART
+FROM MARA
+WHERE MATNR = I_INTAB-HHINCD .
+IF SY-SUBRC <> 0 .
+MOVE-CORRESPONDING I_INTAB TO I_YK210_ERR .
+I_YK210_ERR-STATUS = C_STATUS_MARA .
+APPEND I_YK210_ERR .
+CLEAR  I_YK210_ERR .
+ENDIF .
+
+SELECT SINGLE GSBER
+INTO I_YK210-GSBER
+FROM T134G
+WHERE SPART = W_SPART
+AND WERKS = I_YK210-WERKS .
+IF SY-SUBRC <> 0 .
+MOVE-CORRESPONDING I_INTAB TO I_YK210_ERR .
+I_YK210_ERR-STATUS = C_STATUS_T134G .
+APPEND I_YK210_ERR .
+CLEAR  I_YK210_ERR .
+*{   INSERT         TEPK900272                                        1
+* プラントから事業領域を取得できない場合は選択画面の入力値を使用
+I_YK210-GSBER = P_GSBER.
+*}   INSERT
+ENDIF .
+
+ENDFORM.                    " frm_get_t134g
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_wyt3
+*&---------------------------------------------------------------------*
+*       請求先 を取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_WYT3.
+
+DATA : W_JYUCOD  LIKE YK210-LIFNR ,
+W_LIFNR   LIKE YK210-LIFNR .
+
+*- 25桁→10桁
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+EXPORTING
+INPUT  = I_INTAB-JYUCOD
+IMPORTING
+OUTPUT = W_JYUCOD.
+*- 前ゼロ挿入
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = W_JYUCOD
+IMPORTING
+OUTPUT = W_LIFNR.
+IF SY-SUBRC = 0 .
+ENDIF .
+*- データ取得
+SELECT SINGLE LIFN2
+INTO I_YK210-LIFN2
+FROM WYT3
+WHERE LIFNR = W_LIFNR
+AND EKORG = I_YK210-EKORG
+AND PARVW = 'Y2' .
+IF SY-SUBRC <> 0 .
+MOVE-CORRESPONDING I_INTAB TO I_YK210_ERR .
+I_YK210_ERR-STATUS = C_STATUS_WYT3  .
+APPEND I_YK210_ERR .
+CLEAR  I_YK210_ERR .
+ENDIF .
+
+ENDFORM.                    " frm_get_wyt3
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_t001k
+*&---------------------------------------------------------------------*
+*       会社コード を取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_T001K.
+
+SELECT SINGLE BUKRS
+INTO I_YK210-BUKRS
+FROM T001K
+WHERE BWKEY = I_YK210-WERKS .
+IF SY-SUBRC <> 0 .
+I_YK210-BUKRS = P_BUKRS .
+MOVE-CORRESPONDING I_INTAB TO I_YK210_ERR .
+I_YK210_ERR-STATUS = C_STATUS_T001K .
+APPEND I_YK210_ERR .
+CLEAR  I_YK210_ERR .
+ENDIF .
+
+ENDFORM.                    " frm_get_t001k
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_number
+*&---------------------------------------------------------------------*
+*       入力番号の取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_NUMBER.
+
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+NR_RANGE_NR             = '10'
+OBJECT                  = 'YKBILDOC'
+QUANTITY                = '1'
+*     subobject               = 'C001' "DEL 2002.03.22A
+SUBOBJECT               = I_YK210-BUKRS   "ADD 2002.03.22A
+*     toyear                  = '2001' "DEL 2002.03.22A
+TOYEAR                  = I_YK210-YKYEAR  "ADD 2002.03.22A
+IMPORTING
+NUMBER                  = I_YK210-BILDOC
+EXCEPTIONS
+INTERVAL_NOT_FOUND      = 1
+NUMBER_RANGE_NOT_INTERN = 2
+OBJECT_NOT_FOUND        = 3
+QUANTITY_IS_0           = 4
+QUANTITY_IS_NOT_1       = 5
+INTERVAL_OVERFLOW       = 6
+OTHERS                  = 7.
+
+IF SY-SUBRC <> 0 .
+MESSAGE S641 .
+STOP .
+ENDIF.
+
+ENDFORM.                    " frm_get_number
+*&---------------------------------------------------------------------*
+*&      Form  frm_data_total
+*&---------------------------------------------------------------------*
+*       請求データの集計
+*----------------------------------------------------------------------*
+FORM FRM_DATA_TOTAL.
+
+DATA : W_KNITXAMT   LIKE  YK220-KNITXAMT ,
+W_KNTAXAMT   LIKE  YK220-KNTAXAMT ,
+W_KNETXAMT   LIKE  YK220-KNETXAMT .
+DATA : I_L_YK220    LIKE TABLE OF YK220 WITH HEADER LINE .
+*- sort
+SORT I_YK220
+BY BUKRS YKYEAR LIFNR LIFN2 WERKS EKORG EKGRP GSBER ZFBDT .
+*- 請求合計データ｢YK220｣をキー項目ごとに集計
+LOOP AT I_YK220 .
+W_KNITXAMT = I_YK220-KNITXAMT + W_KNITXAMT .
+W_KNTAXAMT = I_YK220-KNTAXAMT + W_KNTAXAMT .
+W_KNETXAMT = I_YK220-KNETXAMT + W_KNETXAMT .
+*-- 文字化け防止
+MOVE-CORRESPONDING I_YK220 TO I_L_YK220 .
+AT END OF ZFBDT .
+MOVE-CORRESPONDING I_L_YK220 TO I_YK220_MOD .
+I_YK220_MOD-KNITXAMT = W_KNITXAMT .
+I_YK220_MOD-KNTAXAMT = W_KNTAXAMT .
+I_YK220_MOD-KNETXAMT = W_KNETXAMT .
+APPEND I_YK220_MOD .
+CLEAR  I_YK220_MOD .
+*{   INSERT         TEPK900272                                        1
+CLEAR: W_KNITXAMT, W_KNTAXAMT, W_KNETXAMT.
+*}   INSERT
+ENDAT .
+ENDLOOP .
+
+ENDFORM.                    " frm_data_total
+*&---------------------------------------------------------------------*
+*&      Form  frm_enqueue_yk210
+*&---------------------------------------------------------------------*
+*       テーブルロック
+*----------------------------------------------------------------------*
+FORM FRM_ENQUEUE_YK210.
+
+DATA : W_MSGV1 LIKE SY-MSGV1 .   " ロックしてるユーザ取得用
+
+LOOP AT I_YK220_MOD .
+*-- 暦年の設定
+*    i_yk220_mod-ykyear = i_yk220_mod-zfbdt+0(4) . "DEL 2002.03.22A
+*-- yk220 の 存在チェック
+SELECT SINGLE * FROM YK220
+WHERE BUKRS  = I_YK220_MOD-BUKRS   " 会社コード
+AND YKYEAR = I_YK220_MOD-YKYEAR  " 暦年
+AND LIFNR  = I_YK220_MOD-LIFNR   " 仕入先
+AND LIFN2  = I_YK220_MOD-LIFN2   " 請求先
+AND WERKS  = I_YK220_MOD-WERKS   " プラント
+AND EKORG  = I_YK220_MOD-EKORG   " 購買組織
+AND EKGRP  = I_YK220_MOD-EKGRP   " 購買グループ
+AND GSBER  = I_YK220_MOD-GSBER   " 事業領域
+AND ZFBDT  = I_YK220_MOD-ZFBDT . " 締日
+IF SY-SUBRC = 0 .
+MOVE-CORRESPONDING I_YK220_MOD TO I_YK220_LOCK .
+APPEND I_YK220_LOCK .
+CLEAR  I_YK220_LOCK .
+ENDIF .
+ENDLOOP .
+*-- yk220 の ロック
+LOOP AT I_YK220_LOCK .
+CALL FUNCTION 'ENQUEUE_EY_YK220'
+EXPORTING
+MODE_YK220     = 'E'
+MANDT          = SY-MANDT
+BUKRS          = I_YK220_LOCK-BUKRS
+YKYEAR         = I_YK220_LOCK-YKYEAR
+LIFNR          = I_YK220_LOCK-LIFNR
+LIFN2          = I_YK220_LOCK-LIFN2
+WERKS          = I_YK220_LOCK-WERKS
+EKORG          = I_YK220_LOCK-EKORG
+EKGRP          = I_YK220_LOCK-EKGRP
+GSBER          = I_YK220_LOCK-GSBER
+ZFBDT          = I_YK220_LOCK-ZFBDT
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+IF SY-SUBRC <> 0 .
+W_MSGV1 = SY-MSGV1 .
+MESSAGE S642 WITH W_MSGV1 .
+STOP .
+ENDIF .
+ENDLOOP .
+
+ENDFORM.                    " frm_enqueue_yk210
+*&---------------------------------------------------------------------*
+*&      Form  frm_currency_edit
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_CURRENCY_EDIT USING    P_KTUKA              " 通貨cd
+P_AFTER              " 額
+CHANGING P_KINGAKU .
+
+DATA : W_DECIMALS    LIKE TCURX-CURRDEC  ,         " 小数点以下桁数
+W_CURRENCY    LIKE TCURX-CURRKEY  ,         " 通貨コード
+W_MAINASU(3)  TYPE P              ,         " 取得項目 － ２
+W_KEISAN      LIKE YK210-KNETXAMT .         " 取得項目 － ２
+
+*- 汎用モジュール用に通貨cdの置き換え
+W_CURRENCY = P_KTUKA .
+
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+I_CURRENCY         = W_CURRENCY
+IMPORTING
+E_DECIMALS         = W_DECIMALS
+EXCEPTIONS
+I_CURRENCY_INITIAL = 1
+OTHERS             = 2.
+
+IF SY-SUBRC <> 0.
+ELSE .
+W_MAINASU = W_DECIMALS - 2      .
+W_KEISAN  = 10 ** W_MAINASU     .
+P_KINGAKU = P_AFTER * W_KEISAN  .
+ENDIF.
+
+* if i_intab-tfkbn <> space .
+IF I_INTAB-TFKBN = '2'.   "2002/02/14 MOD
+P_KINGAKU = P_KINGAKU * -1 .
+ENDIF .
+
+ENDFORM.                    " frm_currency_edit
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_table
+*&---------------------------------------------------------------------*
+*       アップロードデータ作成
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_TABLE.
+*  data : w_cnt(7)  type  n .
+DATA : W_CNT(7)  TYPE  P .   "2002.04.24A MOD
+CLEAR CT_COC.                "2002/10/23 ADD
+*
+LOOP AT I_UPLOAD .
+W_CNT = W_CNT + 1 .                              " 行数のカウント
+I_INTAB-HATCOD            = I_UPLOAD+15(12)    . " 発注者cd
+I_INTAB-JYUCOD            = I_UPLOAD+27(12)    . " 受注者cd
+I_INTAB-HATBMN            = I_UPLOAD+39(08)    . " 発注部門cd
+I_INTAB-CYUBAN            = I_UPLOAD+47(23)    . " 注文番号
+I_INTAB-TS_CD             = I_UPLOAD+89(1)     . "2002/10/23
+I_INTAB-MEINS             = I_UPLOAD+91(03)    . " 単価
+I_INTAB-HINMEI            = I_UPLOAD+119(30)   . " 品名
+I_INTAB-JHINCD            = I_UPLOAD+149(25)   . " 受注者品名cd
+I_INTAB-HHINCD            = I_UPLOAD+174(25)   . " 発注者品名cd
+I_INTAB-SHUKKA_YYMMDD     = I_UPLOAD+216(06)   . " 出荷日
+I_INTAB-TFKBN             = I_UPLOAD+266(01)   . " 取引符号区分
+I_INTAB-URIKAKE_SU        = I_UPLOAD+311(12)   . " 売掛数量
+I_INTAB-URIKAKE_YYMMDD    = I_UPLOAD+347(06)   . " 売掛日
+*    I_INTAB-KTUKA             = I_UPLOAD+658(06)   . " 通貨コードMOD
+I_INTAB-KTUKA             = I_UPLOAD+658(03)   . " 通貨コード 03/18
+I_INTAB-TANKA_GAI         = I_UPLOAD+661(16)   . " 単価(外貨)
+I_INTAB-SHOHIZEI_GAI      = I_UPLOAD+677(15)   . " 消費税額(外貨)
+I_INTAB-GOUKEI_GAI        = I_UPLOAD+692(15)   . " 合計額(外貨)
+I_INTAB-GYO_SU            = W_CNT              . " 行数
+* Add 2010.03.09 >>>
+I_INTAB-KEIGETSU          = I_UPLOAD+353(04)   . " ,計上年月
+* Add 2010.03.09 <<<
+*- 出荷日・売掛日 yymmdd → yyyymmdd
+CONCATENATE '20' I_UPLOAD+216(06) INTO I_INTAB-SHUKKA_YYMMDD  .
+*    concatenate '20' i_upload+346(12) into i_intab-urikake_yymmdd .
+*                                             "DEL 2002.03.22A
+CONCATENATE '20' I_UPLOAD+347(06) INTO
+I_INTAB-URIKAKE_YYMMDD . "ADD 2002.03.22A
+*{   INSERT         TEPK900272                                        1
+IF I_INTAB-GOUKEI_GAI = 0.
+"合計額が０の場合は、消費税額と売掛金額を加算したものを設定する
+I_INTAB-GOUKEI_GAI = I_UPLOAD+677(15) + I_UPLOAD+723(15).
+ENDIF.
+*}   INSERT
+*2002/10/09 MOF START コック区分が'J'だったら対象外
+*   append i_intab .
+IF I_UPLOAD+90(1) <> 'J'.
+APPEND I_INTAB .
+ELSE.
+CT_COC = CT_COC + 1.
+ENDIF.
+*2002/10/09 MOD END
+CLEAR  I_INTAB .
+ENDLOOP .
+
+ENDFORM.                    " frm_make_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_edit_suryo
+*&---------------------------------------------------------------------*
+*       数量
+*----------------------------------------------------------------------*
+*FORM FRM_EDIT_SURYO.
+*
+*  DATA : W_SURYO_SEI(9)  TYPE C ,      " 売掛数量｢整数｣
+*         W_SURYO_SHO(3)  TYPE C ,      " 売掛数量｢少数｣
+*         W_KNQUAN(12)    TYPE C .      " 売掛数量
+*
+*  W_SURYO_SEI = I_INTAB-URIKAKE_SU+0(8) .
+*  W_SURYO_SHO = I_INTAB-URIKAKE_SU+8(3) .
+*  CONCATENATE W_SURYO_SEI W_SURYO_SHO
+*                      INTO W_KNQUAN SEPARATED BY '.' .
+*  I_YK210-KNQUAN = W_KNQUAN .
+**  if i_intab-tfkbn <> space .
+*  IF I_INTAB-TFKBN = '2'.   "2002/02/14 MOD
+*    I_YK210-KNQUAN = I_YK210-KNQUAN * -1 .
+*  ENDIF .
+*
+*ENDFORM.                    " frm_edit_suryo
+*&---------------------------------------------------------------------*
+*&      Form  frm_edit_tanka
+*&---------------------------------------------------------------------*
+*       単価
+*----------------------------------------------------------------------*
+*FORM FRM_EDIT_TANKA.
+*
+*  DATA : W_TANKA_SEI(11) TYPE C ,      " 単価｢整数｣
+*         W_TANKA_SHO(5)  TYPE C ,      " 単価｢少数｣
+*         W_KNUNTPRC(22)  TYPE C .      " 単価
+*
+*  W_TANKA_SEI = I_INTAB-TANKA_GAI+0(11) .
+*  W_TANKA_SHO = I_INTAB-TANKA_GAI+11(5) .
+*  CONCATENATE W_TANKA_SEI W_TANKA_SHO
+*                      INTO W_KNUNTPRC SEPARATED BY '.' .
+*  I_YK210-KNUNTPRC = W_KNUNTPRC .
+*
+*ENDFORM.                    " frm_edit_tanka
+*&---------------------------------------------------------------------*
+*&      Form  frm_edit_kingaku
+*&---------------------------------------------------------------------*
+*       金額項目
+*----------------------------------------------------------------------*
+*FORM FRM_EDIT_KINGAKU .
+*
+*  DATA : W_SHOHI_SEI(12) TYPE C ,      " 消費税額｢整数｣
+*         W_GOUKE_SEI(12) TYPE C .      " 合計額｢整数｣
+*
+**-- 消費税額(外貨) <i_intab-shohizei_gai>
+*  IF I_INTAB-TANKA_GAI <> SPACE .
+*    W_SHOHI_SEI = I_INTAB-SHOHIZEI_GAI+0(12) .
+**- 通貨編集
+*    PERFORM FRM_CURRENCY_EDIT USING    I_INTAB-KTUKA    " 通貨cd
+*                                       W_SHOHI_SEI      " 消費税額(整)
+*                              CHANGING I_YK210-KNTAXAMT .  " 消費税
+*  ENDIF .
+**-- 合計額(外貨) <i_intab-goukei_gai>
+*  IF I_INTAB-GOUKEI_GAI <> SPACE .
+*    W_GOUKE_SEI = I_INTAB-GOUKEI_GAI+0(12) .
+**- 通貨編集
+*    PERFORM FRM_CURRENCY_EDIT USING    I_INTAB-KTUKA          " 通貨cd
+*                                       W_GOUKE_SEI            " 合計額
+*                              CHANGING I_YK210-KNETXAMT .     " 税込
+*  ENDIF .
+*
+*ENDFORM.                    " frm_edit_kingaku
+*&---------------------------------------------------------------------*
+*&      Form  frm_insert_table .
+*&---------------------------------------------------------------------*
+*       テーブル更新
+*----------------------------------------------------------------------*
+FORM FRM_INSERT_TABLE .
+
+*- YK220 の更新/追加 処理
+PERFORM FRM_UPDATE_YK220 .
+*- YK210 の登録処理
+PERFORM FRM_INSERT_YK210 .
+
+ENDFORM.                    " frm_insert_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_print_out
+*&---------------------------------------------------------------------*
+*       結果出力
+*----------------------------------------------------------------------*
+FORM FRM_PRINT_OUT.
+
+DATA : W_BILDOC(10)  TYPE C          .   " 入力番号
+
+* 正常データ一覧
+IF NOT I_YK210_SUC[] IS INITIAL .
+SKIP 1 .
+WRITE:/     TEXT-H14 ,
+/002  TEXT-H01 ,                " 会社コード
+014  TEXT-H02 ,                " 暦年
+020  TEXT-H03 ,                " 入力番号
+032  TEXT-H04 ,                " 受注者コード
+046  TEXT-H05 ,                " 注文番号
+080  TEXT-H06 .                " 行数
+LOOP AT I_YK210_SUC .
+W_BILDOC = I_YK210_SUC-BILDOC .
+WRITE:/002 I_YK210_SUC-BUKRS   ,    " 会社コード
+014 I_YK210_SUC-YKYEAR  ,    " 暦年
+020 W_BILDOC            ,    " 入力番号
+032 I_YK210_SUC-JYUCOD  ,    " 受注者コード
+046 I_YK210_SUC-CYUBAN  ,    " 注文番号
+071 I_YK210_SUC-GYO_SU  .    " 行数
+ENDLOOP .
+ENDIF .
+SKIP 1 .
+* エラーデータ一覧
+IF NOT I_YK210_ERR[] IS INITIAL .
+WRITE:/     TEXT-H15 ,
+/002  TEXT-H01 ,                " 会社コード
+014  TEXT-H02 ,                " 暦年
+020  TEXT-H03 ,                " 入力番号
+032  TEXT-H04 ,                " 受注者コード
+046  TEXT-H05 ,                " 注文番号
+080  TEXT-H06 ,                " 行数
+085  TEXT-H07 .                " エラーステータス
+LOOP AT I_YK210_ERR .
+W_BILDOC = I_YK210_ERR-BILDOC .
+WRITE:/002 I_YK210_ERR-BUKRS   ,    " 会社コード
+014 I_YK210_ERR-YKYEAR  ,    " 暦年
+020 W_BILDOC            ,    " 入力番号
+032 I_YK210_ERR-JYUCOD  ,    " 受注者コード
+046 I_YK210_ERR-CYUBAN  ,    " 注文番号
+071 I_YK210_ERR-GYO_SU  ,    " 行数
+085 I_YK210_ERR-STATUS  .
+ENDLOOP .
+ENDIF .
+SKIP 1 .
+* 統計情報
+WRITE:/    TEXT-H16     ,
+/002 TEXT-H11     ,
+020 CT_YK210_INS ,
+/002 TEXT-H12     ,
+020 CT_YK220_INS ,
+/002 TEXT-H13     ,
+020 CT_YK220_MOD .
+*2002/10/22 ADD START
+MESSAGE I402 WITH CT_COC  '件、コック区分で無効です'.
+*2002/10/22 ADD END
+MESSAGE I402 WITH CT_YK210_INS '件登録しました' 'YK210' . "2002.04.22
+MESSAGE I402 WITH CT_YK220_INS '件登録しました' 'YK220' . " ADD
+MESSAGE I402 WITH CT_YK220_MOD '件更新しました' 'YK220' . "
+
+ENDFORM.                    " frm_print_out
+*&---------------------------------------------------------------------*
+*&      Form  frm_update_yk220
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_UPDATE_YK220 .
+
+DATA : W_KNITXAMT  LIKE YK220-KNITXAMT ,
+: W_KNTAXAMT  LIKE YK220-KNTAXAMT ,
+: W_KNETXAMT  LIKE YK220-KNETXAMT .
+
+LOOP AT I_YK220_MOD .
+SELECT SINGLE * FROM YK220 INTO YK220
+WHERE BUKRS    =  I_YK220_MOD-BUKRS         "
+AND YKYEAR   =  I_YK220_MOD-YKYEAR        "
+AND LIFNR    =  I_YK220_MOD-LIFNR         "
+AND LIFN2    =  I_YK220_MOD-LIFN2         "
+AND WERKS    =  I_YK220_MOD-WERKS         "
+AND EKORG    =  I_YK220_MOD-EKORG         "
+AND GSBER    =  I_YK220_MOD-GSBER         "
+AND ZFBDT    =  I_YK220_MOD-ZFBDT .       "
+IF SY-SUBRC = 0 .
+*---- 金額項目の設定
+W_KNITXAMT = YK220-KNITXAMT + I_YK220_MOD-KNITXAMT .
+W_KNTAXAMT = YK220-KNTAXAMT + I_YK220_MOD-KNTAXAMT .
+W_KNETXAMT = YK220-KNETXAMT + I_YK220_MOD-KNETXAMT .
+YK220-KNITXAMT = W_KNITXAMT .        " 税抜金額
+YK220-KNTAXAMT = W_KNTAXAMT .        " 消費税額
+YK220-KNETXAMT = W_KNETXAMT .        " 税込金額
+YK220-WAERS    = I_YK220_MOD-WAERS.  " 通貨コード ADD 2002.04.24A
+YK220-UPDDAT   = SY-DATUM   .
+YK220-UPDTIM   = SY-UZEIT   .
+YK220-UPDUSR   = SY-UNAME   .
+MODIFY YK220 .
+CT_YK220_MOD = CT_YK220_MOD + 1 .
+CLEAR  YK220 .
+ELSE .
+MOVE-CORRESPONDING I_YK220_MOD TO YK220 .
+YK220-INSDAT   = SY-DATUM .
+YK220-INSTIM   = SY-UZEIT .
+YK220-INSUSR   = SY-UNAME .
+INSERT YK220 .
+CT_YK220_INS = CT_YK220_INS + 1 .
+CLEAR  YK220 .
+ENDIF .
+ENDLOOP .
+
+ENDFORM.                    " frm_update_yk220
+*&---------------------------------------------------------------------*
+*&      Form  frm_insert_yk210
+*&---------------------------------------------------------------------*
+*       YK210 の登録処理
+*----------------------------------------------------------------------*
+FORM FRM_INSERT_YK210.
+
+LOOP AT I_YK210 .
+MOVE-CORRESPONDING I_YK210 TO YK210 .
+*    yk210-ykyear = i_yk210-zfbdt+0(4) .         "DEL 2002.03.22A
+YK210-INSDAT = SY-DATUM           .
+YK210-INSTIM = SY-UZEIT           .
+YK210-INSUSR = SY-UNAME           .
+INSERT YK210 .
+IF SY-SUBRC = 0 .
+CT_YK210_INS = CT_YK210_INS + 1 .
+MOVE-CORRESPONDING I_YK210 TO I_YK210_SUC .
+*      i_yk210_suc-ykyear = i_yk210-zfbdt+0(4) . "DEL 2002.03.22A
+APPEND   I_YK210_SUC .
+CLEAR  : I_YK210 , I_YK210_SUC .
+ENDIF .
+ENDLOOP .
+
+ENDFORM.                    " frm_insert_yk210
+*&---------------------------------------------------------------------*
+*&      Form  frm_dequeue_yk210
+*&---------------------------------------------------------------------*
+*       テーブルロック解除
+*----------------------------------------------------------------------*
+FORM FRM_DEQUEUE_YK210.
+
+LOOP AT I_YK220_LOCK .
+CALL FUNCTION 'DEQUEUE_EY_YK220'
+EXPORTING
+MODE_YK220 = 'E'
+MANDT      = SY-MANDT
+BUKRS      = I_YK220_LOCK-BUKRS
+YKYEAR     = I_YK220_LOCK-YKYEAR
+LIFNR      = I_YK220_LOCK-LIFNR
+LIFN2      = I_YK220_LOCK-LIFN2
+WERKS      = I_YK220_LOCK-WERKS
+EKORG      = I_YK220_LOCK-EKORG
+EKGRP      = I_YK220_LOCK-EKGRP
+GSBER      = I_YK220_LOCK-GSBER
+ZFBDT      = I_YK220_LOCK-ZFBDT.
+ENDLOOP .
+
+ENDFORM.                    " frm_dequeue_yk210
+*&---------------------------------------------------------------------*
+*&      Form  frm_modify_errtab
+*&---------------------------------------------------------------------*
+*       エラー用内部tab に 会社cd/暦年/入力番号 を格納
+*----------------------------------------------------------------------*
+FORM FRM_MODIFY_ERRTAB.
+
+I_YK210_ERR-BUKRS   =  I_YK210-BUKRS    .   " 会社コード
+*  i_yk210_err-ykyear  =  i_yk210-zfbdt(4) .   " 暦年  DEL 2002.03.22A
+I_YK210_ERR-YKYEAR  =  I_YK210-YKYEAR   .   " 暦年  ADD 2002.03.22A
+I_YK210_ERR-BILDOC  =  I_YK210-BILDOC   .   " 入力番号
+
+MODIFY I_YK210_ERR
+TRANSPORTING BUKRS YKYEAR BILDOC
+WHERE GYO_SU = I_INTAB-GYO_SU .
+CLEAR I_YK210_ERR .
+
+ENDFORM.                    " frm_modify_errtab
+*&---------------------------------------------------------------------*
+*&      Form  frm_cheack_datum
+*&---------------------------------------------------------------------*
+*       日付チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHEACK_DATUM .
+
+DATA : W_SUBRC LIKE SY-SUBRC .
+
+*- 出荷日
+PERFORM FRM_GET_DATUM
+USING    I_INTAB-SHUKKA_YYMMDD+4(2)
+I_INTAB-SHUKKA_YYMMDD+6(2)
+CHANGING W_SUBRC                    .
+IF W_SUBRC <> 0 .
+I_YK210-BILDAT = '00000000' .
+ELSE .
+I_YK210-BILDAT = I_INTAB-SHUKKA_YYMMDD .
+ENDIF .
+*- 売掛日
+PERFORM FRM_GET_DATUM
+USING    I_INTAB-URIKAKE_YYMMDD+4(2)
+I_INTAB-URIKAKE_YYMMDD+6(2)
+CHANGING W_SUBRC                    .
+IF W_SUBRC <> 0 .
+I_YK210-SHPDAT = '00000000' .
+ELSE .
+I_YK210-SHPDAT = I_INTAB-URIKAKE_YYMMDD .
+ENDIF .
+
+ENDFORM.                    " frm_cheack_datum
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_datum
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_GET_DATUM
+USING     VALUE(PC_MANTH)     TYPE    C    "IO:月
+VALUE(PC_DAY)       TYPE    C    "IO:日
+CHANGING  VALUE(PI_SUBRC)     TYPE    I.   "O :ﾘﾀｰﾝｺｰﾄﾞ
+
+*- DATA
+DATA: I_MANTH      TYPE   I ,
+I_DAY        TYPE   I ,
+I_MAX_DATE   TYPE   I .
+*- 月の編集
+I_MANTH = PC_MANTH .        " 編集領域へ設定
+*- 月のチェック
+IF I_MANTH < 1 OR 12 < I_MANTH .
+PI_SUBRC = 4.
+EXIT.
+ENDIF.
+*- 日の編集
+*- MAX日の取得
+CASE  I_MANTH.
+WHEN  4  OR  6  OR  9  OR  11.
+I_MAX_DATE = 30.
+WHEN  2.
+I_MAX_DATE = 29.
+WHEN  OTHERS.
+I_MAX_DATE = 31.
+ENDCASE.
+*- 編集領域へ設定
+I_DAY = PC_DAY.
+*- 日のチェック
+IF   I_DAY < 1  OR  I_MAX_DATE < I_DAY.
+PI_SUBRC = 4.
+EXIT.
+ENDIF.
+*- 編集領域から元に戻す
+PC_MANTH = I_MANTH.
+PC_DAY   = I_DAY.
+*- 右詰＆前ゼロ挿入(月)
+PERFORM FRM_CM_INSERT_ZERO  USING    PC_MANTH
+CHANGING PC_MANTH.
+*- 右詰＆前ゼロ挿入(日)
+PERFORM FRM_CM_INSERT_ZERO  USING    PC_DAY
+CHANGING PC_DAY.
+*- 正常終了
+PI_SUBRC = 0 .
+
+ENDFORM.                    " frm_get_datum
+*&---------------------------------------------------------------------*
+*&      Form  frm_cm_insert_zero
+*&---------------------------------------------------------------------*
+*       右詰＆前ゼロ挿入
+*&---------------------------------------------------------------------*
+FORM FRM_CM_INSERT_ZERO
+
+USING    VALUE(P_STR1)     TYPE C              "[i]前０挿入前の文字列
+CHANGING VALUE(P_STR2)     TYPE C.             "[o]前０挿入後の文字列
+*
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = P_STR1
+IMPORTING
+OUTPUT = P_STR2.
+
+ENDFORM.                    "frm_cm_insert_zero
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_yk250
+*&---------------------------------------------------------------------*
+*       取引プラントの取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_YK250.
+
+SELECT SINGLE WERKSP
+FROM YK250
+INTO YK250-WERKSP
+WHERE BUKRS  = I_YK210-BUKRS
+AND LIFNR  = I_YK210-LIFNR
+AND WERKST = I_YK210-WERKS .
+IF SY-SUBRC = 0 .
+I_YK210-WERKST = I_YK210-WERKS .
+I_YK210-WERKS  = YK250-WERKSP  .
+ELSE .
+I_YK210-WERKST = I_YK210-WERKS  .
+ENDIF .
+
+ENDFORM.                    " frm_get_yk250
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_KINGAKU  2002/03/18 ADD
+*&---------------------------------------------------------------------*
+*       金額の小数部整数部分割
+*----------------------------------------------------------------------*
+*      -->P_CHAR   連結文字列
+*      -->P_DEC    小数部桁数
+*----------------------------------------------------------------------*
+FORM EDIT_KINGAKU USING    P_CHAR
+P_DEC.
+W_NUMC    = P_CHAR.
+W_AMOUNT2 = W_NUMC * 10 ** ( P_DEC * -1 ).
+
+ENDFORM.                    " EDIT_KINGAKU
+*&---------------------------------------------------------------------*
+*&      Form  FILE_DEL  2002/04/09 ADD
+*&---------------------------------------------------------------------*
+*       入力ファイルの削除
+*----------------------------------------------------------------------*
+FORM FRM_FILE_DEL.
+IF P_DEL = 'X'.
+DELETE DATASET P_FILE.
+IF SY-SUBRC <> 0.
+MESSAGE ID 'Y1' TYPE P_DELERR NUMBER '401'
+WITH 'ファイルが削除できません' P_FILE.
+ELSE.
+MESSAGE ID 'Y1' TYPE 'I' NUMBER '401'
+WITH 'ファイルを削除しました' P_FILE.
+ENDIF.
+ENDIF.
+ENDFORM.                    "frm_file_del
+*&---------------------------------------------------------------------*
+*&      Form  CHK_MAINA
+*&---------------------------------------------------------------------*
+*       マイナスチェック
+*----------------------------------------------------------------------*
+*      -->符号反転対象
+*----------------------------------------------------------------------*
+FORM CHK_MAINA USING    P_INT.
+*2002/11/07 MOD START
+*  CASE i_intab-TS_CD.
+*  WHEN '1'.
+*    IF I_intab-TFKBN = '2'.
+*      P_INT = P_INT * -1.
+*    ENDIF.
+*  WHEN '2'.
+*    IF I_intab-TFKBN = '2'.
+*      P_INT = P_INT * -1.
+*    ENDIF.
+*  WHEN '3'.
+*    IF I_intab-TFKBN = '1'.
+*      P_INT = P_INT * -1.
+*    ENDIF.
+*  ENDCASE.
+IF I_INTAB-TS_CD =  '3'.
+P_INT = P_INT * -1.
+ENDIF.
+IF  I_INTAB-TFKBN = '2'.
+P_INT = P_INT * -1.
+ENDIF.
+*2002/11/07 MOD END
+ENDFORM.                    " CHK_MAINA

@@ -1,0 +1,505 @@
+*----------------------------------------------------------------------*
+*                           INCLUDE YMASTF02                           *
+*----------------------------------------------------------------------*
+***                       Job management forms                       ***
+************************************************************************
+FORM YMA_BATCH_MANAGE.
+
+PERFORM YMA_JOB_INIT.
+PERFORM YMA_RELEASE_JOBS.
+
+ENDFORM.                    " YMA_BATCH_MANAGE
+************************************************************************
+*** Read user job parameters
+************************************************************************
+FORM YMA_JOB_INIT.
+
+TABLES : YMA_TR_JOP, USR02, YMA_COL_NM.
+DATA : WA LIKE TB_JOB_USR.
+
+CLEAR TB_JOB_USR.                 REFRESH TB_JOB_USR.
+SELECT * FROM YMA_TR_JOP ORDER BY YMA_GR_USR  YMA_USERNM.
+MOVE-CORRESPONDING YMA_TR_JOP TO TB_JOB_USR.
+*** Get job class : A, B, C or space ( Non priority )
+TB_JOB_USR-CLASS = YMA_TR_JOP-YMA_SUBKEY+6(1).
+TB_JOB_USR-LIM   = YMA_TR_JOP-YOP_QT_VAL.
+CASE YMA_TR_JOP-YMA_GR_USR.
+WHEN 'U'.
+DELETE TB_JOB_USR WHERE YMA_USERNM CP YMA_TR_JOP-YMA_USERNM
+AND   CLASS      =  TB_JOB_USR-CLASS.
+CHECK YMA_TR_JOP-Y_ALRT_E_I = 'I'.
+IF YMA_TR_JOP-YMA_USERNM CA '*'.
+TRANSLATE YMA_TR_JOP-YMA_USERNM USING '*%'.
+SELECT BNAME FROM  USR02 CLIENT SPECIFIED
+INTO  TB_JOB_USR-YMA_USERNM
+WHERE BNAME LIKE YMA_TR_JOP-YMA_USERNM.
+READ TABLE TB_JOB_USR WITH KEY
+YMA_USERNM = TB_JOB_USR-YMA_USERNM
+CLASS      = TB_JOB_USR-CLASS.
+CHECK SY-SUBRC <> 0.               APPEND TB_JOB_USR.
+ENDSELECT.
+ELSE.
+APPEND TB_JOB_USR.
+ENDIF.
+WHEN 'G'.
+IF YMA_TR_JOP-YMA_USERNM CA '*'.
+TRANSLATE YMA_TR_JOP-YMA_USERNM USING '*%'.
+ENDIF.
+SELECT BNAME FROM  USR02 CLIENT SPECIFIED
+INTO  TB_JOB_USR-YMA_USERNM
+WHERE CLASS LIKE YMA_TR_JOP-YMA_USERNM.
+READ TABLE TB_JOB_USR WITH KEY
+YMA_USERNM = TB_JOB_USR-YMA_USERNM
+CLASS      = TB_JOB_USR-CLASS.
+CHECK SY-SUBRC <> 0.               APPEND TB_JOB_USR.
+ENDSELECT.
+ENDCASE.
+ENDSELECT.
+*** Get all our PME jobs
+SELECT * FROM YMA_COL_NM.
+IF YMA_COL_NM-YOP_COLL CA '*'.  R_PME_JOBS-OPTION = 'CP'.
+ELSE.                           R_PME_JOBS-OPTION = 'EQ'.     ENDIF.
+R_PME_JOBS-SIGN = 'E'.
+R_PME_JOBS-LOW  = YMA_COL_NM-YOP_COLL.
+APPEND R_PME_JOBS.
+ENDSELECT.
+
+ENDFORM.                    " YMA_JOB_INIT
+************************************************************************
+*** Main form for job releasing
+************************************************************************
+FORM YMA_RELEASE_JOBS.
+
+DATA : L_TABIX     LIKE SY-TABIX,           L_ERR       TYPE I,
+L_COUNT     TYPE I VALUE 1,          L_ID(3),
+TB_HPR_BTC  LIKE YMA_TREE_J OCCURS 0 WITH HEADER LINE,
+TB_JOBS_1   LIKE TBTCO      OCCURS 0 WITH HEADER LINE,
+TB_JOBS_2   LIKE TBTCO      OCCURS 0 WITH HEADER LINE,
+TB_ST_JOB   LIKE YMA_JOB    OCCURS 0 WITH HEADER LINE.
+
+SELECT * FROM YMA_TREE_J INTO TABLE TB_HPR_BTC.
+* Get job list for releasing
+PERFORM YMA_GET_JOB_LIST TABLES  TB_HPR_BTC  TB_JOBS_1  TB_JOBS_2.
+DESCRIBE TABLE TB_JOB_USR LINES SY-TFILL.     CHECK SY-TFILL > 0.
+SORT : TB_HPR_BTC BY YMA_PRT_JB,
+TB_JOBS_1  BY JOBCLASS,
+TB_JOBS_2  BY JOBCLASS.
+*** First group of high priority jobs
+LOOP AT TB_HPR_BTC.
+LOOP AT TB_JOBS_1 WHERE JOBNAME CP TB_HPR_BTC-YMA_JOB.
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = TB_JOBS_1-SDLUNAME
+CLASS      = TB_JOBS_1-JOBCLASS.
+CHECK TB_JOB_USR-CUR < TB_JOB_USR-LIM.
+L_TABIX = SY-TABIX.
+PERFORM YMA_JOB_MODIFY  USING  TB_JOBS_1  L_ERR.
+PERFORM YMA_FILL_JOB USING TB_JOBS_1  TB_ST_JOB  L_ERR.
+APPEND TB_ST_JOB.                     DELETE TB_JOBS_1.
+IF L_ERR = 0.   ADD 1 TO TB_JOB_USR-CUR.
+ELSE.           TB_JOB_USR-NO_REL = 'X'.            ENDIF.
+MODIFY TB_JOB_USR INDEX L_TABIX.
+ENDLOOP.
+ENDLOOP.
+*** Second group : rest of high priority jobs that will be released
+*** as non-priority jobs if there is quota ( total count > 0 ).
+SORT TB_JOB_USR BY YOP_QT_PRT DESCENDING.
+LOOP AT TB_JOB_USR WHERE CLASS = SPACE.
+CHECK TB_JOB_USR-CUR < TB_JOB_USR-LIM.
+LOOP AT TB_JOBS_1 WHERE SDLUNAME = TB_JOB_USR-YMA_USERNM.
+PERFORM YMA_JOB_MODIFY  USING  TB_JOBS_1  L_ERR.
+PERFORM YMA_FILL_JOB USING TB_JOBS_1  TB_ST_JOB  L_ERR.
+APPEND TB_ST_JOB.                DELETE TB_JOBS_1.
+IF L_ERR = 0.            ADD 1 TO TB_JOB_USR-CUR.
+ELSE.                    TB_JOB_USR-NO_REL = 'X'.          ENDIF.
+CHECK TB_JOB_USR-CUR = TB_JOB_USR-LIM.      EXIT.
+ENDLOOP.
+MODIFY TB_JOB_USR.
+ENDLOOP.
+*** Third group : non-priority jobs
+LOOP AT TB_JOB_USR WHERE CLASS = SPACE.
+CHECK TB_JOB_USR-CUR < TB_JOB_USR-LIM.
+LOOP AT TB_JOBS_2 WHERE SDLUNAME = TB_JOB_USR-YMA_USERNM.
+PERFORM YMA_JOB_MODIFY  USING  TB_JOBS_2  L_ERR.
+PERFORM YMA_FILL_JOB USING TB_JOBS_2  TB_ST_JOB  L_ERR.
+APPEND TB_ST_JOB.                DELETE TB_JOBS_2.
+IF L_ERR = 0.            ADD 1 TO TB_JOB_USR-CUR.
+ELSE.                    TB_JOB_USR-NO_REL = 'X'.          ENDIF.
+CHECK TB_JOB_USR-CUR = TB_JOB_USR-LIM.      EXIT.
+ENDLOOP.
+MODIFY TB_JOB_USR.
+ENDLOOP.
+*** Write all remaining jobs for statistics
+LOOP AT TB_JOBS_1.
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = TB_JOBS_1-SDLUNAME
+CLASS      = TB_JOBS_1-JOBCLASS.
+IF SY-SUBRC <> 0.
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = TB_JOBS_1-SDLUNAME
+CLASS      = SPACE.
+ENDIF.
+TB_JOB_USR-NO_REL = 'X'.   MODIFY TB_JOB_USR INDEX SY-TABIX.
+PERFORM YMA_FILL_JOB USING TB_JOBS_1 TB_ST_JOB -2.
+APPEND TB_ST_JOB.
+ENDLOOP.
+LOOP AT TB_JOBS_2.
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = TB_JOBS_2-SDLUNAME
+CLASS      = SPACE.
+TB_JOB_USR-NO_REL = 'X'.   MODIFY TB_JOB_USR INDEX SY-TABIX.
+PERFORM YMA_FILL_JOB USING TB_JOBS_2 TB_ST_JOB -2.
+APPEND TB_ST_JOB.
+ENDLOOP.
+DESCRIBE TABLE TB_ST_JOB LINES SY-TFILL.     CHECK SY-TFILL > 0.
+INSERT YMA_JOB FROM TABLE TB_ST_JOB.
+*** Compose alerts
+LOOP AT TB_JOB_USR WHERE NO_REL = 'X'.
+CHECK TB_JOB_USR-SUM > TB_JOB_USR-LIM.
+IF TB_JOB_USR-CLASS = SPACE.      L_ID = '032'.
+ELSE.                             L_ID = '040'.         ENDIF.
+PERFORM YMA_PROC_ALERT USING
+'B'  'Y'  L_ID    TB_JOB_USR-YMA_USERNM  TB_JOB_USR-SUM
+TB_JOB_USR-CLASS  TB_JOB_USR-SUM  TB_JOB_USR-LIM
+TB_JOB_USR-LIM    L_COUNT  TB_JOB_USR-YOP_QT_PRT.
+* fix start - restrict number of alerts to 255
+IF L_COUNT >= 255.
+YMA_LOG-RDATE = SY-DATUM.
+YMA_LOG-RTIME = SY-UZEIT.
+YMA_LOG-MESS_CLASS = 'Y!'.
+YMA_LOG-MESS_ID = '087'.
+YMA_LOG-TEXT1 = '255'.
+MODIFY YMA_LOG.
+EXIT.
+ENDIF.
+* fix end
+ADD 1 TO L_COUNT.
+ENDLOOP.
+COMMIT WORK.
+ENDFORM.                    " YMA_RELEASE_JOBS
+************************************************************************
+*** Main form for job modify
+************************************************************************
+FORM YMA_JOB_MODIFY  USING  I_JOB STRUCTURE TBTCO   O_ERR TYPE I.
+
+DATA : L_STDT   LIKE TBTCSTRT,
+TB_STEPS LIKE TBTCSTEP OCCURS 0.
+
+CLEAR O_ERR.
+PERFORM YMA_READ_JOB  TABLES TB_STEPS   USING  I_JOB  L_STDT  O_ERR.
+IF NOT O_ERR IS INITIAL.
+O_ERR = -1.                                  EXIT.
+ENDIF.
+PERFORM YMA_MODIFY_JOB TABLES TB_STEPS  USING  I_JOB  L_STDT  O_ERR.
+CHECK O_ERR = 3.
+IF I_JOB-JOBNAME IN R_PME_JOBS.
+UPDATE TBTCO SET STATUS = 'P' WHERE JOBNAME  = I_JOB-JOBNAME
+AND   JOBCOUNT = I_JOB-JOBCOUNT.
+ENDIF.
+ENDFORM.                    " YMA_JOB_MODIFY
+************************************************************************
+*** Find job in Database table and get his steps
+************************************************************************
+FORM YMA_READ_JOB TABLES  O_STEPS STRUCTURE TBTCSTEP
+USING   I_JOBS  STRUCTURE TBTCO
+O_STDT  STRUCTURE TBTCSTRT
+O_RES.
+TABLES TBTCP.
+DATA : TB_STEPLIST LIKE TBTCP OCCURS 0 WITH HEADER LINE.
+
+CLEAR : TB_STEPLIST, O_STEPS.
+REFRESH : TB_STEPLIST, O_STEPS.
+IF I_JOBS-EVENTID IS INITIAL  AND ( I_JOBS-SDLSTRTDT < SY-DATUM OR
+( I_JOBS-SDLSTRTDT = SY-DATUM AND I_JOBS-SDLSTRTTM <= SY-UZEIT ) ).
+I_JOBS-JOBGROUP = '%_IMMEDIATE'.
+ENDIF.
+PERFORM EXTRACT_STDT_FROM_JOBHEAD IN PROGRAM SAPLBTCH
+USING I_JOBS O_STDT.
+SELECT * FROM TBTCP INTO TABLE TB_STEPLIST
+WHERE JOBNAME  = I_JOBS-JOBNAME
+AND   JOBCOUNT = I_JOBS-JOBCOUNT ORDER BY PRIMARY KEY.
+O_RES = SY-SUBRC.       CHECK O_RES = 0.
+LOOP AT TB_STEPLIST.
+CLEAR O_STEPS.
+MOVE-CORRESPONDING TB_STEPLIST TO O_STEPS.
+IF TB_STEPLIST-XPGFLAG EQ 'X'.
+O_STEPS-TYP       = 'X'.
+O_STEPS-PROGRAM   = TB_STEPLIST-XPGPROG.
+O_STEPS-PARAMETER = TB_STEPLIST-XPGPARAMS.
+ELSE.
+O_STEPS-TYP       = 'A'.
+O_STEPS-PROGRAM   = TB_STEPLIST-PROGNAME.
+O_STEPS-PARAMETER = TB_STEPLIST-VARIANT.
+ENDIF.
+APPEND O_STEPS.
+ENDLOOP.
+
+ENDFORM.                    " YMA_READ_JOB
+************************************************************************
+*** Modify job
+************************************************************************
+FORM YMA_MODIFY_JOB TABLES  I_STEPS STRUCTURE TBTCSTEP
+USING   I_JOBS  STRUCTURE TBTCO
+I_STDT  STRUCTURE TBTCSTRT    O_RES.
+*
+DATA: L_LIST LIKE MSXXLIST OCCURS 0 WITH HEADER LINE.
+*
+CLEAR O_RES.
+IF I_JOBS-BTCSYSTEM CN SPACE.
+REFRESH L_LIST.
+CALL FUNCTION 'TH_SERVER_LIST'
+TABLES     LIST           = L_LIST
+EXCEPTIONS NO_SERVER_LIST = 1.
+READ TABLE L_LIST WITH KEY HOST = I_JOBS-BTCSYSTEM.
+IF SY-SUBRC <> 0. EXIT. ENDIF.
+ENDIF.
+CALL FUNCTION 'BP_JOB_MODIFY'
+EXPORTING     DIALOG                     =  'N'
+OPCODE                     =  17
+JOBNAME                    =  I_JOBS-JOBNAME
+JOBCOUNT                   =  I_JOBS-JOBCOUNT
+RELEASE_STDT               =  I_STDT
+RELEASE_TARGETSYSTEM       =  I_JOBS-BTCSYSTEM
+SUPPRESS_RELEASE_CHECK     =  'X'
+TABLES        NEW_STEPLIST               =  I_STEPS
+EXCEPTIONS    CANT_ENQ_JOB               =  1
+CANT_RELEASE_JOB           =  2
+CANT_START_JOB_IMMEDIATELY =  3
+NO_BATCH_ON_TARGET_HOST    =  4
+NO_BATCH_SERVER_FOUND      =  5
+NO_BATCH_WP_FOR_JOBCLASS   =  6
+TARGET_HOST_NOT_DEFINED    =  7
+TGT_HOST_CHK_HAS_FAILED    =  8
+OTHERS                     = 99.
+O_RES = SY-SUBRC.
+ENDFORM.                    " YMA_MODIFY_JOB
+************************************************************************
+*** Main function for alert processing
+************************************************************************
+FORM YMA_PROC_ALERT USING I_SIGN    I_ALERT  I_ID    I_TEXT1   I_TEXT2
+I_TEXT3   I_VAL    I_YEL   I_RED     I_CNT
+I_PRT.
+
+DATA : L_MESSAGE LIKE SOLI.
+
+PERFORM YMA_FILL_ALERT  USING I_SIGN    I_ALERT   I_ID
+I_TEXT1   I_TEXT2   I_TEXT3
+I_VAL     I_YEL     I_RED
+I_CNT     I_PRT.
+CHECK I_ALERT = 'R'  AND  I_PRT > 500.
+*** Fill mail message
+PERFORM YMA_FILL_MAIL_MESSAGE  USING  TB_OBJCONT_1  I_ID
+I_TEXT1  I_TEXT2  I_TEXT3.
+*** Fill SNMP message
+PERFORM YMA_FILL_ALERT_CLASS IN PROGRAM (C_PROG)
+USING  TB_SNMP_ALERT  I_SIGN.
+TB_SNMP_ALERT-ALR_TIME    = C_CYCLE-STIME.
+TB_SNMP_ALERT-ALR_DATE    = C_CYCLE-RDATE.
+TB_SNMP_ALERT-HOST        = G_HOST.
+TB_SNMP_ALERT-ALR_ON      = G_APSERVER.
+TB_SNMP_ALERT-SID         = G_SYSNAME.
+TB_SNMP_ALERT-SID_NUMBER  = G_SYSNUMBER.
+TB_SNMP_ALERT-ALR_TEXT    = TB_OBJCONT_1.
+TB_SNMP_ALERT-ALR_PRIOR   = I_PRT.
+TB_SNMP_ALERT-ALR_VAL     = I_VAL.
+TB_SNMP_ALERT-ALR_TRS     = I_RED.
+APPEND : TB_OBJCONT_1, TB_SNMP_ALERT.
+CHECK I_PRT > 750.
+*** Fill Pager message and admin. mail
+PERFORM YMA_FILL_PAGER_MESSAGE IN PROGRAM (C_PROG) USING
+TB_PAGER_ALERT  TB_OBJCONT_1  SPACE
+I_RED  I_YEL  I_PRT  I_SIGN.
+APPEND : TB_PAGER_ALERT, TB_OBJCONT_1 TO TB_OBJCONT_2.
+
+ENDFORM.                    " YMA_PROC_ALERT
+************************************************************************
+*** Fill alert and save it in database
+************************************************************************
+FORM YMA_FILL_ALERT USING  I_LVL    I_ALERT  I_ID
+I_TEXT1  I_TEXT2  I_TEXT3
+I_VAL    I_YEL    I_RED    I_CNT  I_PRT.
+
+MOVE-CORRESPONDING C_CYCLE TO YMA_ALERTS.
+YMA_ALERTS-TEXT1    = I_TEXT1.   YMA_ALERTS-YOP_QT_YEL = I_YEL.
+YMA_ALERTS-TEXT2    = I_TEXT2.   YMA_ALERTS-YOP_QT_RED = I_RED.
+YMA_ALERTS-TEXT3    = I_TEXT3.   YMA_ALERTS-YOP_QT_VAL = I_VAL.
+YMA_ALERTS-YMA_LVL  = I_LVL.     YMA_ALERTS-ALR_STATUS = I_ALERT.
+YMA_ALERTS-MESS_ID  = I_ID.      YMA_ALERTS-MESS_CLASS = C_MCLASS.
+YMA_ALERTS-NO_ALERT = I_CNT.     YMA_ALERTS-YOP_QT_PRT = I_PRT.
+INSERT YMA_ALERTS.
+
+ENDFORM.                    " YMA_FILL_ALERT
+************************************************************************
+*** Fill mail message
+************************************************************************
+FORM YMA_FILL_MAIL_MESSAGE USING  O_MESSAGE  I_ID  I_TEXT1
+I_TEXT2    I_TEXT3.
+TABLES T100.
+
+SELECT SINGLE * FROM T100 WHERE SPRSL = SY-LANGU
+AND   ARBGB = C_MCLASS
+AND   MSGNR = I_ID.     CHECK SY-SUBRC = 0.
+O_MESSAGE = T100-TEXT.
+REPLACE '&' WITH : I_TEXT1 INTO O_MESSAGE,
+I_TEXT2 INTO O_MESSAGE,
+I_TEXT3 INTO O_MESSAGE.        CONDENSE O_MESSAGE.
+
+ENDFORM.                    " YMA_FILL_MAIL_MESSAGE
+************************************************************************
+*** Get result of job releasing and fill job record
+************************************************************************
+FORM YMA_FILL_JOB USING  I_JOB    STRUCTURE TBTCO
+O_ST_JOB STRUCTURE YMA_JOB  I_RES TYPE I.
+
+STATICS : S_CNT   LIKE YMA_JOB-NO_JOB VALUE 1,
+S_SHIFT TYPE I.
+
+MOVE-CORRESPONDING : C_CYCLE TO O_ST_JOB, I_JOB TO O_ST_JOB.
+O_ST_JOB-NO_JOB   = S_CNT.                ADD 1 TO S_CNT.
+CASE I_RES.
+WHEN -2.         O_ST_JOB-Y_RESULT = TEXT-031.
+WHEN -1.         O_ST_JOB-Y_RESULT = TEXT-032.
+WHEN  0.         O_ST_JOB-Y_RESULT = TEXT-030.
+WHEN  1.         O_ST_JOB-Y_RESULT = TEXT-033.
+WHEN  2.         O_ST_JOB-Y_RESULT = TEXT-034.
+WHEN  3.         O_ST_JOB-Y_RESULT = TEXT-035.
+WHEN  4.         O_ST_JOB-Y_RESULT = TEXT-036.
+WHEN  5.         O_ST_JOB-Y_RESULT = TEXT-037.
+WHEN  6.         O_ST_JOB-Y_RESULT = TEXT-038.
+WHEN  7.         O_ST_JOB-Y_RESULT = TEXT-039.
+WHEN  8.         O_ST_JOB-Y_RESULT = TEXT-040.
+WHEN  99.        O_ST_JOB-Y_RESULT = TEXT-041.
+ENDCASE.
+CHECK I_RES = 0.
+MOVE-CORRESPONDING C_CYCLE TO YMA_LOG.
+ADD : S_SHIFT TO YMA_LOG-RTIME, 1 TO S_SHIFT.
+YMA_LOG-TEXT1 = I_JOB-JOBNAME.         YMA_LOG-MESS_CLASS = 'Y!'.
+YMA_LOG-TEXT2 = I_JOB-SDLUNAME.        YMA_LOG-MESS_ID    = '041'.
+INSERT YMA_LOG.
+
+ENDFORM.                    " YMA_FILL_JOB
+************************************************************************
+***  Get all jobs that we have to release , and put them into a list
+***  accordind to user priority
+************************************************************************
+FORM YMA_GET_JOB_LIST TABLES   I_HPR_BTC STRUCTURE YMA_TREE_J
+O_JOBS_1  STRUCTURE TBTCO
+O_JOBS_2  STRUCTURE TBTCO.
+
+TABLES TBTCS.
+RANGES : R_STATUS FOR  TBTCO-STATUS,    R_USER    FOR  TBTCO-SDLUNAME.
+DATA : L_TABIX    LIKE SY-TABIX,        L_MAXDATE LIKE SY-DATUM,
+L_MAXTIME  LIKE SY-UZEIT,        L_WA      LIKE TB_JOB_USR,
+L_VAL      TYPE I,               L_RES     TYPE C.
+*** Fill ranges
+R_STATUS-OPTION = 'EQ'.                 R_STATUS-SIGN = 'I'.
+R_STATUS-LOW    = 'P'.                  APPEND R_STATUS.
+R_STATUS-LOW    = 'S'.                  APPEND R_STATUS.
+R_STATUS-LOW    = 'Y'.                  APPEND R_STATUS.
+R_STATUS-LOW    = 'R'.                  APPEND R_STATUS.
+R_USER-OPTION   = 'EQ'.                 R_USER-SIGN = 'I'.
+LOOP AT TB_JOB_USR.
+R_USER-LOW = TB_JOB_USR-YMA_USERNM.   COLLECT R_USER.
+ENDLOOP.
+CHECK SY-SUBRC IS INITIAL.
+*** Get upper limit for date/time for scheduled jobs extracting
+L_MAXDATE = C_CYCLE-RDATE.        L_MAXTIME = C_CYCLE-RTIME + G_INT.
+IF L_MAXTIME < C_CYCLE-RTIME.     ADD 1 TO L_MAXDATE.         ENDIF.
+*** Job selecting
+* select * from tbtco where jobname  in  r_pme_jobs
+*                     and   status   in  r_status
+*                     and   sdluname in  r_user
+*                     and   newflag  <>  'O'.
+SELECT * FROM TBTCO FOR ALL ENTRIES IN R_USER
+WHERE JOBNAME  IN  R_PME_JOBS
+AND   STATUS   IN  R_STATUS
+AND   SDLUNAME = R_USER-LOW
+AND   NEWFLAG  <>  'O'.
+*** Get scheduled jobs for next interval ( with no event )
+CASE TBTCO-STATUS.
+WHEN 'P'.
+CHECK TBTCO-EVENTID IS INITIAL  AND
+( TBTCO-SDLSTRTDT < L_MAXDATE OR ( TBTCO-SDLSTRTDT = L_MAXDATE
+AND TBTCO-SDLSTRTTM < L_MAXTIME ) ).
+WHEN 'S'.
+CHECK TBTCO-RELUNAME = TBTCO-SDLUNAME
+AND   TBTCO-PERIODIC <> 'X'  AND  TBTCO-EVENTID IS INITIAL.
+TBTCO-STATUS = 'P'.                       UPDATE TBTCO.
+DELETE FROM TBTCS WHERE JOBNAME  = TBTCO-JOBNAME
+AND   JOBCOUNT = TBTCO-JOBCOUNT.
+CHECK  TBTCO-SDLSTRTDT < L_MAXDATE  OR
+( TBTCO-SDLSTRTDT = L_MAXDATE AND TBTCO-SDLSTRTTM < L_MAXTIME ).
+ENDCASE.
+*** Job processing
+PERFORM YMA_GET_HPR_JOBNAME TABLES I_HPR_BTC
+USING  TBTCO-JOBNAME  L_RES.
+IF L_RES = 'Y'.
+*** High priority job
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = TBTCO-SDLUNAME
+CLASS      = TBTCO-JOBCLASS.
+IF TB_JOB_USR-LIM = 0.
+*** There is no quota for that user of this class and we try to move it
+*** to list of non priority jobs , if the user has quota
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = TBTCO-SDLUNAME
+CLASS      = SPACE.
+CHECK TB_JOB_USR-LIM > 0.
+L_TABIX = SY-TABIX.
+IF TBTCO-STATUS = 'P'.      APPEND TBTCO TO O_JOBS_1.
+ELSE.                       ADD 1 TO TB_JOB_USR-CUR.     ENDIF.
+ADD 1 TO TB_JOB_USR-SUM.    MODIFY TB_JOB_USR  INDEX L_TABIX.
+ELSE.
+L_TABIX = SY-TABIX.
+IF TBTCO-STATUS = 'P'.      APPEND TBTCO TO O_JOBS_1.
+ELSE.                       ADD 1 TO TB_JOB_USR-CUR.     ENDIF.
+ADD 1 TO TB_JOB_USR-SUM.    MODIFY TB_JOB_USR INDEX L_TABIX.
+ENDIF.
+ELSE.
+*** Non high priority job
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = TBTCO-SDLUNAME
+CLASS      = SPACE.
+CHECK TB_JOB_USR-LIM > 0.     L_TABIX = SY-TABIX.
+IF TBTCO-STATUS = 'P'.        APPEND TBTCO TO O_JOBS_2.
+ELSE.                         ADD 1 TO TB_JOB_USR-CUR.     ENDIF.
+ADD 1 TO TB_JOB_USR-SUM.      MODIFY TB_JOB_USR INDEX L_TABIX.
+ENDIF.
+ENDSELECT.
+* Check for exceeding quota of high priority jobs
+LOOP AT TB_JOB_USR INTO L_WA WHERE CLASS <> SPACE.
+CHECK L_WA-SUM > L_WA-LIM.
+L_VAL = L_WA-SUM - L_WA-LIM.
+READ TABLE TB_JOB_USR WITH KEY YMA_USERNM = L_WA-YMA_USERNM
+CLASS      = SPACE.
+CHECK TB_JOB_USR-LIM > 0.
+ADD L_VAL TO TB_JOB_USR-SUM.
+MODIFY TB_JOB_USR INDEX SY-TABIX.
+ENDLOOP.
+DELETE TB_JOB_USR WHERE SUM = 0.
+
+ENDFORM.                    " YMA_GET_JOB_LIST
+************************************************************************
+*** Get high priority job name
+************************************************************************
+FORM YMA_GET_HPR_JOBNAME TABLES  I_BTC STRUCTURE YMA_TREE_J
+USING   I_NAME   O_RES.
+CLEAR O_RES.
+LOOP AT I_BTC.
+IF I_BTC-YMA_JOB CA '*'.  CHECK I_NAME CP I_BTC-YMA_JOB.
+ELSE.                     CHECK I_NAME EQ I_BTC-YMA_JOB.    ENDIF.
+O_RES = 'Y'.              EXIT.
+ENDLOOP.
+
+ENDFORM.                    " YMA_GET_HPR_JOBNAME
+************************************************************************
+*** Send alerts ==> Mail / SNMP / Pager / Adm. mail
+************************************************************************
+FORM YMA_SEND_ALERTS.
+
+*** Send common mail
+PERFORM YMA_MAIL_ALERTS   IN PROGRAM (C_PROG)  TABLES  TB_OBJCONT_1
+USING   C_CYCLE-RDATE  C_CYCLE-STIME.
+*** Send SNMP trap
+PERFORM YMA_SNMP_ALERTS   IN PROGRAM (C_PROG)  TABLES  TB_SNMP_ALERT
+USING   G_APSERVER.
+*** Send Pager message
+PERFORM YMA_PAGER_ALERTS  IN PROGRAM (C_PROG)  TABLES  TB_PAGER_ALERT
+USING   G_APSERVER.
+*** Send admin. message
+PERFORM  YMA_MAIL2_ALERTS IN PROGRAM (C_PROG)  TABLES  TB_OBJCONT_2.
+
+ENDFORM.                    " YMA_SEND_ALERTS
+************************************************************************

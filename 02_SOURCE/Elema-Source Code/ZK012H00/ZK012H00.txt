@@ -1,0 +1,286 @@
+*----------------------------------------------------------------------*
+*  仕入エラーリスト：プラント別出力                                    *
+*    機能：仕入エラーリストを、プラント別に出力を分けて出力する        *
+*          出力先のプリンタは、納品書の出力条件を用いている            *
+*          オンラインではなく、バッチジョブを登録する                  *
+*    作成：2002/08/30 KURANO                                           *
+*    変更：                                                            *
+*                                                                      *
+*----------------------------------------------------------------------*
+REPORT zzkura75 .
+
+* 使用テーブル
+TABLES yk230. "仕入データ
+TABLES nach.  "詳細出力データ
+
+* グローバル変数
+TYPES: BEGIN OF st_job,
+lifnr LIKE yk230-lifnr,
+werks LIKE yk230-werks,
+ldest LIKE nach-ldest,
+END OF st_job.
+DATA i_job TYPE STANDARD TABLE OF st_job WITH HEADER LINE.
+DATA w_jobcount LIKE tbtcjob-jobcount.
+DATA w_parm LIKE pri_params.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk230-bukrs.      "会社コード
+PARAMETERS p_ekorg LIKE yk230-ekorg.      "購買組織
+SELECT-OPTIONS s_lifnr FOR yk230-lifnr.   "仕入先コード
+SELECT-OPTIONS s_werks FOR yk230-werks.   "プラント
+SELECT-OPTIONS s_kekkbn FOR yk230-kekkbn no-display. "照合結果区分
+PARAMETERS p_primm LIKE pri_params-primm. "即時印刷
+PARAMETERS p_job LIKE tbtcjob-jobname.    "ジョブ名
+PARAMETERS p_kotabn LIKE nach-kotabnr.    "条件テーブル
+PARAMETERS p_kschl LIKE nach-kschl.       "条件タイプ
+parameters p_MISEI as checkbox.
+parameters p_MIKEI as checkbox.
+parameters p_UNM as checkbox.
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+IF p_MISEI is initial and p_UNM is initial AND p_MIKEI is initial.
+MESSAGE e400(Y1) with '出力するリストを選択してください'.
+ENDIF.
+*----------------------------------------------------------------------*
+INITIALIZATION.
+PERFORM f_init.      "選択画面の初期化
+
+START-OF-SELECTION.
+PERFORM f_select.    "ジョブ対象の選択とプリンタ設定
+PERFORM f_job_open.  "ジョブのオープン
+LOOP AT i_job.       "レポートの実行
+CLEAR w_parm.
+PERFORM f_print_parm USING i_job-ldest p_primm w_parm.
+PERFORM f_submit USING i_job-lifnr i_job-werks.
+ENDLOOP.
+PERFORM f_job_close. "ジョブのクローズ
+
+*---------------------------------------------------------------------*
+*       FORM f_init                                                   *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_init.
+GET PARAMETER ID 'BUK' FIELD p_bukrs.
+GET PARAMETER ID 'EKO' FIELD p_ekorg.
+p_kotabn = 961.
+p_kschl = 'WE01'. "入庫荷札
+CONCATENATE sy-repid '-' sy-uname '-' sy-datum sy-uzeit INTO p_job.
+s_kekkbn-sign = 'I'.
+s_kekkbn-option = 'EQ'.
+s_kekkbn-low = '1'.
+APPEND s_kekkbn.
+s_kekkbn-low = '3'.
+APPEND s_kekkbn.
+s_kekkbn-low = '5'.
+APPEND s_kekkbn.
+p_primm = 'X'.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_select                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_select.
+* ローカル変数
+TYPES: BEGIN OF st_yk230,
+lifnr LIKE yk230-lifnr,
+werks LIKE yk230-werks,
+END OF st_yk230.
+DATA i_yk230 TYPE STANDARD TABLE OF st_yk230 WITH HEADER LINE.
+DATA w_vakey LIKE nach-vakey.
+* 仕入データから仕入先とプラントの組み合わせを取得
+SELECT lifnr werks
+FROM   yk230
+INTO   TABLE  i_yk230
+WHERE  kekkbn IN s_kekkbn
+AND    lifnr  IN s_lifnr
+AND    werks  IN s_werks
+AND    ekorg   = p_ekorg
+AND    bukrs   = p_bukrs
+GROUP  by lifnr werks.
+* プリンタの選択
+SORT i_yk230 BY werks.
+LOOP AT i_yk230.
+AT NEW werks.
+CLEAR: w_vakey, nach.
+w_vakey+0(1) = '1'.
+w_vakey+1(4) = i_yk230-werks.
+SELECT        * FROM  nach
+WHERE  kotabnr  = p_kotabn
+AND    kschl    = p_kschl
+AND    vakey    = w_vakey.
+ENDSELECT.
+ENDAT.
+MOVE-CORRESPONDING i_yk230 TO i_job.
+i_job-ldest = nach-ldest.
+APPEND i_job.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_print_parm                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  W_PDEST                                                       *
+*  -->  W_PRIMM                                                       *
+*  -->  W_PARM                                                        *
+*---------------------------------------------------------------------*
+FORM f_print_parm USING w_pdest LIKE pri_params-pdest
+w_primm LIKE pri_params-primm
+w_parm  LIKE pri_params.
+* ローカル変数
+DATA w_repid LIKE pri_params-plist.
+w_repid = sy-repid.
+
+* プリントパラメタ作成
+CALL FUNCTION 'GET_PRINT_PARAMETERS'
+EXPORTING
+archive_mode           = '1'       "印刷のみ
+copies                 = 1         "印刷部数
+destination            = w_pdest   "出力デバイス
+immediately            = w_primm   "即時印刷
+*           layout                 = p_layout  "書式
+*           line_count             = p_count   "行
+*           line_size              = p_size    "列
+list_name              = w_repid   "名称
+no_dialog              = 'X'       "画面表示なし
+receiver               = sy-uname  "受信者
+sap_cover_page         = 'D'       "SAPカバーシート
+host_cover_page        = 'D'       "OS カバーシート
+user                   = sy-uname
+IMPORTING
+out_parameters         = w_parm
+EXCEPTIONS
+archive_info_not_found = 1
+invalid_print_params   = 2
+invalid_archive_params = 3
+OTHERS                 = 4.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_job_open                                               *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_job_open.
+* ジョブを開く
+CALL FUNCTION 'JOB_OPEN'
+EXPORTING
+*     DELANFREP              = ' '
+jobname                = p_job
+IMPORTING
+jobcount               = w_jobcount
+EXCEPTIONS
+cant_create_job        = 1
+invalid_job_data       = 2
+jobname_missing        = 3
+OTHERS                 = 4.
+IF sy-subrc = 0.
+MESSAGE s401(y1) WITH 'ジョブ登録を開始します' w_jobcount.
+ELSE.
+MESSAGE s401(y1) WITH 'ジョブ登録に失敗しました' sy-subrc.
+STOP.
+ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_submit                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_submit USING w_lifnr w_werks.
+
+* 未請求リスト
+IF P_MISEI = 'X'.
+SUBMIT yk012200
+USING SELECTION-SET 'YK_DEFAULT'
+WITH s_lifnr EQ w_lifnr SIGN 'I'
+WITH s_werks EQ w_werks SIGN 'I'
+USER sy-uname VIA JOB p_job NUMBER w_jobcount
+TO SAP-SPOOL SPOOL PARAMETERS w_parm
+WITHOUT SPOOL DYNPRO
+AND  RETURN.
+ENDIF.
+* 未計上リスト
+IF P_MIkEI = 'X'.
+SUBMIT yk012700
+USING SELECTION-SET 'YK_DEFAULT'
+WITH s_lifnr EQ w_lifnr SIGN 'I'
+WITH s_werks EQ w_werks SIGN 'I'
+USER sy-uname VIA JOB p_job NUMBER w_jobcount
+TO SAP-SPOOL SPOOL PARAMETERS w_parm
+WITHOUT SPOOL DYNPRO
+AND  RETURN.
+ENDIF.
+* アンマッチリスト
+IF P_UNM = 'X'.
+SUBMIT yk012800
+USING SELECTION-SET 'YK_DEFAULT'
+WITH s_lifnr EQ w_lifnr SIGN 'I'
+WITH s_werks EQ w_werks SIGN 'I'
+USER sy-uname VIA JOB p_job NUMBER w_jobcount
+TO SAP-SPOOL SPOOL PARAMETERS w_parm
+WITHOUT SPOOL DYNPRO
+AND  RETURN.
+ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_job_close                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_job_close.
+* ジョブクローズ
+CALL FUNCTION 'JOB_CLOSE'
+EXPORTING
+jobcount             = w_jobcount
+jobname              = p_job
+strtimmed            = 'X'
+EXCEPTIONS
+cant_start_immediate = 1
+invalid_startdate    = 2
+jobname_missing      = 3
+job_close_failed     = 4
+job_nosteps          = 5
+job_notex            = 6
+lock_failed          = 7
+OTHERS               = 8.
+* クローズ失敗時はジョブを削除
+IF sy-subrc <> 0.
+MESSAGE s401(y1) WITH 'ジョブのクローズに失敗しました' sy-subrc.
+CALL FUNCTION 'BP_JOB_DELETE'
+EXPORTING
+jobcount                 = w_jobcount
+jobname                  = p_job
+EXCEPTIONS
+cant_delete_event_entry  = 1
+cant_delete_job          = 2
+cant_delete_joblog       = 3
+cant_delete_steps        = 4
+cant_delete_time_entry   = 5
+cant_derelease_successor = 6
+cant_enq_predecessor     = 7
+cant_enq_successor       = 8
+cant_enq_tbtco_entry     = 9
+cant_update_predecessor  = 10
+cant_update_successor    = 11
+commit_failed            = 12
+jobcount_missing         = 13
+jobname_missing          = 14
+job_does_not_exist       = 15
+job_is_already_running   = 16
+no_delete_authority      = 17
+OTHERS                   = 18.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+STOP.
+ENDIF.
+
+ENDFORM.

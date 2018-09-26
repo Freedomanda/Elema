@@ -1,0 +1,696 @@
+************************************************************************
+* [プログラム名]
+*        ZYTD5230  発注伝票取引先機能一括変更
+* [処理概要]
+* ・ 発注残伝票の取引先機能：PI/Y1を変更する。
+* [改定履歴]
+*　YYYY/MM/DD   Programar           Description
+*  2009/11/20   SOLFIS S.KURATA     新規開発
+*& 2012/08/23   ISID                ES-UP
+*& 2014/08/29   ISID18              コードページを"UTF-8"に修正
+*& 2015/01/13   ISID11              アップロード時のBOMロジック改修
+*& 2015/02/04   ISID18              コードページ修正
+***********************************************************************
+REPORT ZYTD5230
+LINE-SIZE  170 LINE-COUNT 58
+MESSAGE-ID Y1 .
+
+* 入力ファイル格納用
+TYPES : BEGIN OF T_IN,
+EBELN       TYPE EKKO-EBELN,  "発注伝票番号
+LIFN2       TYPE EKPA-LIFN2,  "支払先コード
+END OF T_IN.
+
+* 発注伝票：取引先機能データ格納用
+TYPES : BEGIN OF T_EKPA,
+EBELN       TYPE EKPA-EBELN,  "発注伝票番号
+EBELP       TYPE EKPA-EBELP,  "明細番号
+EKORG       TYPE EKPA-EKORG,  "購買組織
+LTSNR       TYPE EKPA-LTSNR,  "仕入先部門
+WERKS       TYPE EKPA-WERKS,  "プラント
+PARVW       TYPE EKPA-PARVW,  "取引先機能
+PARZA       TYPE EKPA-PARZA,  "取引先カウンタ
+END OF T_EKPA.
+
+* エラー情報格納用
+TYPES : BEGIN OF T_DP ,
+EBELN       TYPE EKKO-EBELN,  "発注伝票番号
+LIFN2       TYPE EKPA-LIFN2,  "番号
+RESULT(200) TYPE C,
+END OF T_DP.
+
+DATA : IN_WRK         TYPE T_IN,
+IN_TAB         TYPE TABLE OF T_IN,
+IT_EKPA        TYPE TABLE OF T_EKPA,
+WA_EKPA        TYPE T_EKPA,
+DP_WRK         TYPE T_DP,
+DP_TAB         TYPE TABLE OF T_DP,
+BDC_TAB        TYPE TABLE OF BDCDATA WITH HEADER LINE,
+BDC_MSG        TYPE TABLE OF BDCMSGCOLL WITH HEADER LINE.
+
+DATA : W_MODE(1)      TYPE C VALUE 'N',
+W_COUNT1       TYPE I,
+W_COUNT2       TYPE I,
+W_COUNT3       TYPE I,
+W_COUNT4       TYPE I.
+**** START ADD 2015/02/04 ISID18 ****
+DATA:
+W_OUTPUT_CP  TYPE ZTEGZZM001-Z_OUTPUT_CP,
+W_FLGUTF8    TYPE FLAG.
+**** END ADD 2015/02/04 ISID18 ****
+* Mod ES-UP 2012/08/23 -->
+*CONSTANTS : W_TAB     TYPE X VALUE '09'.
+*-----------------------------------------------------------------------
+*  固定値
+*-----------------------------------------------------------------------
+****START UPD 2014/08/29 ISID18****
+*CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+CONSTANTS CNS_UTF TYPE STRING VALUE `UTF-8`.
+****END UPD 2014/08/29 ISID18****
+* Mod ES-UP 2012/08/23 <--
+**********************************
+* 選択画面定義
+**********************************
+* サーバ
+PARAMETERS : P_SERVER  RADIOBUTTON GROUP RD01 DEFAULT 'X'.
+* ローカル
+PARAMETERS : P_LOCAL   RADIOBUTTON GROUP RD01.
+* 入力ファイル名
+SELECTION-SCREEN : BEGIN OF BLOCK BLK1 WITH FRAME TITLE TEXT-001.
+PARAMETERS : IN_FILE(128) TYPE C OBLIGATORY.
+SELECTION-SCREEN : END OF BLOCK BLK1.
+
+**********************************
+* AT SELECTION-SCREEN
+**********************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR IN_FILE.
+* 検索ヘルプ
+PERFORM OPEN_DIALOG.
+
+**********************************
+* START-OF-SELECTION
+**********************************
+START-OF-SELECTION.
+
+* ファイル読込
+PERFORM READ_FILE.
+* 取引先機能位置情報取得
+PERFORM DATA_GET.
+* バッチインプット実行
+PERFORM BDC_GOGO.
+* 処理結果出力
+PERFORM WRITE_LIST.
+
+*---------------------------------------------------------------------*
+*       FORM Read_File                                                *
+*---------------------------------------------------------------------*
+*       ファイル読込み                                                *
+*---------------------------------------------------------------------*
+FORM READ_FILE.
+
+**** START ADD 2015/02/04 ISID18 ****
+* コードページ取得処理
+PERFORM FRM_GET_CPAGE.
+**** END ADD 2015/02/04 ISID18 ****
+
+CASE 'X'.
+*   サーバ選択時
+WHEN P_SERVER.
+PERFORM READ_FILE_SERVER.
+*   ローカル選択時
+WHEN P_LOCAL.
+PERFORM READ_FILE_LOCAL.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM Data_Get                                                 *
+*---------------------------------------------------------------------*
+*       取引先機能位置情報取得                                        *
+*---------------------------------------------------------------------*
+FORM DATA_GET.
+
+SELECT EBELN
+EBELP
+EKORG
+LTSNR
+WERKS
+PARVW
+PARZA
+INTO TABLE IT_EKPA
+FROM EKPA
+FOR ALL ENTRIES IN IN_TAB
+WHERE EBELN = IN_TAB-EBELN
+AND EBELP = 0.
+
+IF SY-SUBRC NE 0.
+*   該当データは存在しません
+MESSAGE S008.
+STOP.
+ENDIF.
+
+SORT IT_EKPA BY EBELN.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM BDC_GoGo                                                 *
+*---------------------------------------------------------------------*
+*       バッチインプット実行                                          *
+*---------------------------------------------------------------------*
+FORM BDC_GOGO.
+
+DATA : LT_EKPA_WK TYPE TABLE OF T_EKPA,
+WA_EKPA_WK TYPE T_EKPA,
+LV_POS_PI  TYPE I,
+LV_POS_Y1  TYPE I.
+
+SORT : IN_TAB BY EBELN .
+
+LOOP AT IN_TAB INTO IN_WRK.
+REFRESH LT_EKPA_WK.
+*   該当の取引先機能レコードを退避
+LOOP AT IT_EKPA INTO WA_EKPA WHERE EBELN = IN_WRK-EBELN.
+APPEND WA_EKPA TO LT_EKPA_WK.
+ENDLOOP.
+*   処理対象の発注伝票が存在しない場合
+IF LT_EKPA_WK IS INITIAL.
+CLEAR DP_WRK.
+DP_WRK-EBELN  = IN_WRK-EBELN.
+DP_WRK-LIFN2  = IN_WRK-LIFN2.
+DP_WRK-RESULT = '対象データが存在しません'.
+APPEND DP_WRK TO DP_TAB.
+
+*   処理対象の発注伝票が存在する場合
+ELSE.
+*     取引先機能でソート
+SORT LT_EKPA_WK BY PARVW.
+*     取引先機能：PIの位置を取得
+CLEAR LV_POS_PI.
+READ TABLE LT_EKPA_WK INTO WA_EKPA_WK
+WITH KEY PARVW = 'RS'.
+LV_POS_PI = SY-TABIX.
+*     取引先機能：Y1の位置を取得
+CLEAR LV_POS_Y1.
+READ TABLE LT_EKPA_WK INTO WA_EKPA_WK
+WITH KEY PARVW = 'Y1'.
+LV_POS_Y1 = SY-TABIX.
+*     PI/Y1が存在しない場合、バッチインプットしない
+IF LV_POS_PI IS INITIAL AND
+LV_POS_Y1 IS INITIAL.
+CLEAR DP_WRK.
+DP_WRK-EBELN = IN_WRK-EBELN.
+DP_WRK-LIFN2 = IN_WRK-LIFN2.
+DP_WRK-RESULT = '請求書発行者(PI)・支払先(Y1)が存在しません'.
+APPEND DP_WRK TO DP_TAB.
+*     PI/Y1のいずれかが存在する場合、バッチインプット
+ELSE.
+PERFORM CALL_TRAN USING    IN_WRK-EBELN
+IN_WRK-LIFN2
+LV_POS_PI
+LV_POS_Y1.
+ENDIF.
+ENDIF.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM Write_List                                               *
+*---------------------------------------------------------------------*
+*       処理結果出力                                                  *
+*---------------------------------------------------------------------*
+FORM WRITE_LIST.
+
+* エラー情報出力
+LOOP AT DP_TAB INTO DP_WRK.
+WRITE AT : /01 DP_WRK-EBELN,
+12 DP_WRK-LIFN2,
+23 DP_WRK-RESULT.
+CLEAR : DP_WRK.
+ENDLOOP.
+
+* 処理結果出力
+SKIP.
+WRITE  : /01 'ファイル読込件数', 20 W_COUNT4,
+/01 'BDC実行件数',      20 W_COUNT1,
+/01 'BDC変更件数',      20 W_COUNT2,
+/01 'BDCエラー件数',    20 W_COUNT3.
+
+MESSAGE S401 WITH '変更対象データ件数' W_COUNT4.
+MESSAGE S401 WITH 'BDC実行件数'        W_COUNT1.
+MESSAGE S401 WITH 'BDC変更件数'        W_COUNT2.
+MESSAGE S401 WITH 'BDCエラー件数'      W_COUNT3.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM Set_BDC                                                  *
+*---------------------------------------------------------------------*
+*       BDCテーブル編集                                               *
+*---------------------------------------------------------------------*
+*  -->  I_DAT   モジュールプール／項目名                              *
+*  -->  I_VAL   DYNPRO番号／項目値                                    *
+*  -->  I_FLG   DYNPRO開始                                            *
+*---------------------------------------------------------------------*
+FORM SET_BDC USING I_DAT I_VAL I_FLG.
+
+MOVE : I_FLG TO BDC_TAB-DYNBEGIN.   "DYNPRO開始
+IF I_FLG EQ 'X'.
+MOVE : I_DAT TO BDC_TAB-PROGRAM,  "モジュールプール
+I_VAL TO BDC_TAB-DYNPRO.   "DYNPRO番号
+ELSE .
+MOVE : I_DAT TO BDC_TAB-FNAM,     "項目名
+I_VAL TO BDC_TAB-FVAL.     "項目値
+ENDIF.
+APPEND : BDC_TAB.
+CLEAR : BDC_TAB.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM Call_Tran                                                *
+*---------------------------------------------------------------------*
+*       バッチインプット実行                                          *
+*---------------------------------------------------------------------*
+*  -->  I_EBELN    発注伝票番号                                       *
+*  -->  I_LIFN2    支払先コード                                       *
+*  -->  I_POS_PI   変更位置：PI                                       *
+*  -->  I_POS_Y1   変更位置：Y1                                       *
+*---------------------------------------------------------------------*
+FORM CALL_TRAN USING    I_EBELN
+I_LIFN2
+I_POS_PI
+I_POS_Y1.
+
+DATA : LV_FIELD_PI(20) TYPE C,
+LV_FIELD_Y1(20) TYPE C,
+LV_POS(2)       TYPE N,
+W_MSG           TYPE MESSAGE,
+W_MSGNO         TYPE SY-MSGNO,
+FLG_NAST        TYPE C,
+LV_LINE(2)      TYPE N,
+LV_FNAM_KSCHL   TYPE BDCDATA-FNAM,
+LV_FNAM_NACHA   TYPE BDCDATA-FNAM.
+
+PERFORM SET_BDC USING : 'SAPMM06E'    '0105'  'X',
+'BDC_OKCODE'  '/00'   ' ',
+'RM06E-BSTNR' I_EBELN ' '.
+
+PERFORM SET_BDC USING : 'SAPMM06E'    '0120'  'X',
+'BDC_OKCODE'  '=PRTN' ' '.
+
+PERFORM SET_BDC USING : 'SAPLEKPA'    '0101'  'X',
+'BDC_OKCODE'  '=BACK' ' '.
+* PIが存在する場合
+IF NOT I_POS_PI IS INITIAL.
+CLEAR LV_POS.
+LV_POS = I_POS_PI.
+CONCATENATE 'WRF02K-GPARN('
+LV_POS
+')'
+INTO LV_FIELD_PI.
+PERFORM SET_BDC USING LV_FIELD_PI I_LIFN2 ' '.
+ENDIF.
+
+* Y1が存在する場合
+IF NOT I_POS_Y1 IS INITIAL.
+CLEAR LV_POS.
+LV_POS = I_POS_Y1.
+CONCATENATE 'WRF02K-GPARN('
+LV_POS
+')'
+INTO LV_FIELD_Y1.
+PERFORM SET_BDC USING LV_FIELD_Y1 I_LIFN2 ' '.
+ENDIF.
+
+* 未出力レコードが存在するかチェックする
+PERFORM CHECK_NAST USING    I_EBELN
+CHANGING FLG_NAST
+LV_LINE.
+
+* 未出力レコードが存在しない場合、出力ダミーレコード(ZMXX)を追加
+IF FLG_NAST IS INITIAL.
+CONCATENATE 'DNAST-KSCHL('
+LV_LINE
+')'
+INTO LV_FNAM_KSCHL.
+CONCATENATE 'NAST-NACHA('
+LV_LINE
+')'
+INTO LV_FNAM_NACHA.
+PERFORM SET_BDC USING : 'SAPMM06E'    '0120'  'X',
+'BDC_OKCODE'  '=DR'   ' '.
+PERFORM SET_BDC USING : 'SAPDV70A'    '0100'  'X',
+'BDC_OKCODE'  '/00'   ' ',
+LV_FNAM_KSCHL 'ZMXX'  ' ',
+LV_FNAM_NACHA '9'     ' '.
+PERFORM SET_BDC USING : 'SAPDV70A'    '0100'  'X',
+'BDC_OKCODE'  '=V70S' ' '.
+* 未出力レコードが存在する場合
+ELSE.
+PERFORM SET_BDC USING : 'SAPMM06E'    '0120'  'X',
+'BDC_OKCODE'  '=BU'   ' '.
+ENDIF.
+
+* TR-CD：ME22を実行
+CALL TRANSACTION 'ME22'
+USING   BDC_TAB
+MODE    W_MODE
+MESSAGES INTO    BDC_MSG.
+
+ADD 1 TO W_COUNT1.    " BDC 実行カウント
+IF SY-SUBRC = 0.
+ADD 1 TO W_COUNT2. " ＯＫカウント
+ELSE.
+ADD 1 TO W_COUNT3. " エラーカウント
+MESSAGE S401 WITH '購買発注番号：' IN_WRK-EBELN.
+WRITE : '購買発注番号：' , I_EBELN.
+*   全エラーメッセージを出力
+LOOP AT BDC_MSG.
+MOVE : BDC_MSG-MSGNR TO W_MSGNO.
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID         = BDC_MSG-MSGID
+MSGNO         = W_MSGNO
+MSGTY         = BDC_MSG-MSGTYP
+MSGV1         = BDC_MSG-MSGV1
+MSGV2         = BDC_MSG-MSGV2
+MSGV3         = BDC_MSG-MSGV3
+MSGV4         = BDC_MSG-MSGV4
+IMPORTING
+MESSG         = W_MSG.
+
+MESSAGE ID BDC_MSG-MSGID
+TYPE 'S'
+NUMBER W_MSGNO
+WITH BDC_MSG-MSGV1
+BDC_MSG-MSGV2
+BDC_MSG-MSGV3
+BDC_MSG-MSGV4.
+WRITE W_MSG-MSGTX.
+ENDLOOP.
+ENDIF.
+
+REFRESH : BDC_TAB , BDC_MSG.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  READ_FILE_SERVER
+*&---------------------------------------------------------------------*
+*       サーバファイル読込み
+*----------------------------------------------------------------------*
+FORM READ_FILE_SERVER.
+
+DATA : IN_LINE(30) TYPE C.
+* Add ES-UP 2012/08/23 -->
+****START DEL 2014/08/29 ISID18****
+*  DATA L_CODEPAGE TYPE ABAP_ENCODING.
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+****END DEL 2014/08/29 ISID18****
+* Add ES-UP 2012/08/23 <--
+* ファイルオープン
+* Mod ES-UP 2012/08/23 -->
+*  OPEN DATASET IN_FILE FOR INPUT IN TEXT MODE.
+
+**** START ADD 2015/02/04 ISID18 ****
+DATA L_SAPCODEPAGE TYPE STRING.
+DATA L_CODEPAGE    TYPE ABAP_ENCODING.
+L_SAPCODEPAGE = W_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+IF W_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET IN_FILE FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+**** END ADD 2015/02/04 ISID18 ****
+OPEN DATASET IN_FILE FOR INPUT
+**** START UPD 2014/08/31 ISID19 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/08/31 ISID19 ****
+**** START ADD 2015/01/13 ISID11 ****
+SKIPPING BYTE-ORDER MARK
+**** END ADD 2015/01/13 ISID11 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID18 ****
+ENDIF.
+**** END ADD 2015/02/04 ISID18 ****
+
+* Mod ES-UP 2012/08/23 <--
+* エラー時
+IF SY-SUBRC NE  0.
+*   ファイルオープンエラーです
+MESSAGE S209.
+STOP.
+ENDIF.
+
+* 読込み
+DO.
+READ DATASET IN_FILE INTO IN_LINE .
+IF SY-SUBRC NE 0.
+EXIT.
+ENDIF.
+*   タブで区切って格納
+SPLIT IN_LINE
+* Mod ES-UP 2012/08/23 -->
+*      AT  W_TAB
+AT  CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB
+* Mod ES-UP 2012/08/23 <--
+INTO IN_WRK-EBELN
+IN_WRK-LIFN2.
+PERFORM CONV_INPUT_ALPHA USING    IN_WRK-EBELN
+CHANGING IN_WRK-EBELN.
+APPEND IN_WRK TO IN_TAB .
+CLEAR : IN_WRK.
+ENDDO.
+
+* ファイルゼロ件時
+IF IN_TAB IS INITIAL.
+*   処理対象データがありません
+MESSAGE S204.
+STOP.
+ENDIF.
+
+* ファイルクローズ
+CLOSE DATASET IN_FILE.
+
+* 入力件数カウント
+CLEAR : W_COUNT1 , W_COUNT2 , W_COUNT3 , W_COUNT4.
+DESCRIBE TABLE IN_TAB LINES W_COUNT4.
+
+ENDFORM.                    " READ_FILE_SERVER
+*&---------------------------------------------------------------------*
+*&      Form  READ_FILE_LOCAL
+*&---------------------------------------------------------------------*
+*       ローカルファイル読込み
+*----------------------------------------------------------------------*
+FORM READ_FILE_LOCAL.
+
+TYPES:BEGIN OF TY_FILE,
+FIELD(30) TYPE C,
+END OF TY_FILE.
+
+DATA :IT_FILE TYPE TABLE OF TY_FILE,
+LW_FILE TYPE TY_FILE,
+LV_FILE TYPE STRING.
+* Add ES-UP 2012/10/23 -->
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+**** START ADD 2015/02/04 ISID18 ****
+DATA L_SAPCODEPAGE TYPE STRING.
+L_SAPCODEPAGE = W_OUTPUT_CP.
+**** END ADD 2015/02/04 ISID18 ****
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** START UPD 2015/02/04 ISID18 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/10/23 <--
+
+LV_FILE = IN_FILE.
+
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                      = LV_FILE
+* Add ES-UP 2012/10/23 -->
+CODEPAGE                = L_CODEPAGE
+* Add ES-UP 2012/10/23 <--
+TABLES
+DATA_TAB                      = IT_FILE
+EXCEPTIONS
+FILE_OPEN_ERROR               = 1
+FILE_READ_ERROR               = 2
+NO_BATCH                      = 3
+GUI_REFUSE_FILETRANSFER       = 4
+INVALID_TYPE                  = 5
+NO_AUTHORITY                  = 6
+UNKNOWN_ERROR                 = 7
+BAD_DATA_FORMAT               = 8
+HEADER_NOT_ALLOWED            = 9
+SEPARATOR_NOT_ALLOWED         = 10
+HEADER_TOO_LONG               = 11
+UNKNOWN_DP_ERROR              = 12
+ACCESS_DENIED                 = 13
+DP_OUT_OF_MEMORY              = 14
+DISK_FULL                     = 15
+DP_TIMEOUT                    = 16
+OTHERS                        = 17.
+
+IF SY-SUBRC <> 0.
+*   アップロードエラーです
+MESSAGE S638.
+STOP.
+ENDIF.
+
+LOOP AT IT_FILE INTO LW_FILE.
+SPLIT LW_FILE-FIELD
+* Mod ES-UP 2012/08/23 -->
+*      AT  W_TAB
+AT  CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB
+* Mod ES-UP 2012/08/23 <--
+INTO IN_WRK-EBELN
+IN_WRK-LIFN2.
+PERFORM CONV_INPUT_ALPHA USING    IN_WRK-EBELN
+CHANGING IN_WRK-EBELN.
+
+APPEND IN_WRK TO IN_TAB .
+CLEAR IN_WRK.
+ENDLOOP.
+
+* ファイルゼロ件時
+IF IN_TAB IS INITIAL.
+*   処理対象データがありません
+MESSAGE S204 .
+STOP .
+ENDIF .
+
+* 入力件数カウント
+CLEAR : W_COUNT1 , W_COUNT2 , W_COUNT3 , W_COUNT4.
+DESCRIBE TABLE IN_TAB LINES W_COUNT4.
+
+ENDFORM.                    " READ_FILE_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  CONV_INPUT_ALPHA
+*&---------------------------------------------------------------------*
+*       発注伝票番号を外部⇒内部に変換
+*----------------------------------------------------------------------*
+*      -->I_EBELN  変換前
+*      <--O_EBELN  変換後
+*----------------------------------------------------------------------*
+FORM CONV_INPUT_ALPHA USING    I_EBELN
+CHANGING O_EBELN.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = I_EBELN
+IMPORTING
+OUTPUT        = O_EBELN.
+
+ENDFORM.                    " CONV_INPUT_ALPHA
+*&---------------------------------------------------------------------*
+*&      Form  OPEN_DIALOG
+*&---------------------------------------------------------------------*
+*       ファイルオープンダイアログ
+*----------------------------------------------------------------------*
+FORM OPEN_DIALOG.
+
+DATA : LT_FILE TYPE FILETABLE,
+LW_FILE LIKE LINE OF LT_FILE.
+DATA : L_RC    TYPE I,
+L_FILE  TYPE STRING.
+
+CLEAR:L_RC,LW_FILE,LT_FILE[].
+
+L_FILE = IN_FILE.
+
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+EXPORTING
+DEFAULT_EXTENSION       =  L_FILE
+CHANGING
+FILE_TABLE              =  LT_FILE
+RC                      =  L_RC
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+OTHERS                  = 4.
+
+IF SY-SUBRC <> 0.
+*   ファイル名取得に失敗しました
+MESSAGE S616 WITH 'ファイル名取得'.
+ELSE.
+READ TABLE LT_FILE INTO LW_FILE INDEX 1.
+IN_FILE = LW_FILE-FILENAME.
+ENDIF.
+
+ENDFORM.                    " OPEN_DIALOG
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_NAST
+*&---------------------------------------------------------------------*
+*       未出力レコードが存在するかチェックする
+*----------------------------------------------------------------------*
+*      -->I_EBELN     発注伝票番号
+*      <--O_FLG_NAST  未出力レコードフラグ('X'：未出力レコードあり)
+*      <--O_LINE      追加行数
+*----------------------------------------------------------------------*
+FORM CHECK_NAST USING    I_EBELN
+CHANGING O_FLG_NAST
+O_LINE.
+
+DATA : IT_NAST TYPE TABLE OF NAST,
+LW_NAST TYPE NAST,
+LV_CNT  TYPE I.
+
+SELECT *
+FROM NAST
+INTO TABLE IT_NAST
+WHERE KAPPL = 'EF'
+AND OBJKY = I_EBELN.
+
+* 未出力レコードが存在するか検索
+READ TABLE IT_NAST INTO LW_NAST
+WITH KEY VSTAT = '0'.
+* 未出力レコードが存在する場合は、後続処理は行わない
+IF SY-SUBRC = 0.
+O_FLG_NAST = 'X'.
+EXIT.
+ENDIF.
+
+* 未出力レコードが存在しない場合、
+* 出力ダミーレコード(ZMXX)を追加する行数を取得
+DESCRIBE TABLE IT_NAST LINES LV_CNT.
+
+O_LINE = LV_CNT + 1.
+
+ENDFORM.                    " CHECK_NAST
+**** START ADD 2015/02/04 ISID18 ****
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_CPAGE
+*&---------------------------------------------------------------------*
+*       コードページ取得
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_GET_CPAGE .
+
+CLEAR:
+W_OUTPUT_CP,
+W_FLGUTF8.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-002
+IMPORTING
+EXPCODEPAGE = W_OUTPUT_CP
+EXPFLGUTF8  = W_FLGUTF8.
+
+ENDFORM.                    " FRM_GET_CPAGE
+**** END ADD 2015/02/04 ISID18 ****

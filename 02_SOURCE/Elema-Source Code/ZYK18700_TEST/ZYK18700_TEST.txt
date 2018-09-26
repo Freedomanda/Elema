@@ -1,0 +1,387 @@
+*&-------------------------------------------------------------------- *
+*                                                                      *
+*&  検収照合システム                                                   *
+*&     プログラム名称：アンマッチ一覧表                                *
+*&     プログラムＩＤ：ZYK18700                                        *
+*&                                                                     *
+*&     作成者　　　　：X.XXXXXXXXX   作成日　　　　：YYYY/MM/DD        *
+*&     更新者　　　　：X..XXXXXXXX   更新日        ：YYYY/MM/DD        *
+*&                    XXXXXXXXXXXXXXXXXXXX                             *
+*&---------------------------------------------------------------------*
+REPORT    ZYK18700_TEST
+LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING
+MESSAGE-ID Y1.
+*---------------------------------------------------------------------
+*   宣言部
+*---------------------------------------------------------------------
+TYPE-POOLS: SLIS.
+TABLES:  YK210,                     " 検収データ
+YK230,                     " 売上データ
+LFA1,                      " 仕入先マスタ：一般セクション
+T001W.                     " プラント/支店
+TABLES:  TSTCT.                     " トランザクションコ－ドテキスト
+
+* YK210データ格納構造体
+TYPES: BEGIN OF ST_YK210TBL.
+INCLUDE STRUCTURE YK210.
+TYPES SEI_KUBUN(4) TYPE C.  " 請求区分
+TYPES END OF ST_YK210TBL.
+
+*  アンマッチリスト内部テーブル１
+DATA I_ANMATI_1 TYPE STANDARD TABLE OF ST_YK210TBL
+WITH HEADER LINE.
+
+* YK230データ格納構造体
+TYPES: BEGIN OF ST_YK230TBL.
+INCLUDE STRUCTURE YK230.
+TYPES SIIRE_KUBUN(4) TYPE C.  " 仕入区分
+TYPES END OF ST_YK230TBL.
+
+*  アンマッチリスト内部テーブル２
+DATA I_ANMATI_2 TYPE STANDARD TABLE OF ST_YK230TBL
+WITH HEADER LINE.
+
+*  アンマッチリストﾚｲｱｳﾄ取得構造体定義
+TYPES: BEGIN OF ST_ALLTBL.
+TYPES SEI_KUBUN(4) TYPE C.        " 請求区分
+TYPES SIIRE_KUBUN(4) TYPE C.      " 仕入区分
+TYPES LFA1_NAME1 LIKE LFA1-NAME1. " 仕入先名称
+TYPES NAME1 LIKE T001W-NAME1.     " プラント名称
+INCLUDE STRUCTURE YK01280010.
+TYPES END OF ST_ALLTBL.
+
+*  アンマッチリスト内部テーブル３
+DATA I_ANMATI_3 TYPE STANDARD TABLE OF ST_ALLTBL
+WITH HEADER LINE.
+
+*   ＡＬＶ関係の定義
+*   （改頁、ソート）
+DATA: W_SORT     TYPE SLIS_SORTINFO_ALV,    " 改頁のソートキー情報
+I_SORT     TYPE SLIS_T_SORTINFO_ALV,  " (内部テーブル）
+W_LAYOUT   TYPE SLIS_LAYOUT_ALV,      " 改頁処理の宣言
+
+*   （ヘッダー出力）
+W_EVENT    TYPE SLIS_ALV_EVENT,       " 実行可能なイベント群
+I_EVENT    TYPE SLIS_T_EVENT,         " （内部テーブル）
+
+*   （フィールドカタログ）
+W_SNAME    LIKE DD02L-TABNAME VALUE 'YK01280010',
+I_FIELDCAT TYPE SLIS_T_FIELDCAT_ALV,  " （内部テーブル）
+
+*   （帳票印刷用）
+W_PRINT    TYPE SLIS_PRINT_ALV.
+
+*   ワークエリア
+DATA: W_REPID LIKE SY-REPID.    " 当レポート名
+DATA RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+
+DATA CT_REC TYPE P. "2002/03/04 ADD
+DATA W_OLD_LIFNR LIKE YK210-LIFNR. "2002/12/12 ADD
+*---------------------------------------------------------------------
+*   入力画面定義
+*---------------------------------------------------------------------
+PARAMETERS:P_BUKRS LIKE YK230-BUKRS MEMORY ID BUK OBLIGATORY, "会社コー
+P_EKORG LIKE YK230-EKORG MEMORY ID EKO OBLIGATORY. "購買組織
+
+SELECT-OPTIONS: S_GSBER FOR YK230-GSBER MEMORY ID GSB    "事業領域
+NO INTERVALS.
+SELECT-OPTIONS:S_LIFNR FOR YK210-LIFNR
+NO INTERVALS,
+S_WERKS FOR YK230-WERKS MEMORY ID WRK    "プラント
+NO INTERVALS,
+S_EKGRP FOR YK230-EKGRP  "購買GRP
+NO INTERVALS.
+SELECT-OPTIONS S_ZFBDT FOR YK210-ZFBDT                  " 締日
+NO INTERVALS.
+SELECT-OPTIONS S_KEKKBN FOR YK210-KEKKBN DEFAULT 4.
+PARAMETERS:P_TITLE LIKE SY-TITLE.
+PARAMETERS P_CHK1 AS CHECKBOX. "購買グループの初期設定
+**********************************************************************
+INITIALIZATION.
+IF SY-TCODE+0(1) = 'Y' OR SY-TCODE+0(1) = 'Z'.
+SELECT SINGLE * FROM  TSTCT
+WHERE  SPRSL  = SY-LANGU
+AND    TCODE  = SY-TCODE.
+IF SY-SUBRC = 0.
+SY-TITLE = TSTCT-TTEXT.
+ENDIF.
+ENDIF.
+CLEAR W_OLD_LIFNR.
+**********************************************************************
+AT SELECTION-SCREEN.
+DATA CT_REC TYPE P.
+CHECK SY-UCOMM IS INITIAL.          "ENTER時のみ処理
+DESCRIBE TABLE S_LIFNR LINES CT_REC.
+IF CT_REC = 1.
+READ TABLE S_LIFNR INDEX 1.
+IF SY-BATCH NE 'X' . " Add 2002/12/19 <<<
+IF W_OLD_LIFNR <>  S_LIFNR-LOW.   "2002/12/12 ADD
+IF  ( S_LIFNR-OPTION = 'EQ' OR  S_LIFNR-OPTION = SPACE ).
+REFRESH: S_ZFBDT, S_EKGRP.
+PERFORM SET_ZFBDT.              "締日初期値セット
+PERFORM SET_EIGYO.              "購買グループ初期値セット
+MESSAGE ID 'Y1' TYPE 'S' NUMBER '400' WITH '初期値設定しました'.
+ENDIF.
+W_OLD_LIFNR = S_LIFNR-LOW.
+ENDIF.
+ENDIF  .
+ENDIF.
+**********************************************************************
+START-OF-SELECTION.
+*&---------------------------------------------------------------------*
+*       データ読込
+*----------------------------------------------------------------------*
+REFRESH I_ANMATI_1.
+* 1-1: 請求データ取得、取得した内容を内部テーブル１に格納する
+SELECT * FROM YK210
+INTO CORRESPONDING FIELDS OF TABLE I_ANMATI_1
+WHERE LIFNR IN S_LIFNR
+AND BUKRS  = P_BUKRS
+AND EKORG  = P_EKORG
+AND GSBER IN S_GSBER
+AND WERKS IN S_WERKS
+AND EKGRP IN S_EKGRP
+AND ZFBDT2 IN S_ZFBDT
+AND KEKKBN IN S_KEKKBN
+AND DELFLG <> 'X'.
+
+LOOP AT I_ANMATI_1.
+I_ANMATI_1-SEI_KUBUN = '請求'.
+MODIFY: I_ANMATI_1.
+ENDLOOP.
+
+* 1-2: 仕入データ取得,内容を内部テーブル２に格納する
+REFRESH I_ANMATI_2.
+SELECT * FROM YK230
+INTO CORRESPONDING FIELDS OF TABLE I_ANMATI_2
+WHERE LIFNR IN S_LIFNR
+AND BUKRS  = P_BUKRS
+AND EKORG  = P_EKORG
+AND GSBER IN S_GSBER
+AND WERKS IN S_WERKS
+AND EKGRP IN S_EKGRP
+AND ZFBDT2 IN S_ZFBDT
+AND KEKKBN IN S_KEKKBN.
+LOOP AT I_ANMATI_2.           " 2002/01/22
+I_ANMATI_2-SIIRE_KUBUN = '仕入'.
+MODIFY: I_ANMATI_2.
+ENDLOOP.
+
+* 1-3: "請求データ","仕入データ"が取得、内部テーブル３に格納する
+LOOP AT I_ANMATI_1.
+MOVE-CORRESPONDING I_ANMATI_1 TO I_ANMATI_3.
+I_ANMATI_3-KUBUN = I_ANMATI_3-SEI_KUBUN.   " 請求データ区分
+I_ANMATI_3-UPYAMT = 0.
+I_ANMATI_3-SHIIREGAKU = 0.
+I_ANMATI_3-SEIKKYUGAKU = I_ANMATI_1-KNITXAMT."仕入税抜金額
+I_ANMATI_3-BELNR2 = I_ANMATI_1-BILDOC.      "請求:入力番号
+APPEND: I_ANMATI_3.
+ENDLOOP.
+
+CLEAR I_ANMATI_3.
+LOOP AT I_ANMATI_2.
+MOVE-CORRESPONDING I_ANMATI_2 TO I_ANMATI_3.
+I_ANMATI_3-KUBUN = I_ANMATI_3-SIIRE_KUBUN.  " 仕入データ区分
+I_ANMATI_3-UPYAMT = I_ANMATI_2-UPYAMT.  " 未請求金額
+I_ANMATI_3-SEIKKYUGAKU = 0.
+I_ANMATI_3-SHIIREGAKU = I_ANMATI_2-KNITXAMT. "仕入税抜金額
+I_ANMATI_3-BELNR2 = I_ANMATI_2-BELNR.       "仕入:伝票番号
+I_ANMATI_3-BILDAT = I_ANMATI_2-BUDAT.
+APPEND: I_ANMATI_3.
+ENDLOOP.
+
+*   請求,仕入データに選択条件を満たすレコードが存在
+DESCRIBE TABLE I_ANMATI_3 LINES CT_REC.
+IF CT_REC = 0.
+MESSAGE S626 .
+STOP.
+ENDIF.
+
+* 3.2: LFA1テーブルデータを取得
+SELECT SINGLE NAME1 FROM LFA1
+INTO I_ANMATI_3-LFA1_NAME1
+WHERE LIFNR = I_ANMATI_3-LIFNR.
+
+* 3.3: TOO1Wテーブルデータを取得
+SELECT SINGLE NAME1 FROM T001W
+INTO CORRESPONDING FIELDS OF I_ANMATI_3
+WHERE WERKS = I_ANMATI_3-WERKS.
+
+
+* 1-5:  内部テーブル３のデータを以下の順にソードする
+*
+SORT I_ANMATI_3 BY PRCNO LIFNR WERKS EBELN KEKKBN BELNR2.
+
+*&---------------------------------------------------------------------*
+*&      Form  TABLE_OUT
+*&---------------------------------------------------------------------*
+*       ＡＬＶ帳票の出力
+*----------------------------------------------------------------------*
+*FORM TABLE_OUT.
+* 呼出元を設定
+W_REPID = SY-REPID.
+
+*   項目カタログの作成
+CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = W_SNAME
+CHANGING
+CT_FIELDCAT            = I_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+
+IF SY-SUBRC <> 0.
+*        MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*                WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+*   実行可能なイベント群の作成
+W_EVENT-FORM = 'TOP_OF_PAGE'.
+W_EVENT-NAME = 'TOP_OF_PAGE'.
+APPEND W_EVENT TO I_EVENT.
+W_EVENT-FORM = 'CALLER_EXIT'.
+W_EVENT-NAME = 'CALLER_EXIT'.
+APPEND W_EVENT TO I_EVENT.
+
+*   "TOP-OF-PAGE"を定義
+READ TABLE I_EVENT INTO W_EVENT WITH KEY NAME = 'TOP_OF_PAGE'.
+W_EVENT-FORM = 'TOP_OF_PAGE'.
+MODIFY I_EVENT FROM W_EVENT TRANSPORTING
+FORM WHERE NAME = 'TOP_OF_PAGE'.
+
+*   ソート & ページイジェクト
+W_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+W_PRINT-NO_PRINT_LISTINFOS = 'X'.   " Extra printing pageを抑制
+W_LAYOUT-NO_TOTALLINE = 'X'.        " 2002/04/12 ADD
+
+W_SORT-SPOS      = '01'.
+W_SORT-FIELDNAME = 'LIFNR'.    " 仕入先の項目名
+W_SORT-UP        = 'X'.
+W_SORT-SUBTOT    = 'X'.
+W_SORT-GROUP     = '*'.
+APPEND W_SORT TO I_SORT.
+
+W_SORT-SPOS      = '02'.
+W_SORT-FIELDNAME = 'WERKS'.    " プラントの項目名
+W_SORT-UP        = 'X'.
+W_SORT-SUBTOT    = 'X'.
+W_SORT-GROUP     = '*'.
+APPEND W_SORT TO I_SORT.
+
+*   レポート表示
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM = W_REPID
+IT_FIELDCAT        = I_FIELDCAT
+I_SAVE             = 'A'
+IT_EVENTS          = I_EVENT[]
+IS_LAYOUT          = W_LAYOUT
+IT_SORT            = I_SORT
+IS_PRINT           = W_PRINT
+TABLES
+T_OUTTAB           = I_ANMATI_3
+EXCEPTIONS
+PROGRAM_ERROR      = 1
+OTHERS             = 2.
+
+IF SY-SUBRC <> 0.
+*        MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*                WITH SY-MASV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+*&---------------------------------------------------------------------*
+*&      Form  CALLER_EXIT
+*&---------------------------------------------------------------------*
+*       先頭行取得定義
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM CALLER_EXIT USING RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+RS_DATA-CALLBACK_HEADER_TRANSPORT = 'FILITEXTS_TEXT_TRANSPORT'.
+ENDFORM.            " CALLER_EXIT
+**********************************************************************
+***          TOP_OF_PAGE                                           ***
+**********************************************************************
+FORM TOP_OF_PAGE.
+DATA: W_NAME1 LIKE KNA1-NAME1
+VALUE '                   ',
+W_BEZEI LIKE TVGRT-BEZEI
+VALUE '                   '.
+
+WRITE: /1 P_TITLE.                "2002/03/18 MOD
+WRITE: /1 'Page:',
+SY-PAGNO.
+WRITE: /1 '作成日時： ',
+SY-DATUM USING EDIT MASK '____/__/__',
+SY-UZEIT USING EDIT MASK '__:__'.
+IF NOT ( I_ANMATI_3-ZFBDT IS INITIAL AND
+I_ANMATI_1-LIFNR IS INITIAL ).
+WRITE: /.
+SELECT SINGLE NAME1
+FROM LFA1 INTO W_NAME1
+WHERE LIFNR = I_ANMATI_3-LIFNR.
+WRITE: /1 '仕入先:    ',
+12 I_ANMATI_3-LIFNR,
+24 '仕入先名称:',
+38 W_NAME1.
+
+SELECT SINGLE NAME1
+FROM T001W INTO W_BEZEI
+WHERE WERKS = I_ANMATI_3-WERKS.
+WRITE: /1 'プラント:',
+12 I_ANMATI_3-WERKS,
+24 'プラント名称:',
+38 W_BEZEI.
+ENDIF.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  SET_ZFBDT
+*&---------------------------------------------------------------------*
+*       締日の初期値セット
+*----------------------------------------------------------------------*
+FORM SET_ZFBDT.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+I_CORD         = S_LIFNR-LOW
+I_EKORG        = P_EKORG
+I_DAY          = SY-DATUM
+IMPORTING
+E_ZFBDT_OLD    = S_ZFBDT-LOW
+EXCEPTIONS
+NO_GET_T052    = 1
+NO_GOOD_GETDAY = 2
+NO_GET_ZTERM   = 3
+OTHERS         = 4.
+IF SY-SUBRC = 0.
+S_ZFBDT-SIGN   = 'I'.
+S_ZFBDT-OPTION = 'EQ'.
+APPEND S_ZFBDT.
+ENDIF.
+
+ENDFORM.                    " SET_ZFBDT
+*&---------------------------------------------------------------------*
+*&      Form  SET_EIGYO
+*&---------------------------------------------------------------------*
+*       購買グループ初期値セット
+*----------------------------------------------------------------------*
+FORM SET_EIGYO.
+TABLES LFM1.
+CLEAR LFM1.
+
+DATA W_CNT TYPE P.
+DESCRIBE TABLE S_EKGRP LINES W_CNT.
+IF P_CHK1 = 'X' AND W_CNT = 0.
+SELECT * FROM   LFM1
+WHERE  LIFNR IN S_LIFNR
+AND  EKORG =  P_EKORG.
+S_EKGRP-LOW = LFM1-EKGRP.
+S_EKGRP-SIGN  = 'I'.
+S_EKGRP-OPTION ='EQ'.
+APPEND S_EKGRP.
+ENDSELECT.
+ENDIF.
+ENDFORM.                    " SET_EIGYO

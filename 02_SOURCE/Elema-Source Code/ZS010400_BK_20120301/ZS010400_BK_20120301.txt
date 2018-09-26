@@ -1,0 +1,1616 @@
+************************************************************************
+* [プログラム名]
+*   ZS010400        売上日計表
+*
+* [処理概要]
+*   ・日々の売上額・粗利額の管理をおこなう
+* [改定履歴]
+*　YYYY/MM/DD  Programar         Description
+*  2001/12/5  PSD K.Usami        新規開発
+*  2002/01/10 PSD M.Arai         仕様変更：対象明細カテゴリ追加対応
+*  2002/03/15 PSD M.Arai         粗利金額誤差対応
+*  2002/03/19 PSD T.SAITOH       ALVステータス印刷拒否設定
+*  2002/05/16 PSD K.ARAI         粗利金額の算出方法を変更
+*  2002/06/20 PSD T.SAITOH       再移送
+*  2002/07/30 PSD T.SAITOH       販売組織／流通チャネル／製品部門対応
+*  2002/08/08 カットオーバー -------------------------------------------
+*  2002/08/09 PSD T.SAITOH       ページ番号廃止
+*  2002/08/14 PSD T.SAITOH       ALVステータス印刷拒否設定(＋１帳票）
+*  2002/09/13 PSD T.SAITOH       出力日時追加
+*  2002/10/21 PSD K.ARAI         ソート項目の追加
+*  2004/10/15 DMC MURATA         選択画面にﾊﾞｰｼﾞｮﾝを追加
+*                                暫定対応：バージョンに002をセット
+*  2010/04/06 SOLFIS HATA        営業所統廃合対応
+*  2010/09/08 SOLFIS S.KURATA    部門表示順変更対応
+*  2011/01/06 SOLFIS M.MURATA    抽出条件に登録日を追加
+*                                ※転記日(売上計上日)との併用は行わない
+*                                ヘッダ印字文字列の追加
+*                                ※抽出条件によって印字文字列変更
+*  2011/04/01 SOLFIS M.MURATA    営業所統廃合(2500→900)
+************************************************************************
+REPORT  zs010400.
+************************************************************************
+* TYPES
+************************************************************************
+TYPE-POOLS slis.
+
+* 請求伝票型
+TYPES: BEGIN OF typ_seikyu,
+*---APPEND START PSD K.ARAI   2002/10/21 ---------------------------*
+*** ソート用キー項目追加
+vbeln     TYPE vbrp-vbeln,
+posnr     TYPE vbrp-posnr,
+*---APPEND END   PSD K.ARAI   2002/10/21 ---------------------------*
+waerk     TYPE vbrk-waerk,      " 通貨
+kurrf     TYPE vbrk-kurrf,      " 換算レート
+fkdat     TYPE vbrk-fkdat,      " 請求日
+vbtyp     TYPE vbrk-vbtyp,      " 明細伝票カテゴリ
+vkbur     TYPE vbrp-vkbur,      " 営業所
+vkgrp     TYPE vbrp-vkgrp,      " 営業グループ
+netwr     TYPE vbrp-netwr,      " 正味額
+wavwr     TYPE vbrp-wavwr,      " 原価
+*2011/01/06 ADD START
+erdat     TYPE vbrk-erdat,      " 登録日
+*2011/01/06 ADD END
+END   OF typ_seikyu.
+* 営業所型
+TYPES: BEGIN OF typ_eigyousyo,
+vkbur     TYPE tvkbt-vkbur,    " 営業所
+bezei     TYPE tvkbt-bezei,    " テキスト
+END   OF typ_eigyousyo.
+
+* 営業グループ型
+TYPES: BEGIN OF typ_eigyougp,
+vkgrp     TYPE tvgrt-vkgrp,     " 営業所
+bezei     TYPE tvgrt-bezei,     " テキスト
+END   OF typ_eigyougp.
+
+*2010/09/08 ADD START
+* レポートコード取得用
+TYPES: BEGIN OF t_zs0030,
+zkey       TYPE zs0030-zkey,     " キー
+repcd      TYPE zs0030-repcd,    " レポートコード
+END OF t_zs0030.
+*2010/09/08 ADD END
+***********************************************************************
+* DATA
+***********************************************************************
+CONSTANTS: cns_m TYPE c VALUE 'M',
+cns_n TYPE c VALUE 'N',
+cns_o TYPE c VALUE 'O',
+cns_p TYPE c VALUE 'P',
+* ↓ APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+cns_s TYPE c VALUE 'S',
+* ↑
+cns_j TYPE c VALUE 'J',
+cns_x TYPE c VALUE 'X'.
+
+* 請求伝票内部テーブル
+DATA: gf_seikyu    TYPE          typ_seikyu,
+gt_seikyu    LIKE TABLE OF gf_seikyu.
+DATA:tmp_seikyu LIKE gf_seikyu.
+
+
+* 営業所内部テーブル
+DATA: gf_eigyousyo TYPE typ_eigyousyo,
+* MODIFY PSD K.ARAI 2002/05/29
+gt_eigyousyo  LIKE HASHED TABLE  OF  gf_eigyousyo
+WITH   UNIQUE KEY vkbur.
+*      GT_EIGYOUSYO  LIKE TABLE OF GF_EIGYOUSYO.
+* MODIFY END
+
+* 営業グループ内部テーブル
+DATA: gf_eigyougp   TYPE          typ_eigyougp,
+* MODIFY PSD K.ARAI 2002/05/29
+gt_eigyougp   LIKE HASHED TABLE  OF  gf_eigyougp
+WITH   UNIQUE KEY vkgrp.
+*      GT_EIGYOUGP   LIKE TABLE OF GF_EIGYOUGP.
+* MODIFY END
+
+* 帳票出力用内部テーブル
+DATA: gf_write    TYPE          zslist_v04,
+gt_write    LIKE TABLE OF gf_write.
+* 予算使用バージョン
+DATA: yosan LIKE s901-vrsio.
+* 金額変換用
+
+*DATA: I_GF_SEIKYU_NETWR(30) TYPE C,
+*      TURN_NETWR TYPE VBRP-NETWR,
+*      I_GF_SEIKYU_WAVWR(30) TYPE C,
+*      TURN_WAVWR TYPE VBRP-WAVWR.
+DATA: i_gf_seikyu_netwr(30) TYPE c,
+turn_netwr(10) TYPE p DECIMALS 2,
+i_gf_seikyu_wavwr(30) TYPE c,
+turn_wavwr(10) TYPE p DECIMALS 2.
+
+* 合計用
+DATA: usum LIKE s901-netwr,
+asum LIKE s901-zzaraigaku.
+
+* 型変換用
+DATA: w_arari(6) TYPE p DECIMALS 1,
+w_tarariritu(6) TYPE p DECIMALS 1,
+w_rarariritu(6) TYPE p DECIMALS 1,
+w_uriagetassei(6) TYPE p DECIMALS 1,
+w_araritassei(6) TYPE p DECIMALS 1.
+
+*ヘッダ用
+DATA: gf_header TYPE zslist_v04.
+
+* ＡＢＡＰリストビューア用
+DATA: g_repid     LIKE sy-repid,            "レポートID
+gs_layout   TYPE slis_layout_alv,     "レイアウト構造
+gz_variant   LIKE disvariant,          "バリアント
+ge_variant   LIKE disvariant.
+* REUSE_ALV_LIST_DISPLAY用                ABAPリストビューア関連
+DATA: top_of_page TYPE slis_formname VALUE 'TOP_OF_PAGE'.
+
+* REUSE_ALV_EVENTS_GET 用
+DATA: gt_event TYPE slis_t_event.
+DATA: gs_event TYPE slis_alv_event.
+
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定 --*
+DATA: gf_print      TYPE slis_print_alv.
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+
+*2010/09/08 ADD START
+* レポートコード取得用
+DATA: gt_zs0030     TYPE HASHED TABLE OF t_zs0030
+WITH UNIQUE KEY zkey,
+gf_zs0030     TYPE t_zs0030.
+*2010/09/08 ADD END
+***********************************************************************
+* 選択画面定義
+***********************************************************************
+*   販売組織
+PARAMETERS: pr_vkorg TYPE tvko-vkorg MEMORY ID vko OBLIGATORY,
+*   流通チャネル
+pr_vtweg TYPE tvtw-vtweg MEMORY ID vtw OBLIGATORY,
+*   製品部門
+pr_spart TYPE tspa-spart MEMORY ID spa OBLIGATORY.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT (33) text-001.
+
+PARAMETERS : r_zensya RADIOBUTTON GROUP radi DEFAULT 'X'." 全社
+SELECTION-SCREEN COMMENT 61(4) text-002
+FOR FIELD r_zensya.
+
+PARAMETERS :r_eigyou RADIOBUTTON GROUP radi.
+SELECTION-SCREEN COMMENT 67(6) text-003
+FOR FIELD r_eigyou." 営業所
+
+SELECTION-SCREEN END OF LINE.
+
+PARAMETERS: p_eigyou LIKE gf_eigyousyo-vkbur.        "営業所
+*2011/01/06 ADD START
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT (8) text-020.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS r_fkdat RADIOBUTTON GROUP gr1 DEFAULT 'X'. "売上計上日
+SELECTION-SCREEN COMMENT 36(10) text-021 FOR FIELD r_fkdat.
+SELECTION-SCREEN POSITION 66.
+PARAMETERS r_erdat RADIOBUTTON GROUP gr1.             "登録日
+SELECTION-SCREEN COMMENT 67(6) text-022 FOR FIELD r_erdat.
+SELECTION-SCREEN END OF LINE.
+PARAMETERS:
+*2011/01/06 ADD END
+p_keijou LIKE sy-datum DEFAULT sy-datum, "売上げ計上日
+*2011/01/06 ADD START
+p_erdat  TYPE vbrk-erdat DEFAULT sy-datum. "登録日
+*2011/01/06 ADD END
+* 2004/10/15 ADD>>
+PARAMETERS: p_vrsio  LIKE s901-vrsio DEFAULT '001' . "no-display.
+* 2004/10/15 ADD<<
+
+***********************************************************************
+* AT SELECTION-SCREEN
+***********************************************************************
+AT SELECTION-SCREEN.
+* 入力後処理
+* ラジオボタン：営業所選択時
+IF r_eigyou = cns_x AND p_eigyou = ' '.
+MESSAGE e006(z1) WITH text-003.
+ENDIF.
+
+*2011/01/06 ADD START
+IF r_fkdat = cns_x AND p_keijou IS INITIAL.
+SET CURSOR FIELD 'P_KEIJOU'.
+MESSAGE e006(z1) WITH text-021.
+ENDIF.
+IF r_erdat = cns_x AND p_erdat IS INITIAL.
+SET CURSOR FIELD 'P_ERDAT'.
+MESSAGE e006(z1) WITH text-022.
+ENDIF.
+*2011/01/06 ADD END
+
+* 予算使用バージョン
+* 2004/10/15 MOD>>
+* Mod 2005.04.04 --->
+*  yosan = '002'.                              "暫定対応：下記に変更予定
+yosan = p_vrsio.                          "選択画面のﾊﾞｰｼﾞｮﾝに変更
+* Mod 2005.04.04 <---
+*  YOSAN = '001'.
+* 2004/10/15 MOD<<
+***********************************************************************
+* START-OF-SELECTION
+***********************************************************************
+START-OF-SELECTION.
+* 対象データ抽出処理
+PERFORM frm_get_data.
+
+* 帳票出力用内部テーブル作成処理
+PERFORM frm_make_data.
+
+* 帳票出力処理
+IF r_zensya = cns_x.
+PERFORM frm_zwrite_data.
+ELSEIF r_eigyou = cns_x.
+PERFORM frm_ewrite_data.
+ENDIF.
+***********************************************************************
+* Form
+***********************************************************************
+*&---------------------------------------------------------------------
+*&      Form  frm_get_data
+*&---------------------------------------------------------------------
+*       対象データ抽出処理
+*----------------------------------------------------------------------
+FORM frm_get_data.
+
+* 営業所内部TBL設定処理
+PERFORM frm_set_eigyousyo.
+* 営業グループ内部TBL設定処理
+PERFORM frm_set_eigyougp.
+* 請求伝票情報内部TBL設定処理
+PERFORM frm_set_seikyu.
+*2010/09/08 ADD START
+* レポートコード取得
+IF r_zensya = cns_x.
+PERFORM frm_set_zs0030.
+ENDIF.
+*2010/09/08 ADD END
+* ソート処理
+PERFORM frm_sort.
+
+ENDFORM.                    " frm_get_data
+*&---------------------------------------------------------------------
+*&      Form  frm_set_eigyousyo
+*&---------------------------------------------------------------------
+*       営業所内部TBL設定処理
+*----------------------------------------------------------------------
+FORM frm_set_eigyousyo.
+*営業所コード/テキスト
+SELECT
+vkbur bezei
+INTO TABLE gt_eigyousyo
+FROM tvkbt
+WHERE spras = cns_j.
+
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE s600(z1) WITH text-003." 営業所
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-003 '8'.
+ENDCASE.
+
+ENDFORM.                    " frm_set_eigyousyo
+*&---------------------------------------------------------------------
+*&      Form  frm_set_eigyougp
+*&---------------------------------------------------------------------
+*       営業グループ内部TBL設定処理
+*----------------------------------------------------------------------
+FORM frm_set_eigyougp.
+*営業グループ/テキスト
+SELECT
+vkgrp bezei
+INTO TABLE gt_eigyougp
+FROM tvgrt
+WHERE spras = cns_j.
+
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE s600(z1) WITH text-005." 営業グループ
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-005 '8'.
+ENDCASE.
+
+ENDFORM.                    " frm_set_eigyougp
+*&---------------------------------------------------------------------
+*&      Form  frm_set_seikyu
+*&---------------------------------------------------------------------
+*       請求伝票情報内部TBL設定処理
+*----------------------------------------------------------------------
+FORM frm_set_seikyu.
+DATA w_keijou LIKE p_keijou.
+*2011/01/06 ADD START
+DATA l_erdat_from TYPE vbrk-erdat.  "登録日月初日
+
+CONCATENATE p_erdat+0(6) '01' INTO l_erdat_from.
+*2011/01/06 ADD END
+CONCATENATE p_keijou+0(6)
+'01'
+INTO w_keijou.
+
+IF r_zensya = cns_x.
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.    "売上計上日
+*2011/01/06 ADD END
+*通貨/換算レート/明細伝票カテゴリ/請求日/営業所/営業グループ/正味額/原価
+SELECT
+*---APPEND START PSD K.ARAI   2002/10/21 ---------------------------*
+*** ソート用キー項目取得
+b~vbeln b~posnr
+*---APPEND END   PSD K.ARAI   2002/10/21 ---------------------------*
+a~waerk a~kurrf a~fkdat a~vbtyp
+b~vkbur b~vkgrp b~netwr b~wavwr
+*2011/01/06 ADD START
+a~erdat
+*2011/01/06 ADD END
+INTO CORRESPONDING FIELDS OF TABLE gt_seikyu
+FROM ( vbrk AS a INNER JOIN vbrp     AS b
+ON a~vbeln = b~vbeln )
+WHERE   a~fkdat    >= w_keijou
+AND   a~fkdat      <= p_keijou
+*---APPEND START PSD T.SAITOH 2002/07/30 ---------------------------*
+* 販売組織対応
+AND   a~vkorg = pr_vkorg        "指定販売組織
+AND   a~vtweg = pr_vtweg        "指定流通チャネル
+AND   a~spart = pr_spart        "指定製品部門
+*---APPEND END   PSD T.SAITOH 2002/07/30 ---------------------------*
+* MODIFY PSD K.ARAI 2002/05/29
+AND   a~vbtyp      IN (cns_m , cns_n,
+cns_o , cns_p,
+cns_s).
+*    AND ( a~VBTYP    = CNS_M
+*    OR    a~VBTYP    = CNS_N
+*    OR    a~VBTYP    = CNS_O
+*    OR    a~VBTYP    = CNS_P
+** ↓ APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*    or    a~vbtyp    = cns_s ).
+** ↑
+* MODIFY END
+
+*2011/01/06 ADD START
+ELSE.                              "登録日
+SELECT b~vbeln b~posnr
+a~waerk a~kurrf a~fkdat a~vbtyp
+b~vkbur b~vkgrp b~netwr b~wavwr
+*2011/01/06 ADD START
+a~erdat
+*2011/01/06 ADD END
+INTO CORRESPONDING FIELDS OF TABLE gt_seikyu
+FROM ( vbrk AS a INNER JOIN vbrp AS b
+ON a~vbeln = b~vbeln )
+WHERE a~erdat >= l_erdat_from
+AND a~erdat <= p_erdat
+AND a~vkorg =  pr_vkorg         "販売組織
+AND a~vtweg =  pr_vtweg         "流通チャネル
+AND a~spart =  pr_spart         "製品部門
+AND a~vbtyp IN (cns_m , cns_n,
+cns_o , cns_p, cns_s).
+ENDIF.
+*2011/01/06 ADD END
+
+*エラー処理
+CASE sy-subrc.
+WHEN 0.
+* Add 2006.10.24 --->
+CLEAR :gf_seikyu .
+gf_seikyu-vkbur = 'S000' .
+APPEND gf_seikyu TO gt_seikyu .
+CLEAR :gf_seikyu .
+* Add 2006.10.24 <---
+
+WHEN 4.    " 対象データなし
+MESSAGE s600(z1) WITH text-006." 対象請求伝票
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-006 '8'.
+ENDCASE.
+
+ELSEIF r_eigyou = cns_x.
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.    "売上計上日
+*2011/01/06 ADD END
+*通貨/換算レート/営業所/営業グループ/正味額/原価/明細伝票カテゴリ/請日
+SELECT
+*---APPEND START PSD K.ARAI   2002/10/21 ---------------------------*
+*** ソート用キー項目取得
+b~vbeln b~posnr
+*---APPEND END   PSD K.ARAI   2002/10/21 ---------------------------*
+a~waerk a~kurrf a~fkdat a~vbtyp
+b~vkbur b~vkgrp b~netwr b~wavwr
+*2011/01/06 ADD START
+a~erdat
+*2011/01/06 ADD END
+INTO TABLE gt_seikyu
+FROM ( vbrk AS a INNER JOIN vbrp     AS b
+ON a~vbeln = b~vbeln )
+WHERE b~vkbur    = p_eigyou
+AND   a~fkdat    >= w_keijou
+AND   a~fkdat    <= p_keijou
+*---APPEND START PSD T.SAITOH 2002/07/30 ---------------------------*
+*   販売組織対応
+AND   a~vkorg = pr_vkorg        "指定販売組織
+AND   a~vtweg = pr_vtweg        "指定流通チャネル
+AND   a~spart = pr_spart        "指定製品部門
+*---APPEND END   PSD T.SAITOH 2002/07/30 ---------------------------*
+* MODIFY PSD K.ARAI 2002/05/29
+AND   a~vbtyp    IN (cns_m , cns_n,
+cns_o , cns_p,
+cns_s).
+*    AND ( a~VBTYP    = CNS_M
+*    OR    a~VBTYP    = CNS_N
+*    OR    a~VBTYP    = CNS_O
+*    OR    a~VBTYP    = CNS_P
+** ↓ APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*    or    a~vbtyp    = cns_s ).
+** ↑
+* MODIFY END
+
+*2011/01/06 ADD START
+ELSE.                              "登録日
+SELECT b~vbeln b~posnr
+a~waerk a~kurrf a~fkdat a~vbtyp
+b~vkbur b~vkgrp b~netwr b~wavwr
+*2011/01/06 ADD START
+a~erdat
+*2011/01/06 ADD END
+INTO TABLE gt_seikyu
+FROM ( vbrk AS a INNER JOIN vbrp AS b
+ON a~vbeln = b~vbeln )
+WHERE b~vkbur =  p_eigyou
+AND a~erdat >= l_erdat_from
+AND a~erdat <= p_erdat
+AND a~vkorg =  pr_vkorg        "販売組織
+AND a~vtweg =  pr_vtweg        "流通チャネル
+AND a~spart =  pr_spart        "製品部門
+AND a~vbtyp IN (cns_m , cns_n,
+cns_o , cns_p,
+cns_s).
+ENDIF.
+*2011/01/06 ADD END
+
+*エラー処理
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE s600(z1) WITH text-006." 対象請求伝票
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-006 '8'.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " frm_set_seikyu
+*&---------------------------------------------------------------------*
+*&      Form  frm_sort
+*&---------------------------------------------------------------------*
+*       ソート処理
+*----------------------------------------------------------------------*
+FORM frm_sort.
+* Add 2010/04/06 --->
+CLEAR gf_seikyu .
+LOOP AT gt_seikyu INTO gf_seikyu .
+CASE gf_seikyu-vkbur .
+WHEN '1100' .
+gf_seikyu-vkbur = '1500' .
+WHEN '2300' .
+gf_seikyu-vkbur = '0800' .
+*2011/04/01 ADD START
+WHEN '2500' .
+gf_seikyu-vkbur = '0900' .
+*2011/04/01 ADD END
+WHEN '9000' .
+gf_seikyu-vkbur = '0500' .
+WHEN '9100' .
+gf_seikyu-vkbur = '1900' .
+WHEN '9200' .
+gf_seikyu-vkbur = '1300' .
+WHEN 'S700' .
+gf_seikyu-vkbur = 'S200' .
+ENDCASE .
+
+
+MODIFY gt_seikyu FROM gf_seikyu .
+CLEAR gf_seikyu .
+ENDLOOP .
+* Add 2010/04/06 <---
+
+
+SORT gt_seikyu ASCENDING BY vkbur    "営業所
+*---MODIFY START PSD K.ARAI   2002/10/21 ---------------------------*
+vkgrp  "営業グループ
+vbeln
+posnr.
+*                              VKGRP.  "営業グループ
+*---MODIFY END   PSD K.ARAI   2002/10/21 ---------------------------*
+ENDFORM.                    " frm_sort
+
+*&---------------------------------------------------------------------
+*&      Form  frm_make_data
+*&---------------------------------------------------------------------
+*       帳票出力用内部テーブル作成処理
+*----------------------------------------------------------------------
+FORM frm_make_data.
+
+* 請求伝票内部TBLループ処理
+LOOP AT gt_seikyu INTO gf_seikyu.
+
+* ① ラジオボタン：全社選択時
+* MODIFY PSD K.ARAI 2002/05/29(パフォーマンス対応)
+CASE cns_x.
+WHEN r_zensya.
+*    IF r_ZENSYA = CNS_X.
+* MODIFY END
+
+*営業所コードがブレイクした場合
+IF tmp_seikyu-vkbur <> gf_seikyu-vkbur AND sy-tabix > 1.
+* (a)設定項目の帳票出力用内部TBLへの追加処理
+PERFORM frm_zkoumoku.
+ENDIF.
+* (b)当日売上額、売上累計の設定
+PERFORM frm_zuriage.
+* (c)粗利の設定
+PERFORM frm_zarari.
+
+* ② ラジオボタン：営業所選択時
+* MODIFY PSD K.ARAI 2002/05/29(パフォーマンス対応)
+WHEN r_eigyou.
+*    ELSEIF r_EIGYOU = CNS_X.
+* MODIFY END
+
+*営業所コード/営業所グループがブレイクした場合
+IF sy-tabix > 1
+AND ( tmp_seikyu-vkbur <> gf_seikyu-vkbur
+OR tmp_seikyu-vkgrp <> gf_seikyu-vkgrp ).
+* (a)設定項目の帳票出力用内部TBLへの追加処理
+PERFORM frm_ekoumoku.
+ENDIF.
+* (b)当日売上額、売上累計の設定
+PERFORM frm_euriage.
+* (c)粗利の設定
+PERFORM frm_earari.
+* MODIFY PSD K.ARAI 2002/05/29(パフォーマンス対応)
+ENDCASE.
+*    ENDIF.
+* MODIFY END
+tmp_seikyu = gf_seikyu.
+ENDLOOP.
+
+* 帳票出力用内部TBLレコード追加
+IF r_zensya = cns_x.
+PERFORM frm_zkoumoku.
+ELSEIF r_eigyou = cns_x.
+PERFORM frm_ekoumoku.
+ENDIF.
+
+
+
+* ③ 対象データ存在チェック
+PERFORM frm_check_data.
+
+ENDFORM.                    " frm_make_data
+*&---------------------------------------------------------------------
+*&      Form  frm_zkoumoku
+*&---------------------------------------------------------------------
+*       設定項目の帳票出力用内部TBLへの追加処理
+*----------------------------------------------------------------------
+FORM frm_zkoumoku.
+
+* ｱ) 営業所名設定
+* MODIFY PSD K.ARAI 2002/05/29
+READ TABLE gt_eigyousyo WITH TABLE KEY vkbur = tmp_seikyu-vkbur
+INTO gf_eigyousyo.
+*  READ TABLE GT_EIGYOUSYO WITH KEY VKBUR = tmp_SEIKYU-VKBUR
+*  INTO GF_EIGYOUSYO.
+* MODIFY PSD K.ARAI
+
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+gf_write-vkbur = gf_eigyousyo-vkbur.
+gf_write-bubzi = gf_eigyousyo-bezei.
+
+WHEN 4.    " 対象データなし
+MESSAGE s600(z1) WITH text-006.
+STOP.
+ENDCASE.
+
+* ｲ) 粗利率(当日)の設定
+IF gf_write-zuriage = 0.
+gf_write-zarariritu = 0.
+ELSE.
+w_tarariritu = gf_write-zarari / gf_write-zuriage * 100.
+gf_write-zarariritu = w_tarariritu.
+ENDIF.
+
+* ｳ) 粗利率(累計)の設定
+IF gf_write-zuriruikei = 0.
+gf_write-zarariturui = 0.
+ELSE.
+w_rarariritu = gf_write-zararuikei / gf_write-zuriruikei * 100.
+gf_write-zarariturui = w_rarariritu.
+ENDIF.
+
+* ｴ) 当月売上予算、当月粗利予算の設定
+*2011/01/06 ADD START
+IF r_fkdat = 'X'.
+*2011/01/06 ADD END
+SELECT
+SUM( netwr )
+INTO usum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   spmon = p_keijou+0(6).
+*2011/01/06 ADD START
+ELSE.
+SELECT
+SUM( netwr )
+INTO usum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   spmon = p_erdat+0(6).
+ENDIF.
+*2011/01/06 ADD END
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+gf_write-zuriyosan = usum * 100.
+WHEN 4.    " 対象データなし
+gf_write-zuriyosan = 0.
+gf_write-zuriyosan = 0.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-010 '8'.
+ENDCASE.
+
+*2011/01/06 ADD START
+IF r_fkdat = 'X'.
+*2011/01/06 ADD END
+SELECT
+SUM( zzaraigaku )
+INTO asum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   spmon = p_keijou+0(6).
+*2011/01/06 ADD START
+ELSE.
+SELECT
+SUM( zzaraigaku )
+INTO asum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   spmon = p_erdat+0(6).
+ENDIF.
+*2011/01/06 ADD END
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+gf_write-zarayosan = asum * 100.
+WHEN 4.    " 対象データなし
+gf_write-zarayosan = 0.
+gf_write-zarayosan = 0.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-010 '8'.
+ENDCASE.
+
+* ｵ）売上達成率の設定
+IF gf_write-zuriyosan = 0.
+gf_write-zuriritu = 0.
+ELSE.
+w_uriagetassei = gf_write-zuriruikei /
+gf_write-zuriyosan * 100.
+gf_write-zuriritu = w_uriagetassei.
+ENDIF.
+* ｶ）粗利達成率の設定
+IF gf_write-zuriyosan = 0.
+gf_write-zararitu = 0.
+ELSE.
+w_araritassei = gf_write-zararuikei /
+gf_write-zarayosan * 100.
+gf_write-zararitu = w_araritassei.
+ENDIF.
+*2010/09/08 ADD START
+IF r_zensya = cns_x.
+CLEAR gf_zs0030.
+READ TABLE gt_zs0030 INTO gf_zs0030
+WITH TABLE KEY zkey = tmp_seikyu-vkbur.
+gf_write-zrepcd = gf_zs0030-repcd.
+ENDIF.
+*2010/09/08 ADD END
+* ｷ）帳票出力用内部TBLレコード追加
+tmp_seikyu = gf_seikyu.
+APPEND gf_write TO gt_write.
+
+CLEAR: gf_write.
+i_gf_seikyu_netwr = 0.
+turn_netwr = 0.
+i_gf_seikyu_wavwr = 0.
+turn_wavwr = 0.
+usum  = 0.
+asum  = 0.
+w_arari = 0.
+w_tarariritu = 0.
+w_rarariritu = 0.
+w_uriagetassei = 0.
+w_araritassei = 0.
+
+ENDFORM.                    " frm_zkoumoku
+*&---------------------------------------------------------------------
+*&      Form  frm_zuriage
+*&---------------------------------------------------------------------
+*       当日売上額、売上累計の設定
+*----------------------------------------------------------------------
+FORM frm_zuriage.
+
+* ｱ) 正味額の価格変換
+i_gf_seikyu_netwr = 0.
+
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+currency    = gf_seikyu-waerk
+sap_amount  = gf_seikyu-netwr
+IMPORTING
+idoc_amount = i_gf_seikyu_netwr.
+
+turn_netwr = i_gf_seikyu_netwr."GF_SEIKYU_NETWR
+
+* ｲ) 当日売上額合計設定
+* 請求伝票内部TBLの請求日が画面入力された売上計上日と同じ場合
+* 以下の処理を行い、当日売上額を設定する。
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.
+*2011/01/06 ADD END
+IF gf_seikyu-fkdat = p_keijou.
+
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+gf_write-zuriage = gf_write-zuriage
++ turn_netwr * gf_seikyu-kurrf.
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+gf_write-zuriage = gf_write-zuriage
+- turn_netwr * gf_seikyu-kurrf.
+ENDCASE.
+ENDIF.
+*2011/01/06 ADD START
+ELSE.
+IF gf_seikyu-erdat = p_erdat.
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+WHEN 'M' OR 'P' OR 'S'.
+gf_write-zuriage = gf_write-zuriage
++ turn_netwr * gf_seikyu-kurrf.
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+gf_write-zuriage = gf_write-zuriage
+- turn_netwr * gf_seikyu-kurrf.
+ENDCASE.
+ENDIF.
+ENDIF.
+*2011/01/06 ADD END
+
+* ｳ) 売上累計の設定
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+gf_write-zuriruikei = gf_write-zuriruikei
++ turn_netwr * gf_seikyu-kurrf.
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+gf_write-zuriruikei = gf_write-zuriruikei
+- turn_netwr * gf_seikyu-kurrf.
+ENDCASE.
+ENDFORM.                    " frm_zuriage
+*&---------------------------------------------------------------------
+*&      Form  frm_zarari
+*&---------------------------------------------------------------------
+*       粗利の設定
+*----------------------------------------------------------------------
+FORM frm_zarari.
+* ↓ APPEND 2002/03/15 PSD M.Arai 仕様変更対応
+DATA: l_netwr(16) TYPE p DECIMALS 0,
+l_wavwr(16) TYPE p DECIMALS 0.
+* ↑
+
+* ｱ) 原価の価格変換
+i_gf_seikyu_wavwr = 0.
+
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+currency    = gf_seikyu-waerk
+sap_amount  = gf_seikyu-wavwr
+IMPORTING
+idoc_amount = i_gf_seikyu_wavwr.
+
+turn_wavwr = i_gf_seikyu_wavwr."GF_SEIKYU_WAVWR
+* ｲ) 粗利設定
+* 請求伝票内部TBLの請求日が画面入力された売上計上日と同じ場合
+* 以下の処理を行い、粗利を設定する。
+
+* ↓ APPEND 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+l_netwr = turn_netwr * gf_seikyu-kurrf. " 売上(円)
+l_wavwr = turn_wavwr * gf_seikyu-kurrf. " 原価(円)
+* ↑
+
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.
+*2011/01/06 ADD END
+IF gf_seikyu-fkdat = p_keijou.
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zarari = gf_write-zarari
++ ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+**        粗利額
+*         GF_WRITE-ZARARI = GF_WRITE-ZARARI + ( L_NETWR - L_WAVWR ).
+**      GF_WRITE-ZARARI = GF_WRITE-ZARARI
+**                      + ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF.
+* ↑ 2002.05.16
+
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zarari = gf_write-zarari
+- ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+**        粗利額
+*         GF_WRITE-ZARARI = GF_WRITE-ZARARI - ( L_NETWR - L_WAVWR ).
+**      GF_WRITE-ZARARI = GF_WRITE-ZARARI
+**                      - ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF.
+** ↑
+* ↑ 2002.05.16
+ENDCASE.
+ENDIF.
+*2011/01/06 ADD START
+ELSE.
+IF gf_seikyu-erdat = p_erdat.
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+WHEN 'M' OR 'P' OR 'S'.
+gf_write-zarari = gf_write-zarari
++ ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+gf_write-zarari = gf_write-zarari
+- ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+ENDCASE.
+ENDIF.
+ENDIF.
+*2011/01/06 ADD END
+
+* ｳ) 粗利累計設定
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zararuikei = gf_write-zararuikei
++ ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+**        粗利額
+*       GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+*                           + ( L_NETWR - L_WAVWR ).
+**     GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+**                       + ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF
+** ↑
+* ↑ 2002.05.16
+
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zararuikei = gf_write-zararuikei
+- ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+**        粗利額
+*       GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+*                           - ( L_NETWR - L_WAVWR ).
+**     GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+**                       - ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF
+** ↑
+* ↑ 2002.05.16
+ENDCASE.
+
+ENDFORM.                    " frm_zarari
+*&---------------------------------------------------------------------
+*&      Form  frm_ekoumoku
+*&---------------------------------------------------------------------
+*       設定項目の帳票出力用内部TBLへの追加処理
+*----------------------------------------------------------------------
+FORM frm_ekoumoku.
+
+* ｱ) 営業所名設定
+* MODIFY PSD K.ARAI 2002/05/29
+READ TABLE gt_eigyousyo WITH TABLE KEY vkbur = tmp_seikyu-vkbur
+INTO gf_eigyousyo.
+*  READ TABLE GT_EIGYOUSYO WITH KEY VKBUR = tmp_SEIKYU-VKBUR
+*  INTO GF_EIGYOUSYO.
+* MODIFY PSD K.ARAI
+
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+gf_write-vkbur = gf_eigyousyo-vkbur.
+gf_write-bubzi = gf_eigyousyo-bezei.
+WHEN 4.    " 対象データなし
+MESSAGE s600(z1) WITH text-006.
+STOP.
+ENDCASE.
+* ｲ) 営業グループの設定
+* MODIFY PSD K.ARAI 2002/05/29
+READ TABLE gt_eigyougp WITH TABLE KEY vkgrp = tmp_seikyu-vkgrp
+INTO gf_eigyougp.
+*  READ TABLE GT_EIGYOUGP WITH KEY VKGRP = tmp_SEIKYU-VKGRP
+*  INTO GF_EIGYOUGP.
+* MODIFY END
+
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+gf_write-grbzi = gf_eigyougp-bezei.
+gf_write-vkgrp = gf_eigyougp-vkgrp.
+WHEN 4.    " 対象データなし
+MESSAGE s600(z1) WITH text-006.
+STOP.
+ENDCASE.
+
+* ｳ) 粗利率(当日)の設定
+IF gf_write-zuriage = 0.
+gf_write-zarariritu = 0.
+ELSE.
+w_tarariritu = gf_write-zarari / gf_write-zuriage * 100.
+gf_write-zarariritu = w_tarariritu.
+ENDIF.
+
+* ｴ) 粗利率(累計)の設定
+IF gf_write-zuriruikei = 0.
+gf_write-zarariturui = 0.
+ELSE.
+w_rarariritu = gf_write-zararuikei / gf_write-zuriruikei * 100.
+gf_write-zarariturui = w_rarariritu.
+ENDIF.
+* ｵ) 当月売上予算、当月粗利予算の設定
+*2011/01/06 ADD START
+IF r_fkdat = 'X'.
+*2011/01/06 ADD END
+SELECT
+SUM( netwr )
+INTO usum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   vkgrp = tmp_seikyu-vkgrp
+AND   spmon = p_keijou+0(6).
+*2011/01/06 ADD START
+ELSE.
+SELECT
+SUM( netwr )
+INTO usum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   vkgrp = tmp_seikyu-vkgrp
+AND   spmon = p_erdat+0(6).
+ENDIF.
+*2011/01/06 ADD END
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+gf_write-zuriyosan = usum * 100.
+WHEN 4.    " 対象データなし
+gf_write-zuriyosan = 0.
+gf_write-zarayosan = 0.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-010 '8'.
+ENDCASE.
+
+*2011/01/06 ADD START
+IF r_fkdat = 'X'.
+*2011/01/06 ADD END
+SELECT
+SUM( zzaraigaku )
+INTO asum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   vkgrp = tmp_seikyu-vkgrp
+AND   spmon = p_keijou+0(6).
+*2011/01/06 ADD START
+ELSE.
+SELECT
+SUM( zzaraigaku )
+INTO asum
+FROM s901
+WHERE vrsio = yosan
+AND   vkbur = tmp_seikyu-vkbur
+AND   vkgrp = tmp_seikyu-vkgrp
+AND   spmon = p_erdat+0(6).
+ENDIF.
+*2011/01/06 ADD END
+
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+gf_write-zarayosan = asum * 100.
+WHEN 4.    " 対象データなし
+gf_write-zuriyosan = 0.
+gf_write-zarayosan = 0.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-010 '8'.
+ENDCASE.
+
+* エラー処理
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.    " 対象データなし
+gf_write-zuriyosan = 0.
+gf_write-zuriyosan = 0.
+WHEN 8.    " システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-010 '8'.
+ENDCASE.
+
+* ｶ）売上達成率の設定
+IF gf_write-zuriyosan = 0.
+gf_write-zuriritu = 0.
+ELSE.
+w_uriagetassei = gf_write-zuriruikei /
+gf_write-zuriyosan * 100.
+gf_write-zuriritu = w_uriagetassei.
+ENDIF.
+* ｷ）粗利達成率の設定
+IF gf_write-zuriyosan = 0.
+gf_write-zararitu = 0.
+ELSE.
+w_araritassei = gf_write-zararuikei /
+gf_write-zarayosan * 100.
+gf_write-zararitu = w_araritassei.
+ENDIF.
+* ｸ）帳票出力用内部TBLレコード追加
+tmp_seikyu = gf_seikyu.
+APPEND gf_write TO gt_write.
+
+CLEAR: gf_write.
+i_gf_seikyu_netwr = 0.
+turn_netwr = 0.
+i_gf_seikyu_wavwr = 0.
+turn_wavwr = 0.
+usum  = 0.
+asum  = 0.
+w_arari = 0.
+w_tarariritu = 0.
+w_rarariritu = 0.
+w_uriagetassei = 0.
+w_araritassei = 0.
+
+ENDFORM.                    " frm_ekoumoku
+*&---------------------------------------------------------------------
+*&      Form  frm_euriage
+*&---------------------------------------------------------------------
+*       当日売上額、売上累計の設定
+*----------------------------------------------------------------------
+FORM frm_euriage.
+
+* ｱ) 正味額の価格変換
+i_gf_seikyu_netwr = 0.
+
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+currency    = gf_seikyu-waerk
+sap_amount  = gf_seikyu-netwr
+IMPORTING
+idoc_amount = i_gf_seikyu_netwr.
+
+turn_netwr = i_gf_seikyu_netwr."GF_SEIKYU_NETWR
+
+* ｲ) 当日売上額合計設定
+* 請求伝票内部TBLの請求日が画面入力された売上計上日と同じ場合
+* 以下の処理を行い、当日売上額を設定する。
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.
+*2011/01/06 ADD END
+IF gf_seikyu-fkdat = p_keijou.
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+gf_write-zuriage = gf_write-zuriage + turn_netwr * gf_seikyu-kurrf.
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+gf_write-zuriage = gf_write-zuriage - turn_netwr * gf_seikyu-kurrf.
+ENDCASE.
+ENDIF.
+*2011/01/06 ADD START
+ELSE.
+IF gf_seikyu-erdat = p_erdat.
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+WHEN 'M' OR 'P' OR 'S'.
+gf_write-zuriage = gf_write-zuriage + turn_netwr * gf_seikyu-kurrf.
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+gf_write-zuriage = gf_write-zuriage - turn_netwr * gf_seikyu-kurrf.
+ENDCASE.
+ENDIF.
+ENDIF.
+*2011/01/06 ADD END
+* ｳ) 売上累計の設定
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+gf_write-zuriruikei = gf_write-zuriruikei
++ turn_netwr * gf_seikyu-kurrf.
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+gf_write-zuriruikei = gf_write-zuriruikei
+- turn_netwr * gf_seikyu-kurrf.
+ENDCASE.
+
+ENDFORM.                    " frm_euriage
+*&---------------------------------------------------------------------
+*&      Form  frm_earari
+*&---------------------------------------------------------------------
+*       粗利の設定
+*----------------------------------------------------------------------
+FORM frm_earari.
+* ↓ APPEND 2002/03/15 PSD M.Arai 仕様変更対応
+DATA: l_netwr(16) TYPE p DECIMALS 0,
+l_wavwr(16) TYPE p DECIMALS 0.
+* ↑
+
+* ｱ) 原価の価格変換
+i_gf_seikyu_wavwr = 0.
+
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+currency    = gf_seikyu-waerk
+sap_amount  = gf_seikyu-wavwr
+IMPORTING
+idoc_amount = i_gf_seikyu_wavwr.
+
+turn_wavwr = i_gf_seikyu_wavwr."GF_SEIKYU_WAVWR
+* ｲ) 粗利設定
+* 請求伝票内部TBLの請求日が画面入力された売上計上日と同じ場合
+* 以下の処理を行い、粗利を設定する。
+
+* ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+l_netwr = turn_netwr * gf_seikyu-kurrf. " 売上(円)
+l_wavwr = turn_wavwr * gf_seikyu-kurrf. " 原価(円)
+* ↑
+
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.
+*2011/01/06 ADD END
+IF gf_seikyu-fkdat = p_keijou.
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+
+*        粗利額
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zarari = gf_write-zarari
++ ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+*         GF_WRITE-ZARARI = GF_WRITE-ZARARI + ( L_NETWR - L_WAVWR ).
+**       GF_WRITE-ZARARI = GF_WRITE-ZARARI
+**                      + ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF.
+** ↑
+* ↑2002.05.16
+
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+*        粗利額
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zarari = gf_write-zarari
+- ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+*         GF_WRITE-ZARARI = GF_WRITE-ZARARI - ( L_NETWR - L_WAVWR ).
+**       GF_WRITE-ZARARI = GF_WRITE-ZARARI
+**                      - ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF.
+** ↑
+* ↑2002.05.16
+ENDCASE.
+ENDIF.
+*2011/01/06 ADD START
+ELSE.
+IF gf_seikyu-erdat = p_erdat.
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+WHEN 'M' OR 'P' OR 'S'.
+*         粗利額
+gf_write-zarari = gf_write-zarari
++ ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+*         粗利額
+gf_write-zarari = gf_write-zarari
+- ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+ENDCASE.
+ENDIF.
+ENDIF.
+*2011/01/06 ADD END
+
+* ｳ) 粗利累計設定
+*    I)  請求伝票内部TBLの販売伝票カテゴリが'M'or'P'の場合
+CASE gf_seikyu-vbtyp.
+* ↓DELETE 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+*      WHEN 'M' or 'P'.
+* ↑
+* ↓APPEND 2002/01/10 PSD M.Arai 明細カテゴリ追加対応
+WHEN 'M' OR 'P' OR 'S'.
+* ↑
+
+*        粗利額
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zararuikei = gf_write-zararuikei
++ ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+*       GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+*                           + ( L_NETWR - L_WAVWR ).
+**      GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+**                       + ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF
+** ↑
+* ↑2002.05.16
+
+*    Ⅱ）請求伝票内部TBLの販売伝票カテゴリが'N'or'O'の場合
+WHEN 'N' OR 'O'.
+* ↓ MODIFY 2002.05.16 PSD K.ARAI 粗利金額算出法変更
+gf_write-zararuikei = gf_write-zararuikei
+- ( turn_netwr - turn_wavwr ) * gf_seikyu-kurrf.
+** ↓ MODIFY 2002.03.15 PSD M.ARAI 粗利金額誤差修正
+**        粗利額
+*       GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+*                           - ( L_NETWR - L_WAVWR ).
+**      GF_WRITE-ZARARUIKEI = GF_WRITE-ZARARUIKEI
+**                    - ( TURN_NETWR - TURN_WAVWR ) * GF_SEIKYU-KURRF
+** ↑
+* ↑2002.05.16
+ENDCASE.
+
+ENDFORM.                    " frm_earari
+*&---------------------------------------------------------------------
+*&      Form  frm_check_data
+*&---------------------------------------------------------------------
+*       対象データ存在チェック処理
+*----------------------------------------------------------------------
+FORM frm_check_data.
+
+IF gt_write IS INITIAL.
+MESSAGE s600(z1) WITH text-006.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_check_data
+*&---------------------------------------------------------------------
+*&      Form  frm_zwrite_data
+*&---------------------------------------------------------------------
+*       帳票出力処理
+*----------------------------------------------------------------------
+FORM frm_zwrite_data.
+
+*--- ページ切り替え設定
+gs_layout-group_change_edit = cns_x.
+*---総合計行名称
+gs_layout-totals_text = '全社合計'.
+*---バリアント設定
+gz_variant-variant = '/ZS010400_01'.
+
+*--- イベント取得処理
+PERFORM frm_event_get.
+
+* 'REUSE_ALV_LIST_DISPLAY'用変数の設定
+g_repid = sy-repid.
+
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定----*
+gf_print-no_print_listinfos = 'X'.
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+
+* リストの出力
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+*   I_INTERFACE_CHECK              = ' '
+*   I_BYPASSING_BUFFER             =
+*   I_BUFFER_ACTIVE                = ' '
+i_callback_program             = g_repid       "レポートID
+*   I_CALLBACK_PF_STATUS_SET       = ' '
+i_callback_top_of_page         = top_of_page    "TOP_OF_PAGE
+*   I_CALLBACK_USER_COMMAND        = ' '
+i_structure_name               = 'ZSLIST_V04'  "構造
+is_layout                      = gs_layout     "レイアウト設定
+*    IT_FIELDCAT                    = GT_FIELDCAT[] "カタログ設定
+*   IT_EXCLUDING                   =
+*   IT_SPECIAL_GROUPS              =
+*   IT_SORT                        =
+*   IT_FILTER                      =
+*   IS_SEL_HIDE                    =
+*   I_DEFAULT                      = ' '
+i_save                         = 'A'           "レイアウト保存
+is_variant                     = gz_variant
+it_events                      = gt_event[]    "イベント設定
+*   IT_EVENT_EXIT                  =
+*---MODIFY START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定----*
+*   IS_PRINT                       =
+is_print                       = gf_print      "印刷設定
+*---MODIFY END   PSD T.SAITOH 2002/03/19 ---------------------------*
+*   IS_REPREP_ID                   =
+*   I_SCREEN_START_COLUMN          = 0
+*   I_SCREEN_START_LINE            = 0
+*   I_SCREEN_END_COLUMN            = 0
+*   I_SCREEN_END_LINE              = 0
+* IMPORTING
+*   E_EXIT_CAUSED_BY_CALLER        =
+*   ES_EXIT_CAUSED_BY_USER         =
+TABLES
+t_outtab                       = gt_write      "データの受取TBL
+* EXCEPTIONS
+*   PROGRAM_ERROR                  = 1
+*   OTHERS                         = 2
+.
+ENDFORM.                    " frm_write_data
+*&---------------------------------------------------------------------
+*&      Form  frm_event_get
+*&---------------------------------------------------------------------
+*       イベント取得処理
+*----------------------------------------------------------------------
+FORM frm_event_get.
+
+* イベント取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+i_list_type     = 0
+IMPORTING
+et_events       = gt_event
+EXCEPTIONS
+list_type_wrong = 1
+OTHERS          = 2.
+IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+*--- 使用イベントに実行するサブルーチン名を設定
+LOOP AT gt_event INTO gs_event
+WHERE name = 'TOP_OF_PAGE'.
+gs_event-form = 'FRM_TOP_OF_PAGE'.
+MODIFY gt_event FROM gs_event.
+ENDLOOP.
+
+ENDFORM.                    " frm_event_get
+*&---------------------------------------------------------------------
+*&    Form   TOP_OF_PAGE
+*&---------------------------------------------------------------------
+FORM frm_top_of_page.
+
+DATA: l_sy-tabix TYPE p.
+
+l_sy-tabix = sy-tabix.
+
+IF r_zensya = cns_x.
+WRITE:    text-011.
+*2011/01/06 ADD START
+IF r_fkdat = 'X'.    "計上日基準
+WRITE 024 text-023.
+ELSE.                "登録日基準
+WRITE 024 text-024.
+ENDIF.
+*2011/01/06 ADD END
+*---APPEND START PSD T.SAITOH 2002/09/13 ---------------------------*
+WRITE:100 '出力日時：',sy-datum,'  ',sy-uzeit.
+*---APPEND END   PSD T.SAITOH 2002/09/13 ---------------------------*
+SKIP.
+*---MODIFY START PSD T.SAITOH 2002/08/09 ---------------------------*
+* ページ廃止
+*    WRITE: /  text-015,' ',p_KEIJOU,
+*              155 text-018, SY-PAGNO.
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.
+*2011/01/06 ADD END
+WRITE: /  text-015,' ',p_keijou.
+*2011/01/06 ADD START
+ELSE.
+WRITE: /  text-015,' ',p_erdat.
+ENDIF.
+*2011/01/06 ADD END
+*---MODIFY END   PSD T.SAITOH 2002/08/09 ---------------------------*
+
+ELSEIF r_eigyou = cns_x AND sy-pagno = 1.
+READ TABLE gt_write INTO gf_header INDEX 1.
+WRITE:    text-012.
+*2011/01/06 ADD START
+IF r_fkdat = 'X'.    "計上日基準
+WRITE 024 text-023.
+ELSE.                "登録日基準
+WRITE 024 text-024.
+ENDIF.
+*2011/01/06 ADD END
+*---APPEND START PSD T.SAITOH 2002/09/13 ---------------------------*
+WRITE:100 '出力日時：',sy-datum,'  ',sy-uzeit.
+*---APPEND END   PSD T.SAITOH 2002/09/13 ---------------------------*
+SKIP.
+*---MODIFY START PSD T.SAITOH 2002/08/09 ---------------------------*
+* ページ廃止
+*    WRITE: /  text-017,' ',p_EIGYOU,GF_HEADER-BUBZI,
+*              ' ',text-015,' ',p_KEIJOU,
+*              155 text-018, SY-PAGNO.
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.
+*2011/01/06 ADD END
+WRITE: /  text-017,' ',p_eigyou,gf_header-bubzi,
+' ',text-015,' ',p_keijou.
+*2011/01/06 ADD START
+ELSE.
+WRITE: /  text-017,' ',p_eigyou,gf_header-bubzi,
+' ',text-015,' ',p_erdat.
+ENDIF.
+*2011/01/06 ADD END
+*---MODIFY END   PSD T.SAITOH 2002/08/09 ---------------------------*
+
+ELSEIF r_eigyou = cns_x AND sy-pagno >= 2.
+READ TABLE gt_write INTO gf_header INDEX 1.
+WRITE:    text-012.
+*2011/01/06 ADD START
+IF r_fkdat = 'X'.    "計上日基準
+WRITE 024 text-023.
+ELSE.                "登録日基準
+WRITE 024 text-024.
+ENDIF.
+*2011/01/06 ADD END
+SKIP.
+*---MODIFY START PSD T.SAITOH 2002/08/09 ---------------------------*
+* ページ廃止
+*    WRITE: /  text-017,' ',p_EIGYOU,GF_HEADER-BUBZI,
+*              ' ',text-015,' ',p_KEIJOU,
+*              155 text-018, SY-PAGNO.
+*2011/01/06 ADD START
+IF r_fkdat = cns_x.
+*2011/01/06 ADD END
+WRITE: /  text-017,' ',p_eigyou,gf_header-bubzi,
+' ',text-015,' ',p_keijou.
+*2011/01/06 ADD START
+ELSE.
+WRITE: /  text-017,' ',p_eigyou,gf_header-bubzi,
+' ',text-015,' ',p_erdat.
+ENDIF.
+*2011/01/06 ADD END
+*---MODIFY END   PSD T.SAITOH 2002/08/09 ---------------------------*
+ENDIF.
+ENDFORM.
+*&---------------------------------------------------------------------
+*&      Form  frm_ewrite_data
+*&---------------------------------------------------------------------
+*       帳票出力処理
+*----------------------------------------------------------------------
+FORM frm_ewrite_data.
+
+*--- ページ切り替え設定
+gs_layout-group_change_edit = cns_x.
+*---総合計行名称
+gs_layout-totals_text = '営業所合計'.
+*---バリアント設定
+ge_variant-variant = '/ZS010400_02'.
+
+*--- イベント取得処理
+PERFORM frm_event_get.
+
+* 'REUSE_ALV_LIST_DISPLAY'用変数の設定
+g_repid = sy-repid.
+
+*---APPEND START PSD T.SAITOH 2002/08/14 ALVステータス印刷拒否設定----*
+gf_print-no_print_listinfos = 'X'.
+*---APPEND END   PSD T.SAITOH 2002/08/14 ---------------------------*
+
+* リストの出力
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+*   I_INTERFACE_CHECK              = ' '
+*   I_BYPASSING_BUFFER             =
+*   I_BUFFER_ACTIVE                = ' '
+i_callback_program             = g_repid       "レポートID
+*   I_CALLBACK_PF_STATUS_SET       = ' '
+i_callback_top_of_page         = top_of_page    "TOP_OF_PAGE
+*   I_CALLBACK_USER_COMMAND        = ' '
+i_structure_name               = 'ZSLIST_V04'  "構造
+is_layout                      = gs_layout     "レイアウト設定
+*    IT_FIELDCAT                    = GT_FIELDCAT[] "カタログ設定
+*   IT_EXCLUDING                   =
+*   IT_SPECIAL_GROUPS              =
+*   IT_SORT                        =
+*   IT_FILTER                      =
+*   IS_SEL_HIDE                    =
+*   I_DEFAULT                      = ' '
+i_save                         = 'A'           "レイアウト保存
+is_variant                     = ge_variant
+it_events                      = gt_event[]    "イベント設定
+*   IT_EVENT_EXIT                  =
+*---MODIFY START PSD T.SAITOH 2002/08/14 ALVステータス印刷拒否設定----*
+*   IS_PRINT                       =
+is_print                       = gf_print      "印刷設定
+*---MODIFY END   PSD T.SAITOH 2002/08/14 ---------------------------*
+*   IS_REPREP_ID                   =
+*   I_SCREEN_START_COLUMN          = 0
+*   I_SCREEN_START_LINE            = 0
+*   I_SCREEN_END_COLUMN            = 0
+*   I_SCREEN_END_LINE              = 0
+* IMPORTING
+*   E_EXIT_CAUSED_BY_CALLER        =
+*   ES_EXIT_CAUSED_BY_USER         =
+TABLES
+t_outtab                       = gt_write      "データの受取TBL
+* EXCEPTIONS
+*   PROGRAM_ERROR                  = 1
+*   OTHERS                         = 2
+.
+ENDFORM.                    " frm_write_data
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_ZS0030
+*&---------------------------------------------------------------------*
+*       レポートコード取得
+*----------------------------------------------------------------------*
+FORM frm_set_zs0030.
+
+REFRESH gt_zs0030.
+SELECT zkey   "キー
+repcd  "レポートコード
+INTO TABLE gt_zs0030
+FROM zs0030
+FOR ALL ENTRIES IN gt_eigyousyo
+WHERE zkey = gt_eigyousyo-vkbur.
+
+CASE sy-subrc.
+WHEN 0 OR 4.
+WHEN OTHERS.
+*     システムエラー
+MESSAGE a603(z1) WITH 'ZS010400' text-019 '8'.
+ENDCASE.
+
+ENDFORM.                    " FRM_SET_ZS0030

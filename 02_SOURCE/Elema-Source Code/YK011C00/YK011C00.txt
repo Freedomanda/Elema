@@ -1,0 +1,323 @@
+*&--------------------------------------------------------------------*
+*&                                                                    *
+*& 検収照合システム                                                   *
+*&     プログラム名称：売上照合取消                                   *
+*&     プログラムＩＤ：YK011C00                                       *
+*&     作成者　　　　：K.KAJISA〔NDSC〕  作成日　　　　：2002/03/19   *
+*&     更新者　　　　：                  更新日　　　　：             *
+*&---------------------------------------------------------------------*
+REPORT      YK011C00
+LINE-COUNT 58
+LINE-SIZE 170
+NO STANDARD PAGE HEADING
+MESSAGE-ID Y1.
+************************************************************************
+* DB定義
+TABLES:YK110,YK130,YK310,KNA1.
+************************************************************************
+* 内部テーブル定義
+DATA:BEGIN OF ST_ITAB,
+PRCNO   LIKE YK110-PRCNO,  "処理番号
+AUDDOC  LIKE YK110-AUDDOC, "検収番号
+VBELN   LIKE YK130-VBELN,  "請求番号
+PRCDAT  LIKE YK110-PRCDAT, "処理日
+PRCDAT2 LIKE YK310-PRCDAT, "処理日(会計)
+YKYEAR  LIKE YK110-YKYEAR, "暦年
+POSNR   LIKE YK130-POSNR,  "明細
+INCDOC  LIKE YK310-INCDOC, "入金予定番号
+KUNNR   LIKE YK110-KUNNR,  "得意先コード
+NAME1   LIKE KNA1-NAME1,   "名称1
+BSTKD   LIKE YK110-BSTKD,  "得意先発注番号
+BUKRS   LIKE YK110-BUKRS,  "会社コード
+ZFBDT2  LIKE YK110-ZFBDT2, "締日
+VKORG   LIKE YK110-VKORG,  "販売組織
+VTWEG   LIKE YK110-VTWEG,  "流通チャネル
+SPART   LIKE YK110-SPART,  "製品部門
+END OF ST_ITAB.
+DATA:I_ITAB  LIKE ST_ITAB OCCURS 0 WITH HEADER LINE. "
+DATA:I_ITAB2 LIKE ST_ITAB OCCURS 0 WITH HEADER LINE. "
+************************************************************************
+* ワーク定義
+DATA CT_REC    TYPE P.
+DATA: FG_ERR(1) TYPE C,
+W_POPUPANS(1) TYPE C.      "ポップアップの返答
+************************************************************************
+* 選択画面定義
+SELECT-OPTIONS: S_KUNNR  FOR YK110-KUNNR MEMORY ID KUN NO INTERVALS,
+S_BSTKD  FOR YK110-BSTKD NO INTERVALS,
+S_PRCDAT FOR YK110-PRCDAT DEFAULT SY-DATUM NO INTERVALS,
+S_KEKKBN FOR YK110-KEKKBN DEFAULT 4 NO INTERVALS.
+************************************************************************
+START-OF-SELECTION.
+PERFORM INIT_PROC.     "初期処理
+PERFORM MAIN_PROC.     "メイン処理
+************************************************************************
+TOP-OF-PAGE.
+WRITE: /1  SY-TITLE,
+125 '作成日時:',
+SY-DATUM USING EDIT MASK '____/__/__',
+SY-UZEIT USING EDIT MASK '__:__',
+155 'Page:',
+SY-PAGNO.
+SKIP.
+WRITE:/1   '処理番号',
+12  '照合処理日',
+24  '入金予定番号',
+38  '会計処理日',
+50  '得意先コード',
+64  '得意先名称',
+101  '得意先発注番号',
+138  '検収番号',
+150  '請求番号'.
+ULINE.
+************************************************************************
+AT LINE-SELECTION.
+DATA: W_TXT(100) TYPE C,
+W_CT(16)   TYPE C.
+CLEAR: FG_ERR,W_TXT,CT_REC.
+REFRESH I_ITAB.
+ST_ITAB = I_ITAB2.
+PERFORM GET_ITAB3.
+IF ST_ITAB-INCDOC IS INITIAL AND ST_ITAB-PRCDAT2 IS INITIAL.
+LOOP AT I_ITAB." WHERE PRCNO = ST_ITAB-PRCNO.
+PERFORM ENQ_ADDON.        "アドオンテーブルのロック
+CT_REC = CT_REC + 1.
+ENDLOOP.
+IF FG_ERR = 'X'.
+PERFORM DEQ_ADDON.        "アドオンテーブルのアンロック
+MESSAGE S400 WITH '明細をロックできませんでした'.
+ELSE.
+CLEAR W_POPUPANS.
+W_CT = CT_REC.
+CONCATENATE W_CT '件の照合取消を行います' INTO W_TXT.
+CONDENSE  W_TXT  NO-GAPS.
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+TEXT_QUESTION        = W_TXT
+TEXTLINE1            = 'はい'
+TEXTLINE2            = 'いいえ'
+TITEL                = '売上照合取消'
+IMPORTING
+ANSWER               = W_POPUPANS.
+IF W_POPUPANS <> '1'.
+MESSAGE S400 WITH '処理を中止しました'.
+ELSE.
+PERFORM EDIT_ADDON.       "アドオンテーブル更新
+PERFORM DEQ_ADDON.        "アドオンテーブルのアンロック
+IF FG_ERR ='X'.
+ROLLBACK WORK.
+MESSAGE E400 WITH '更新に失敗しました'.
+ELSE.
+MESSAGE S401 WITH CT_REC '件更新しました'.
+ENDIF.
+ENDIF.
+ENDIF.
+ELSE.
+MESSAGE S400 WITH 'すでに入金予定が作成されています'.
+ENDIF.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INIT_PROC.
+REFRESH:I_ITAB,I_ITAB2.
+CLEAR:ST_ITAB,I_ITAB,I_ITAB2.
+
+ENDFORM.                    " INIT_PROC
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_PROC
+*&---------------------------------------------------------------------*
+*       メイン処理
+*----------------------------------------------------------------------*
+FORM MAIN_PROC.
+PERFORM GET_ITAB.         "YK110&YK130データ取得
+PERFORM GET_ITAB2.        "データ補足
+PERFORM WRITE_LIST.       "リスト出力
+
+
+ENDFORM.                    " MAIN_PROC
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ITAB
+*&---------------------------------------------------------------------*
+*       YK110&YK130データ取得
+*----------------------------------------------------------------------*
+FORM GET_ITAB.
+SELECT * APPENDING CORRESPONDING FIELDS OF TABLE  I_ITAB FROM YK110
+WHERE KUNNR  IN S_KUNNR
+AND KEKKBN IN S_KEKKBN
+AND PRCDAT IN S_PRCDAT
+AND BSTKD  IN S_BSTKD.
+SELECT * APPENDING CORRESPONDING FIELDS OF TABLE  I_ITAB FROM YK130
+WHERE KUNNR  IN S_KUNNR
+AND KEKKBN IN S_KEKKBN
+AND PRCDAT IN S_PRCDAT
+AND BSTKD  IN S_BSTKD.
+DESCRIBE TABLE I_ITAB LINES CT_REC.
+IF CT_REC > 0.
+SORT I_ITAB BY PRCNO AUDDOC VBELN.
+ELSE.
+MESSAGE S008.
+STOP.
+ENDIF.
+ENDFORM.                    " GET_ITAB
+*&---------------------------------------------------------------------*
+*&      Form  GET_ITAB2
+*&---------------------------------------------------------------------*
+*       データ補足
+*----------------------------------------------------------------------*
+FORM GET_ITAB2.
+LOOP AT I_ITAB.
+CLEAR I_ITAB2.
+I_ITAB2 = I_ITAB.
+SELECT SINGLE NAME1 INTO I_ITAB2-NAME1 FROM KNA1
+WHERE KUNNR = I_ITAB2-KUNNR.                    "得意先名称取得
+SELECT SINGLE INCDOC PRCDAT INTO (I_ITAB2-INCDOC,I_ITAB2-PRCDAT2)
+FROM YK310 WHERE BUKRS = I_ITAB2-BUKRS
+AND KUNNR = I_ITAB2-KUNNR
+AND ZFBDT = I_ITAB2-ZFBDT2
+AND VKORG = I_ITAB2-VKORG
+AND VTWEG = I_ITAB2-VTWEG
+AND SPART = I_ITAB2-SPART.
+APPEND I_ITAB2.
+ENDLOOP.
+*  FREE I_ITAB.
+ENDFORM.                    " GET_ITAB2
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_LIST
+*&---------------------------------------------------------------------*
+*       リスト出力
+*----------------------------------------------------------------------*
+FORM WRITE_LIST.
+LOOP AT I_ITAB2.
+WRITE: /1    I_ITAB2-PRCNO,
+12   I_ITAB2-PRCDAT,
+26   I_ITAB2-INCDOC,
+38   I_ITAB2-PRCDAT2,
+51   I_ITAB2-KUNNR,
+64   I_ITAB2-NAME1,
+101   I_ITAB2-BSTKD,
+138   I_ITAB2-AUDDOC,
+150   I_ITAB2-VBELN.
+HIDE I_ITAB2.
+ENDLOOP.
+ENDFORM.                    " WRITE_LIST
+*&---------------------------------------------------------------------*
+*&      Form  ENQ_ADDON
+*&---------------------------------------------------------------------*
+*       アドオンテーブルのロック
+*----------------------------------------------------------------------*
+FORM ENQ_ADDON.
+IF I_ITAB-VBELN IS INITIAL. "検収データ
+CALL FUNCTION 'ENQUEUE_EY_YK110'
+EXPORTING
+MODE_YK110           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = I_ITAB-BUKRS
+YKYEAR               = I_ITAB-YKYEAR
+AUDDOC               = I_ITAB-AUDDOC
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+FG_ERR = 'X'.
+ENDIF.
+ELSE.                     "売上データ
+CALL FUNCTION 'ENQUEUE_EY_YK130'
+EXPORTING
+MODE_YK130           = 'E'
+MANDT                = SY-MANDT
+VBELN                = I_ITAB-VBELN
+POSNR                = I_ITAB-POSNR
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+FG_ERR = 'X'.
+ENDIF.
+ENDIF.
+ENDFORM.                    " ENQ_ADDON
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ADDON
+*&---------------------------------------------------------------------*
+*       アドオンテーブル更新
+*----------------------------------------------------------------------*
+FORM EDIT_ADDON.
+LOOP AT I_ITAB." WHERE PRCNO = ST_ITAB-PRCNO.
+CHECK FG_ERR IS INITIAL.
+IF I_ITAB-VBELN IS INITIAL. "検収データ
+UPDATE YK110 SET  KEKKBN = SPACE
+ZFBDT2 = 0
+PRCDAT = 0
+PRCNO  = SPACE
+UPDDAT = SY-DATUM
+UPDTIM = SY-UZEIT
+UPDUSR = SY-UNAME
+WHERE BUKRS  = I_ITAB-BUKRS
+AND YKYEAR = I_ITAB-YKYEAR
+AND AUDDOC = I_ITAB-AUDDOC.
+ELSE.
+UPDATE YK130 SET  KEKKBN = SPACE
+ZFBDT2 = 0
+PRCDAT = 0
+PRCNO  = SPACE
+UPDDAT = SY-DATUM
+UPDTIM = SY-UZEIT
+UPDUSR = SY-UNAME
+WHERE VBELN  = I_ITAB-VBELN
+AND POSNR  = I_ITAB-POSNR.
+ENDIF.
+IF SY-SUBRC <> 0.
+FG_ERR = 'X'.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " EDIT_ADDON
+*&---------------------------------------------------------------------*
+*&      Form  DEQ_ADDON
+*&---------------------------------------------------------------------*
+*       アドオンテーブルのアンロック
+*----------------------------------------------------------------------*
+FORM DEQ_ADDON.
+LOOP AT I_ITAB." WHERE PRCNO = ST_ITAB-PRCNO.
+IF I_ITAB-VBELN IS INITIAL. "検収データ
+CALL FUNCTION 'DEQUEUE_EY_YK110'
+EXPORTING
+MODE_YK110           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = I_ITAB-BUKRS
+YKYEAR               = I_ITAB-YKYEAR
+AUDDOC               = I_ITAB-AUDDOC
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+ELSE.                     "売上データ
+CALL FUNCTION 'DEQUEUE_EY_YK130'
+EXPORTING
+MODE_YK130           = 'E'
+MANDT                = SY-MANDT
+VBELN                = I_ITAB-VBELN
+POSNR                = I_ITAB-POSNR
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " DEQ_ADDON
+*&---------------------------------------------------------------------*
+*&      Form  GET_ITAB3
+*&---------------------------------------------------------------------*
+*       同一処理番号の全データ取得
+*----------------------------------------------------------------------*
+FORM GET_ITAB3.
+SELECT * APPENDING CORRESPONDING FIELDS OF TABLE  I_ITAB FROM YK110
+WHERE PRCNO = ST_ITAB-PRCNO.
+SELECT * APPENDING CORRESPONDING FIELDS OF TABLE  I_ITAB FROM YK130
+WHERE PRCNO = ST_ITAB-PRCNO.
+
+ENDFORM.                    " GET_ITAB3

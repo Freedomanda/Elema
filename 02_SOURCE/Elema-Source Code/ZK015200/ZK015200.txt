@@ -1,0 +1,595 @@
+*----------------------------------------------------------------------*
+*  高千穂電機請求書締日処理                                            *
+*    作成：2002/10/21 KAJISA                                           *
+*    更新：2002/10/26 KURANO 高千穂請求書対象のみに限定                *
+*    更新：2002/11/08 KAJISA FOR ALL ENTRES バグ対応                   *
+*    更新：2004/04/05 FURUYA パラメータ得意先を反映　メモリ不足回避　　*
+*    更新：2007/05/09 DMC    登録エラー対応　　　                      *
+*    更新：2008/11/05 MIKAMI for all entries in の重複エントリ削除     *
+*----------------------------------------------------------------------*
+REPORT ZK015200 NO STANDARD PAGE HEADING
+LINE-SIZE 255
+LINE-COUNT 60.
+TABLES:YK520,YK510,BSID,BSAD.
+TABLES:STXH. "2002/10/26 ADD
+DATA: BEGIN OF ST_YK520,
+BUKRS LIKE YK520-BUKRS,
+KUNNR LIKE YK520-KUNNR,
+VKORG LIKE YK520-VKORG,
+VTWEG LIKE YK520-VTWEG,
+SPART LIKE YK520-SPART,
+ZFBDT LIKE YK520-ZFBDT,
+WAERS LIKE YK520-WAERS,
+VBELN LIKE YK520-VBELN,
+POSNR LIKE YK520-POSNR,
+NETWR LIKE YK520-NETWR,
+MWSBP LIKE YK520-MWSBP,
+BRTWR LIKE YK520-BRTWR,
+END OF ST_YK520.
+DATA: BEGIN OF ST_BSID,
+BUKRS LIKE BSID-BUKRS,
+KUNNR LIKE BSID-KUNNR,
+WAERS LIKE BSID-WAERS,
+BUDAT LIKE BSID-BUDAT,
+AUGDT LIKE BSID-AUGDT,
+SHKZG LIKE BSID-SHKZG,
+WRBTR LIKE BSID-WRBTR,
+BELNR LIKE BSID-BELNR,"2002/11/08 ADD
+BUZEI LIKE BSID-BUZEI,"2002/11/08 ADD
+END OF ST_BSID.
+DATA I_BSID    LIKE STANDARD TABLE OF ST_BSID WITH HEADER LINE."
+DATA I_BSAD    LIKE STANDARD TABLE OF ST_BSID WITH HEADER LINE."
+DATA I_YK520   LIKE STANDARD TABLE OF ST_YK520 WITH HEADER LINE.
+DATA I_YK510   LIKE STANDARD TABLE OF YK510 WITH HEADER LINE.
+DATA I_YK510_D LIKE STANDARD TABLE OF YK510 WITH HEADER LINE.
+DATA:W_UZEIT LIKE SY-UZEIT,
+W_DATUM LIKE SY-DATUM,
+W_UNAME LIKE SY-UNAME,
+W_WRBTR LIKE BSID-WRBTR,
+W_ZFBDT LIKE YK520-ZFBDT,
+CNT_INS TYPE P,
+CNT_UPD TYPE P.
+* insert 2005/10/04
+DATA:W_OLD_DATE LIKE SY-DATUM.
+* insert 2005/10/04
+
+
+************************************************************************
+* 選択画面
+PARAMETERS P_BUKRS LIKE YK520-BUKRS DEFAULT 'C001'.
+SELECT-OPTIONS S_KUNNR FOR YK520-KUNNR.
+PARAMETERS P_ZFBDT LIKE YK520-ZFBDT DEFAULT '20020930'.
+SELECT-OPTIONS S_HKONT FOR BSID-HKONT.
+PARAMETERS P_TEST AS CHECKBOX DEFAULT 'X'.
+PARAMETERS P_OBJECT LIKE STXH-TDOBJECT DEFAULT 'KNB1'. "2002/10/26 ADD
+PARAMETERS P_TDID LIKE STXH-TDID DEFAULT 'ZK01'. "2002/10/26 ADD
+************************************************************************
+START-OF-SELECTION.
+PERFORM INIT_PROC.
+PERFORM MAIN_PROC.
+************************************************************************
+TOP-OF-PAGE.
+WRITE: /001 '高千穂電機請求書締日処理',
+213 'Page.', SY-PAGNO.
+WRITE: /213 '作成日時', SY-DATUM, SY-UZEIT.
+ULINE.
+WRITE: /1  '得意先',
+12  '販売組織',
+21  '流通チャネル',
+35  '製品部門',
+48  '締日',
+66  '通貨 ',
+72  '前月請求額',
+94  '当月入金額',
+116 '当月売上額',
+138 '当月税額',
+160 '当月税込額',
+182 '当月請求額',
+206 '出力日',
+218 '出力回数',
+228 '会計連絡済'.
+ULINE.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INIT_PROC.
+CLEAR:  I_YK520, I_YK510.
+REFRESH:I_YK520, I_YK510.
+ENDFORM.                    " INIT_PROC
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_PROC
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM MAIN_PROC.
+
+PERFORM GET_YK520.
+PERFORM EDIT_MACH.
+PERFORM WRITE_DATA.
+IF P_TEST <> 'X'.          "テスト実行でなければ更新
+PERFORM OUT_DATA.
+ENDIF.
+ENDFORM.                    " MAIN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_YK520
+*&---------------------------------------------------------------------*
+*       一括請求書明細データ
+*----------------------------------------------------------------------*
+FORM GET_YK520.
+
+* 2002/10/26 MOD YK520のSELECTをSTXHのループで囲んだ
+DATA W_KUNNR LIKE YK520-KUNNR.
+DATA W_COUNT LIKE SY-DBCNT.
+DATA L_CNT LIKE SY-DBCNT.    "2004/04/05 ADD
+
+REFRESH I_YK520.
+SELECT        * FROM  STXH
+WHERE  TDOBJECT  = P_OBJECT
+AND    TDID      = P_TDID
+AND    TDSPRAS   = SY-LANGU.
+W_KUNNR = STXH-TDNAME+0(10).
+IF ( W_KUNNR IN S_KUNNR ).    "2004/04/05 ADD
+SELECT BUKRS KUNNR VKORG VTWEG SPART ZFBDT VBELN POSNR
+NETWR MWSBP BRTWR WAERS
+*    INTO CORRESPONDING FIELDS OF TABLE i_yk520 FROM YK520
+APPENDING CORRESPONDING FIELDS OF TABLE I_YK520 FROM YK520
+WHERE  BUKRS  = P_BUKRS
+AND    KUNNR = W_KUNNR
+AND    ZFBDT = P_ZFBDT.
+ADD SY-DBCNT TO W_COUNT.   "2004/04/05 DEL
+IF ( SY-SUBRC = 0 ).  "2004/04/05 ADD
+L_CNT = L_CNT + 1.  "2004/04/05 ADD
+ENDIF.                "2004/04/05 ADD
+ENDIF.                  "2004/04/05 ADD
+ENDSELECT.
+
+*  WRITE: / '対象得意先件数', sy-dbcnt. "2004/04/05 DEL
+WRITE: / '対象得意先件数', L_CNT.   "2004/04/05 ADD
+WRITE: / '対象明細件数　', W_COUNT.
+
+ENDFORM.                                                    " GET_YK520
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_MACH
+*&---------------------------------------------------------------------*
+*       YK510 データ作成
+*----------------------------------------------------------------------*
+FORM EDIT_MACH.
+W_UZEIT = SY-UZEIT.       "変更時刻
+W_DATUM = SY-DATUM.       "変更日時
+W_UNAME = SY-UNAME.       "変更ユーザ名
+* insert 2005/10/04
+PERFORM GET_MAESIME.
+* insert 2005/10/04
+* 2007/05/09 update_s
+*  SORT I_YK520 BY BUKRS KUNNR VKORG VTWEG SPART ZFBDT VBELN POSNR WAERS
+*.
+SORT I_YK520 BY BUKRS KUNNR VKORG VTWEG SPART ZFBDT WAERS VBELN POSNR.
+* 2007/05/09 update_e
+PERFORM GET_BSID_BSAD.    "会計管理データの取得
+LOOP AT I_YK520.
+AT NEW WAERS.
+SUM.
+CLEAR I_YK510.
+MOVE-CORRESPONDING I_YK520 TO I_YK510.
+I_YK510-CSLAMT = I_YK520-NETWR.           "当月売上額
+I_YK510-CTXAMT = I_YK520-MWSBP.           "当月税額
+I_YK510-CSTAMT = I_YK520-BRTWR.           "当月税込額
+PERFORM GET_URIZAN USING I_YK520-ZFBDT.
+I_YK510-CBLAMT = W_WRBTR.                 "当月請求額
+PERFORM GET_W_ZFBDT.                      "前締日取得
+PERFORM GET_URIZAN USING W_ZFBDT.
+I_YK510-LBLAMT = W_WRBTR.                 "前月請求額
+I_YK510-CICAMT = I_YK510-LBLAMT + I_YK510-CSTAMT - I_YK510-CBLAMT.
+APPEND I_YK510.
+ENDAT.
+ENDLOOP.
+* FREE:I_YK520
+FREE:I_BSAD,I_BSID.
+ENDFORM.                    " EDIT_MACH
+
+* insert 2005/10/04
+*&---------------------------------------------------------------------*
+*&      Form  get_maesime
+*&---------------------------------------------------------------------*
+*       一番古い前締日を取得
+*----------------------------------------------------------------------*
+FORM GET_MAESIME.
+
+W_OLD_DATE = '99991231'.
+SORT I_YK520 BY BUKRS KUNNR VKORG VTWEG SPART ZFBDT.
+
+LOOP AT I_YK520.
+AT NEW ZFBDT.
+PERFORM GET_W_ZFBDT.                      "前締日取得
+IF W_OLD_DATE > W_ZFBDT.
+W_OLD_DATE = W_ZFBDT.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+CLEAR: W_ZFBDT.
+
+ENDFORM.                    " get_maesime
+* insert 2005/10/04
+
+*&---------------------------------------------------------------------*
+*&      Form  OUT_DATA
+*&---------------------------------------------------------------------*
+*       データ出力
+*----------------------------------------------------------------------*
+FORM OUT_DATA.
+*  PERFORM GET_YK510.              "アドオンテーブルの現状を取得
+LOOP AT I_YK520.
+PERFORM UPDATE_YK520.
+ENDLOOP.
+FREE I_YK520.
+LOOP AT I_YK510.
+PERFORM ENQ_YK510.            "アドオンテーブルロック
+CLEAR I_YK510_D.
+READ TABLE I_YK510_D WITH KEY BUKRS = I_YK510-BUKRS
+KUNNR = I_YK510-KUNNR
+VKORG = I_YK510-VKORG
+VTWEG = I_YK510-VTWEG
+SPART = I_YK510-SPART
+ZFBDT = I_YK510-ZFBDT
+BUKRS = I_YK510-BUKRS
+WAERS = I_YK510-WAERS
+BINARY SEARCH.
+IF SY-SUBRC = '0'.
+PERFORM UPD_PROC.     "すでに存在しているので更新処理
+ELSE.
+PERFORM INS_PROC.     "存在してないので登録処理
+ENDIF.
+PERFORM DEQ_YK510.     "アドオンテーブルロック解除
+ENDLOOP.
+PERFORM END_PROC.
+
+ENDFORM.                    " OUT_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_URIZAN
+*&---------------------------------------------------------------------*
+*       売掛金残高
+*----------------------------------------------------------------------*
+FORM GET_URIZAN USING P_BUDAT.
+DATA I_WORK    LIKE STANDARD TABLE OF ST_BSID WITH HEADER LINE."
+CLEAR: W_WRBTR,I_WORK.
+REFRESH I_WORK.
+* 未決済明細検索
+I_WORK[] = I_BSID[].
+DELETE I_WORK WHERE BUKRS <> I_YK520-BUKRS  "指定された会社でないか
+OR  KUNNR <> I_YK520-KUNNR  "指定された得意先でないか
+OR  BUDAT > P_BUDAT         "締日以前に転記でない
+OR  WAERS <> I_YK520-WAERS. "
+LOOP AT I_WORK.
+IF  I_WORK-SHKZG = 'H'.
+I_WORK-WRBTR = I_WORK-WRBTR * -1.
+ENDIF.
+W_WRBTR = W_WRBTR + I_WORK-WRBTR.
+ENDLOOP.
+* 決済明細検索
+I_WORK[] = I_BSAD[].
+DELETE I_WORK WHERE BUKRS <> I_YK520-BUKRS  "指定された会社でないか
+OR  KUNNR <> I_YK520-KUNNR  "指定された得意先でないか
+OR  BUDAT > P_BUDAT         "締日以前に転記でないか
+OR  AUGDT < P_BUDAT         "締日の後で決済でない
+OR  WAERS <> I_YK520-WAERS. "
+LOOP AT I_WORK.
+IF  I_WORK-SHKZG = 'H'.
+I_WORK-WRBTR = I_WORK-WRBTR * -1.
+ENDIF.
+W_WRBTR = W_WRBTR + I_WORK-WRBTR.
+ENDLOOP.
+ENDFORM.                    " GET_URIZAN
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSID_BSAD
+*&---------------------------------------------------------------------*
+*       会計管理データの取得
+*----------------------------------------------------------------------*
+FORM GET_BSID_BSAD.
+*2002/11/08 ADD START
+DATA WK_TB_CNT TYPE P.
+READ TABLE I_YK520 INDEX 1.
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+
+*   insert 2008/11/05 S.MIKAMI {
+DATA: LT_YK520 LIKE TABLE OF ST_YK520.
+DATA: LW_YK520 LIKE ST_YK520.
+
+LOOP AT I_YK520 INTO LW_YK520.
+AT NEW KUNNR.
+APPEND LW_YK520 TO LT_YK520.
+ENDAT.
+ENDLOOP.
+* } insert 2008/11/05 S.MIKAMI
+
+*2002/11/08 ADD END
+CLEAR  :I_BSID,I_BSAD.
+REFRESH:I_BSID,I_BSAD.
+*  SELECT BUKRS KUNNR WAERS BUDAT SHKZG WRBTR " MOD 11/08
+SELECT BUKRS KUNNR WAERS BELNR BUZEI BUDAT SHKZG WRBTR    " MOD 11/08
+INTO CORRESPONDING FIELDS OF TABLE I_BSID
+*   modify 2008/11/05 S.MIKAMI {
+*    FROM BSID FOR ALL ENTRIES IN I_YK520
+*    WHERE BUKRS = P_BUKRS
+*      AND KUNNR = I_YK520-KUNNR
+FROM BSID FOR ALL ENTRIES IN LT_YK520
+WHERE BUKRS = P_BUKRS
+AND KUNNR = LT_YK520-KUNNR
+* } modify 2008/11/05 S.MIKAMI
+* insert 2005/10/04
+AND BUDAT <= P_ZFBDT   "今回〆より前に転記
+* insert 2005/10/04
+AND HKONT IN S_HKONT.  "売掛金勘定
+*  SELECT BUKRS KUNNR WAERS BUDAT AUGDT SHKZG WRBTR " MOD 11/08
+SELECT BUKRS KUNNR WAERS BELNR BUZEI  BUDAT AUGDT SHKZG WRBTR " MOD
+INTO CORRESPONDING FIELDS OF TABLE I_BSAD
+*   modify 2008/11/05 S.MIKAMI {
+*    FROM BSAD FOR ALL ENTRIES IN I_YK520
+*    WHERE BUKRS = P_BUKRS
+*      AND KUNNR = I_YK520-KUNNR
+FROM BSAD FOR ALL ENTRIES IN LT_YK520
+WHERE BUKRS = P_BUKRS
+AND KUNNR = LT_YK520-KUNNR
+* } modify 2008/11/05 S.MIKAMI
+* insert 2005/10/04
+AND (   AUGDT >= W_OLD_DATE   "一番古い前回〆より後に決済
+AND BUDAT <= P_ZFBDT )    "今回〆より前に転記
+* insert 2005/10/04
+AND HKONT IN S_HKONT.  "売掛金勘定
+SORT I_BSID BY BUKRS KUNNR WAERS BUDAT SHKZG WRBTR.
+SORT I_BSAD BY BUKRS KUNNR WAERS BUDAT AUGDT SHKZG WRBTR.
+
+ENDFORM.                    " GET_BSID_BSAD
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_W_ZFBDT
+*&---------------------------------------------------------------------*
+*       前締日取得
+*----------------------------------------------------------------------*
+FORM GET_W_ZFBDT.
+CLEAR W_ZFBDT.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD         = I_YK520-KUNNR
+I_VKORG        = I_YK520-VKORG
+I_VTWEG        = I_YK520-VTWEG
+I_SPART        = I_YK520-SPART
+I_DAY          = I_YK520-ZFBDT
+IMPORTING
+E_ZFBDT_OLD    = W_ZFBDT
+EXCEPTIONS
+NO_GET_T052    = 1
+NO_GOOD_GETDAY = 2
+NO_GET_ZTERM   = 3
+OTHERS         = 4.
+
+ENDFORM.                    " GET_W_ZFBDT
+*&---------------------------------------------------------------------*
+*&      Form  UPD_PROC
+*&---------------------------------------------------------------------*
+*       DB更新処理
+*----------------------------------------------------------------------*
+FORM UPD_PROC.
+I_YK510_D-CSLAMT = I_YK510-CSLAMT.
+I_YK510_D-CTXAMT = I_YK510-CTXAMT.
+I_YK510_D-CSTAMT = I_YK510-CSTAMT.
+I_YK510_D-LBLAMT = I_YK510-LBLAMT.
+I_YK510_D-CICAMT = I_YK510-CICAMT.
+I_YK510_D-CBLAMT = I_YK510-CBLAMT.
+I_YK510_D-UPDDAT = W_DATUM.
+I_YK510_D-UPDTIM = W_UZEIT.
+I_YK510_D-UPDUSR = W_UNAME.
+UPDATE YK510 FROM I_YK510_D.
+IF SY-SUBRC <> 0.
+WRITE: / 'YK510更新エラー', SY-MSGV1.
+*  2007/05/09 add_s
+WRITE: / '得意先：', I_YK510-KUNNR, '通貨：', I_YK510-WAERS.
+*  2007/05/09 add_e
+ROLLBACK WORK.
+STOP.
+ELSE.
+CNT_UPD = CNT_UPD + 1.
+ENDIF.
+ENDFORM.                    " UPD_PROC
+*&---------------------------------------------------------------------*
+*&      Form  ENQ_YK510
+*&---------------------------------------------------------------------*
+*       アドオンテーブルのロック
+*----------------------------------------------------------------------*
+FORM ENQ_YK510.
+*アドオンテーブルのロック
+CALL FUNCTION 'ENQUEUE_EY_YK510'
+EXPORTING
+*       MODE_YK510           = 'E'
+*       MANDT                = SY-MANDT
+BUKRS                = I_YK510-BUKRS
+KUNNR                = I_YK510-KUNNR
+VKORG                = I_YK510-VKORG
+VTWEG                = I_YK510-VTWEG
+SPART                = I_YK510-SPART
+ZFBDT                = I_YK510-ZFBDT
+WAERS                = I_YK510-WAERS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+WRITE: / 'YK510がロックできません', SY-MSGV1.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+
+ENDFORM.                                                    " ENQ_YK510
+*&---------------------------------------------------------------------*
+*&      Form  GET_YK510
+*&---------------------------------------------------------------------*
+*       一括請求書ヘッダデータ 取得
+*----------------------------------------------------------------------*
+FORM GET_YK510.
+SELECT * INTO CORRESPONDING FIELDS OF TABLE I_YK510_D
+FROM YK510 FOR ALL ENTRIES IN I_YK510
+WHERE BUKRS = I_YK510-BUKRS
+AND KUNNR = I_YK510-KUNNR
+AND VKORG = I_YK510-VKORG
+AND VTWEG = I_YK510-VTWEG
+AND SPART = I_YK510-SPART
+AND ZFBDT = I_YK510-ZFBDT
+AND WAERS = I_YK510-WAERS.
+SORT I_YK510   BY BUKRS KUNNR VKORG VTWEG SPART ZFBDT WAERS.
+SORT I_YK510_D BY BUKRS KUNNR VKORG VTWEG SPART ZFBDT WAERS.
+CLEAR:CNT_INS,CNT_UPD.
+ENDFORM.                                                    " GET_YK510
+*&---------------------------------------------------------------------*
+*&      Form  INS_PROC
+*&---------------------------------------------------------------------*
+*       登録処理
+*----------------------------------------------------------------------*
+FORM INS_PROC.
+I_YK510-INSDAT = W_DATUM.
+I_YK510-INSTIM = W_UZEIT.
+I_YK510-INSUSR = W_UNAME.
+INSERT INTO YK510 VALUES I_YK510.
+IF SY-SUBRC <> 0.
+WRITE: / 'YK510登録エラー', SY-MSGV1.
+*  2007/05/09 add_s
+WRITE: / '得意先：', I_YK510-KUNNR, '通貨：', I_YK510-WAERS.
+*  2007/05/09 add_e
+ROLLBACK WORK.
+STOP.
+ELSE.
+CNT_INS = CNT_INS + 1.
+ENDIF.
+
+
+ENDFORM.                    " INS_PROC
+*&---------------------------------------------------------------------*
+*&      Form  DEQ_YK510
+*&---------------------------------------------------------------------*
+*       アドオンテーブルロック解除
+*----------------------------------------------------------------------*
+FORM DEQ_YK510.
+CALL FUNCTION 'DEQUEUE_EY_YK510'
+EXPORTING
+*       MODE_YK510           = 'E'
+*       MANDT                = SY-MANDT
+BUKRS                = I_YK510-BUKRS
+KUNNR                = I_YK510-KUNNR
+VKORG                = I_YK510-VKORG
+VTWEG                = I_YK510-VTWEG
+SPART                = I_YK510-SPART
+ZFBDT                = I_YK510-ZFBDT
+WAERS                = I_YK510-WAERS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+
+ENDFORM.                                                    " DEQ_YK510
+*&---------------------------------------------------------------------*
+*&      Form  END_PROC
+*&---------------------------------------------------------------------*
+*       終了処理
+*----------------------------------------------------------------------*
+FORM END_PROC.
+MESSAGE I401(Y1) WITH 'YK510登録件数' CNT_INS.
+MESSAGE I401(Y1) WITH 'YK510更新件数' CNT_UPD.
+ENDFORM.                    " END_PROC
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_DATA
+*&---------------------------------------------------------------------*
+*       帳票出力
+*----------------------------------------------------------------------*
+FORM WRITE_DATA.
+PERFORM GET_YK510.              "アドオンテーブルの現状を取得
+LOOP AT I_YK510.
+CLEAR I_YK510_D.
+READ TABLE I_YK510_D WITH KEY BUKRS = I_YK510-BUKRS
+KUNNR = I_YK510-KUNNR
+VKORG = I_YK510-VKORG
+VTWEG = I_YK510-VTWEG
+SPART = I_YK510-SPART
+ZFBDT = I_YK510-ZFBDT
+BUKRS = I_YK510-BUKRS
+WAERS = I_YK510-WAERS
+BINARY SEARCH.
+WRITE:/01  I_YK510-KUNNR,
+14  I_YK510-VKORG,
+26  I_YK510-VTWEG,
+38  I_YK510-SPART,
+45  I_YK510-ZFBDT,
+66  I_YK510-WAERS,
+72  I_YK510-LBLAMT CURRENCY I_YK510-WAERS,
+94  I_YK510-CICAMT CURRENCY I_YK510-WAERS,
+116 I_YK510-CSLAMT CURRENCY I_YK510-WAERS,
+138 I_YK510-CTXAMT CURRENCY I_YK510-WAERS,
+160 I_YK510-CSTAMT CURRENCY I_YK510-WAERS,
+182 I_YK510-CBLAMT CURRENCY I_YK510-WAERS,
+204 I_YK510_D-OUTDAT,
+221 I_YK510_D-OUTCNT,
+233 I_YK510_D-FIFLG.
+ENDLOOP.
+ENDFORM.                    " WRITE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_YK520
+*&---------------------------------------------------------------------*
+*       フラグ更新
+*----------------------------------------------------------------------*
+FORM UPDATE_YK520.
+CALL FUNCTION 'ENQUEUE_EY_YK520'
+EXPORTING
+BUKRS          = I_YK520-BUKRS
+KUNNR          = I_YK520-KUNNR
+VKORG          = I_YK520-VKORG
+VTWEG          = I_YK520-VTWEG
+SPART          = I_YK520-SPART
+ZFBDT          = I_YK520-ZFBDT
+VBELN          = I_YK520-VBELN
+POSNR          = I_YK520-POSNR
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+IF SY-SUBRC <> 0.
+WRITE: / 'YK520ロックエラー', SY-MSGV1.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+UPDATE YK520 SET HEADFLG = 'X'
+UPDDAT  = SY-DATUM
+UPDTIM  = SY-UZEIT
+UPDUSR  = SY-UNAME
+WHERE BUKRS = I_YK520-BUKRS
+AND KUNNR = I_YK520-KUNNR
+AND VKORG = I_YK520-VKORG
+AND VTWEG = I_YK520-VTWEG
+AND SPART = I_YK520-SPART
+AND ZFBDT = I_YK520-ZFBDT
+AND VBELN = I_YK520-VBELN
+AND POSNR = I_YK520-POSNR.
+IF SY-SUBRC <> 0.
+WRITE: / 'YK520更新エラー', SY-MSGV1.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+CALL FUNCTION 'DEQUEUE_EY_YK520'
+EXPORTING
+BUKRS          = I_YK520-BUKRS
+KUNNR          = I_YK520-KUNNR
+VKORG          = I_YK520-VKORG
+VTWEG          = I_YK520-VTWEG
+SPART          = I_YK520-SPART
+ZFBDT          = I_YK520-ZFBDT
+VBELN          = I_YK520-VBELN
+POSNR          = I_YK520-POSNR
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+
+ENDFORM.                    " UPDATE_YK520

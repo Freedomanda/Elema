@@ -1,0 +1,481 @@
+REPORT yk014110 LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID y1
+NO STANDARD PAGE HEADING .
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID： YK014110                                              *
+*    ﾌﾟﾛｸﾞﾗﾑ名： 支払予定データ作成                                    *
+*    処理種別 ： UL/更新(ABAP/4)                                       *
+*    処理概要 ：                                                       *
+*    入力     ：                                                       *
+*----------------------------------------------------------------------*
+*    作成日   ：2002/01/17                                             *
+*    作成者   ：舘林 裕香                                              *
+*    変更履歴 ：選択画面調整 2002/03/04                                *
+*    変更履歴 ：YK210更新処理追加 2002/03/13                           *
+*    変更履歴 ：買掛管理表出力処理追加 2002/04/30                      *
+*　　変更履歴 ：請求先指定をマスタから取得する処理を削除　2009/12/11   *
+*　　　　　　 　⇒集計した仕入先コードをセットするように修正           *
+************************************************************************
+*// データベース定義 //*
+TABLES : t001   ,            " 会社コード
+t001w  ,            " プラント/支店
+t024   ,            " 購買グループ
+t052   ,            " 支払条件
+lfm1   ,            " 仕入先マスタ購買組織データ
+wyt3   ,            " 取引先機能
+yk210  ,            " 請求データ
+yk410  .            " 支払予定データ
+************************************************************************
+*// 内部テーブル定義 //*
+*- データ抽出用
+DATA : i_yk210  LIKE TABLE OF yk210  WITH HEADER LINE .
+*- 集計用
+DATA : BEGIN OF st_sum ,
+bukrs   LIKE    yk410-bukrs    ,       " 会社コード
+lifnr   LIKE    yk410-lifnr    ,       " 仕入先コード
+zfbdt   LIKE    yk410-zfbdt    ,       " 締日
+werks   LIKE    yk410-werks    ,       " プラント
+ekorg   LIKE    yk410-ekorg    ,       " 購買組織
+ekgrp   LIKE    yk410-ekgrp    ,       " 購買グループ
+gsber   LIKE    yk410-gsber    ,       " 事業領域
+waers   LIKE    yk410-waers    ,       " 通貨コード
+payamt  LIKE    yk410-payamt   .       " 支払予定額
+DATA : END   OF st_sum .
+DATA : i_sum    LIKE TABLE OF st_sum WITH HEADER LINE .
+
+************************************************************************
+*// 作業領域定義(ワーク変数、フラグ、カウンタ等) //*
+CONSTANTS :
+c_sgtxt(24)   TYPE c VALUE '支払予定データの自動作成'        ,
+c_t001(30)    TYPE c VALUE '会社コードの存在エラー'          ,
+c_lfm1(31)    TYPE c VALUE '仕入コード/購買組織の存在エラー' ,
+c_waers(30)   TYPE c VALUE '通貨コード不一致'                ,
+c_paydat(31)  TYPE c VALUE '支払予定日/支払条件の取得エラー' ,
+c_zfbdt(30)   TYPE c VALUE '締日不一致'                      ,
+c_werks(30)   TYPE c VALUE 'プラントの存在エラー'            ,
+c_t024(30)    TYPE c VALUE '購買グループの存在エラー'        ,
+c_paydoc(30)  TYPE c VALUE '支払予約番号の取得エラー'        .
+
+DATA      : w_suc_cnt    TYPE i ,
+w_err_cnt    TYPE i .
+DATA      : w_suc_cnt2   TYPE i .                      "2002/03/13 ADD
+************************************************************************
+*選択画面定義
+
+*  selection-screen skip 1 .                             "2002/03/04 DEL
+PARAMETERS     : p_bukrs    LIKE  yk210-bukrs
+MEMORY ID buk   "2002/03/04 ADD
+OBLIGATORY .    " 会社コード
+SELECT-OPTIONS : s_kekkbn   FOR   yk210-kekkbn    ,    " 照合結果区分
+s_lifnr    FOR   yk210-lifnr     ,    " 仕入先コード
+s_lifn2    FOR   yk210-lifn2     ,    " 請求先コード
+s_werks    FOR   yk210-werks     ,    " プラント
+s_ekorg    FOR   yk210-ekorg     ,    " 購買組織
+s_ekgrp    FOR   yk210-ekgrp     ,    " 購買グループ
+s_gsber    FOR   yk210-gsber     .    " 事業領域
+PARAMETERS     : p_zfbdt2   LIKE  yk210-zfbdt2
+OBLIGATORY .    " 照合締日
+
+************************************************************************
+INITIALIZATION.
+* ローカル変数
+DATA w_ttext LIKE tstct-ttext.
+* タイトル設定
+IF sy-tcode+0(1) = 'Z' OR sy-tcode+0(1) = 'Y'.
+SELECT SINGLE ttext
+INTO   w_ttext
+FROM   tstct
+WHERE  sprsl  = sy-langu
+AND    tcode  = sy-tcode.
+IF sy-subrc = 0.
+sy-title = w_ttext.
+ENDIF.
+ENDIF.
+
+START-OF-SELECTION .
+
+*- 請求データ抽出
+PERFORM frm_select_yk210 .
+*- データ集計
+PERFORM frm_data_total .
+*- テーブルロック
+PERFORM frm_lock_enqueu .
+*- データ登録
+LOOP AT i_sum .
+MOVE-CORRESPONDING i_sum TO yk410 .
+PERFORM frm_data_insert .
+CHECK w_err_cnt = 0.                        "2002/03/13 ADD
+ENDLOOP .
+*2002/03/13 ADD START
+IF  w_err_cnt <> 0.
+ROLLBACK WORK.
+ENDIF.
+*2002/03/13 ADD END
+*- テーブルロック解除
+PERFORM frm_lock_dequeue .
+*- メッセージ表示
+*2002/03/13 MOD START
+*  message s609 with w_suc_cnt w_err_cnt .
+MESSAGE s612 WITH 'YK410登録件数 '  w_suc_cnt
+' YK210更新件数 '  w_suc_cnt2.
+*2002/03/13 MOD END
+
+*- 買掛管理表実行 2002/04/30
+PERFORM frm_report_submit.
+
+************************************************************************
+TOP-OF-PAGE .
+
+WRITE:/03      text-h01        ,          " 会社コード
+15      text-h02        ,          " 仕入先コード
+29      text-h03        ,          " 締日
+41      text-h04        ,          " プラント
+51      text-h05        ,          " 購買組織
+61      text-h06        ,          " 購買グループ
+75      text-h07        ,          " 事業領域
+85      text-h08        ,          " 通貨コード
+97(13)  text-h09        ,          " 税込金額
+112      text-h10        .          " エラー理由
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_yk210
+*&---------------------------------------------------------------------*
+*       請求データ抽出
+*----------------------------------------------------------------------*
+FORM frm_select_yk210.
+
+SELECT * FROM yk210
+INTO TABLE i_yk210
+WHERE bukrs  =   p_bukrs
+AND kekkbn IN  s_kekkbn          " 照合結果区分
+AND lifnr  IN  s_lifnr           " 仕入先コード
+AND lifn2  IN  s_lifn2           " 請求先コード
+AND werks  IN  s_werks           " プラント
+AND ekorg  IN  s_ekorg           " 購買組織
+AND ekgrp  IN  s_ekgrp           " 購買グループ
+AND gsber  IN  s_gsber           " 事業領域
+*{   REPLACE        TEPK900302                                        1
+*\           AND paydoc = space               "2002/03/14 ADD
+AND ( paydoc = space              " 支払予定番号
+OR   paydoc = 0     )
+*}   REPLACE
+AND zfbdt2 =   p_zfbdt2  .       " 照合締日
+
+IF sy-subrc <> 0 .
+MESSAGE s610 .
+STOP .
+ENDIF .
+
+ENDFORM.                    " frm_select_yk210
+*&---------------------------------------------------------------------*
+*&      Form  frm_data_total
+*&---------------------------------------------------------------------*
+*       データ集計
+*----------------------------------------------------------------------*
+FORM frm_data_total.
+
+SORT i_yk210 BY bukrs lifnr zfbdt2 werks ekorg ekgrp gsber waers  .
+
+LOOP AT i_yk210 .
+i_sum-bukrs  = i_yk210-bukrs    .       " 会社コード
+i_sum-lifnr  = i_yk210-lifnr    .       " 仕入先コード
+i_sum-zfbdt  = i_yk210-zfbdt2   .       " 照合締日 → 締日
+i_sum-werks  = i_yk210-werks    .       " プラント
+i_sum-ekorg  = i_yk210-ekorg    .       " 購買組織
+i_sum-ekgrp  = i_yk210-ekgrp    .       " 購買グループ
+i_sum-gsber  = i_yk210-gsber    .       " 事業領域
+i_sum-waers  = i_yk210-waers    .       " 通貨コード
+i_sum-payamt = i_yk210-knetxamt .       " 税込金額 → 支払予定額
+COLLECT i_sum .
+ENDLOOP .
+
+ENDFORM.                    " frm_data_total
+*&---------------------------------------------------------------------*
+*&      Form  frm_lock_enqueu
+*&---------------------------------------------------------------------*
+*       ロック[yk410]
+*----------------------------------------------------------------------*
+FORM frm_lock_enqueu .
+
+DATA : w_msgv1 LIKE sy-msgv1 .   " ロックしてるユーザ取得用
+
+*- YK410 のロック
+CALL FUNCTION 'ENQUEUE_EY_YK410'
+EXPORTING
+mode_yk410     = 'E'
+mandt          = sy-mandt
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0 .
+w_msgv1 = sy-msgv1 .
+MESSAGE s611 WITH w_msgv1 .
+STOP .
+ENDIF.
+*2002/03/13 ADD START
+LOOP AT i_yk210 .
+CALL FUNCTION 'ENQUEUE_EY_YK210'
+EXPORTING
+mode_yk210     = 'E'
+mandt          = sy-mandt
+bukrs          = i_yk210-bukrs
+ykyear         = i_yk210-ykyear
+bildoc         = i_yk210-bildoc
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0 .
+w_msgv1 = sy-msgv1 .
+MESSAGE s611 WITH w_msgv1 .
+STOP .
+ENDIF.
+ENDLOOP.
+*2002/03/13 ADD end
+ENDFORM.                    " frm_lock_enqueu
+*&---------------------------------------------------------------------*
+*&      Form  frm_data_insert
+*&---------------------------------------------------------------------*
+*       データ登録
+*----------------------------------------------------------------------*
+FORM frm_data_insert.
+
+DATA : w_zfbdt  LIKE i_sum-zfbdt .
+
+*-- 会社コードチェック
+SELECT SINGLE * FROM t001
+WHERE bukrs = i_sum-bukrs .
+IF sy-subrc <> 0 .
+PERFORM frm_write_list USING c_t001       .     " エラーリスト
+EXIT .
+ENDIF .
+*-- 仕入コード/購買組織チェック
+SELECT SINGLE * FROM lfm1
+WHERE lifnr = i_sum-lifnr
+AND ekorg = i_sum-ekorg .
+IF sy-subrc <> 0 .
+PERFORM frm_write_list USING c_lfm1       .     " エラーリスト
+EXIT .
+ENDIF .
+*-- 通貨コードチェック
+IF i_sum-waers <> lfm1-waers .
+PERFORM frm_write_list USING c_waers      .     " エラーリスト
+EXIT .
+ENDIF .
+*-- 支払予定日/条件の取得
+PERFORM frm_get_datum USING w_zfbdt .
+IF sy-subrc <> 0 .
+PERFORM frm_write_list USING c_paydat     .     " エラーリスト
+EXIT .
+ENDIF .
+*-- 締日チェック
+IF w_zfbdt <> i_sum-zfbdt .
+PERFORM frm_write_list USING c_zfbdt      .     " エラーリスト
+EXIT .
+ENDIF .
+*-- プラントチェック
+SELECT SINGLE * FROM t001w
+WHERE werks = i_sum-werks .
+IF sy-subrc <> 0 .
+PERFORM frm_write_list USING c_werks      .     " エラーリスト
+EXIT .
+ENDIF .
+*2002/03/18 MOD START
+* yk410-zuonr = i_sum-werks .
+yk410-zuonr = t001w-name1.
+*2002/03/18 MOD END
+*-- 購買グループチェック
+IF i_sum-ekgrp <> space .
+SELECT SINGLE * FROM t024
+WHERE ekgrp = i_sum-ekgrp .
+IF sy-subrc <> 0 .
+PERFORM frm_write_list USING c_t024       .     " エラーリスト
+EXIT .
+ENDIF .
+ENDIF .
+* Mod 2009/12/11 --->
+*-- 請求書発行者の取得
+*  SELECT * FROM wyt3
+*        WHERE lifnr = i_sum-lifnr
+*          AND ekorg = i_sum-ekorg
+*          AND parvw = 'RS'        .
+*    yk410-lifre = wyt3-lifn2 .
+*  ENDSELECT .
+yk410-lifre = i_sum-lifnr .
+* Mod 209/12/11 <---
+*-- 支払先の取得
+SELECT * FROM wyt3
+WHERE lifnr = i_sum-lifnr
+AND ekorg = i_sum-ekorg
+AND parvw = 'Y1'        .
+yk410-lifn1 = wyt3-lifn2 .
+ENDSELECT .
+*-- 支払方法と保留の取得
+SELECT * FROM t052
+WHERE zterm = yk410-zterm .
+yk410-zlsch = t052-zlsch .       "
+yk410-zlspr = t052-zschf .       "
+ENDSELECT .
+*-- 支払予約番号の取得
+PERFORM frm_get_paydoc .
+*--
+yk410-prcflg = '1'      .          "
+yk410-sgtxt  = c_sgtxt  .          "
+yk410-insdat = sy-datum .          "
+yk410-instim = sy-uzeit .          "
+yk410-insusr = sy-uname .          "
+
+INSERT yk410 .
+IF sy-subrc = 0 .
+w_suc_cnt = w_suc_cnt + 1 .
+*2002/03/13 ADD START
+PERFORM edit_yk210.
+*2002/03/13 ADD END
+ELSE .
+w_err_cnt = w_err_cnt + 1 .
+ENDIF .
+
+ENDFORM.                    " frm_data_insert
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_datum
+*&---------------------------------------------------------------------*
+*       支払予定日/条件の取得
+*----------------------------------------------------------------------*
+FORM frm_get_datum USING p_zfbdt .
+
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+i_cord         = i_sum-lifnr
+i_ekorg        = i_sum-ekorg
+i_day          = i_sum-zfbdt
+IMPORTING
+e_zfbdt        = p_zfbdt
+e_siharaibi    = yk410-paydat
+e_zterm        = yk410-zterm
+EXCEPTIONS
+no_get_t052    = 1
+no_good_getday = 2
+no_get_zterm   = 3
+OTHERS         = 4.
+
+ENDFORM.                    " frm_get_datum
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_paydoc
+*&---------------------------------------------------------------------*
+*       支払予約番号の取得
+*----------------------------------------------------------------------*
+FORM frm_get_paydoc.
+
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+nr_range_nr             = '10'
+object                  = 'YKPAYDOC'
+subobject               = yk410-bukrs
+IMPORTING
+number                  = yk410-paydoc
+EXCEPTIONS
+interval_not_found      = 1
+number_range_not_intern = 2
+object_not_found        = 3
+quantity_is_0           = 4
+quantity_is_not_1       = 5
+interval_overflow       = 6
+OTHERS                  = 7.
+
+IF sy-subrc <> 0.
+MESSAGE w612 WITH text-e01 text-e02 sy-subrc text-e03 .
+PERFORM frm_write_list USING c_paydoc     .     " エラーリスト
+EXIT .
+ENDIF.
+
+ENDFORM.                    " frm_get_paydoc
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_list
+*&---------------------------------------------------------------------*
+*       エラーリスト
+*----------------------------------------------------------------------*
+FORM frm_write_list USING p_text .
+
+WRITE:/03      i_sum-bukrs     ,                   " 会社コード
+15      i_sum-lifnr     ,                   " 仕入先コード
+29      i_sum-zfbdt     ,                   " 締日
+41      i_sum-werks     ,                   " プラント
+51      i_sum-ekorg     ,                   " 購買組織
+61      i_sum-ekgrp     ,                   " 購買グループ
+75      i_sum-gsber     ,                   " 事業領域
+85      i_sum-waers     ,                   " 通貨コード
+97(13)  i_sum-payamt CURRENCY i_sum-waers , " 税込金額
+112(31)  p_text                            . " エラー理由
+
+ENDFORM.                    " frm_write_list
+*&---------------------------------------------------------------------*
+*&      Form  frm_lock_dequeue
+*&---------------------------------------------------------------------*
+*       ロック解除[yk410]
+*----------------------------------------------------------------------*
+FORM frm_lock_dequeue.
+*- YK410 のロック解除
+CALL FUNCTION 'DEQUEUE_EY_YK410'
+EXPORTING
+mode_yk410 = 'E'
+mandt      = sy-mandt.
+*2002/03/13 ADD START
+LOOP AT i_yk210 .
+CALL FUNCTION 'DEQUEUE_EY_YK210'
+EXPORTING
+mode_yk210     = 'E'
+mandt          = sy-mandt
+bukrs          = i_yk210-bukrs
+ykyear         = i_yk210-ykyear
+bildoc         = i_yk210-bildoc
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+ENDLOOP.
+*2002/03/13 ADD end
+
+ENDFORM.                    " frm_lock_dequeue
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_YK210
+*&---------------------------------------------------------------------*
+*       YK210更新 2002/03/13 ADD
+*----------------------------------------------------------------------*
+FORM edit_yk210.
+LOOP AT i_yk210 WHERE bukrs   = i_sum-bukrs
+AND lifnr   = i_sum-lifnr
+AND zfbdt2  = i_sum-zfbdt
+AND werks   = i_sum-werks
+AND ekorg   = i_sum-ekorg
+AND ekgrp   = i_sum-ekgrp
+AND gsber   = i_sum-gsber
+AND waers   = i_sum-waers.
+UPDATE yk210 SET upddat = sy-datum
+updtim = sy-uzeit
+updusr = sy-uname
+paydoc = yk410-paydoc
+WHERE bukrs  = i_yk210-bukrs
+AND ykyear = i_yk210-ykyear
+AND bildoc = i_yk210-bildoc.
+IF sy-subrc = 0 .
+w_suc_cnt2 = w_suc_cnt2 + 1 .
+ELSE .
+w_err_cnt = w_err_cnt + 1 .
+ENDIF .
+ENDLOOP.
+ENDFORM.                    " EDIT_YK210
+*&---------------------------------------------------------------------*
+*&      Form  frm_report_submit
+*&---------------------------------------------------------------------*
+*       買掛管理表出力 2002/04/30 ADD
+*----------------------------------------------------------------------*
+FORM frm_report_submit.
+SUBMIT yk014230
+USING SELECTION-SET 'YK_DEFAULT' "2002/06/06 ADD
+WITH s_lifnr IN s_lifnr  "仕入先コード
+WITH s_werks IN s_werks  "プラント
+WITH p_zfbdt EQ p_zfbdt2 "締日
+AND RETURN.
+ENDFORM.

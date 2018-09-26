@@ -1,0 +1,1196 @@
+*&---------------------------------------------------------------------
+*& REPORT     :  YF021200
+*& PROGRAM    :  受取手形仕訳計上
+*& MAKE DATE  :  2004/06/28
+*& CODING BY  :  TSUDA
+*& 変更履歴  ：  2008/01/22 ARII
+*& 変更内容  ：  STOP命令置き換え
+*& 変更履歴  ：  2008/01/22 ARII
+*& 変更内容  ：  MODIFY命令置き換え
+*&---------------------------------------------------------------------
+*&
+*&
+*&---------------------------------------------------------------------
+
+REPORT  yf021200  NO STANDARD PAGE HEADING
+LINE-SIZE 120
+LINE-COUNT 30
+MESSAGE-ID y1.
+
+LOAD-OF-PROGRAM.
+
+* テーブル宣言
+TABLES : bsid,   "会計管理：得意先の２次索引
+ZTGT01,  "受取手形明細
+ZTGT02,  "受取手形仕訳マスタ
+bsad.   "会計管理：得意先の２次索引
+
+* データ定義
+** BSIDテーブル読込み用
+TYPES: BEGIN OF typ_wa_bsid,
+bukrs LIKE bsid-bukrs,     "会社コード
+kunnr LIKE bsid-kunnr,     "得意先コード１
+umskz LIKE bsid-umskz,     "特殊仕訳コード
+gjahr LIKE bsid-gjahr,     "会計年度
+belnr LIKE bsid-belnr,     "会計伝票番号
+buzei LIKE bsid-buzei,     "会計伝票明細番号
+zuonr LIKE bsid-zuonr,     "ソートキー
+wrbtr LIKE bsid-wrbtr,     "伝票通貨額
+waers LIKE bsid-waers,     "通貨コード
+END OF typ_wa_bsid.
+
+** 仕訳計上データ用
+TYPES: BEGIN OF typ_wa_yft,
+bukrs LIKE ZTGT01-bukrs,    "会社コード
+kunnr LIKE ZTGT01-kunnr,    "得意先コード１
+umskz LIKE ZTGT01-umskz,    "特殊仕訳コード
+gjahr LIKE ZTGT01-gjahr,    "会計年度
+belnr LIKE ZTGT01-belnr,    "伝票番号
+buzei LIKE ZTGT01-buzei,    "伝票明細番号
+stats LIKE ZTGT01-stats,    "手形ステータス
+srday LIKE ZTGT01-srday,    "処理日付
+trday LIKE ZTGT01-trday,    "取消日付
+trbkn LIKE ZTGT01-trbkn,    "取扱銀行
+lifnr LIKE ZTGT01-lifnr,    "仕入先コード
+fiflg LIKE ZTGT01-fiflg,    "仕訳計上フラグ
+deflg LIKE ZTGT01-deflg,    "取消フラグ
+blart LIKE ZTGT02-blart,    "伝票タイプ
+bschl_d LIKE ZTGT02-bschl_d,  "借方転記キー
+bschl_c LIKE ZTGT02-bschl_c,  "貸方転記キー
+hkont_d LIKE ZTGT02-hkont_d,  "借方勘定コード
+hkont_c LIKE ZTGT02-hkont_c,  "貸方勘定コード
+mtflg(1) TYPE c,             "マスタ不備フラグ
+zuonr LIKE bsid-zuonr,       "ソートキー
+wrbtr(16) TYPE c,       "伝票通貨額
+waers LIKE bsid-waers,      "通貨コード
+frflg(1) TYPE c,             "データ元判別フラグ
+END OF typ_wa_yft.
+** 金額取得用
+TYPES: BEGIN OF typ_wa_kingaku,
+wrbtr LIKE bsid-wrbtr,   "伝票通貨額
+waers LIKE bsid-waers,   "通貨コード
+zuonr LIKE bsid-zuonr,   "ソートキー
+END OF typ_wa_kingaku.
+
+* データ宣言
+** 構造
+DATA: wa_bsid TYPE typ_wa_bsid.
+DATA: wa_yft TYPE typ_wa_yft.
+DATA: wa_yft_h TYPE typ_wa_yft.
+DATA: wa_yft_err TYPE typ_wa_yft.
+DATA: wa_yft_aperr TYPE typ_wa_yft.
+DATA: wa_yft_s TYPE typ_wa_yft.
+
+** 内部テーブル
+DATA: it_bsid LIKE STANDARD TABLE OF wa_bsid.
+DATA: it_yft LIKE STANDARD TABLE OF wa_yft.    "仕訳計上データ用
+DATA: it_yft_h LIKE STANDARD TABLE OF wa_yft.  "反対仕訳処理用
+DATA: it_yft_err LIKE STANDARD TABLE OF wa_yft."マスタ不備エラー保持用
+DATA: it_yft_srerr LIKE STANDARD TABLE OF wa_yft. "処理エラー保持用
+DATA: it_yft_aperr LIKE STANDARD TABLE OF wa_yft."会計期間エラー保持用
+DATA: it_yft_s LIKE STANDARD TABLE OF wa_yft. "作業用
+
+"バッチインプット処理用
+DATA: wa_bdcdata TYPE bdcdata.
+DATA: it_bdcdata TYPE TABLE OF bdcdata.
+
+"金額取得用
+DATA: wk_wrbtr LIKE bsid-wrbtr.
+DATA: wk_kingaku(16) TYPE c .
+DATA: wk_waers LIKE bsid-waers.
+DATA: wa_kingaku TYPE typ_wa_kingaku.
+DATA: it_kingaku TYPE STANDARD TABLE OF typ_wa_kingaku.
+
+"会計期間判定用
+DATA: wk_bukrs LIKE bsid-bukrs.  "会社コード
+DATA: wk_day LIKE ZTGT01-trday.  "日付項目
+DATA: wk_gjahr LIKE bsid-gjahr.  "会計年度
+DATA: wk_monat LIKE bsid-monat.  "会計期間
+DATA: wk_monat2 LIKE t001b-frpe1.
+
+** その他
+DATA: wk_srcnt TYPE i VALUE 0.         "処理済データ件数用
+DATA: wk_updflg(1) TYPE c VALUE ' '.     "アップデートエラーフラグ
+DATA: wk_bdcflg(1) TYPE c VALUE ' '.     "バッチ処理エラーフラグ
+DATA: wk_fipflg(1) TYPE c VALUE ' '.     "会計期間エラーフラグ
+DATA: wk_mteflg(1) TYPE c VALUE ' '.     "マスタ不備エラーフラグ
+
+
+
+****************************************************************
+*入力画面
+****************************************************************
+SELECTION-SCREEN BEGIN OF BLOCK choice WITH FRAME.
+
+PARAMETERS    : pr_bukrs LIKE bsid-bukrs  OBLIGATORY.
+SELECT-OPTIONS: so_kunnr FOR  bsid-kunnr.
+SELECT-OPTIONS: so_umskz FOR  bsid-umskz  NO INTERVALS OBLIGATORY.
+PARAMETERS    : pr_srday LIKE ZTGT01-srday OBLIGATORY.
+SELECT-OPTIONS: so_stats FOR  ZTGT01-stats NO INTERVALS OBLIGATORY.
+
+SELECTION-SCREEN END OF BLOCK choice.
+
+***************************************************************
+AT SELECTION-SCREEN ON pr_srday.
+***************************************************************
+*===== 処理日付とシステム日付の比較 =====*
+PERFORM srday_check.
+*===== 処理日付の会計期間チェック =====*
+PERFORM fi_period.
+
+***************************************************************
+START-OF-SELECTION.
+***************************************************************
+
+*=====   ロック処理   =====*
+PERFORM lock_ZTGT01 .
+PERFORM lock_ZTGT02 .
+
+*=====   処理対象データ抽出   =====*
+** BSIDテーブル読込
+PERFORM get_bsid .
+** ZTGT01テーブル読込
+PERFORM get_ZTGT01 .
+
+*=====   仕訳計上データ取得   =====*
+** ZTGT02テーブル読込
+PERFORM get_ZTGT02 .
+
+*=====   反対仕訳処理対象データ抽出   =====*
+** ZTGT01テーブル読込
+PERFORM get_ZTGT01_h .
+
+*=====   反対仕訳計上データ取得   =====*
+** ZTGT02テーブル読込
+PERFORM get_ZTGT02_h .
+** 金額取得
+PERFORM get_kingaku .
+
+
+*=====   バッチインプット処理準備   =====*
+** 内部テーブル結合
+PERFORM it_ketsugou .
+** マスタ不備フラグチェック＆データ移行
+PERFORM mtflg_check .
+** ソート(会社コード、得意先コード、手形ステータス)
+SORT it_yft BY bukrs kunnr stats.
+SORT it_yft_err BY bukrs kunnr stats.
+
+
+*=====   バッチインプット処理   =====*
+CLEAR: wa_yft,it_yft_srerr,wk_bdcflg,wk_updflg,wk_srcnt,
+wk_fipflg,it_yft_aperr.
+
+LOOP AT it_yft INTO wa_yft.
+** 処理エラーチェック(バッチ処理・UPD)
+IF ( wk_bdcflg = 'X' OR wk_updflg = 'X' ).
+APPEND wa_yft TO it_yft_srerr.
+ELSE.
+*** 会計期間の取得
+MOVE wa_yft-bukrs TO wk_bukrs.
+MOVE wa_yft-trday TO wk_day.
+PERFORM get_fi_period USING wk_bukrs
+wk_day.
+IF ( sy-subrc <> 0 ).
+MOVE 'X' TO wk_fipflg .
+APPEND wa_yft TO it_yft_aperr.
+ELSE.
+**** 会計期間の判定
+PERFORM check_fi_period USING wk_bukrs.
+IF ( sy-subrc <> 0 ).
+MOVE 'X' TO wk_fipflg.
+APPEND wa_yft TO it_yft_aperr.
+ELSE.
+***** BDCDATA作成
+PERFORM make_bdcdata .
+***** CALL TRANSACTION
+CALL TRANSACTION 'F-02' USING  it_bdcdata MODE 'N'.
+
+IF ( sy-subrc <> 0 ).
+MOVE 'X' TO wk_bdcflg. "エラーフラグオン
+APPEND wa_yft TO it_yft_srerr.
+ELSE.
+
+****** 内部テーブル更新
+PERFORM bdc_ok.
+****** ZTGT01の更新
+PERFORM update_ZTGT01.
+
+IF ( sy-subrc <> 0 ).
+MOVE 'X' TO wk_updflg.
+APPEND wa_yft TO it_yft_srerr.
+ELSE.
+COMMIT WORK.
+wk_srcnt = wk_srcnt + 1.
+
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+
+CLEAR: wk_bukrs,wk_day,wa_yft.
+ENDLOOP.
+
+*=====   実行結果の出力   =====*
+** 未処理データの書き出し
+IF ( wk_bdcflg = 'X' ).
+SKIP.
+WRITE: / text-012.
+"仕訳計上処理においてエラーが発生しました。
+SKIP.
+WRITE: / text-006.
+PERFORM err CHANGING it_yft_srerr.
+ELSEIF ( wk_updflg = 'X' ).
+SKIP.
+WRITE: text-010.
+"システム障害が発生しました。管理者に連絡してください。
+"(テーブル更新エラー)
+SKIP.
+WRITE: / text-006.
+PERFORM err CHANGING it_yft_srerr.
+ELSE.
+ENDIF.
+
+** 仕訳計上マスタ不備データの書き出し
+IF ( wk_mteflg = 'X' ).
+SKIP.
+WRITE: / text-011.
+"仕訳処理に必要なデータが取得できませんでした。
+SKIP.
+WRITE: / text-007.
+PERFORM err CHANGING it_yft_err.
+ELSE.
+ENDIF.
+** 会計期間エラーデータの書き出し
+IF ( wk_fipflg = 'X' ).
+SKIP.
+WRITE: / text-015.
+"転記日付に不正があります。処理日付/取消日付を修正してください。
+SKIP.
+WRITE: / text-016.
+PERFORM err CHANGING it_yft_aperr.
+ELSE.
+ENDIF.
+
+** エラーの有無による処理
+IF ( wk_bdcflg = ' ' AND wk_updflg = ' ' AND wk_fipflg = ' '
+AND wk_mteflg = ' ' ).
+WRITE: text-009.
+MESSAGE: s400 WITH text-009.
+"処理が正常に終了しました。
+ELSE.
+MESSAGE: s400 WITH text-018.
+"エラーが発生したレコードがあります。
+ENDIF.
+
+** 処理済件数表示
+PERFORM syorikensu.
+
+*=====   ロック解除   =====*
+PERFORM unlock_ZTGT01.
+PERFORM unlock_ZTGT02.
+
+
+
+
+*&--------------------------------------------------------------------*
+*&      Form  srday_check
+*&--------------------------------------------------------------------*
+*       処理日付とシステム日付の比較
+*---------------------------------------------------------------------*
+FORM srday_check.
+* 処理日付がシステム日付より前日付でなければならない。
+IF ( pr_srday > sy-datum ).
+MESSAGE e404 WITH text-019.
+"処理日付はシステム日付以前の日付を入力してください。
+ELSE.
+ENDIF.
+ENDFORM.                    "srday_check
+
+*&--------------------------------------------------------------------*
+*&      Form  fi_period
+*&--------------------------------------------------------------------*
+*       入力された処理日付の会計期間チェック
+*---------------------------------------------------------------------*
+FORM fi_period.
+CLEAR: wk_bukrs,wk_day.
+MOVE pr_bukrs TO wk_bukrs.
+MOVE pr_srday TO wk_day.
+*　会計期間取得
+PERFORM get_fi_period USING wk_bukrs
+wk_day.
+
+IF ( sy-subrc <> 0 ).
+MESSAGE e502 WITH text-020 sy-subrc.
+"汎用モジュールがエラーリターンしました(ﾓｼﾞｭｰﾙ名=&、ｴﾗｰｺｰﾄﾞ=&)
+ELSE.
+*　会計期間判定
+PERFORM check_fi_period USING wk_bukrs.
+IF ( sy-subrc <> 0 ).
+MESSAGE e400 WITH text-021.
+"会計期間エラー。有効な処理日付を入力してください。
+ELSE.
+ENDIF.
+ENDIF.
+
+CLEAR: wk_bukrs,wk_day.
+
+ENDFORM.                    "fi_period
+
+*&--------------------------------------------------------------------*
+*&      Form  lock_ZTGT01
+*&--------------------------------------------------------------------*
+*       ZTGT01ロック処理
+*---------------------------------------------------------------------*
+FORM lock_ZTGT01  .
+
+CALL FUNCTION 'ENQUEUE_EY_ZTGT01'
+EXPORTING
+mode_ZTGT01           = 'E'
+mandt                = sy-mandt
+*       bukrs                = wa_yft-bukrs
+*       gjahr                = wa_yft-gjahr
+*       belnr                = wa_yft-belnr
+*       buzei                = wa_yft-buzei
+*     X_BUKRS              = ' '
+*     X_GJAHR              = ' '
+*     X_BELNR              = ' '
+*     X_BUZEI              = ' '
+*     _SCOPE               = '2'
+*     _WAIT                = ' '
+*     _COLLECT             = ' '
+EXCEPTIONS
+foreign_lock         = 1
+system_failure       = 2
+OTHERS               = 3.
+
+IF ( sy-subrc <> 0 ).
+MESSAGE s661 WITH text-001.
+"テーブルZTGT01のロック処理に失敗しました。
+*20080122 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*    STOP
+*20080122 <<<
+ELSE.
+ENDIF.
+
+ENDFORM.                                                    "lock_ZTGT01
+
+*&--------------------------------------------------------------------*
+*&      Form  lock_ZTGT02
+*&--------------------------------------------------------------------*
+*       ZTGT02ロック処理
+*---------------------------------------------------------------------*
+FORM lock_ZTGT02 .
+
+CALL FUNCTION 'ENQUEUE_EY_ZTGT02'
+EXPORTING
+mode_ZTGT02           = 'E'
+mandt                = sy-mandt
+*       bukrs                = wa_yft-bukrs
+*       stats                = wa_yft-stats
+*       trbkn                = wa_yft-trbkn
+*       umskz                = wa_yft-umskz
+*   X_BUKRS              = ' '
+*   X_STATS              = ' '
+*   X_TRBKN              = ' '
+*   X_UMSKZ              = ' '
+*   _SCOPE               = '2'
+*   _WAIT                = ' '
+*   _COLLECT             = ' '
+EXCEPTIONS
+foreign_lock         = 1
+system_failure       = 2
+OTHERS               = 3.
+
+IF ( sy-subrc <> 0 ).
+MESSAGE s661 WITH text-002.
+"テーブルZTGT02のロック処理に失敗しました。
+*20080122 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*    STOP
+*20080122 <<<
+ELSE.
+ENDIF.
+
+ENDFORM.                                                    "lock_ZTGT02
+
+
+*&--------------------------------------------------------------------*
+*&      Form  get_bsid
+*&--------------------------------------------------------------------*
+*       BSID読込
+*---------------------------------------------------------------------*
+FORM get_bsid .
+CLEAR: it_bsid.
+SELECT bukrs kunnr umskz gjahr belnr buzei zuonr wrbtr waers
+INTO CORRESPONDING FIELDS OF TABLE it_bsid
+FROM bsid
+WHERE bukrs = pr_bukrs
+AND kunnr IN so_kunnr
+AND umskz IN so_umskz
+AND shkzg = 'S'.
+*sy-subrc <>0でも反対仕訳処理は行うのでSTOPはしない。
+IF ( sy-subrc = 0 ).
+ELSE.
+ENDIF.
+
+ENDFORM.                    "get_bsid
+
+
+*&--------------------------------------------------------------------*
+*&      Form  get_ZTGT01
+*&--------------------------------------------------------------------*
+*       処理対象データ取得
+*---------------------------------------------------------------------*
+FORM get_ZTGT01 .
+
+LOOP AT  it_bsid INTO  wa_bsid.
+
+CLEAR:  wa_yft,wk_wrbtr,wk_waers,wk_kingaku.
+
+SELECT SINGLE stats trbkn lifnr srday
+INTO CORRESPONDING FIELDS OF  wa_yft
+FROM ZTGT01
+WHERE gjahr =  wa_bsid-gjahr
+AND belnr =  wa_bsid-belnr
+AND buzei =  wa_bsid-buzei
+AND fiflg = ' '
+AND stats IN so_stats
+AND srday =  pr_srday.
+
+IF ( sy-subrc = 0 ).
+* 内部テーブルit_bsidのデータをit_yftに移す。
+MOVE  wa_bsid-bukrs TO  wa_yft-bukrs.
+MOVE  wa_bsid-kunnr TO  wa_yft-kunnr.
+MOVE  wa_bsid-umskz TO  wa_yft-umskz.
+MOVE  wa_bsid-gjahr TO  wa_yft-gjahr.
+MOVE  wa_bsid-belnr TO  wa_yft-belnr.
+MOVE  wa_bsid-buzei TO  wa_yft-buzei.
+MOVE  wa_bsid-zuonr TO  wa_yft-zuonr.
+
+MOVE  wa_yft-srday TO  wa_yft-trday."BDCDATA作成の為
+
+"金額の変換取得
+MOVE  wa_bsid-wrbtr TO wk_wrbtr.
+MOVE  wa_bsid-waers TO wk_waers.
+PERFORM henkan_kingaku CHANGING wk_wrbtr
+wk_kingaku
+wk_waers.
+MOVE wk_kingaku TO wa_yft-wrbtr.
+MOVE wa_bsid-waers TO wa_yft-waers.
+
+APPEND wa_yft TO it_yft.
+ELSE.
+ENDIF.
+CLEAR: wa_bsid.
+ENDLOOP.
+ENDFORM.                                                    "get_ZTGT01
+
+*&--------------------------------------------------------------------*
+*&      Form  get_ZTGT02
+*&--------------------------------------------------------------------*
+*       仕訳計上データ取得
+*---------------------------------------------------------------------*
+FORM get_ZTGT02 .
+LOOP AT  it_yft INTO  wa_yft_s.
+CLEAR:  wa_yft.
+SELECT SINGLE blart bschl_d bschl_c hkont_d hkont_c
+INTO CORRESPONDING FIELDS OF  wa_yft
+FROM ZTGT02
+WHERE bukrs =  wa_yft_s-bukrs
+AND stats =  wa_yft_s-stats
+AND trbkn =  wa_yft_s-trbkn.
+
+
+*該当データを内部テーブルに追加更新。
+*取得できなかった場合はマスタ不備フラグ='X'に更新
+*20080122 MODIFY命令置き換え >>>
+IF ( sy-subrc = 0 ).
+MODIFY  it_yft FROM  wa_yft
+TRANSPORTING blart bschl_d bschl_c hkont_d hkont_c
+WHERE bukrs =  wa_yft_s-bukrs
+AND kunnr =  wa_yft_s-kunnr
+AND umskz =  wa_yft_s-umskz
+AND gjahr =  wa_yft_s-gjahr
+AND belnr =  wa_yft_s-belnr
+AND buzei =  wa_yft_s-buzei
+AND stats =  wa_yft_s-stats
+AND trbkn =  wa_yft_s-trbkn.
+
+ELSE.
+MOVE 'X' TO  wa_yft-mtflg.  "マスタ不備フラグをオン
+MODIFY  it_yft FROM  wa_yft TRANSPORTING mtflg
+WHERE bukrs =  wa_yft_s-bukrs
+AND kunnr =  wa_yft_s-kunnr
+AND umskz =  wa_yft_s-umskz
+AND gjahr =  wa_yft_s-gjahr
+AND belnr =  wa_yft_s-belnr
+AND buzei =  wa_yft_s-buzei
+AND stats =  wa_yft_s-stats
+AND trbkn =  wa_yft_s-trbkn.
+*20080122 <<<
+ENDIF.
+
+CLEAR:  wa_yft_s.
+ENDLOOP.
+ENDFORM.                                                    "get_ZTGT02
+
+*&--------------------------------------------------------------------*
+*&      Form  get_ZTGT01_h
+*&--------------------------------------------------------------------*
+*       反対仕訳処理対象データ取得
+*---------------------------------------------------------------------*
+FORM get_ZTGT01_h .
+
+SELECT bukrs kunnr umskz gjahr belnr buzei
+stats trbkn lifnr srday trday
+INTO CORRESPONDING FIELDS OF wa_yft_h
+FROM ZTGT01
+WHERE bukrs = pr_bukrs
+AND kunnr IN so_kunnr
+AND umskz IN so_umskz
+AND fiflg = 'X'
+AND deflg = 'X'
+AND stats IN so_stats.
+
+
+*データ元判別用フラグON
+MOVE 'X' TO  wa_yft_h-frflg.
+*取消日付が空白なら処理日付を代入
+IF ( wa_yft_h-trday = '00000000' ).
+MOVE  wa_yft_h-srday TO  wa_yft_h-trday.
+ELSE.
+ENDIF.
+
+APPEND  wa_yft_h TO  it_yft_h.
+
+CLEAR:  wa_yft_h.
+ENDSELECT.
+
+ENDFORM.                    "get_ZTGT01_h
+
+
+*&--------------------------------------------------------------------*
+*&      Form  get_ZTGT02_h
+*&--------------------------------------------------------------------*
+*       反対仕訳計上データ取得
+*---------------------------------------------------------------------*
+FORM get_ZTGT02_h .
+
+LOOP AT  it_yft_h INTO  wa_yft_s.
+CLEAR:  wa_yft_h.
+SELECT SINGLE blart bschl_dh bschl_ch hkont_d hkont_c
+INTO (wa_yft_h-blart,wa_yft_h-bschl_d,wa_yft_h-bschl_c
+,wa_yft_h-hkont_c,wa_yft_h-hkont_d)
+FROM ZTGT02
+WHERE bukrs =  wa_yft_s-bukrs
+AND stats =  wa_yft_s-stats
+AND trbkn =  wa_yft_s-trbkn.
+
+*該当データを内部テーブルに追加更新。
+*取得できなかった場合はマスタ不備フラグ='X'に更新
+IF ( sy-subrc = 0 ).
+MODIFY  it_yft_h FROM  wa_yft_h
+TRANSPORTING blart bschl_d bschl_c hkont_d hkont_c
+WHERE bukrs =  wa_yft_s-bukrs
+AND kunnr =  wa_yft_s-kunnr
+AND umskz =  wa_yft_s-umskz
+AND gjahr =  wa_yft_s-gjahr
+AND belnr =  wa_yft_s-belnr
+AND buzei =  wa_yft_s-buzei
+AND stats =  wa_yft_s-stats
+AND trbkn =  wa_yft_s-trbkn.
+ELSE.
+MOVE 'X' TO  wa_yft_h-mtflg.  "マスタ不備フラグをオン
+MODIFY  it_yft_h FROM  wa_yft_h TRANSPORTING mtflg
+WHERE bukrs =  wa_yft_s-bukrs
+AND kunnr =  wa_yft_s-kunnr
+AND umskz =  wa_yft_s-umskz
+AND gjahr =  wa_yft_s-gjahr
+AND belnr =  wa_yft_s-belnr
+AND buzei =  wa_yft_s-buzei
+AND stats =  wa_yft_s-stats
+AND trbkn =  wa_yft_s-trbkn.
+ENDIF.
+
+CLEAR:  wa_yft_s.
+ENDLOOP.
+
+ENDFORM.                    "get_ZTGT02_h
+
+*&--------------------------------------------------------------------*
+*&      Form  get_kingaku
+*&--------------------------------------------------------------------*
+*       反対仕訳金額取得
+*---------------------------------------------------------------------*
+FORM get_kingaku .
+CLEAR: wa_yft_h.
+LOOP AT  it_yft_h INTO  wa_yft_h.
+IF ( sy-subrc = 0 ).
+CLEAR:  wa_kingaku,wk_kingaku,wk_wrbtr,wk_waers.
+*     金額を取得する為にBSADを読込む
+*    （反対仕訳に伴いデータ取込PGで取消フラグが立てられた場合）
+SELECT SINGLE wrbtr waers zuonr
+INTO  wa_kingaku
+FROM bsad
+WHERE bukrs = wa_yft_h-bukrs
+AND kunnr = wa_yft_h-kunnr
+AND umskz = wa_yft_h-umskz
+AND gjahr = wa_yft_h-gjahr
+AND belnr = wa_yft_h-belnr
+AND buzei = wa_yft_h-buzei.
+
+IF ( sy-subrc = 0 ).
+MOVE  wa_kingaku-wrbtr TO wk_wrbtr.
+MOVE  wa_kingaku-waers TO wk_waers.
+PERFORM henkan_kingaku CHANGING wk_wrbtr "金額取得
+wk_kingaku
+wk_waers.
+MOVE wk_kingaku TO wa_yft_h-wrbtr.
+MOVE wa_kingaku-waers TO wa_yft_h-waers.
+MOVE wa_kingaku-zuonr TO wa_yft_h-zuonr.
+
+MODIFY  it_yft_h FROM  wa_yft_h TRANSPORTING wrbtr waers zuonr
+WHERE bukrs =  wa_yft_h-bukrs
+AND kunnr =  wa_yft_h-kunnr
+AND umskz =  wa_yft_h-umskz
+AND gjahr =  wa_yft_h-gjahr
+AND belnr =  wa_yft_h-belnr
+AND buzei =  wa_yft_h-buzei
+AND stats =  wa_yft_h-stats
+AND trbkn =  wa_yft_h-trbkn.
+ELSE.
+*    もしBSADに対象レコードがなかった場合にBSIDを読込む。
+*    (ステータス変更PGによって取消フラグが立てられた場合）
+SELECT SINGLE wrbtr waers zuonr
+INTO  wa_kingaku
+FROM bsid
+WHERE bukrs = wa_yft_h-bukrs
+AND kunnr = wa_yft_h-kunnr
+AND umskz = wa_yft_h-umskz
+AND gjahr = wa_yft_h-gjahr
+AND belnr = wa_yft_h-belnr
+AND buzei = wa_yft_h-buzei.
+IF ( sy-subrc = 0 ).
+MOVE  wa_kingaku-wrbtr TO wk_wrbtr.
+MOVE  wa_kingaku-waers TO wk_waers.
+PERFORM henkan_kingaku CHANGING wk_wrbtr "金額取得
+wk_kingaku
+wk_waers.
+MOVE wk_kingaku TO wa_yft_h-wrbtr.
+MOVE wa_kingaku-waers TO wa_yft_h-waers.
+MOVE wa_kingaku-zuonr TO wa_yft_h-zuonr.
+
+MODIFY  it_yft_h FROM  wa_yft_h TRANSPORTING wrbtr waers zuonr
+WHERE bukrs =  wa_yft_h-bukrs
+AND kunnr =  wa_yft_h-kunnr
+AND umskz =  wa_yft_h-umskz
+AND gjahr =  wa_yft_h-gjahr
+AND belnr =  wa_yft_h-belnr
+AND buzei =  wa_yft_h-buzei
+AND stats =  wa_yft_h-stats
+AND trbkn =  wa_yft_h-trbkn.
+ELSE.
+MESSAGE: s010. "処理を中止します。
+WRITE: text-013.
+"DBに不整合があります。システム管理者に連絡してください
+*20080122 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*          STOP
+*20080122 <<<
+ENDIF.
+ENDIF.
+CLEAR:  wa_yft_h.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    "get_kingaku
+
+*&--------------------------------------------------------------------*
+*&      Form  henkan_kingaku
+*&--------------------------------------------------------------------*
+*       金額取得用
+*---------------------------------------------------------------------*
+FORM henkan_kingaku CHANGING  wk_wrbtr LIKE wk_wrbtr
+wk_kingaku LIKE wk_kingaku
+wk_waers LIKE wk_waers.
+CLEAR:  wk_kingaku.
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+currency    = wk_waers "通貨コード
+sap_amount  = wk_wrbtr "伝票通貨額
+IMPORTING
+idoc_amount = wk_kingaku. "金額
+
+IF ( sy-subrc = 0 ).
+ELSE.
+MESSAGE: s401 WITH text-014 text-017.
+"汎用モジュール"CURRENCY_AMOUNT_SAP_TO_IDOC"
+"でエラーが発生しました。処理を停止します。
+*20080122 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*    STOP
+*20080122 <<<
+ENDIF.
+
+ENDFORM.                    "henkan_kingaku
+
+*&--------------------------------------------------------------------*
+*&      Form  it_ketsugou
+*&--------------------------------------------------------------------*
+*       内部テーブルの結合
+*---------------------------------------------------------------------*
+FORM it_ketsugou .
+CLEAR: wa_yft_h.
+
+LOOP AT  it_yft_h INTO  wa_yft_h.
+
+APPEND  wa_yft_h TO  it_yft.
+
+CLEAR:  wa_yft_h.
+ENDLOOP.
+
+ENDFORM.                    "it_ketsugou
+
+*&--------------------------------------------------------------------*
+*&      Form  mtflg_check
+*&--------------------------------------------------------------------*
+*       マスタ不備レコードチェック
+*---------------------------------------------------------------------*
+FORM mtflg_check .
+
+*マスタ不備フラグ＝'X'の場合、内部マスタエラーテーブルにデータを移し
+*元の内部テーブルからは削除する。
+CLEAR: wa_yft,wk_mteflg.
+LOOP AT  it_yft INTO  wa_yft.
+IF (  wa_yft-mtflg = 'X' ).
+APPEND  wa_yft TO  it_yft_err.  "追加
+DELETE  it_yft.                 "削除
+MOVE 'X' TO wk_mteflg.
+ELSE.
+ENDIF.
+CLEAR:  wa_yft.
+ENDLOOP.
+
+ENDFORM.                    "mtflg_check
+
+*&--------------------------------------------------------------------*
+*&      Form  get_fi_period
+*&--------------------------------------------------------------------*
+*       会計期間取得
+*---------------------------------------------------------------------*
+FORM get_fi_period USING p_wk_bukrs LIKE wk_bukrs
+p_wk_day LIKE wk_day.
+
+CLEAR: wk_gjahr,wk_monat.
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+i_budat              = p_wk_day  "取消日付
+i_bukrs              = p_wk_bukrs  "会社コード
+*     I_PERIV              = ' '
+*     I_GJAHR              = 0000
+*     I_MONAT              = 00
+*     X_XMO16              = ' '
+IMPORTING
+e_gjahr              = wk_gjahr      "会計年度
+e_monat              = wk_monat      "会計期間
+*     E_POPER              =
+EXCEPTIONS
+fiscal_year          = 1
+period               = 2
+period_version       = 3
+posting_period       = 4
+special_period       = 5
+version              = 6
+posting_date         = 7
+OTHERS               = 8.
+
+ENDFORM.                    "get_fi_period
+
+*&--------------------------------------------------------------------*
+*&      Form  check_fi_period
+*&--------------------------------------------------------------------*
+*       会計期間判定
+*---------------------------------------------------------------------*
+FORM check_fi_period USING p_wk_bukrs.
+CLEAR: wk_monat2.
+MOVE wk_monat TO wk_monat2.
+CALL FUNCTION 'FI_PERIOD_CHECK'
+EXPORTING
+i_bukrs                = p_wk_bukrs "会社コード
+*     I_OPVAR                = ' '
+i_gjahr               = wk_gjahr      "会計年度
+i_koart               = '+'           "勘定タイプ
+*     I_KONTO                = ' '
+i_monat               = wk_monat2     "会計期間
+*     I_SPERI                =
+*   IMPORTING
+*     E_OPER                 =
+EXCEPTIONS
+error_period           = 1
+error_period_acc       = 2
+OTHERS                 = 3.
+
+ENDFORM.                    "check_fi_period
+
+*&--------------------------------------------------------------------*
+*&      Form  make_bdcdata
+*&--------------------------------------------------------------------*
+*       BDCデータ作成
+*---------------------------------------------------------------------*
+FORM make_bdcdata.
+CLEAR: it_bdcdata.
+*１画面目(会計伝票ヘッダ画面)
+**1行目
+CLEAR: wa_bdcdata.
+MOVE 'SAPMF05A' TO wa_bdcdata-program.
+MOVE '0100' TO wa_bdcdata-dynpro.
+MOVE 'X' TO wa_bdcdata-dynbegin.
+APPEND wa_bdcdata TO it_bdcdata.
+**2行目(伝票日付）
+CLEAR: wa_bdcdata.
+MOVE 'BKPF-BLDAT' TO  wa_bdcdata-fnam.
+MOVE sy-datum TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**3行目（転記日付）
+CLEAR:  wa_bdcdata.
+MOVE 'BKPF-BUDAT' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-trday TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**4行目(伝票タイプ）
+CLEAR: wa_bdcdata.
+MOVE 'BKPF-BLART' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-blart TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**5行目（会社コード）
+CLEAR:  wa_bdcdata.
+MOVE 'BKPF-BUKRS' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-bukrs TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**6行目（通貨コード）
+CLEAR:  wa_bdcdata.
+MOVE 'BKPF-WAERS' TO  wa_bdcdata-fnam.
+MOVE wa_yft-waers TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**7行目（転記キー）
+CLEAR:  wa_bdcdata.
+MOVE 'RF05A-NEWBS' TO  wa_bdcdata-fnam.
+*   手形ステータスによって変更
+IF ( wa_yft-stats = 'U' AND wa_yft-frflg = 'X' ).
+MOVE  wa_yft-bschl_c TO  wa_bdcdata-fval.
+ELSE.
+MOVE  wa_yft-bschl_d TO  wa_bdcdata-fval.
+ENDIF.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**8行目（勘定コード）
+CLEAR:  wa_bdcdata.
+MOVE 'RF05A-NEWKO' TO  wa_bdcdata-fnam.
+*   手形ステータスによって変更
+IF ( wa_yft-stats = 'W' ).
+MOVE  wa_yft-hkont_d TO  wa_bdcdata-fval.
+ELSEIF ( wa_yft-stats ='U' ).
+MOVE  wa_yft-lifnr TO  wa_bdcdata-fval.
+ELSE.
+ENDIF.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**9行目(ENTER)
+CLEAR:  wa_bdcdata.
+MOVE 'BDC_OKCODE' TO  wa_bdcdata-fnam.
+MOVE '/00' TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+
+**--- 手形ステータスが割引の場合
+IF  (  wa_yft-stats ='W').
+*2画面目(伝票明細画面（総勘定元帳(S)））
+**1行目
+CLEAR:  wa_bdcdata.
+MOVE 'SAPMF05A' TO  wa_bdcdata-program.
+MOVE '0300' TO  wa_bdcdata-dynpro.
+MOVE 'X' TO  wa_bdcdata-dynbegin.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**2行目（金額）
+CLEAR:  wa_bdcdata.
+MOVE 'BSEG-WRBTR' TO  wa_bdcdata-fnam.
+MOVE wa_yft-wrbtr TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**3行目（ソートキー）
+CLEAR:  wa_bdcdata.
+MOVE 'BSEG-ZUONR' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-zuonr TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**4行目（貸方転記キー）
+CLEAR:  wa_bdcdata.
+MOVE 'RF05A-NEWBS' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-bschl_c TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**5行目（貸方勘定コード）
+CLEAR:  wa_bdcdata.
+MOVE 'RF05A-NEWKO' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-hkont_c TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**6行目(ENTER)
+CLEAR:  wa_bdcdata.
+MOVE 'BDC_OKCODE' TO  wa_bdcdata-fnam.
+MOVE '/00' TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**7行目
+CLEAR:  wa_bdcdata.
+MOVE 'SAPLKACB' TO  wa_bdcdata-program.
+MOVE '0002' TO  wa_bdcdata-dynpro.
+MOVE 'X' TO  wa_bdcdata-dynbegin.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**8行目
+CLEAR:  wa_bdcdata.
+MOVE 'BDC_OKCODE' TO  wa_bdcdata-fnam.
+MOVE '/00' TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+
+**--- 手形ステータスが裏書の場合
+*2画面目(伝票明細画面（仕入先勘定(K)））
+ELSEIF (  wa_yft-stats = 'U' ).
+**1行目
+CLEAR:  wa_bdcdata.
+MOVE 'SAPMF05A' TO  wa_bdcdata-program.
+MOVE '0302' TO  wa_bdcdata-dynpro.
+MOVE 'X' TO  wa_bdcdata-dynbegin.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**2行目（金額）
+CLEAR:  wa_bdcdata.
+MOVE 'BSEG-WRBTR' TO  wa_bdcdata-fnam.
+MOVE wa_yft-wrbtr TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**3行目（ソートキー）
+CLEAR:  wa_bdcdata.
+MOVE 'BSEG-ZUONR' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-zuonr TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**4行目（貸方転記キー）
+CLEAR:  wa_bdcdata.
+MOVE 'RF05A-NEWBS' TO  wa_bdcdata-fnam.
+IF ( wa_yft-frflg = ' ' ).
+MOVE  wa_yft-bschl_c TO  wa_bdcdata-fval.
+ELSEIF (  wa_yft-frflg = 'X' ).
+MOVE  wa_yft-bschl_d TO  wa_bdcdata-fval.
+ELSE.
+ENDIF.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**5行目（貸方勘定コード）
+CLEAR:  wa_bdcdata.
+MOVE 'RF05A-NEWKO' TO  wa_bdcdata-fnam.
+IF ( wa_yft-frflg = ' ' ).
+MOVE  wa_yft-hkont_c TO  wa_bdcdata-fval.
+ELSEIF (  wa_yft-frflg = 'X' ).
+MOVE  wa_yft-hkont_d TO  wa_bdcdata-fval.
+ELSE.
+ENDIF.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**6行目
+CLEAR:  wa_bdcdata.
+MOVE 'BDC_OKCODE' TO  wa_bdcdata-fnam.
+MOVE '/00' TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+
+ELSE.
+ENDIF.
+*3画面目
+**1行目
+CLEAR:  wa_bdcdata.
+MOVE 'SAPMF05A' TO  wa_bdcdata-program.
+MOVE '0300' TO  wa_bdcdata-dynpro.
+MOVE 'X' TO  wa_bdcdata-dynbegin.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**2行目（金額）
+CLEAR:  wa_bdcdata,wk_kingaku.
+MOVE 'BSEG-WRBTR' TO  wa_bdcdata-fnam.
+MOVE wa_yft-wrbtr TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**3行目(ソートキー）
+CLEAR:  wa_bdcdata.
+MOVE 'BSEG-ZUONR' TO  wa_bdcdata-fnam.
+MOVE  wa_yft-zuonr TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**4行目（保存）
+CLEAR:  wa_bdcdata.
+MOVE 'BDC_OKCODE' TO  wa_bdcdata-fnam.
+MOVE '=BU' TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**5行目
+CLEAR:  wa_bdcdata.
+MOVE 'SAPLKACB' TO  wa_bdcdata-program.
+MOVE '0002' TO  wa_bdcdata-dynpro.
+MOVE 'X' TO  wa_bdcdata-dynbegin.
+APPEND  wa_bdcdata TO  it_bdcdata.
+**6行目（ENTER)
+CLEAR:  wa_bdcdata.
+MOVE 'BDC_OKCODE' TO  wa_bdcdata-fnam.
+MOVE '/00' TO  wa_bdcdata-fval.
+APPEND  wa_bdcdata TO  it_bdcdata.
+
+ENDFORM.                    "make_bdcdata
+
+*&--------------------------------------------------------------------*
+*&      Form  bdc_ok
+*&--------------------------------------------------------------------*
+*       BDC成功時の内部テーブル更新処理
+*---------------------------------------------------------------------*
+FORM bdc_ok.
+*内部テーブルの対象レコードを更新。
+*frflgは元データが反対仕訳かどうかを判定する為。
+
+IF ( wa_yft-frflg = 'X' ). "元データが反対仕訳の場合
+CLEAR: wa_yft-stats,
+wa_yft-srday,
+wa_yft-trday,
+wa_yft-trbkn,
+wa_yft-lifnr,
+wa_yft-fiflg,
+wa_yft-deflg.
+MODIFY it_yft FROM wa_yft
+TRANSPORTING stats srday trday trbkn lifnr fiflg deflg
+WHERE bukrs =  wa_yft-bukrs
+AND kunnr =  wa_yft-kunnr
+AND umskz =  wa_yft-umskz
+AND gjahr =  wa_yft-gjahr
+AND belnr =  wa_yft-belnr
+AND buzei =  wa_yft-buzei
+AND stats =  wa_yft-stats
+AND trbkn =  wa_yft-trbkn.
+ELSE.                      "元データが通常処理の場合
+MOVE 'X' TO wa_yft-fiflg.
+MODIFY it_yft FROM wa_yft TRANSPORTING fiflg
+WHERE bukrs =  wa_yft-bukrs
+AND kunnr =  wa_yft-kunnr
+AND umskz =  wa_yft-umskz
+AND gjahr =  wa_yft-gjahr
+AND belnr =  wa_yft-belnr
+AND buzei =  wa_yft-buzei
+AND stats =  wa_yft-stats
+AND trbkn =  wa_yft-trbkn.
+ENDIF.
+
+ENDFORM.                    "bdc_ok
+
+
+*&--------------------------------------------------------------------*
+*&      Form  update_ZTGT01
+*&--------------------------------------------------------------------*
+*       ZTGT01の更新処理
+*---------------------------------------------------------------------*
+FORM update_ZTGT01.
+*仕訳計上の終了したデータのZTGT01の対象レコードを更新。
+*frflgは元データが反対仕訳かどうかを判定する為。
+IF ( wa_yft-frflg = 'X' ). "元データが反対仕訳の場合
+UPDATE ZTGT01
+SET stats = wa_yft-stats
+srday = wa_yft-srday
+trday = wa_yft-trday
+trbkn = wa_yft-trbkn
+lifnr = wa_yft-lifnr
+fiflg = wa_yft-fiflg
+deflg = wa_yft-deflg
+updday = sy-datum
+updtim = sy-uzeit
+updusr = sy-uname
+WHERE bukrs = wa_yft-bukrs
+AND gjahr = wa_yft-gjahr
+AND belnr = wa_yft-belnr
+AND buzei = wa_yft-buzei.
+ELSE.                      "元データが通常処理の場合
+UPDATE ZTGT01
+SET fiflg = wa_yft-fiflg
+updday = sy-datum
+updtim = sy-uzeit
+updusr = sy-uname
+WHERE bukrs = wa_yft-bukrs
+AND gjahr = wa_yft-gjahr
+AND belnr = wa_yft-belnr
+AND buzei = wa_yft-buzei.
+ENDIF.
+
+ENDFORM.                    "update_ZTGT01
+
+
+*&--------------------------------------------------------------------*
+*&      Form  err
+*&--------------------------------------------------------------------*
+*       エラーレコードのWRITE処理
+*---------------------------------------------------------------------*
+FORM err CHANGING p_it_yft_err LIKE it_yft.
+*エラーレコードの書き出し。
+CLEAR wa_yft_s .
+
+LOOP AT p_it_yft_err INTO wa_yft_s .
+WRITE: / wa_yft_s-bukrs ,   "会社コード
+wa_yft_s-kunnr ,    "得意先コード１
+wa_yft_s-gjahr ,    "会計年度
+wa_yft_s-belnr ,    "伝票番号
+wa_yft_s-buzei ,    "伝票明細番号
+wa_yft_s-zuonr ,    "ソートキー
+wa_yft_s-wrbtr ,    "金額
+wa_yft_s-stats .    "手形ステータス
+
+CLEAR: wa_yft_s.
+ENDLOOP.
+ENDFORM.                    "err
+
+
+
+*&--------------------------------------------------------------------*
+*&      Form  syorikensu
+*&--------------------------------------------------------------------*
+*       処理済件数表示処理
+*---------------------------------------------------------------------*
+FORM syorikensu.
+SKIP.
+WRITE: / text-008.
+WRITE: / wk_srcnt,'件'.
+ENDFORM.                    "syorikensu
+
+*&--------------------------------------------------------------------*
+*&      Form  unlock_ZTGT01
+*&--------------------------------------------------------------------*
+*       ZTGT01のアンロック処理
+*---------------------------------------------------------------------*
+FORM unlock_ZTGT01.
+CALL FUNCTION 'DEQUEUE_EY_ZTGT01'
+EXPORTING
+mode_ZTGT01 = 'E'
+mandt      = sy-mandt.
+*   BUKRS            =
+*   GJAHR            =
+*   BELNR            =
+*   BUZEI            =
+*   X_BUKRS          = ' '
+*   X_GJAHR          = ' '
+*   X_BELNR          = ' '
+*   X_BUZEI          = ' '
+*   _SCOPE           = '3'
+*   _SYNCHRON        = ' '
+*   _COLLECT         = ' '
+
+ENDFORM.                    "unlock_ZTGT01
+*&--------------------------------------------------------------------*
+*&      Form  unlock_ZTGT02
+*&--------------------------------------------------------------------*
+*       ZTGT02のアンロック処理
+*---------------------------------------------------------------------*
+FORM unlock_ZTGT02.
+CALL FUNCTION 'DEQUEUE_EY_ZTGT02'
+EXPORTING
+mode_ZTGT02 = 'E'
+mandt      = sy-mandt.
+*   BUKRS            =
+*   STATS            =
+*   TRBKN            =
+*   UMSKZ            =
+*   X_BUKRS          = ' '
+*   X_STATS          = ' '
+*   X_TRBKN          = ' '
+*   X_UMSKZ          = ' '
+*   _SCOPE           = '3'
+*   _SYNCHRON        = ' '
+*   _COLLECT         = ' '
+
+
+ENDFORM.                    "unlock_ZTGT02

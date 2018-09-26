@@ -1,0 +1,5898 @@
+*&---------------------------------------------------------------------*
+*& プログラムID  : ZEGSDR2050
+*&                 Cross Company Transaction Report Output
+*& 作成者        : ISID Zhu
+*& 作成日        : 2015/02/27
+*& 処理概要      : ・会社間取引を一覧として表示する
+*&                 ・債権債務一致性を簡単に確認できること
+*&                 ・入出庫一致性を簡単に確認できること
+*&                 ・受発注金額一致性を確認できること
+*&                 ・伝票レベルと明細レベルで一覧が出せること
+*& 変更履歴
+*& No   DATE       MODIFYED BY   SUMMARY
+*& 1    2015/04/21 ISID17        買掛情報よりALVItemデータの編集処理で
+*&                               数量を基本数量単位に変換する時に
+*&                               EKPOの発注単位(MEINS)から変換する
+*& 2    2015/06/08 ISID18        受注数量取得項目変更
+*& 3    2015/07/23 ISID REN      権限チェックの処理を削除する
+*& 4    2015/07/31 ISID REN      印刷パラメータ変更
+*&---------------------------------------------------------------------*
+REPORT ZEGSDR2050
+LINE-SIZE 153
+LINE-COUNT 58
+NO STANDARD PAGE HEADING
+MESSAGE-ID ZMEGSD01.
+
+*----------------------------------------------------------------------*
+* CONSTANTS定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+CNS_BSART_Z TYPE EKKO-BSART   VALUE 'ZB', " 返品発注
+CNS_VBTYP_R TYPE VBFA-VBTYP_N VALUE 'R',  " 在庫移動
+CNS_VBTYP_T TYPE VBFA-VBTYP_N VALUE 'h',  " 出庫取消
+CNS_VGABE_2 TYPE EKBE-VGABE   VALUE '2',  " 請求書受領
+CNS_SHKZG_S TYPE MSEG-SHKZG   VALUE 'S',  " 借
+CNS_SHKZG_H TYPE MSEG-SHKZG   VALUE 'H',  " 貸
+CNS_VBTYP_C TYPE VBAK-VBTYP   VALUE 'C',  " 販売伝票カテゴリ(受注)
+CNS_VBTYP_H TYPE VBAK-VBTYP   VALUE 'H',  " 販売伝票カテゴリ(返品)
+CNS_VBTYP_K TYPE VBAK-VBTYP   VALUE 'K',  " 販売伝票カテゴリ(借)
+CNS_VBTYP_L TYPE VBAK-VBTYP   VALUE 'L'.  " 販売伝票カテゴリ(貸)
+
+* 移動タイプ(入出庫取消)
+CONSTANTS:
+CNS_BWART_102 TYPE MSEG-BWART VALUE '102',
+CNS_BWART_162 TYPE MSEG-BWART VALUE '162',
+CNS_BWART_962 TYPE MSEG-BWART VALUE '962',
+CNS_BWART_964 TYPE MSEG-BWART VALUE '964'.
+
+* ALV
+CONSTANTS:
+CNS_TBNAM_H       TYPE TABNAME       VALUE 'ZSEGSD0025',
+CNS_TBNAM_I       TYPE TABNAME       VALUE 'ZSEGSD0026',
+CNS_TBNAM_L       TYPE TABNAME       VALUE 'ZSEGSD0024',
+CNS_PF_STATUS_SET TYPE SLIS_FORMNAME VALUE 'SET_PF_STATUS',
+CNS_USER_CMD_2000 TYPE SLIS_FORMNAME VALUE 'USER_COMMAND_2000',
+CNS_USER_CMD_3000 TYPE SLIS_FORMNAME VALUE 'USER_COMMAND_3000',
+CNS_USER_CMD_4000 TYPE SLIS_FORMNAME VALUE 'USER_COMMAND_4000'.
+
+*----------------------------------------------------------------------*
+* TYPES定義
+*----------------------------------------------------------------------*
+TYPES:
+TYP_RD_EKORG TYPE RANGE OF EKKO-EKORG,
+TYP_RD_VKORG TYPE RANGE OF VBAK-VKORG.
+
+* 会社情報
+TYPES:
+BEGIN OF TYP_TH_COMP,
+BUKRS_SO   TYPE T001-BUKRS,        " 会社(受注)
+BUTXT_SO   TYPE T001-BUTXT,        " 会社名称(受注)
+BUKRS_PO   TYPE T001-BUKRS,        " 会社(発注)
+BUTXT_PO   TYPE T001-BUTXT,        " 会社名称(発注)
+HDOFF_SO   TYPE CHAR01,            " 本社フラグ(受注)
+END OF TYP_TH_COMP.
+
+* 会社連携データ
+TYPES:
+BEGIN OF TYP_TH_ZTEGSDT203,
+EBELN    TYPE ZTEGSDT203-EBELN,    " 購買伝票番号
+EBELP    TYPE ZTEGSDT203-EBELP,    " 購買伝票の明細番号
+EKGRP    TYPE ZTEGSDT203-EKGRP,    " 購買グループ
+VBELN    TYPE ZTEGSDT203-VBELN,    " 販売伝票
+POSNR    TYPE ZTEGSDT203-POSNR,    " 販売伝票明細
+VKGRP    TYPE ZTEGSDT203-VKGRP,    " 営業グループ
+MATNR    TYPE ZTEGSDT203-MATNR_PO,    " 品目コード
+TXZ01    TYPE ZTEGSDT203-TXZ01,    " 品目テキスト
+END OF TYP_TH_ZTEGSDT203,
+TYP_TD_ZTEGSDT203 TYPE STANDARD TABLE OF TYP_TH_ZTEGSDT203.
+
+* 発注情報
+TYPES:
+BEGIN OF TYP_TH_PO,
+EBELN    TYPE EKPO-EBELN,      " 購買伝票番号
+EBELP    TYPE EKPO-EBELP,      " 購買伝票の明細番号
+NETWR    TYPE EKPO-NETWR,      " 正味発注額
+MENGE    TYPE EKPO-MENGE,      " 数量
+MEINS    TYPE EKPO-MEINS,      " 発注単位
+LMEIN    TYPE EKPO-LMEIN,      " 基本数量単位
+BSART    TYPE EKKO-BSART,      " 購買伝票タイプ
+LIFNR    TYPE EKKO-LIFNR,      " 仕入先
+WAERS    TYPE EKKO-WAERS,      " 通貨コード
+BEDAT    TYPE EKKO-BEDAT,      " 購買伝票日付
+NAME1    TYPE LFA1-NAME1,      " 名称1
+END OF TYP_TH_PO,
+TYP_TD_PO TYPE STANDARD TABLE OF TYP_TH_PO.
+
+* 受注情報
+TYPES:
+BEGIN OF TYP_TH_SO,
+VBELN    TYPE VBAP-VBELN,      " 販売伝票番号
+POSNR    TYPE VBAP-POSNR,      " 販売伝票明細
+ZMENG    TYPE VBAP-ZMENG,      " 目標数量（販売単位）
+ZIEME    TYPE VBAP-ZIEME,      " 販売単位
+MEINS    TYPE VBAP-MEINS,      " 基本数量単位
+NETWR    TYPE VBAP-NETWR,      " 受注明細正味額
+**** START UPD 2015/06/08 ISID18 ****
+*    KLMENG   TYPE VBAP-KLMENG,     " 数量
+KWMENG   TYPE VBAP-KWMENG,     " 数量
+VRKME    TYPE VBAP-VRKME,      " 販売単位
+**** END UPD 2015/06/08 ISID18 ****
+AUDAT    TYPE VBAK-AUDAT,      " 伝票日付
+VBTYP    TYPE VBAK-VBTYP,      " 販売管理伝票カテゴリ
+AUART    TYPE VBAK-AUART,      " 販売伝票タイプ
+WAERK    TYPE VBAK-WAERK,      " 販売伝票通貨
+KUNNR    TYPE VBAK-KUNNR,      " 受注先
+NAME1    TYPE KNA1-NAME1,      " 名称1
+END OF TYP_TH_SO,
+TYP_TD_SO TYPE STANDARD TABLE OF TYP_TH_SO.
+
+* 入庫情報
+TYPES:
+BEGIN OF TYP_TH_INB,
+MBLNR      TYPE MSEG-MBLNR,      " 入出庫伝票番号
+MJAHR      TYPE MSEG-MJAHR,      " 入出庫伝票年
+ZEILE      TYPE MSEG-ZEILE,      " 入出庫伝票の明細
+BWART      TYPE MSEG-BWART,      " 移動タイプ
+SHKZG      TYPE MSEG-SHKZG,      " 借方/貸方フラグ
+MENGE      TYPE MSEG-MENGE,      " 数量
+MEINS      TYPE MSEG-MEINS,      " 基本数量単位
+ERFME      TYPE MSEG-ERFME,      " 入力単位
+EBELN      TYPE MSEG-EBELN,      " 購買発注番号
+EBELP      TYPE MSEG-EBELP,      " 購買伝票の明細番号
+SJAHR      TYPE MSEG-SJAHR,      " 入出庫伝票年
+SMBLN      TYPE MSEG-SMBLN,      " 入出庫伝票番号
+SMBLP      TYPE MSEG-SMBLP,      " 入出庫伝票の明細
+BUDAT_MKPF TYPE MSEG-BUDAT_MKPF, " 伝票の転記日付
+XBLNR_MKPF TYPE MSEG-XBLNR_MKPF, " 参照伝票番号
+END OF TYP_TH_INB,
+TYP_TD_INB TYPE STANDARD TABLE OF TYP_TH_INB.
+
+* 伝票フロー
+TYPES:
+BEGIN OF TYP_TH_VBFA,
+VBELV      TYPE VBFA-VBELV,      " 先行販売管理伝票
+POSNV      TYPE VBFA-POSNV,      " 販売管理伝票前明細
+VBELN      TYPE VBFA-VBELN,      " 後続の販売管理伝票
+POSNN      TYPE VBFA-POSNN,      " 販売管理伝票次明細
+MJAHR      TYPE VBFA-MJAHR,      " 入出庫伝票年
+END OF TYP_TH_VBFA,
+TYP_TD_VBFA TYPE STANDARD TABLE OF TYP_TH_VBFA.
+
+* 出庫情報
+TYPES:
+BEGIN OF TYP_TH_MSEG,
+MBLNR      TYPE MSEG-MBLNR,      " 入出庫伝票番号
+MJAHR      TYPE MSEG-MJAHR,      " 入出庫伝票年
+ZEILE      TYPE MSEG-ZEILE,      " 入出庫伝票の明細
+BWART      TYPE MSEG-BWART,      " 移動タイプ
+SHKZG      TYPE MSEG-SHKZG,      " 借方/貸方フラグ
+MENGE      TYPE MSEG-MENGE,      " 数量
+MEINS      TYPE MSEG-MEINS,      " 基本数量単位
+SJAHR      TYPE MSEG-SJAHR,      " 入出庫伝票年
+SMBLN      TYPE MSEG-SMBLN,      " 入出庫伝票番号
+SMBLP      TYPE MSEG-SMBLP,      " 入出庫伝票の明細
+BUDAT_MKPF TYPE MSEG-BUDAT_MKPF, " 伝票の転記日付
+XBLNR_MKPF TYPE MSEG-XBLNR_MKPF, " 参照伝票番号
+VBELN_IM   TYPE MSEG-VBELN_IM,   " 出荷伝票
+VBELP_IM   TYPE MSEG-VBELP_IM,   " 出荷明細
+END OF TYP_TH_MSEG,
+TYP_TD_MSEG TYPE STANDARD TABLE OF TYP_TH_MSEG.
+
+* 出庫情報
+TYPES:
+BEGIN OF TYP_TH_OUB,
+VBELV      TYPE VBFA-VBELV,      " 先行販売管理伝票
+POSNV      TYPE VBFA-POSNV,      " 販売管理伝票前明細
+MBLNR      TYPE MSEG-MBLNR,      " 入出庫伝票番号
+MJAHR      TYPE MSEG-MJAHR,      " 入出庫伝票年
+ZEILE      TYPE MSEG-ZEILE,      " 入出庫伝票の明細
+BWART      TYPE MSEG-BWART,      " 移動タイプ
+SHKZG      TYPE MSEG-SHKZG,      " 借方/貸方フラグ
+MENGE      TYPE MSEG-MENGE,      " 数量
+MEINS      TYPE MSEG-MEINS,      " 基本数量単位
+SJAHR      TYPE MSEG-SJAHR,      " 入出庫伝票年
+SMBLN      TYPE MSEG-SMBLN,      " 入出庫伝票番号
+SMBLP      TYPE MSEG-SMBLP,      " 入出庫伝票の明細
+BUDAT_MKPF TYPE MSEG-BUDAT_MKPF, " 伝票の転記日付
+XBLNR_MKPF TYPE MSEG-XBLNR_MKPF, " 参照伝票番号
+VBELN_IM   TYPE MSEG-VBELN_IM,   " 出荷伝票
+VBELP_IM   TYPE MSEG-VBELP_IM,   " 出荷明細
+END OF TYP_TH_OUB,
+TYP_TD_OUB TYPE STANDARD TABLE OF TYP_TH_OUB.
+
+* InvoiceNo
+TYPES:
+BEGIN OF TYP_TH_INV,
+VBELN        TYPE ZTEGSDT001-VBELN,          " 出荷伝票
+Z_INVOICE_NO TYPE ZTEGSDT001-Z_INVOICE_NO,   " Invoice No
+END OF TYP_TH_INV,
+TYP_TD_INV TYPE STANDARD TABLE OF TYP_TH_INV.
+
+* 入出庫連携情報
+TYPES:
+BEGIN OF TYP_TH_ZTEGSDT206,
+KDAUF      TYPE ZTEGSDT206-KDAUF,          " 受注伝票番号
+MBLNR_OUTB TYPE ZTEGSDT206-MBLNR_OUTB,     " 入出庫伝票番号
+MJAHR_OUTB TYPE ZTEGSDT206-MJAHR_OUTB,     " 入出庫伝票年
+EBELN      TYPE ZTEGSDT206-EBELN,          " 購買伝票番号
+MBLNR_INB  TYPE ZTEGSDT206-MBLNR_INB,      " 入出庫伝票番号
+MJAHR_INB  TYPE ZTEGSDT206-MJAHR_INB,      " 入出庫伝票年
+END OF TYP_TH_ZTEGSDT206,
+TYP_TD_ZTEGSDT206 TYPE STANDARD TABLE OF TYP_TH_ZTEGSDT206.
+
+* 買掛（AP）情報
+TYPES:
+BEGIN OF TYP_TH_AP,
+GJAHR   TYPE EKBE-GJAHR,    " 入出庫伝票年
+BELNR   TYPE EKBE-BELNR,    " 入出庫伝票番号
+BUZEI   TYPE EKBE-BUZEI,    " 入出庫伝票の明細
+BUDAT   TYPE EKBE-BUDAT,    " 伝票の転記日付
+MENGE   TYPE EKBE-MENGE,    " 数量
+WRBTR   TYPE EKBE-WRBTR,    " 伝票通貨額
+WAERS   TYPE EKBE-WAERS,    " 通貨コード
+SHKZG   TYPE EKBE-SHKZG,    " 借方/貸方フラグ
+LFGJA   TYPE EKBE-LFGJA,    " 参照伝票の会計年度
+LFBNR   TYPE EKBE-LFBNR,    " 参照伝票の伝票番号
+LFPOS   TYPE EKBE-LFPOS,    " 参照伝票の明細
+END OF TYP_TH_AP,
+TYP_TD_AP TYPE STANDARD TABLE OF TYP_TH_AP.
+
+* 売掛（AR）情報
+TYPES:
+BEGIN OF TYP_TH_AR,
+VGBEL   TYPE VBRP-VGBEL,    " 参照伝票番号
+VGPOS   TYPE VBRP-VGPOS,    " 参照明細番号
+VBELN   TYPE VBRP-VBELN,    " 請求伝票
+POSNR   TYPE VBRP-POSNR,    " 請求明細
+FKIMG   TYPE VBRP-FKIMG,    " 請求数量
+VRKME   TYPE VBRP-VRKME,    " 販売単位
+MEINS   TYPE VBRP-MEINS,    " 基本数量単位
+NETWR   TYPE VBRP-NETWR,    " 伝票通貨の正味額
+WAERK   TYPE VBRK-WAERK,    " 通貨コード
+FKDAT   TYPE VBRK-FKDAT,    " 請求日
+END OF TYP_TH_AR,
+TYP_TD_AR TYPE STANDARD TABLE OF TYP_TH_AR.
+
+* 集計
+TYPES:
+BEGIN OF TYP_TH_SUM,
+NETWR_PO  TYPE ZSEGSD0025-NETWR_PO,      " 発注金額
+MENGE_PO  TYPE ZSEGSD0025-MENGE_PO,      " 発注数量
+MENGE_INB TYPE ZSEGSD0025-MENGE_INB,     " 入庫数量
+WRBTR_AP  TYPE ZSEGSD0025-WRBTR_AP,      " 照合金額
+MENGE_AP  TYPE ZSEGSD0025-MENGE_AP,      " 照合数量
+NETWR_SO  TYPE ZSEGSD0025-NETWR_SO,      " 受注数量
+MENGE_SO  TYPE ZSEGSD0025-MENGE_SO,      " 受注金額
+MENGE_OUB TYPE ZSEGSD0025-MENGE_OUB,     " 出庫数量
+WRBTR_AR  TYPE ZSEGSD0025-WRBTR_AR,      " 請求金額
+MENGE_AR  TYPE ZSEGSD0025-MENGE_AR,      " 請求数量
+END OF TYP_TH_SUM.
+
+* ALVデータ
+TYPES:
+TYP_TD_ZSEGSD0024 TYPE STANDARD TABLE OF ZSEGSD0024,
+TYP_TD_ZSEGSD0025 TYPE STANDARD TABLE OF ZSEGSD0025,
+TYP_TD_ZSEGSD0026 TYPE STANDARD TABLE OF ZSEGSD0026.
+
+*----------------------------------------------------------------------*
+* DATA定義
+*----------------------------------------------------------------------*
+* 画面パラメータ参照変数定義
+DATA:
+W_LDATE  TYPE ZTEGSDT203-Z_CRE_YMD,     " 受発注連携日付
+W_BUDAT  TYPE BKPF-BUDAT,               " 転記日付
+W_INVOC  TYPE ZTEGSDT001-Z_INVOICE_NO,  " Invoice no
+W_EKGRP  TYPE EKKO-EKGRP,               " 購買グループ
+W_EBELN  TYPE EKKO-EBELN,               " 購買伝票
+W_VBELN  TYPE VBAK-VBELN,               " 販売伝票
+W_VKGRP  TYPE VBAK-VKGRP.               " 営業グループ
+
+* ワーク変数
+DATA:
+W_BUTXT_A TYPE T001-BUTXT,         " 会社Ａ名称
+W_BUTXT_B TYPE T001-BUTXT.         " 会社Ｂ名称
+
+* 購買組織、販売組織レンジテーブル
+DATA:
+RD_EKORG_A    TYPE TYP_RD_EKORG,
+RD_EKORG_B    TYPE TYP_RD_EKORG,
+RD_VKORG_A    TYPE TYP_RD_VKORG,
+RD_VKORG_B    TYPE TYP_RD_VKORG.
+
+DATA:
+TH_COMP       TYPE TYP_TH_COMP,
+TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203,
+TD_ALV_LIST   TYPE TYP_TD_ZSEGSD0024,
+TD_ALV_POSOH  TYPE TYP_TD_ZSEGSD0025,
+TD_ALV_POSOI  TYPE TYP_TD_ZSEGSD0026.
+
+*----------------------------------------------------------------------*
+* 選択画面定義
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF LINE.
+* 受発注レベル
+SELECTION-SCREEN POSITION 3.
+PARAMETERS RB_POSOH RADIOBUTTON GROUP RB1.
+SELECTION-SCREEN COMMENT 5(20) TEXT-001 FOR FIELD RB_POSOH.
+* 受発注明細レベル
+SELECTION-SCREEN POSITION 27.
+PARAMETERS RB_POSOI RADIOBUTTON GROUP RB1.
+SELECTION-SCREEN COMMENT 29(25) TEXT-002 FOR FIELD RB_POSOI.
+* 入出庫明細レベル
+SELECTION-SCREEN POSITION 56.
+PARAMETERS RB_INOUT RADIOBUTTON GROUP RB1 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 58(30) TEXT-003 FOR FIELD RB_INOUT.
+SELECTION-SCREEN END OF LINE.
+
+* 選択項目
+PARAMETERS:
+P_BUKRSA TYPE T001-BUKRS OBLIGATORY,    " 会社コードＡ
+P_BUKRSB TYPE T001-BUKRS OBLIGATORY.    " 会社コードＢ
+SELECT-OPTIONS:
+S_LDATE FOR W_LDATE,                    " 受発注連携日付
+S_BUDAT FOR W_BUDAT,                    " 転記日付
+S_INVOC FOR W_INVOC,                    " Invoice
+S_EBELN FOR W_EBELN,                    " 購買発注
+S_EKGRP FOR W_EKGRP MEMORY ID EKG,      " 購買グループ
+S_VBELN FOR W_VBELN,                    " 販売伝票
+S_VKGRP FOR W_VKGRP.                    " 営業グループ
+
+* 一致データ
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(15) TEXT-004 FOR FIELD CB_MATH.
+PARAMETERS CB_MATH AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN END OF LINE.
+
+* 不一致データ
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(15) TEXT-005 FOR FIELD CB_NMATH.
+PARAMETERS CB_NMATH AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN END OF LINE.
+
+* 出力デバイス
+SELECTION-SCREEN SKIP 1.
+PARAMETERS P_DEVICE TYPE TSP03-PADEST.
+*----------------------------------------------------------------------*
+* 初期値定義
+*----------------------------------------------------------------------*
+INITIALIZATION.
+
+* 受発注連携日付初期値設定
+PERFORM GET_DEFAULT_LDATE.
+
+* 出力デバイス初期値設定
+PERFORM GET_DEFAULT_PRINTER.
+
+*----------------------------------------------------------------------*
+* 選択画面チェック
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+
+* 入力項目チェック
+PERFORM SEL_VALIDATE.
+
+*----------------------------------------------------------------------*
+* メイン処理
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 購買組織、販売組織取得
+PERFORM GET_EKORG_VKORG
+CHANGING RD_EKORG_A       " 購買組織Ａ
+RD_EKORG_B       " 購買組織Ｂ
+RD_VKORG_A       " 販売組織Ａ
+RD_VKORG_B.      " 販売組織Ｂ
+
+* 会社連携データ抽出(会社A 発注　⇒　会社B 受注)
+CLEAR TH_COMP.
+PERFORM GET_DATA_SO_PO
+USING    P_BUKRSB
+RD_EKORG_A       " 購買組織Ａ
+RD_VKORG_B       " 販売組織Ｂ
+CHANGING TH_COMP-HDOFF_SO " B社本社フラグ
+TD_ZTEGSDT203.   " 会社連携データ
+
+* 会社情報編集
+TH_COMP-BUKRS_SO = P_BUKRSB.
+TH_COMP-BUTXT_SO = W_BUTXT_B.
+TH_COMP-BUKRS_PO = P_BUKRSA.
+TH_COMP-BUTXT_PO = W_BUTXT_A.
+
+* その他データ抽出＆編集(会社A 発注　⇒　会社B 受注)
+PERFORM GET_DATA_ALV
+USING    TH_COMP          " 会社情報
+TD_ZTEGSDT203    " 会社連携データ
+CHANGING TD_ALV_LIST.     " ALVListデータ
+
+* 会社連携データ抽出(会社B 発注　⇒　会社A 受注)
+CLEAR TH_COMP.
+PERFORM GET_DATA_SO_PO
+USING    P_BUKRSA
+RD_EKORG_B       " 購買組織Ｂ
+RD_VKORG_A       " 販売組織Ａ
+CHANGING TH_COMP-HDOFF_SO " A社本社フラグ
+TD_ZTEGSDT203.   " 会社連携データ
+
+* 会社情報編集
+TH_COMP-BUKRS_SO = P_BUKRSA.
+TH_COMP-BUTXT_SO = W_BUTXT_A.
+TH_COMP-BUKRS_PO = P_BUKRSB.
+TH_COMP-BUTXT_PO = W_BUTXT_B.
+
+* その他データ抽出＆編集(会社B 発注　⇒　会社A 受注)
+PERFORM GET_DATA_ALV
+USING    TH_COMP          " 会社情報
+TD_ZTEGSDT203    " 会社連携データ
+CHANGING TD_ALV_LIST.     " ALVListデータ
+
+* データ存在しない場合
+IF TD_ALV_LIST[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* PO/SOレベルの集計
+IF RB_POSOH IS NOT INITIAL.
+PERFORM SUM_BY_POSOI
+USING    TD_ALV_LIST
+CHANGING TD_ALV_POSOI.
+PERFORM SUM_BY_POSOH
+USING    TD_ALV_POSOI
+CHANGING TD_ALV_POSOH.
+ENDIF.
+
+* PO/SO明細レベルの集計
+IF RB_POSOI IS NOT INITIAL.
+PERFORM SUM_BY_POSOI
+USING    TD_ALV_LIST
+CHANGING TD_ALV_POSOI.
+ENDIF.
+
+* 対象データの限定処理&ALV出力
+CASE ABAP_TRUE.
+WHEN RB_POSOH.
+PERFORM CHECK_OUTPUT_POSOH
+CHANGING TD_ALV_POSOH.
+PERFORM DISPLAY_ALV_POSOH
+USING TD_ALV_POSOH.
+WHEN RB_POSOI.
+PERFORM CHECK_OUTPUT_POSOI
+CHANGING TD_ALV_POSOI.
+PERFORM DISPLAY_ALV_POSOI
+USING TD_ALV_POSOI.
+WHEN RB_INOUT.
+PERFORM CHECK_OUTPUT_LIST
+CHANGING TD_ALV_LIST.
+PERFORM DISPLAY_ALV_LIST
+USING TD_ALV_LIST.
+WHEN OTHERS.
+ENDCASE.
+
+*----------------------------------------------------------------------*
+* END-OF-SELECTION
+*----------------------------------------------------------------------*
+END-OF-SELECTION.
+
+*----------------------------------------------------------------------*
+* TOP-OF-PAGE
+*----------------------------------------------------------------------*
+TOP-OF-PAGE.
+
+*----------------------------------------------------------------------*
+*&      Form  GET_DEFAULT_LDATE
+*----------------------------------------------------------------------*
+*       受発注連携日付初期値設定
+*----------------------------------------------------------------------*
+FORM GET_DEFAULT_LDATE .
+
+DATA: LRH_LDATE LIKE LINE OF S_LDATE.
+
+* 受発注連携日付From
+CONCATENATE SY-DATUM+0(6) '01' INTO LRH_LDATE-LOW.
+
+* 受発注連携日付To
+CALL FUNCTION 'DATE_GET_MONTH_LASTDAY'
+EXPORTING
+I_DATE = LRH_LDATE-LOW
+IMPORTING
+E_DATE = LRH_LDATE-HIGH.
+
+LRH_LDATE-SIGN = 'I'.
+LRH_LDATE-OPTION = 'BT'.
+APPEND LRH_LDATE TO S_LDATE.
+
+ENDFORM.                    " GET_DEFAULT_LDATE
+*----------------------------------------------------------------------*
+*&      Form  GET_DEFAULT_PRINTER
+*----------------------------------------------------------------------*
+*       出力デバイス初期値取得
+*----------------------------------------------------------------------*
+FORM GET_DEFAULT_PRINTER .
+
+DATA LST_USER_DEFAULTS  TYPE USDEFAULTS.
+
+CALL FUNCTION 'SUSR_USER_READ'
+EXPORTING
+USER_NAME            = SY-UNAME
+IMPORTING
+USER_DEFAULTS        = LST_USER_DEFAULTS
+EXCEPTIONS
+USER_NAME_NOT_EXISTS = 1
+INTERNAL_ERROR       = 2
+OTHERS               = 3.
+
+IF SY-SUBRC = 0.
+P_DEVICE = LST_USER_DEFAULTS-SPLD.
+ENDIF.
+
+ENDFORM.                    " GET_DEFAULT_PRINTER
+*----------------------------------------------------------------------*
+*&      Form  sel_validate
+*----------------------------------------------------------------------*
+*      選択画面入力項目チェック
+*----------------------------------------------------------------------*
+FORM SEL_VALIDATE.
+
+* 会社コードＡ存在性チェック
+SELECT SINGLE BUTXT
+INTO W_BUTXT_A
+FROM T001
+WHERE BUKRS = P_BUKRSA.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRSA'.
+MESSAGE E002 WITH P_BUKRSA.
+ENDIF.
+
+* 会社コードＢ存在性チェック
+SELECT SINGLE BUTXT
+INTO W_BUTXT_B
+FROM T001
+WHERE BUKRS = P_BUKRSB.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRSB'.
+MESSAGE E002 WITH P_BUKRSB.
+ENDIF.
+
+* 受発注連携日付と転記日付の入力チェック
+IF S_LDATE[] IS INITIAL AND
+S_BUDAT[] IS INITIAL.
+SET CURSOR FIELD 'S_LDATE-LOW'.
+MESSAGE E083.
+ENDIF.
+
+* チェックボックスの入力チェック
+IF CB_MATH  IS INITIAL AND
+CB_NMATH IS INITIAL.
+SET CURSOR FIELD 'CB_MATH'.
+MESSAGE E014.
+ENDIF.
+
+**** START DEL BY ISID REN 2015/07/23 ****
+** 会社コードＡの権限チェック
+*  AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+*    ID 'BUKRS' FIELD P_BUKRSA
+*    ID 'ACTVT' FIELD '03'.
+*
+*  IF SY-SUBRC <> 0.
+*    SET CURSOR FIELD 'P_BUKRSA'.
+*    MESSAGE E001.
+*  ENDIF.
+*
+** 会社コードＢの権限チェック
+*  AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+*    ID 'BUKRS' FIELD P_BUKRSB
+*    ID 'ACTVT' FIELD '03'.
+*
+*  IF SY-SUBRC <> 0.
+*    SET CURSOR FIELD 'P_BUKRSB'.
+*    MESSAGE E001.
+*  ENDIF.
+**** END DEL BY ISID REN 2015/07/23 ****
+
+ENDFORM.                    "GS_SELVALIDATE
+*----------------------------------------------------------------------*
+*&      Form  GET_EKORG_VKORG
+*----------------------------------------------------------------------*
+*       購買組織、販売組織取得
+*----------------------------------------------------------------------*
+*      <--O_RD_EKORG_A  会社Ａの購買組織
+*      <--O_RD_EKORG_B  会社Ｂの購買組織
+*      <--O_RD_VKORG_A  会社Ａの販売組織
+*      <--O_RD_VKORG_B  会社Ｂの販売組織
+*----------------------------------------------------------------------*
+FORM GET_EKORG_VKORG
+CHANGING O_RD_EKORG_A TYPE TYP_RD_EKORG
+O_RD_EKORG_B TYPE TYP_RD_EKORG
+O_RD_VKORG_A TYPE TYP_RD_VKORG
+O_RD_VKORG_B TYPE TYP_RD_VKORG.
+
+TYPES:BEGIN OF LTYP_T024E,
+EKORG TYPE T024E-EKORG,
+END OF LTYP_T024E,
+BEGIN OF LTYP_TVKO,
+VKORG TYPE TVKO-VKORG,
+END OF LTYP_TVKO.
+
+DATA: LRH_EKORG LIKE LINE OF O_RD_EKORG_A,
+LRH_VKORG LIKE LINE OF O_RD_VKORG_A,
+LRD_T024E TYPE STANDARD TABLE OF LTYP_T024E,
+LRD_TVKO  TYPE STANDARD TABLE OF LTYP_TVKO,
+LRH_T024E TYPE LTYP_T024E,
+LRH_TVKO  TYPE LTYP_TVKO.
+
+REFRESH: O_RD_EKORG_A,
+O_RD_EKORG_B,
+O_RD_VKORG_A,
+O_RD_VKORG_B.
+
+* レンジテーブル編集
+CLEAR: LRH_EKORG, LRH_VKORG.
+LRH_EKORG-SIGN = 'I'.
+LRH_EKORG-OPTION = 'EQ'.
+LRH_VKORG-SIGN = 'I'.
+LRH_VKORG-OPTION = 'EQ'.
+
+* 購買組織A取得
+SELECT EKORG
+INTO TABLE LRD_T024E
+FROM T024E
+WHERE BUKRS = P_BUKRSA.
+IF SY-SUBRC <> 0.
+MESSAGE S084 WITH P_BUKRSA
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_T024E INTO LRH_T024E.
+LRH_EKORG-LOW = LRH_T024E-EKORG.
+APPEND LRH_EKORG TO O_RD_EKORG_A.
+ENDLOOP.
+ENDIF.
+
+* 購買組織B取得
+REFRESH LRD_T024E.
+SELECT EKORG
+INTO TABLE LRD_T024E
+FROM T024E
+WHERE BUKRS = P_BUKRSB.
+IF SY-SUBRC <> 0.
+MESSAGE S084 WITH P_BUKRSB
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_T024E INTO LRH_T024E.
+LRH_EKORG-LOW = LRH_T024E-EKORG.
+APPEND LRH_EKORG TO O_RD_EKORG_B.
+ENDLOOP.
+ENDIF.
+
+* 販売組織A取得
+SELECT VKORG
+INTO TABLE LRD_TVKO
+FROM TVKO
+WHERE BUKRS = P_BUKRSA.
+IF SY-SUBRC <> 0.
+MESSAGE S085 WITH P_BUKRSA
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_TVKO INTO LRH_TVKO.
+LRH_VKORG-LOW = LRH_TVKO-VKORG.
+APPEND LRH_VKORG TO O_RD_VKORG_A.
+ENDLOOP.
+ENDIF.
+
+* 販売組織B取得
+REFRESH LRD_TVKO.
+SELECT VKORG
+INTO TABLE LRD_TVKO
+FROM TVKO
+WHERE BUKRS = P_BUKRSB.
+IF SY-SUBRC <> 0.
+MESSAGE S085 WITH P_BUKRSB
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_TVKO INTO LRH_TVKO.
+LRH_VKORG-LOW = LRH_TVKO-VKORG.
+APPEND LRH_VKORG TO O_RD_VKORG_B.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " GET_EKORG_VKORG
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_SO_PO
+*&---------------------------------------------------------------------*
+*       会社連携データ抽出
+*----------------------------------------------------------------------*
+*      -->I_BUKRS          会社コード
+*      -->I_RD_EKORG       購買組織
+*      -->I_RD_VKORG       販売組織
+*      <--O_FLG_HOSYA      本社フラグ
+*      <--O_TD_ZTEGSDT203  会社連携データ
+*----------------------------------------------------------------------*
+FORM GET_DATA_SO_PO
+USING    I_BUKRS         TYPE T001-BUKRS
+I_RD_EKORG      TYPE TYP_RD_EKORG
+I_RD_VKORG      TYPE TYP_RD_VKORG
+CHANGING O_FLG_HOSYA     TYPE CHAR01
+O_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203.
+
+* 本社フラグ取得
+CLEAR O_FLG_HOSYA.
+SELECT SINGLE ZFLGHEADOFFICE
+INTO O_FLG_HOSYA
+FROM ZTEGSDT204
+WHERE BUKRS = I_BUKRS.
+
+* 会社連携データ取得
+REFRESH O_TD_ZTEGSDT203.
+SELECT EBELN       " 購買伝票番号
+EBELP       " 購買伝票の明細番号
+EKGRP       " 購買グループ
+VBELN       " 販売伝票
+POSNR       " 販売伝票明細
+VKGRP       " 営業グループ
+MATNR_PO AS MATNR       " 品目コード
+TXZ01       " 品目テキスト
+INTO TABLE O_TD_ZTEGSDT203
+FROM ZTEGSDT203
+WHERE EKORG IN I_RD_EKORG    " 購買組織
+AND VKORG IN I_RD_VKORG    " 販売組織
+AND EKGRP IN S_EKGRP       " 購買グループ
+AND VKGRP IN S_VKGRP       " 営業グループ
+AND EBELN IN S_EBELN       " 購買伝票番号
+AND VBELN IN S_VBELN       " 販売伝票
+AND VBELN <> SPACE         " 販売伝票
+AND Z_CRE_YMD IN S_LDATE.  " 登録年月日
+
+ENDFORM.                    " GET_DATA_SO_PO
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ALV
+*&---------------------------------------------------------------------*
+*       その他データ抽出＆編集
+*----------------------------------------------------------------------*
+*      -->I_TH_COMP        会社データ
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_ALV_LIST    ALVListデータ
+*----------------------------------------------------------------------*
+FORM GET_DATA_ALV
+USING    I_TH_COMP       TYPE TYP_TH_COMP
+I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_ALV_LIST   TYPE TYP_TD_ZSEGSD0024.
+
+DATA: LTD_PO         TYPE TYP_TD_PO,
+LTD_SO         TYPE TYP_TD_SO,
+LTD_INB        TYPE TYP_TD_INB,
+LTD_OUB        TYPE TYP_TD_OUB,
+LTD_INV        TYPE TYP_TD_INV,
+LTD_206        TYPE TYP_TD_ZTEGSDT206,
+LTD_AP         TYPE TYP_TD_AP,
+LTD_AR_OR      TYPE TYP_TD_AR,
+LTD_AR_DC      TYPE TYP_TD_AR,
+LTH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203,
+LTH_ALV_LIST   TYPE ZSEGSD0024.
+
+* 連携データがない場合、下記処理をスキップ
+IF I_TD_ZTEGSDT203[] IS INITIAL.
+RETURN.
+ENDIF.
+
+* 発注情報取得
+PERFORM GET_PO_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING LTD_PO.
+
+* 受注情報取得
+PERFORM GET_SO_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING LTD_SO.
+
+* 入出庫情報取得
+PERFORM GET_MIGO_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING LTD_INB
+LTD_OUB
+LTD_INV
+LTD_206.
+
+* 買掛（AP）情報取得
+PERFORM GET_AP_DATA
+USING    LTD_INB
+CHANGING LTD_AP.
+
+* 売掛（AR）情報取得
+PERFORM GET_AR_DATA
+USING    I_TD_ZTEGSDT203
+LTD_OUB
+CHANGING LTD_AR_OR      " 受注と返品
+LTD_AR_DC.     " クレジットメモ とデビットメモ
+
+* ALVデータ編集
+LOOP AT I_TD_ZTEGSDT203 INTO LTH_ZTEGSDT203.
+CLEAR LTH_ALV_LIST.
+
+*   会社連携データより編集
+PERFORM SET_ALV_FROM_ZTEGSDT203
+USING    LTH_ZTEGSDT203
+I_TH_COMP
+CHANGING LTH_ALV_LIST.
+
+*   発注情報より編集
+PERFORM SET_ALV_FROM_PO
+USING    LTH_ZTEGSDT203
+LTD_PO
+CHANGING LTH_ALV_LIST.
+
+*   受注情報より編集
+PERFORM SET_ALV_FROM_SO
+USING    LTH_ZTEGSDT203
+LTD_SO
+CHANGING LTH_ALV_LIST.
+
+*   入出庫情報＆AP＆AR情報より編集
+PERFORM SET_ALV_FROM_INBOUB
+USING    I_TH_COMP
+LTD_INB
+LTD_OUB
+LTD_INV
+LTD_206
+LTD_AP
+LTD_AR_OR
+LTD_AR_DC
+**** START ADD BY ISID17 2015/04/21 ****
+LTD_PO
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING LTH_ALV_LIST
+O_TD_ALV_LIST.
+ENDLOOP.
+
+* ALVデータの限定処理
+IF S_BUDAT[] IS NOT INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE BUDAT_AP IS INITIAL AND
+BUDAT_AR IS INITIAL.
+ENDIF.
+IF S_INVOC[] IS NOT INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE Z_INVOICE_NO NOT IN S_INVOC[].
+ENDIF.
+
+* FLG設定
+PERFORM SET_FLG_ALV_LIST
+CHANGING O_TD_ALV_LIST.
+
+* SORT
+SORT O_TD_ALV_LIST
+BY BUKRS_PO
+EBELN EBELP
+VBELN POSNR
+MBLNR_OUB MBLNR_INB.
+
+ENDFORM.                    " GET_DATA_ALV
+*&---------------------------------------------------------------------*
+*&      Form  GET_PO_DATA
+*&---------------------------------------------------------------------*
+*       発注情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_PO          発注情報
+*----------------------------------------------------------------------*
+FORM GET_PO_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_PO         TYPE TYP_TD_PO.
+
+DATA LTD_DATA TYPE TYP_TD_ZTEGSDT203.
+
+* 購買伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY EBELN EBELP.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING EBELN EBELP.
+IF LTD_DATA[] IS INITIAL.
+RETURN.
+ENDIF.
+
+* 発注情報取得
+REFRESH O_TD_PO.
+SELECT EKPO~EBELN      " 購買伝票番号
+EKPO~EBELP      " 購買伝票の明細番号
+EKPO~NETWR      " 正味発注額
+EKPO~MENGE      " 数量
+EKPO~MEINS      " 発注単位
+EKPO~LMEIN      " 基本数量単位
+EKKO~BSART      " 購買伝票タイプ
+EKKO~LIFNR      " 仕入先
+EKKO~WAERS      " 通貨コード
+EKKO~BEDAT      " 購買伝票日付
+LFA1~NAME1      " 名称1
+INTO TABLE O_TD_PO
+FROM EKPO AS EKPO
+INNER JOIN EKKO AS EKKO
+ON EKKO~EBELN = EKPO~EBELN
+INNER JOIN LFA1 AS LFA1
+ON EKKO~LIFNR = LFA1~LIFNR
+FOR ALL ENTRIES IN LTD_DATA
+WHERE EKPO~EBELN = LTD_DATA-EBELN
+AND EKPO~EBELP = LTD_DATA-EBELP
+AND EKPO~LOEKZ = SPACE.
+
+* SORT
+SORT O_TD_PO BY EBELN EBELP.
+
+ENDFORM.                    " GET_PO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_SO_DATA
+*&---------------------------------------------------------------------*
+*       受注情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_SO          受注情報
+*----------------------------------------------------------------------*
+FORM GET_SO_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_SO         TYPE TYP_TD_SO.
+
+DATA LTD_DATA TYPE TYP_TD_ZTEGSDT203.
+
+* 販売伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY VBELN POSNR.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING VBELN POSNR.
+IF LTD_DATA[] IS INITIAL.
+RETURN.
+ENDIF.
+
+* 受注情報取得
+REFRESH O_TD_SO.
+SELECT VBAP~VBELN      " 販売伝票番号
+VBAP~POSNR      " 販売伝票明細
+VBAP~ZMENG      " 目標数量（販売単位）
+VBAP~ZIEME      " 目標数量 (数量単位)
+VBAP~MEINS      " 基本数量単位
+VBAP~NETWR      " 受注明細正味額
+**** START UPD 2015/06/08 ISID18 ****
+*         VBAP~KLMENG     " 数量
+VBAP~KWMENG     " 数量
+VBAP~VRKME      " 販売単位
+**** END UPD 2015/06/08 ISID18 ****
+VBAK~AUDAT      " 伝票日付
+VBAK~VBTYP      " 販売管理伝票カテゴリ
+VBAK~AUART      " 販売伝票タイプ
+VBAK~WAERK      " 販売伝票通貨
+VBAK~KUNNR      " 受注先
+KNA1~NAME1      " 名称1
+INTO TABLE O_TD_SO
+FROM VBAP AS VBAP
+INNER JOIN VBAK AS VBAK
+ON VBAK~VBELN = VBAP~VBELN
+INNER JOIN KNA1 AS KNA1
+ON VBAK~KUNNR = KNA1~KUNNR
+FOR ALL ENTRIES IN LTD_DATA
+WHERE VBAP~VBELN = LTD_DATA-VBELN
+AND VBAP~POSNR = LTD_DATA-POSNR.
+
+* SORT
+SORT O_TD_SO BY VBELN POSNR.
+
+ENDFORM.                    " GET_SO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_MIGO_DATA
+*&---------------------------------------------------------------------*
+*       入出庫情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_INB         入庫情報
+*      <--O_TD_OUB         出庫情報
+*      <--O_TD_INV         InvoiceNo
+*      <--O_TD_ZTEGSDT206  入出庫連携情報
+*----------------------------------------------------------------------*
+FORM GET_MIGO_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_INB        TYPE TYP_TD_INB
+O_TD_OUB        TYPE TYP_TD_OUB
+O_TD_INV        TYPE TYP_TD_INV
+O_TD_ZTEGSDT206 TYPE TYP_TD_ZTEGSDT206.
+
+DATA: LTD_DATA  TYPE TYP_TD_ZTEGSDT203,
+LTD_OUB   TYPE TYP_TD_OUB.
+
+* 購買伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY EBELN EBELP.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING EBELN EBELP.
+
+* 入庫情報取得
+REFRESH O_TD_INB.
+IF LTD_DATA[] IS NOT INITIAL.
+SELECT MBLNR         " 入出庫伝票番号
+MJAHR         " 入出庫伝票年
+ZEILE         " 入出庫伝票の明細
+BWART         " 移動タイプ (在庫管理)
+SHKZG         " 借方/貸方フラグ
+MENGE         " 数量
+MEINS         " 基本数量単位
+ERFME         " 入力単位
+EBELN         " 購買発注番号
+EBELP         " 購買伝票の明細番号
+SJAHR         " 入出庫伝票年
+SMBLN         " 入出庫伝票番号
+SMBLP         " 入出庫伝票の明細
+BUDAT_MKPF    " 伝票の転記日付
+XBLNR_MKPF    " 参照伝票番号
+INTO TABLE O_TD_INB
+FROM MSEG
+FOR ALL ENTRIES IN LTD_DATA
+WHERE EBELN = LTD_DATA-EBELN
+AND EBELP = LTD_DATA-EBELP.
+ENDIF.
+SORT O_TD_INB BY EBELN EBELP
+MBLNR MJAHR ZEILE.
+
+* 出庫情報取得
+PERFORM GET_OUB_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING O_TD_OUB.
+
+* 出荷伝票の重複データ削除
+LTD_OUB[] = O_TD_OUB[].
+SORT LTD_OUB BY VBELN_IM.
+DELETE ADJACENT DUPLICATES FROM LTD_OUB
+COMPARING VBELN_IM.
+
+* InvoiceNo取得
+REFRESH O_TD_INV.
+IF LTD_OUB[] IS NOT INITIAL.
+SELECT VBELN                   " 出荷伝票
+Z_INVOICE_NO            " Invoice No
+FROM ZTEGSDT001
+INTO TABLE O_TD_INV
+FOR ALL ENTRIES IN LTD_OUB
+WHERE VBELN = LTD_OUB-VBELN_IM.
+ENDIF.
+SORT O_TD_INV BY VBELN.
+
+* 購買伝票、販売伝票の重複キー削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY EBELN VBELN.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING EBELN VBELN.
+
+* 入出庫連携情報取得
+IF LTD_DATA[] IS NOT INITIAL.
+SELECT KDAUF                  " 受注伝票番号
+MBLNR_OUTB             " 入出庫伝票番号
+MJAHR_OUTB             " 入出庫伝票年
+EBELN                  " 購買伝票番号
+MBLNR_INB              " 入出庫伝票番号
+MJAHR_INB              " 入出庫伝票年
+INTO TABLE O_TD_ZTEGSDT206
+FROM ZTEGSDT206
+FOR ALL ENTRIES IN LTD_DATA
+WHERE KDAUF = LTD_DATA-VBELN
+AND EBELN = LTD_DATA-EBELN.
+ENDIF.
+SORT O_TD_ZTEGSDT206
+BY EBELN MBLNR_INB MJAHR_INB
+KDAUF MBLNR_OUTB MJAHR_OUTB.
+
+ENDFORM.                    " GET_MIGO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_AP_DATA
+*&---------------------------------------------------------------------*
+*       買掛（AP）情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_INB  入庫情報
+*      <--O_TD_AP   買掛（AP）情報
+*----------------------------------------------------------------------*
+FORM GET_AP_DATA
+USING    I_TD_INB TYPE TYP_TD_INB
+CHANGING O_TD_AP  TYPE TYP_TD_AP.
+
+DATA LTD_INB TYPE TYP_TD_INB.
+
+* 重複キー削除
+LTD_INB[] = I_TD_INB[].
+SORT LTD_INB BY MBLNR MJAHR ZEILE.
+DELETE ADJACENT DUPLICATES FROM LTD_INB
+COMPARING MBLNR MJAHR ZEILE.
+
+* 買掛（AP）情報取得
+REFRESH O_TD_AP.
+IF LTD_INB[] IS NOT INITIAL.
+SELECT GJAHR           " 入出庫伝票年
+BELNR           " 入出庫伝票番号
+BUZEI           " 入出庫伝票の明細
+BUDAT           " 伝票の転記日付
+MENGE           " 数量
+WRBTR           " 伝票通貨額
+WAERS           " 通貨コード
+SHKZG           " 借方/貸方フラグ
+LFGJA           " 参照伝票の会計年度
+LFBNR           " 参照伝票の伝票番号
+LFPOS           " 参照伝票の明細
+INTO TABLE O_TD_AP
+FROM EKBE
+FOR ALL ENTRIES IN LTD_INB
+WHERE LFGJA =  LTD_INB-MJAHR
+AND LFBNR =  LTD_INB-MBLNR
+AND LFPOS =  LTD_INB-ZEILE
+AND VGABE =  CNS_VGABE_2
+AND BUDAT IN S_BUDAT.
+ENDIF.
+
+* SORT
+SORT O_TD_AP BY LFBNR LFGJA LFPOS.
+
+ENDFORM.                    " GET_AP_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_AR_DATA
+*&---------------------------------------------------------------------*
+*       売掛（AR）情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      -->I_TD_OUB         出庫情報
+*      <--O_TD_AR_OR       売掛（AR）情報(受注と返品)
+*      <--O_TD_AR_DC       売掛（AR）情報(CR & DR)
+*----------------------------------------------------------------------*
+FORM GET_AR_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+I_TD_OUB        TYPE TYP_TD_OUB
+CHANGING O_TD_AR_OR      TYPE TYP_TD_AR
+O_TD_AR_DC      TYPE TYP_TD_AR.
+
+DATA: LTD_203 TYPE TYP_TD_ZTEGSDT203,
+LTD_OUB TYPE TYP_TD_OUB.
+
+* 受注と返品の場合
+LTD_OUB[] = I_TD_OUB[].
+SORT LTD_OUB BY VBELN_IM VBELP_IM.
+DELETE ADJACENT DUPLICATES FROM LTD_OUB
+COMPARING VBELN_IM VBELP_IM.
+
+* 売掛（AR）情報取得
+REFRESH O_TD_AR_OR.
+IF LTD_OUB[] IS NOT INITIAL.
+SELECT VBRP~VGBEL       " 参照伝票番号
+VBRP~VGPOS       " 参照明細番号
+VBRP~VBELN       " 請求伝票
+VBRP~POSNR       " 請求明細
+VBRP~FKIMG       " 請求数量
+VBRP~VRKME       " 販売単位
+VBRP~MEINS       " 基本数量単位
+VBRP~NETWR       " 伝票通貨の正味額
+VBRK~WAERK       " 通貨コード
+VBRK~FKDAT       " 請求日
+INTO TABLE O_TD_AR_OR
+FROM VBRP AS VBRP
+INNER JOIN VBRK AS VBRK
+ON VBRK~VBELN = VBRP~VBELN
+FOR ALL ENTRIES IN LTD_OUB
+WHERE VBRP~VGBEL  = LTD_OUB-VBELN_IM
+AND VBRP~VGPOS  = LTD_OUB-VBELP_IM
+AND VBRK~FKDAT IN S_BUDAT.
+ENDIF.
+
+* クレジットメモ とデビットメモの場合
+LTD_203[] = I_TD_ZTEGSDT203[].
+SORT LTD_203 BY VBELN POSNR.
+DELETE ADJACENT DUPLICATES FROM LTD_203
+COMPARING VBELN POSNR.
+
+* 売掛（AR）情報取得
+REFRESH O_TD_AR_DC.
+IF LTD_203[] IS NOT INITIAL.
+SELECT VBRP~VGBEL       " 参照伝票番号
+VBRP~VGPOS       " 参照明細番号
+VBRP~VBELN       " 請求伝票
+VBRP~POSNR       " 請求明細
+VBRP~FKIMG       " 請求数量
+VBRP~VRKME       " 販売単位
+VBRP~MEINS       " 基本数量単位
+VBRP~NETWR       " 伝票通貨の正味額
+VBRK~WAERK       " 通貨コード
+VBRK~FKDAT       " 請求日
+INTO TABLE O_TD_AR_DC
+FROM VBRP AS VBRP
+INNER JOIN VBRK AS VBRK
+ON VBRK~VBELN = VBRP~VBELN
+FOR ALL ENTRIES IN LTD_203
+WHERE VBRP~VGBEL  = LTD_203-VBELN
+AND VBRP~VGPOS  = LTD_203-POSNR
+AND VBRK~FKDAT IN S_BUDAT.
+ENDIF.
+
+* SORT
+SORT O_TD_AR_OR BY VGBEL VGPOS.
+SORT O_TD_AR_DC BY VGBEL VGPOS.
+
+ENDFORM.                    " GET_AR_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*       会社連携データよりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_ZTEGSDT203  会社連携データ
+*      -->I_TH_COMP        会社データ
+*      <--O_TH_ALV_LIST    ALVItemデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_ZTEGSDT203
+USING    I_TH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203
+I_TH_COMP       TYPE TYP_TH_COMP
+CHANGING O_TH_ALV_LIST   TYPE ZSEGSD0024.
+
+O_TH_ALV_LIST-EBELN = I_TH_ZTEGSDT203-EBELN.   " 購買伝票番号
+O_TH_ALV_LIST-EBELP = I_TH_ZTEGSDT203-EBELP.   " 購買伝票明細
+O_TH_ALV_LIST-EKGRP = I_TH_ZTEGSDT203-EKGRP.   " 購買グループ
+O_TH_ALV_LIST-VBELN = I_TH_ZTEGSDT203-VBELN.   " 販売伝票
+O_TH_ALV_LIST-POSNR = I_TH_ZTEGSDT203-POSNR.   " 販売伝票明細
+O_TH_ALV_LIST-VKGRP = I_TH_ZTEGSDT203-VKGRP.   " 営業グループ
+O_TH_ALV_LIST-MATNR = I_TH_ZTEGSDT203-MATNR.   " 品目コード
+O_TH_ALV_LIST-TXZ01 = I_TH_ZTEGSDT203-TXZ01.   " 品目テキスト
+
+O_TH_ALV_LIST-BUKRS_SO = I_TH_COMP-BUKRS_SO.   " Sales. Comp
+O_TH_ALV_LIST-BUTXT_SO = I_TH_COMP-BUTXT_SO.   " Name
+O_TH_ALV_LIST-BUKRS_PO = I_TH_COMP-BUKRS_PO.   " Puch. Comp
+O_TH_ALV_LIST-BUTXT_PO = I_TH_COMP-BUTXT_PO.   " Name
+
+ENDFORM.                    " SET_ALV_FROM_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_PO
+*&---------------------------------------------------------------------*
+*       発注情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_ZTEGSDT203  会社連携データ
+*      -->I_TD_PO          発注情報
+*      <--O_TH_ALV_LIST    ALVItemデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_PO
+USING    I_TH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203
+I_TD_PO         TYPE TYP_TD_PO
+CHANGING O_TH_ALV_LIST   TYPE ZSEGSD0024.
+
+DATA LTH_PO TYPE TYP_TH_PO.
+
+CLEAR LTH_PO.
+READ TABLE I_TD_PO INTO LTH_PO
+WITH KEY EBELN = I_TH_ZTEGSDT203-EBELN
+EBELP = I_TH_ZTEGSDT203-EBELP
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV_LIST-LIFNR      = LTH_PO-LIFNR.    " 仕入先
+O_TH_ALV_LIST-NAME_LIFNR = LTH_PO-NAME1.    " 名称1
+O_TH_ALV_LIST-BEDAT      = LTH_PO-BEDAT.    " 購買伝票日付
+O_TH_ALV_LIST-NETWR_PO   = LTH_PO-NETWR.    " 正味発注額
+O_TH_ALV_LIST-WAERS_PO   = LTH_PO-WAERS.    " 通貨コード
+O_TH_ALV_LIST-MEINS_PO   = LTH_PO-LMEIN.    " 基本数量単位
+
+* 数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV_LIST-MATNR        " 品目コード
+LTH_PO-MEINS               " 発注単位
+LTH_PO-LMEIN               " 基本数量単位
+LTH_PO-MENGE               " 数量
+CHANGING O_TH_ALV_LIST-MENGE_PO.    " 数量
+
+* 返品発注の場合
+IF LTH_PO-BSART = CNS_BSART_Z.
+O_TH_ALV_LIST-NETWR_PO = O_TH_ALV_LIST-NETWR_PO * ( -1 ).
+O_TH_ALV_LIST-MENGE_PO = O_TH_ALV_LIST-MENGE_PO * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_PO
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_SO
+*&---------------------------------------------------------------------*
+*       受注情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_ZTEGSDT203  会社連携データ
+*      -->I_TD_SO          受注情報
+*      <--O_TH_ALV_LIST    ALVItemデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_SO
+USING    I_TH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203
+I_TD_SO         TYPE TYP_TD_SO
+CHANGING O_TH_ALV_LIST   TYPE ZSEGSD0024.
+
+DATA LTH_SO TYPE TYP_TH_SO.
+**** START ADD 2015/06/08 ISID18 ****
+DATA LW_MENGE TYPE EKPO-MENGE.
+**** END ADD 2015/06/08 ISID18 ****
+
+CLEAR LTH_SO.
+READ TABLE I_TD_SO INTO LTH_SO
+WITH KEY VBELN = I_TH_ZTEGSDT203-VBELN
+POSNR = I_TH_ZTEGSDT203-POSNR
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV_LIST-KUNNR      = LTH_SO-KUNNR.    " 受注先
+O_TH_ALV_LIST-NAME_KUNNR = LTH_SO-NAME1.    " 名称1
+O_TH_ALV_LIST-AUART      = LTH_SO-AUART.    " 販売伝票タイプ
+O_TH_ALV_LIST-AUDAT      = LTH_SO-AUDAT.    " 伝票日付
+O_TH_ALV_LIST-NETWR_SO   = LTH_SO-NETWR.    " 正味発注額
+O_TH_ALV_LIST-WAERS_SO   = LTH_SO-WAERK.    " 通貨コード
+O_TH_ALV_LIST-VBTYP      = LTH_SO-VBTYP.    " 受注伝票カテゴリ
+O_TH_ALV_LIST-MEINS_SO   = LTH_SO-MEINS.    " 基本数量単位
+
+* 数量編集
+CASE LTH_SO-VBTYP.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+**** START UPD 2015/06/08 ISID18 ****
+*      O_TH_ALV_LIST-MENGE_SO = LTH_SO-KLMENG.   " 数量
+LW_MENGE = LTH_SO-KWMENG.
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV_LIST-MATNR        " 品目コード
+LTH_SO-VRKME               " 販売単位
+LTH_SO-MEINS               " 基本数量単位
+LW_MENGE                   " 基本数量単位
+CHANGING O_TH_ALV_LIST-MENGE_SO.    " 数量
+**** END UPD 2015/06/08 ISID18 ****
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV_LIST-MATNR        " 品目コード
+LTH_SO-ZIEME               " 販売単位
+LTH_SO-MEINS               " 基本数量単位
+LTH_SO-ZMENG               " 数量
+CHANGING O_TH_ALV_LIST-MENGE_SO.    " 数量
+WHEN OTHERS.
+ENDCASE.
+
+* 返品、クレジットメモの場合
+IF LTH_SO-VBTYP = CNS_VBTYP_H OR
+LTH_SO-VBTYP = CNS_VBTYP_K.
+O_TH_ALV_LIST-NETWR_SO = O_TH_ALV_LIST-NETWR_SO * ( -1 ).
+O_TH_ALV_LIST-MENGE_SO = O_TH_ALV_LIST-MENGE_SO * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_SO
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_INBOUB
+*&---------------------------------------------------------------------*
+*       入出庫情報＆AP＆AR情報より編集
+*----------------------------------------------------------------------*
+*      -->I_TH_COMP   会社データ
+*      -->I_TD_INB    入庫情報
+*      -->I_TD_OUB    出庫情報
+*      -->I_TD_INV    Invoice情報
+*      -->I_TD_206    入出庫連携情報
+*      -->I_TD_AP     買掛情報
+*      -->I_TD_AR_OR  売掛情報(受注と返品)
+*      -->I_TD_AR_DC  売掛情報(CR　Or　DR)
+**** START ADD BY ISID17 2015/04/21 ****
+*      -->I_TD_PO     発注情報
+**** END ADD BY ISID17 2015/04/21 ****
+*      <--O_TH_ALV    ALVItem情報
+*      <--O_TD_ALV    ALVItem情報
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_INBOUB
+USING    I_TH_COMP  TYPE TYP_TH_COMP
+I_TD_INB   TYPE TYP_TD_INB
+I_TD_OUB   TYPE TYP_TD_OUB
+I_TD_INV   TYPE TYP_TD_INV
+I_TD_206   TYPE TYP_TD_ZTEGSDT206
+I_TD_AP    TYPE TYP_TD_AP
+I_TD_AR_OR TYPE TYP_TD_AR
+I_TD_AR_DC TYPE TYP_TD_AR
+**** START ADD BY ISID17 2015/04/21 ****
+I_TD_PO    TYPE TYP_TD_PO
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING O_TH_ALV   TYPE ZSEGSD0024
+O_TD_ALV   TYPE TYP_TD_ZSEGSD0024.
+
+DATA: LTH_INB      TYPE TYP_TH_INB,
+LTH_OUB      TYPE TYP_TH_OUB,
+LTD_INB      TYPE TYP_TD_INB,
+LTD_OUB      TYPE TYP_TD_OUB,
+LTD_OUB_OK   TYPE TYP_TD_OUB,
+LTD_AR       TYPE TYP_TD_AR,
+LTH_206      TYPE TYP_TH_ZTEGSDT206,
+LTH_ALV_TMP  TYPE ZSEGSD0024,
+**** START ADD BY ISID17 2015/04/21 ****
+LTH_PO       TYPE TYP_TH_PO,
+**** END ADD BY ISID17 2015/04/21 ****
+LW_SUBRC_206 TYPE CHAR01,
+LW_SUBRC_INB TYPE SY-SUBRC,
+LW_SUBRC_OUB TYPE SY-SUBRC.
+
+* 一時的に保存
+LTD_INB[] = I_TD_INB[].
+LTD_OUB[] = I_TD_OUB[].
+LTD_AR[]  = I_TD_AR_DC[].
+SORT LTD_INB BY EBELN EBELP.
+SORT LTD_OUB BY VBELV POSNV.
+SORT LTD_AR  BY VGBEL VGPOS.
+
+**** START ADD BY ISID17 2015/04/21 ****
+* 発注情報の取得
+READ TABLE I_TD_PO INTO LTH_PO
+TRANSPORTING MEINS                 "発注単位
+WITH KEY EBELN = O_TH_ALV-EBELN
+EBELP = O_TH_ALV-EBELP
+BINARY SEARCH.
+**** END ADD BY ISID17 2015/04/21 ****
+
+* 入庫情報あるか判定
+READ TABLE LTD_INB TRANSPORTING NO FIELDS
+WITH KEY EBELN = O_TH_ALV-EBELN
+EBELP = O_TH_ALV-EBELP.
+LW_SUBRC_INB = SY-SUBRC.
+
+* 出庫情報あるか判定
+READ TABLE LTD_OUB TRANSPORTING NO FIELDS
+WITH KEY VBELV = O_TH_ALV-VBELN
+POSNV = O_TH_ALV-POSNR
+BINARY SEARCH.
+LW_SUBRC_OUB = SY-SUBRC.
+
+* デビットメモ、クレジットメモの場合
+READ TABLE LTD_AR TRANSPORTING NO FIELDS
+WITH KEY VGBEL = O_TH_ALV-VBELN
+VGPOS = O_TH_ALV-POSNR
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING O_TH_ALV.
+ENDIF.
+
+* 入出庫情報がない場合
+IF LW_SUBRC_INB <> 0 AND
+LW_SUBRC_OUB <> 0.
+APPEND O_TH_ALV TO O_TD_ALV.
+RETURN.
+ENDIF.
+REFRESH LTD_OUB_OK.
+
+* 入庫情報設定
+IF LW_SUBRC_INB = 0.
+LOOP AT I_TD_INB INTO LTH_INB
+WHERE EBELN = O_TH_ALV-EBELN
+AND EBELP = O_TH_ALV-EBELP.
+CLEAR LTH_ALV_TMP.
+LTH_ALV_TMP = O_TH_ALV.
+
+*     入庫情報より編集
+PERFORM SET_ALV_FROM_INB
+USING    LTH_INB
+CHANGING LTH_ALV_TMP.
+
+*     買掛情報より編集
+PERFORM SET_ALV_FROM_AP
+USING    LTH_INB
+I_TD_AP
+**** START ADD BY ISID17 2015/04/21 ****
+LTH_PO-MEINS                 "発注単位
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING LTH_ALV_TMP.
+
+*     入出庫連携情報チェック
+CLEAR: LTH_206, LW_SUBRC_206.
+CASE LTH_INB-BWART.
+*       入出庫取消連携
+WHEN CNS_BWART_102
+OR CNS_BWART_162.
+LOOP AT I_TD_206 INTO LTH_206
+WHERE EBELN      = LTH_INB-EBELN
+AND MBLNR_INB  = LTH_INB-SMBLN
+AND MJAHR_INB  = LTH_INB-SJAHR
+AND KDAUF      = LTH_ALV_TMP-VBELN
+AND MBLNR_OUTB IS NOT INITIAL
+AND MJAHR_OUTB IS NOT INITIAL.
+LOOP AT LTD_OUB INTO LTH_OUB
+WHERE   VBELV = LTH_ALV_TMP-VBELN
+AND   POSNV = LTH_ALV_TMP-POSNR
+AND ( BWART = CNS_BWART_962 OR
+BWART = CNS_BWART_964 )
+AND   SMBLN = LTH_206-MBLNR_OUTB
+AND   SJAHR = LTH_206-MJAHR_OUTB.
+*             出庫情報より編集
+PERFORM SET_ALV_FROM_OUB
+USING    LTH_OUB
+I_TH_COMP
+I_TD_INV
+CHANGING LTH_ALV_TMP.
+*             売掛情報より編集
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING LTH_ALV_TMP.
+*             ALVに追加
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+APPEND LTH_OUB TO LTD_OUB_OK.
+LW_SUBRC_206 = ABAP_TRUE.
+ENDLOOP.
+ENDLOOP.
+
+*       入出庫連携
+WHEN OTHERS.
+LOOP AT I_TD_206 INTO LTH_206
+WHERE EBELN      = LTH_INB-EBELN
+AND MBLNR_INB  = LTH_INB-MBLNR
+AND MJAHR_INB  = LTH_INB-MJAHR
+AND KDAUF      = LTH_ALV_TMP-VBELN
+AND MBLNR_OUTB IS NOT INITIAL
+AND MJAHR_OUTB IS NOT INITIAL.
+LOOP AT LTD_OUB INTO LTH_OUB
+WHERE   VBELV = LTH_ALV_TMP-VBELN
+AND   POSNV = LTH_ALV_TMP-POSNR
+AND   MBLNR = LTH_206-MBLNR_OUTB
+AND   MJAHR = LTH_206-MJAHR_OUTB.
+*             出庫情報より編集
+PERFORM SET_ALV_FROM_OUB
+USING    LTH_OUB
+I_TH_COMP
+I_TD_INV
+CHANGING LTH_ALV_TMP.
+*             売掛情報より編集
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING LTH_ALV_TMP.
+*             ALVに追加
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+APPEND LTH_OUB TO LTD_OUB_OK.
+LW_SUBRC_206 = ABAP_TRUE.
+ENDLOOP.
+ENDLOOP.
+ENDCASE.
+IF LW_SUBRC_206 IS INITIAL.
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+SORT LTD_OUB_OK BY VBELV POSNV
+MBLNR MJAHR ZEILE.
+* 出庫情報設定
+IF LW_SUBRC_OUB = 0.
+LOOP AT LTD_OUB INTO LTH_OUB
+WHERE VBELV = O_TH_ALV-VBELN
+AND POSNV = O_TH_ALV-POSNR.
+READ TABLE LTD_OUB_OK TRANSPORTING NO FIELDS
+WITH KEY VBELV = LTH_OUB-VBELV
+POSNV = LTH_OUB-POSNV
+MBLNR = LTH_OUB-MBLNR
+MJAHR = LTH_OUB-MJAHR
+ZEILE = LTH_OUB-ZEILE
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+CLEAR: LTH_ALV_TMP.
+LTH_ALV_TMP = O_TH_ALV.
+*       出庫情報より編集
+PERFORM SET_ALV_FROM_OUB
+USING    LTH_OUB
+I_TH_COMP
+I_TD_INV
+CHANGING LTH_ALV_TMP.
+*       売掛情報より編集
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING LTH_ALV_TMP.
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_INBOUB
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_INB
+*&---------------------------------------------------------------------*
+*       入庫情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_INB  入庫情報
+*      <--O_TH_ALV  ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_INB
+USING    I_TH_INB TYPE TYP_TH_INB
+CHANGING O_TH_ALV TYPE ZSEGSD0024.
+
+O_TH_ALV-MBLNR_INB    = I_TH_INB-MBLNR.         " 入庫伝票番号
+O_TH_ALV-MJAHR_INB    = I_TH_INB-MJAHR.         " 入庫伝票年
+O_TH_ALV-MBLPO_INB    = I_TH_INB-ZEILE.         " 入庫伝票明細
+O_TH_ALV-BUDAT_INB    = I_TH_INB-BUDAT_MKPF.    " 入庫転記日付
+O_TH_ALV-MEINS_INB    = I_TH_INB-MEINS.         " 基本数量単位
+O_TH_ALV-Z_INVOICE_NO = I_TH_INB-XBLNR_MKPF.    " Invoice
+
+CASE I_TH_INB-SHKZG.
+WHEN CNS_SHKZG_S.
+O_TH_ALV-MENGE_INB = I_TH_INB-MENGE.            " 入庫数量
+WHEN CNS_SHKZG_H.
+O_TH_ALV-MENGE_INB = I_TH_INB-MENGE * ( -1 ).   " 入庫数量
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " SET_ALV_FROM_INB
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_AP
+*&---------------------------------------------------------------------*
+*       買掛情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_INB  入庫情報
+*      -->I_TD_AP   買掛データ
+**** START ADD BY ISID17 2015/04/21 ****
+*      -->I_MEINS   発注単位
+**** END ADD BY ISID17 2015/04/21 ****
+*      <--O_TH_ALV  ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_AP
+USING    I_TH_INB TYPE TYP_TH_INB
+I_TD_AP  TYPE TYP_TD_AP
+**** START ADD BY ISID17 2015/04/21 ****
+I_MEINS  TYPE EKPO-MEINS
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING O_TH_ALV TYPE ZSEGSD0024.
+
+DATA LTH_AP TYPE TYP_TH_AP.
+
+IF I_TH_INB-MBLNR IS INITIAL OR
+I_TH_INB-MJAHR IS INITIAL OR
+I_TH_INB-ZEILE IS INITIAL.
+RETURN.
+ENDIF.
+
+CLEAR LTH_AP.
+READ TABLE I_TD_AP INTO LTH_AP
+WITH KEY LFBNR = I_TH_INB-MBLNR
+LFGJA = I_TH_INB-MJAHR
+LFPOS = I_TH_INB-ZEILE
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV-BELNR_AP = LTH_AP-BELNR.    " 請求書伝票番号
+O_TH_ALV-GJAHR_AP = LTH_AP-GJAHR.    " 請求書伝票年
+O_TH_ALV-BUZEI_AP = LTH_AP-BUZEI.    " 請求書伝票明細
+O_TH_ALV-BUDAT_AP = LTH_AP-BUDAT.    " 請求書転記日付
+O_TH_ALV-WRBTR_AP = LTH_AP-WRBTR.    " 照合金額
+O_TH_ALV-WAERS_AP = LTH_AP-WAERS.    " 通貨コード
+O_TH_ALV-MEINS_AP = I_TH_INB-MEINS.  " 基本数量単位
+
+* 数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV-MATNR             " 品目コード
+**** START UPD BY ISID17 2015/04/21 ****
+*             I_TH_INB-ERFME            "発注単位
+I_MEINS                    "発注単位
+**** END UPD BY ISID17 2015/04/21 ****
+I_TH_INB-MEINS             " 基本数量単位
+LTH_AP-MENGE               " 数量
+CHANGING O_TH_ALV-MENGE_AP.         " 数量
+
+* 貸方の場合
+IF LTH_AP-SHKZG = CNS_SHKZG_H.
+O_TH_ALV-WRBTR_AP = O_TH_ALV-WRBTR_AP * ( -1 ).
+O_TH_ALV-MENGE_AP = O_TH_ALV-MENGE_AP * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_AP
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_OUB
+*&---------------------------------------------------------------------*
+*       出庫情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_OUB    出庫情報
+*      -->I_TH_COMP   会社データ
+*      -->I_TD_INV    Invoice情報
+*      <--O_TH_ALV    ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_OUB
+USING    I_TH_OUB   TYPE TYP_TH_OUB
+I_TH_COMP  TYPE TYP_TH_COMP
+I_TD_INV   TYPE TYP_TD_INV
+CHANGING O_TH_ALV   TYPE ZSEGSD0024.
+
+DATA: LTH_INV    TYPE TYP_TH_INV,
+LW_INVOICE TYPE ZSEGSD0024-Z_INVOICE_NO.
+
+* Invoice番号取得
+CASE I_TH_COMP-HDOFF_SO.
+WHEN ABAP_TRUE.
+PERFORM CALL_READ_TEXT
+USING    I_TH_OUB-VBELN_IM
+CHANGING LW_INVOICE.
+WHEN SPACE.
+CLEAR LTH_INV.
+READ TABLE I_TD_INV INTO LTH_INV
+WITH KEY VBELN = I_TH_OUB-VBELN_IM
+BINARY SEARCH.
+LW_INVOICE = LTH_INV-Z_INVOICE_NO.
+WHEN OTHERS.
+ENDCASE.
+
+O_TH_ALV-MBLNR_OUB    = I_TH_OUB-MBLNR.         " 出庫伝票番号
+O_TH_ALV-MJAHR_OUB    = I_TH_OUB-MJAHR.         " 出庫伝票年
+O_TH_ALV-MBLPO_OUB    = I_TH_OUB-ZEILE.         " 出庫伝票明細
+O_TH_ALV-BUDAT_OUB    = I_TH_OUB-BUDAT_MKPF.    " 出庫転記日付
+O_TH_ALV-MEINS_OUB    = I_TH_OUB-MEINS.         " 基本数量単位
+O_TH_ALV-Z_INVOICE_NO = LW_INVOICE.             " Invoice
+O_TH_ALV-VBELN_IM     = I_TH_OUB-VBELN_IM.      " 出荷伝票
+O_TH_ALV-VBELP_IM     = I_TH_OUB-VBELP_IM.      " 出荷明細
+
+CASE I_TH_OUB-SHKZG.
+WHEN CNS_SHKZG_H.
+O_TH_ALV-MENGE_OUB = I_TH_OUB-MENGE.            " 出庫数量
+WHEN CNS_SHKZG_S.
+O_TH_ALV-MENGE_OUB = I_TH_OUB-MENGE * ( -1 ).   " 出庫数量
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " SET_ALV_FROM_OUB
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_AR
+*&---------------------------------------------------------------------*
+*       売掛情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TD_AR_OR  売掛情報(受注と返品)
+*      -->I_TD_AR_DC  売掛情報(CR　Or　DR)
+*      <--O_TH_ALV    ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR TYPE TYP_TD_AR
+I_TD_AR_DC TYPE TYP_TD_AR
+CHANGING O_TH_ALV   TYPE ZSEGSD0024.
+
+DATA: LTH_AR TYPE TYP_TH_AR.
+
+CASE O_TH_ALV-VBTYP.
+
+*   受注と返品の場合
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+CLEAR LTH_AR.
+READ TABLE I_TD_AR_OR INTO LTH_AR
+WITH KEY VGBEL = O_TH_ALV-VBELN_IM
+VGPOS = O_TH_ALV-VBELP_IM
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV-BELNR_AR = LTH_AR-VBELN.    " 請求伝票番号
+O_TH_ALV-BUZEI_AR = LTH_AR-POSNR.    " 請求伝票明細
+O_TH_ALV-BUDAT_AR = LTH_AR-FKDAT.    " 請求転記日付
+O_TH_ALV-WRBTR_AR = LTH_AR-NETWR.    " 請求金額
+O_TH_ALV-WAERS_AR = LTH_AR-WAERK.    " 通貨コード
+O_TH_ALV-MEINS_AR = LTH_AR-MEINS.    " 基本数量単位
+
+*     数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV-MATNR            " 品目コード
+LTH_AR-VRKME              " 販売単位
+LTH_AR-MEINS              " 基本数量単位
+LTH_AR-FKIMG              " 数量
+CHANGING O_TH_ALV-MENGE_AR.        " 数量
+
+*   クレジットメモ or デビットメモの場合
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+CLEAR LTH_AR.
+READ TABLE I_TD_AR_DC INTO LTH_AR
+WITH KEY VGBEL = O_TH_ALV-VBELN
+VGPOS = O_TH_ALV-POSNR
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV-BELNR_AR = LTH_AR-VBELN.    " 請求伝票番号
+O_TH_ALV-BUZEI_AR = LTH_AR-POSNR.    " 請求伝票明細
+O_TH_ALV-BUDAT_AR = LTH_AR-FKDAT.    " 請求転記日付
+O_TH_ALV-WRBTR_AR = LTH_AR-NETWR.    " 請求金額
+O_TH_ALV-WAERS_AR = LTH_AR-WAERK.    " 通貨コード
+O_TH_ALV-MEINS_AR = LTH_AR-MEINS.    " 基本数量単位
+
+*     数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV-MATNR            " 品目コード
+LTH_AR-VRKME              " 販売単位
+LTH_AR-MEINS              " 基本数量単位
+LTH_AR-FKIMG              " 数量
+CHANGING O_TH_ALV-MENGE_AR.        " 数量
+WHEN OTHERS.
+ENDCASE.
+
+* 返品、クレジットメモの場合
+IF O_TH_ALV-VBTYP = CNS_VBTYP_H OR
+O_TH_ALV-VBTYP = CNS_VBTYP_K.
+O_TH_ALV-WRBTR_AR = O_TH_ALV-WRBTR_AR * ( -1 ).
+O_TH_ALV-MENGE_AR = O_TH_ALV-MENGE_AR * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_AR
+*&---------------------------------------------------------------------*
+*&      Form  CALL_READ_TEXT
+*&---------------------------------------------------------------------*
+*       Invoice番号取得
+*----------------------------------------------------------------------*
+*      -->I_VBELN    出荷伝票
+*      <--O_INVOICE  Invoice番号
+*----------------------------------------------------------------------*
+FORM CALL_READ_TEXT
+USING    I_VBELN   TYPE MSEG-VBELN_IM
+CHANGING O_INVOICE TYPE ZTEGSDT001-Z_INVOICE_NO.
+
+DATA: LW_NAME     TYPE THEAD-TDNAME,
+LW_MSG(128) TYPE C,
+LTH_LINES   TYPE TLINE,
+LTD_LINES   TYPE STANDARD TABLE OF TLINE.
+
+CLEAR O_INVOICE.
+
+LW_NAME = I_VBELN.
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID                      = 'Z031'
+LANGUAGE                = SY-LANGU
+NAME                    = LW_NAME
+OBJECT                  = 'VBBK'
+TABLES
+LINES                   = LTD_LINES
+EXCEPTIONS
+ID                      = 1
+LANGUAGE                = 2
+NAME                    = 3
+NOT_FOUND               = 4
+OBJECT                  = 5
+REFERENCE_CHECK         = 6
+WRONG_ACCESS_TO_ARCHIVE = 7
+OTHERS                  = 8.
+
+CASE SY-SUBRC.
+WHEN 0.
+READ TABLE LTD_LINES INTO LTH_LINES INDEX 1.
+O_INVOICE = LTH_LINES-TDLINE.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE ID SY-MSGID
+TYPE SY-MSGTY
+NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+INTO LW_MSG.
+*     汎用モジュールにて想定外のエラーが発生しました。
+MESSAGE S032
+WITH 'READ_TEXT' LW_MSG
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDCASE.
+
+ENDFORM.                    " CALL_READ_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  SET_FLG_ALV_LIST
+*&---------------------------------------------------------------------*
+*       フラグ設定
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_LIST  入出庫明細レベル
+*----------------------------------------------------------------------*
+FORM SET_FLG_ALV_LIST
+CHANGING O_TD_ALV_LIST TYPE TYP_TD_ZSEGSD0024.
+
+FIELD-SYMBOLS <LFS_ALV> TYPE ZSEGSD0024.
+
+LOOP AT O_TD_ALV_LIST ASSIGNING <LFS_ALV>.
+
+*   受発注
+IF <LFS_ALV>-NETWR_PO = <LFS_ALV>-NETWR_SO AND
+<LFS_ALV>-WAERS_PO = <LFS_ALV>-WAERS_SO AND
+<LFS_ALV>-MENGE_PO = <LFS_ALV>-MENGE_SO.
+<LFS_ALV>-FLG_PO_SO = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_PO_SO = TEXT-007.
+ENDIF.
+
+*   入出庫
+CASE <LFS_ALV>-VBTYP.
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+<LFS_ALV>-FLG_INB_OUB = TEXT-008.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+IF <LFS_ALV>-MENGE_INB = <LFS_ALV>-MENGE_OUB AND
+<LFS_ALV>-BUDAT_INB = <LFS_ALV>-BUDAT_OUB.
+<LFS_ALV>-FLG_INB_OUB = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_INB_OUB = TEXT-007.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+*   債権債務
+IF <LFS_ALV>-MENGE_AP = <LFS_ALV>-MENGE_AR AND
+<LFS_ALV>-WRBTR_AP = <LFS_ALV>-WRBTR_AR AND
+<LFS_ALV>-WAERS_AP = <LFS_ALV>-WAERS_AR AND
+<LFS_ALV>-BUDAT_AP = <LFS_ALV>-BUDAT_AR.
+<LFS_ALV>-FLG_AP_AR = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_AP_AR = TEXT-007.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_FLG_ALV_LIST
+*&---------------------------------------------------------------------*
+*&      Form  SUM_BY_POSOH
+*&---------------------------------------------------------------------*
+*       PO/SOレベルの集計
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_POSOI   PO/SO明細レベル
+*      <--O_TD_ALV_POSOH   PO/SOレベル
+*----------------------------------------------------------------------*
+FORM SUM_BY_POSOH
+USING    I_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026
+CHANGING O_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+DATA: LTD_ALV      TYPE TYP_TD_ZSEGSD0026,
+LTH_ALV_POSO TYPE ZSEGSD0025,
+LTH_ALV      TYPE ZSEGSD0026,
+LTH_SUM      TYPE TYP_TH_SUM,
+LTH_ALV_S    TYPE ZSEGSD0026.
+
+* SORT
+LTD_ALV[] = I_TD_ALV_POSOI[].
+SORT LTD_ALV BY EBELN EBELP
+VBELN POSNR.
+
+* 集計
+LOOP AT LTD_ALV INTO LTH_ALV.
+IF LTH_ALV-EBELN <> LTH_ALV_S-EBELN OR
+LTH_ALV-VBELN <> LTH_ALV_S-VBELN.
+IF LTH_ALV_S IS NOT INITIAL.
+*       PO/SOレベルのデータ設定
+PERFORM SET_ALV_POSOH
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOH.
+ENDIF.
+CLEAR LTH_SUM.
+LTH_ALV_S = LTH_ALV.
+ENDIF.
+LTH_SUM-NETWR_PO  = LTH_SUM-NETWR_PO  + LTH_ALV-NETWR_PO.
+LTH_SUM-NETWR_SO  = LTH_SUM-NETWR_SO  + LTH_ALV-NETWR_SO.
+LTH_SUM-MENGE_PO  = LTH_SUM-MENGE_PO  + LTH_ALV-MENGE_PO.
+LTH_SUM-MENGE_SO  = LTH_SUM-MENGE_SO  + LTH_ALV-MENGE_SO.
+LTH_SUM-MENGE_INB = LTH_SUM-MENGE_INB + LTH_ALV-MENGE_INB.
+LTH_SUM-MENGE_OUB = LTH_SUM-MENGE_OUB + LTH_ALV-MENGE_OUB.
+LTH_SUM-WRBTR_AP  = LTH_SUM-WRBTR_AP  + LTH_ALV-WRBTR_AP.
+LTH_SUM-WRBTR_AR  = LTH_SUM-WRBTR_AR  + LTH_ALV-WRBTR_AR.
+LTH_SUM-MENGE_AP  = LTH_SUM-MENGE_AP  + LTH_ALV-MENGE_AP.
+LTH_SUM-MENGE_AR  = LTH_SUM-MENGE_AR  + LTH_ALV-MENGE_AR.
+ENDLOOP.
+
+* PO/SOレベルのデータ設定
+PERFORM SET_ALV_POSOH
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOH.
+
+* フラグ設定
+PERFORM SET_FLG_POSOH
+CHANGING O_TD_ALV_POSOH.
+
+ENDFORM.                    " SUM_BY_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  SUM_BY_POSOI
+*&---------------------------------------------------------------------*
+*       PO/SO明細レベルの集計
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_LIST   入出庫明細レベル
+*      <--O_TD_ALV_POSOI  PO/SO明細レベル
+*----------------------------------------------------------------------*
+FORM SUM_BY_POSOI
+USING    I_TD_ALV_LIST  TYPE TYP_TD_ZSEGSD0024
+CHANGING O_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+DATA: LTD_ALV      TYPE TYP_TD_ZSEGSD0024,
+LTH_ALV_POSO TYPE ZSEGSD0026,
+LTH_ALV      TYPE ZSEGSD0024,
+LTH_SUM      TYPE TYP_TH_SUM,
+LTH_ALV_S    TYPE ZSEGSD0024.
+
+* SORT
+LTD_ALV[] = I_TD_ALV_LIST[].
+SORT LTD_ALV BY EBELN EBELP
+VBELN POSNR.
+
+* 集計
+LOOP AT LTD_ALV INTO LTH_ALV.
+IF LTH_ALV-EBELN <> LTH_ALV_S-EBELN OR
+LTH_ALV-EBELP <> LTH_ALV_S-EBELP OR
+LTH_ALV-VBELN <> LTH_ALV_S-VBELN OR
+LTH_ALV-POSNR <> LTH_ALV_S-POSNR.
+IF LTH_ALV_S IS NOT INITIAL.
+*       PO/SO明細レベルのデータ設定
+PERFORM SET_ALV_POSOI
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOI.
+ENDIF.
+CLEAR LTH_SUM.
+LTH_ALV_S = LTH_ALV.
+ENDIF.
+LTH_SUM-MENGE_INB = LTH_SUM-MENGE_INB + LTH_ALV-MENGE_INB.
+LTH_SUM-MENGE_OUB = LTH_SUM-MENGE_OUB + LTH_ALV-MENGE_OUB.
+LTH_SUM-WRBTR_AP  = LTH_SUM-WRBTR_AP + LTH_ALV-WRBTR_AP.
+LTH_SUM-WRBTR_AR  = LTH_SUM-WRBTR_AR + LTH_ALV-WRBTR_AR.
+LTH_SUM-MENGE_AP  = LTH_SUM-MENGE_AP + LTH_ALV-MENGE_AP.
+LTH_SUM-MENGE_AR  = LTH_SUM-MENGE_AR + LTH_ALV-MENGE_AR.
+LTH_ALV_S-WAERS_AR  = LTH_ALV-WAERS_AR.
+LTH_ALV_S-MEINS_SO  = LTH_ALV-MEINS_SO.
+LTH_ALV_S-MEINS_OUB = LTH_ALV-MEINS_OUB.
+LTH_ALV_S-MEINS_AR  = LTH_ALV-MEINS_AR.
+ENDLOOP.
+
+* PO/SO明細レベルのデータ設定
+PERFORM SET_ALV_POSOI
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOI.
+
+* フラグ設定
+PERFORM SET_FLG_POSOI
+CHANGING O_TD_ALV_POSOI.
+
+ENDFORM.                    " SUM_BY_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  SET_FLG_POSOH
+*&---------------------------------------------------------------------*
+*       フラグ設定
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOH  PO/SOレベル
+*----------------------------------------------------------------------*
+FORM SET_FLG_POSOH
+CHANGING O_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+FIELD-SYMBOLS <LFS_ALV> TYPE ZSEGSD0025.
+
+LOOP AT O_TD_ALV_POSOH ASSIGNING <LFS_ALV>.
+
+*   受発注
+IF <LFS_ALV>-NETWR_PO = <LFS_ALV>-NETWR_SO AND
+<LFS_ALV>-WAERS_PO = <LFS_ALV>-WAERS_SO AND
+<LFS_ALV>-MENGE_PO = <LFS_ALV>-MENGE_SO.
+<LFS_ALV>-FLG_PO_SO = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_PO_SO = TEXT-007.
+ENDIF.
+
+*   入出庫
+CASE <LFS_ALV>-VBTYP.
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+<LFS_ALV>-FLG_INB_OUB = TEXT-008.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+IF <LFS_ALV>-MENGE_INB = <LFS_ALV>-MENGE_OUB.
+<LFS_ALV>-FLG_INB_OUB = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_INB_OUB = TEXT-007.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+*   債権債務
+IF <LFS_ALV>-MENGE_AP = <LFS_ALV>-MENGE_AR AND
+<LFS_ALV>-WRBTR_AP = <LFS_ALV>-WRBTR_AR AND
+<LFS_ALV>-WAERS_AP = <LFS_ALV>-WAERS_AR.
+<LFS_ALV>-FLG_AP_AR = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_AP_AR = TEXT-007.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_FLG_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  SET_FLG_POSOI
+*&---------------------------------------------------------------------*
+*       フラグ設定
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOI  PO/SO明細レベル
+*----------------------------------------------------------------------*
+FORM SET_FLG_POSOI
+CHANGING O_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+FIELD-SYMBOLS <LFS_ALV> TYPE ZSEGSD0026.
+
+LOOP AT O_TD_ALV_POSOI ASSIGNING <LFS_ALV>.
+
+*   受発注
+IF <LFS_ALV>-NETWR_PO = <LFS_ALV>-NETWR_SO AND
+<LFS_ALV>-WAERS_PO = <LFS_ALV>-WAERS_SO AND
+<LFS_ALV>-MENGE_PO = <LFS_ALV>-MENGE_SO.
+<LFS_ALV>-FLG_PO_SO = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_PO_SO = TEXT-007.
+ENDIF.
+
+*   入出庫
+CASE <LFS_ALV>-VBTYP.
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+<LFS_ALV>-FLG_INB_OUB = TEXT-008.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+IF <LFS_ALV>-MENGE_INB = <LFS_ALV>-MENGE_OUB.
+<LFS_ALV>-FLG_INB_OUB = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_INB_OUB = TEXT-007.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+*   債権債務
+IF <LFS_ALV>-MENGE_AP = <LFS_ALV>-MENGE_AR AND
+<LFS_ALV>-WRBTR_AP = <LFS_ALV>-WRBTR_AR AND
+<LFS_ALV>-WAERS_AP = <LFS_ALV>-WAERS_AR.
+<LFS_ALV>-FLG_AP_AR = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_AP_AR = TEXT-007.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_FLG_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_POSOH
+*&---------------------------------------------------------------------*
+*       PO/SOレベルのALVデータ設定
+*----------------------------------------------------------------------*
+*      -->I_TH_ALV_LIST  入出庫明細レベルのALVデータ
+*      -->I_TH_SUM       集計データ
+*      <--O_TH_ALV_H     PO/SOレベルのALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_POSOH
+USING    I_TH_ALV_LIST TYPE ZSEGSD0026
+I_TH_SUM      TYPE TYP_TH_SUM
+CHANGING O_TH_ALV_H    TYPE ZSEGSD0025.
+
+CLEAR O_TH_ALV_H.
+MOVE-CORRESPONDING I_TH_ALV_LIST TO O_TH_ALV_H.
+O_TH_ALV_H-MENGE_INB = I_TH_SUM-MENGE_INB.     " 入庫数量
+O_TH_ALV_H-MENGE_OUB = I_TH_SUM-MENGE_OUB.     " 出庫数量
+O_TH_ALV_H-WRBTR_AP  = I_TH_SUM-WRBTR_AP.      " 仕入額
+O_TH_ALV_H-WRBTR_AR  = I_TH_SUM-WRBTR_AR.      " 売上額
+O_TH_ALV_H-MENGE_AP  = I_TH_SUM-MENGE_AP.      " 照合数量
+O_TH_ALV_H-MENGE_AR  = I_TH_SUM-MENGE_AR.      " 請求数量
+O_TH_ALV_H-NETWR_PO  = I_TH_SUM-NETWR_PO.      " 発注金額
+O_TH_ALV_H-NETWR_SO  = I_TH_SUM-NETWR_SO.      " 受注金額
+O_TH_ALV_H-MENGE_PO  = I_TH_SUM-MENGE_PO.      " 発注数量
+O_TH_ALV_H-MENGE_SO  = I_TH_SUM-MENGE_SO.      " 受注数量
+
+ENDFORM.                    " SET_ALV_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_POSOI
+*&---------------------------------------------------------------------*
+*       PO/SO明細レベルのALVデータ設定
+*----------------------------------------------------------------------*
+*      -->I_TH_ALV_LIST  入出庫明細レベルのALVデータ
+*      -->I_TH_SUM       集計データ
+*      <--O_TH_ALV_I     PO/SO明細レベルのALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_POSOI
+USING    I_TH_ALV_LIST TYPE ZSEGSD0024
+I_TH_SUM      TYPE TYP_TH_SUM
+CHANGING O_TH_ALV_I    TYPE ZSEGSD0026.
+
+CLEAR O_TH_ALV_I.
+MOVE-CORRESPONDING I_TH_ALV_LIST TO O_TH_ALV_I.
+O_TH_ALV_I-MENGE_INB = I_TH_SUM-MENGE_INB.     " 入庫数量
+O_TH_ALV_I-MENGE_OUB = I_TH_SUM-MENGE_OUB.     " 出庫数量
+O_TH_ALV_I-WRBTR_AP  = I_TH_SUM-WRBTR_AP.      " 仕入額
+O_TH_ALV_I-WRBTR_AR  = I_TH_SUM-WRBTR_AR.      " 売上額
+O_TH_ALV_I-MENGE_AP  = I_TH_SUM-MENGE_AP.      " 照合数量
+O_TH_ALV_I-MENGE_AR  = I_TH_SUM-MENGE_AR.      " 請求数量
+
+ENDFORM.                    " SET_ALV_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_OUTPUT_POSOH
+*&---------------------------------------------------------------------*
+*       対象データの限定処理(受発注レベル)
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOH  受発注データ
+*----------------------------------------------------------------------*
+FORM CHECK_OUTPUT_POSOH
+CHANGING O_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+* 一致データがOFF
+IF CB_MATH IS INITIAL.
+DELETE O_TD_ALV_POSOH
+WHERE FLG_PO_SO  = TEXT-006
+AND ( FLG_INB_OUB = TEXT-008 OR
+FLG_INB_OUB = TEXT-006 )
+AND FLG_AP_AR = TEXT-006.
+ENDIF.
+
+* 不一致データがOFF
+IF CB_NMATH IS INITIAL.
+DELETE O_TD_ALV_POSOH
+WHERE FLG_PO_SO   = TEXT-007
+OR FLG_INB_OUB = TEXT-007
+OR FLG_AP_AR   = TEXT-007.
+ENDIF.
+
+* データ存在しない場合
+IF O_TD_ALV_POSOH[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* SORT
+SORT O_TD_ALV_POSOH
+BY BUKRS_PO
+EBELN
+VBELN.
+
+ENDFORM.                    " CHECK_OUTPUT_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_OUTPUT_POSOI
+*&---------------------------------------------------------------------*
+*       対象データの限定処理(受発注明細レベル)
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOI  受発注明細データ
+*----------------------------------------------------------------------*
+FORM CHECK_OUTPUT_POSOI
+CHANGING O_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+* 一致データがOFF
+IF CB_MATH IS INITIAL.
+DELETE O_TD_ALV_POSOI
+WHERE FLG_PO_SO  = TEXT-006
+AND ( FLG_INB_OUB = TEXT-008 OR
+FLG_INB_OUB = TEXT-006 )
+AND FLG_AP_AR = TEXT-006.
+ENDIF.
+
+* 不一致データがOFF
+IF CB_NMATH IS INITIAL.
+DELETE O_TD_ALV_POSOI
+WHERE FLG_PO_SO   = TEXT-007
+OR FLG_INB_OUB = TEXT-007
+OR FLG_AP_AR   = TEXT-007.
+ENDIF.
+
+* データ存在しない場合
+IF O_TD_ALV_POSOI[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* SORT
+SORT O_TD_ALV_POSOI
+BY BUKRS_PO
+EBELN EBELP
+VBELN POSNR.
+
+ENDFORM.                    " CHECK_OUTPUT_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_OUTPUT_LIST
+*&---------------------------------------------------------------------*
+*       対象データの限定処理(入出庫明細レベル)
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_LIST  入出庫明細データ
+*----------------------------------------------------------------------*
+FORM CHECK_OUTPUT_LIST
+CHANGING O_TD_ALV_LIST TYPE TYP_TD_ZSEGSD0024.
+
+* 一致データがOFF
+IF CB_MATH IS INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE FLG_PO_SO  = TEXT-006
+AND ( FLG_INB_OUB = TEXT-008 OR
+FLG_INB_OUB = TEXT-006 )
+AND FLG_AP_AR = TEXT-006.
+ENDIF.
+
+* 不一致データがOFF
+IF CB_NMATH IS INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE FLG_PO_SO   = TEXT-007
+OR FLG_INB_OUB = TEXT-007
+OR FLG_AP_AR   = TEXT-007.
+ENDIF.
+
+* データ存在しない場合
+IF O_TD_ALV_LIST[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " CHECK_OUTPUT_LIST
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_POSOH
+*&---------------------------------------------------------------------*
+*       ALV一覧出力(受発注レベル)
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_POSOH  受発注データ
+*----------------------------------------------------------------------*
+FORM DISPLAY_ALV_POSOH
+USING I_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+DATA: LTH_LAYOUT   TYPE LVC_S_LAYO,     "slis_layout_alv
+LTD_FIELDCAT TYPE LVC_T_FCAT,     "ALV fieldcat 属性の設定
+LTH_VARI     TYPE DISVARIANT,
+LTH_PRINT    TYPE LVC_S_PRNT.
+
+FIELD-SYMBOLS <LFS_FIELDCAT> TYPE LVC_S_FCAT.
+
+* fielcat 属性の設定
+CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = CNS_TBNAM_H
+CHANGING
+CT_FIELDCAT            = LTD_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* 販売伝票カテゴリ非表示
+LOOP AT LTD_FIELDCAT ASSIGNING <LFS_FIELDCAT>
+WHERE FIELDNAME = 'VBTYP'     OR
+FIELDNAME = 'MEINS_PO'  OR
+FIELDNAME = 'MEINS_SO'  OR
+FIELDNAME = 'MEINS_INB' OR
+FIELDNAME = 'MEINS_OUB' OR
+FIELDNAME = 'MEINS_AP'  OR
+FIELDNAME = 'MEINS_AR'.
+<LFS_FIELDCAT>-NO_OUT = ABAP_TRUE.
+ENDLOOP.
+
+* LAYOUT の設定
+LTH_LAYOUT-CWIDTH_OPT = ABAP_TRUE.
+LTH_LAYOUT-ZEBRA      = ABAP_TRUE.
+
+* バリアントなど の設定
+LTH_VARI-REPORT = SY-REPID.
+LTH_VARI-HANDLE = '2000'.
+
+* 印刷パラメータ取得
+CASE SY-BATCH.
+WHEN SPACE.
+CLEAR LTH_PRINT.
+WHEN ABAP_TRUE.
+PERFORM GET_PRINT_PARAMETER
+CHANGING LTH_PRINT.
+ENDCASE.
+
+* ALV出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+EXPORTING
+I_CALLBACK_PROGRAM       = SY-REPID
+I_CALLBACK_PF_STATUS_SET = CNS_PF_STATUS_SET
+I_CALLBACK_USER_COMMAND  = CNS_USER_CMD_2000
+IS_LAYOUT_LVC            = LTH_LAYOUT
+IT_FIELDCAT_LVC          = LTD_FIELDCAT
+I_SAVE                   = 'A'
+IS_VARIANT               = LTH_VARI
+IS_PRINT_LVC             = LTH_PRINT
+TABLES
+T_OUTTAB                 = I_TD_ALV_POSOH
+EXCEPTIONS
+PROGRAM_ERROR            = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_POSOI
+*&---------------------------------------------------------------------*
+*       ALV一覧出力(受発注明細レベル)
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_POSOI  受発注明細データ
+*----------------------------------------------------------------------*
+FORM DISPLAY_ALV_POSOI
+USING I_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+DATA: LTH_LAYOUT   TYPE LVC_S_LAYO,     "slis_layout_alv
+LTD_FIELDCAT TYPE LVC_T_FCAT,     "ALV fieldcat 属性の設定
+LTH_VARI     TYPE DISVARIANT,
+LTH_PRINT    TYPE LVC_S_PRNT.
+
+FIELD-SYMBOLS <LFS_FIELDCAT> TYPE LVC_S_FCAT.
+
+* fielcat 属性の設定
+CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = CNS_TBNAM_I
+CHANGING
+CT_FIELDCAT            = LTD_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* 販売伝票カテゴリ非表示
+LOOP AT LTD_FIELDCAT ASSIGNING <LFS_FIELDCAT>
+WHERE FIELDNAME = 'VBTYP'     OR
+FIELDNAME = 'MEINS_PO'  OR
+FIELDNAME = 'MEINS_SO'  OR
+FIELDNAME = 'MEINS_INB' OR
+FIELDNAME = 'MEINS_OUB' OR
+FIELDNAME = 'MEINS_AP'  OR
+FIELDNAME = 'MEINS_AR'.
+<LFS_FIELDCAT>-NO_OUT = ABAP_TRUE.
+ENDLOOP.
+
+* LAYOUT の設定
+LTH_LAYOUT-CWIDTH_OPT = ABAP_TRUE.
+LTH_LAYOUT-ZEBRA      = ABAP_TRUE.
+
+* バリアントなど の設定
+LTH_VARI-REPORT = SY-REPID.
+LTH_VARI-HANDLE = '3000'.
+
+* 印刷パラメータ取得
+CASE SY-BATCH.
+WHEN SPACE.
+CLEAR LTH_PRINT.
+WHEN ABAP_TRUE.
+PERFORM GET_PRINT_PARAMETER
+CHANGING LTH_PRINT.
+ENDCASE.
+
+* ALV出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+EXPORTING
+I_CALLBACK_PROGRAM       = SY-REPID
+I_CALLBACK_PF_STATUS_SET = CNS_PF_STATUS_SET
+I_CALLBACK_USER_COMMAND  = CNS_USER_CMD_3000
+IS_LAYOUT_LVC            = LTH_LAYOUT
+IT_FIELDCAT_LVC          = LTD_FIELDCAT
+I_SAVE                   = 'A'
+IS_VARIANT               = LTH_VARI
+IS_PRINT_LVC             = LTH_PRINT
+TABLES
+T_OUTTAB                 = I_TD_ALV_POSOI
+EXCEPTIONS
+PROGRAM_ERROR            = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_LIST
+*&---------------------------------------------------------------------*
+*       ALV一覧出力(入出庫明細レベル)
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_LIST  入出庫明細データ
+*----------------------------------------------------------------------*
+FORM DISPLAY_ALV_LIST
+USING I_TD_ALV_LIST TYPE TYP_TD_ZSEGSD0024.
+
+DATA: LTH_LAYOUT   TYPE LVC_S_LAYO,     "slis_layout_alv
+LTD_FIELDCAT TYPE LVC_T_FCAT,     "ALV fieldcat 属性の設定
+LTH_VARI     TYPE DISVARIANT,
+LTH_PRINT    TYPE LVC_S_PRNT.
+
+FIELD-SYMBOLS <LFS_FIELDCAT> TYPE LVC_S_FCAT.
+
+* fielcat 属性の設定
+CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = CNS_TBNAM_L
+CHANGING
+CT_FIELDCAT            = LTD_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* 販売伝票カテゴリ非表示
+LOOP AT LTD_FIELDCAT ASSIGNING <LFS_FIELDCAT>
+WHERE FIELDNAME = 'VBTYP'     OR
+FIELDNAME = 'MJAHR_INB' OR
+FIELDNAME = 'MJAHR_OUB' OR
+FIELDNAME = 'GJAHR_AP'  OR
+FIELDNAME = 'VBELN_IM'  OR
+FIELDNAME = 'VBELP_IM'  OR
+FIELDNAME = 'MEINS_PO'  OR
+FIELDNAME = 'MEINS_SO'  OR
+FIELDNAME = 'MEINS_AP'  OR
+FIELDNAME = 'MEINS_AR'.
+<LFS_FIELDCAT>-NO_OUT = ABAP_TRUE.
+ENDLOOP.
+
+* LAYOUT の設定
+LTH_LAYOUT-CWIDTH_OPT = ABAP_TRUE.
+LTH_LAYOUT-ZEBRA      = ABAP_TRUE.
+
+* バリアントなど の設定
+LTH_VARI-REPORT = SY-REPID.
+LTH_VARI-HANDLE = '4000'.
+
+* 印刷パラメータ取得
+CASE SY-BATCH.
+WHEN SPACE.
+CLEAR LTH_PRINT.
+WHEN ABAP_TRUE.
+PERFORM GET_PRINT_PARAMETER
+CHANGING LTH_PRINT.
+ENDCASE.
+
+* ALV出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+EXPORTING
+I_CALLBACK_PROGRAM       = SY-REPID
+I_CALLBACK_PF_STATUS_SET = CNS_PF_STATUS_SET
+I_CALLBACK_USER_COMMAND  = CNS_USER_CMD_4000
+IS_LAYOUT_LVC            = LTH_LAYOUT
+IT_FIELDCAT_LVC          = LTD_FIELDCAT
+I_SAVE                   = 'A'
+IS_VARIANT               = LTH_VARI
+IS_PRINT_LVC             = LTH_PRINT
+TABLES
+T_OUTTAB                 = I_TD_ALV_LIST
+EXCEPTIONS
+PROGRAM_ERROR            = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_LIST
+*&---------------------------------------------------------------------*
+*&      Form  SET_PF_STATUS
+*&---------------------------------------------------------------------*
+*       ALVのステータスの設定
+*----------------------------------------------------------------------*
+*      -->I_TD_EXTAB    function codes
+*----------------------------------------------------------------------*
+FORM SET_PF_STATUS
+USING I_TD_EXTAB TYPE SLIS_T_EXTAB.
+
+* ステータス設定
+SET PF-STATUS 'STATUS_2000'.
+
+* タイトル設定
+CASE ABAP_TRUE.
+WHEN RB_POSOH.
+SET TITLEBAR 'TITLE_2000'.
+WHEN RB_POSOI.
+SET TITLEBAR 'TITLE_3000'.
+WHEN RB_INOUT.
+SET TITLEBAR 'TITLE_4000'.
+ENDCASE.
+
+ENDFORM.                    " SET_PF_STATUS
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND_2000
+*&---------------------------------------------------------------------*
+*       ALV画面の事件
+*----------------------------------------------------------------------*
+*      -->I_UCOMM           機能コード
+*      -->I_TH_SELFIELD     ALV項目情報
+*----------------------------------------------------------------------*
+FORM USER_COMMAND_2000
+USING I_UCOMM       TYPE SY-UCOMM
+I_TH_SELFIELD TYPE SLIS_SELFIELD.
+
+DATA: LTH_ALV TYPE ZSEGSD0025.
+READ TABLE TD_ALV_POSOH INTO LTH_ALV INDEX I_TH_SELFIELD-TABINDEX.
+CASE I_UCOMM.
+WHEN 'DETAIL'
+OR '&IC1'.
+CASE I_TH_SELFIELD-FIELDNAME.
+*       購買伝票照会
+WHEN 'EBELN'.
+IF LTH_ALV-EBELN IS NOT INITIAL.
+SET PARAMETER ID 'BES' FIELD LTH_ALV-EBELN.
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+ENDIF.
+*       受注伝票照会
+WHEN 'VBELN'.
+IF LTH_ALV-VBELN IS NOT INITIAL.
+SET PARAMETER ID 'AUN' FIELD LTH_ALV-VBELN.
+CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN.
+ENDIF.
+WHEN OTHERS.
+MESSAGE E065.
+LEAVE TO LIST-PROCESSING.
+ENDCASE.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " USER_COMMAND_2000
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND_3000
+*&---------------------------------------------------------------------*
+*       ALV画面の事件
+*----------------------------------------------------------------------*
+*      -->I_UCOMM           機能コード
+*      -->I_TH_SELFIELD     ALV項目情報
+*----------------------------------------------------------------------*
+FORM USER_COMMAND_3000
+USING I_UCOMM       TYPE SY-UCOMM
+I_TH_SELFIELD TYPE SLIS_SELFIELD.
+
+DATA: LTH_ALV TYPE ZSEGSD0026.
+READ TABLE TD_ALV_POSOI INTO LTH_ALV INDEX I_TH_SELFIELD-TABINDEX.
+CASE I_UCOMM.
+WHEN 'DETAIL'
+OR '&IC1'.
+CASE I_TH_SELFIELD-FIELDNAME.
+*       購買伝票照会
+WHEN 'EBELN'.
+IF LTH_ALV-EBELN IS NOT INITIAL.
+SET PARAMETER ID 'BES' FIELD LTH_ALV-EBELN.
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+ENDIF.
+*       受注伝票照会
+WHEN 'VBELN'.
+IF LTH_ALV-VBELN IS NOT INITIAL.
+SET PARAMETER ID 'AUN' FIELD LTH_ALV-VBELN.
+CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN.
+ENDIF.
+WHEN OTHERS.
+MESSAGE E065.
+LEAVE TO LIST-PROCESSING.
+ENDCASE.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " USER_COMMAND_3000
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND_4000
+*&---------------------------------------------------------------------*
+*       ALV画面の事件
+*----------------------------------------------------------------------*
+*      -->I_UCOMM           機能コード
+*      -->I_TH_SELFIELD     ALV項目情報
+*----------------------------------------------------------------------*
+FORM USER_COMMAND_4000
+USING I_UCOMM       TYPE SY-UCOMM
+I_TH_SELFIELD TYPE SLIS_SELFIELD.
+
+DATA: LTH_ALV TYPE ZSEGSD0024.
+READ TABLE TD_ALV_LIST INTO LTH_ALV INDEX I_TH_SELFIELD-TABINDEX.
+CASE I_UCOMM.
+WHEN 'DETAIL'
+OR '&IC1'.
+CASE I_TH_SELFIELD-FIELDNAME.
+*       購買伝票照会
+WHEN 'EBELN'.
+IF LTH_ALV-EBELN IS NOT INITIAL.
+SET PARAMETER ID 'BES' FIELD LTH_ALV-EBELN.
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+ENDIF.
+*       受注伝票照会
+WHEN 'VBELN'.
+IF LTH_ALV-VBELN IS NOT INITIAL.
+SET PARAMETER ID 'AUN' FIELD LTH_ALV-VBELN.
+CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN.
+ENDIF.
+*       入出庫伝票照会
+WHEN 'MBLNR_INB'.
+IF LTH_ALV-MBLNR_INB IS NOT INITIAL AND
+LTH_ALV-MJAHR_INB IS NOT INITIAL.
+SET PARAMETER ID 'MBN' FIELD LTH_ALV-MBLNR_INB.
+SET PARAMETER ID 'MJA' FIELD LTH_ALV-MJAHR_INB.
+CALL TRANSACTION 'MB03' AND SKIP FIRST SCREEN.
+ENDIF.
+*       入出庫伝票照会
+WHEN 'MBLNR_OUB'.
+IF LTH_ALV-MBLNR_OUB IS NOT INITIAL AND
+LTH_ALV-MJAHR_OUB IS NOT INITIAL.
+SET PARAMETER ID 'MBN' FIELD LTH_ALV-MBLNR_OUB.
+SET PARAMETER ID 'MJA' FIELD LTH_ALV-MJAHR_OUB.
+CALL TRANSACTION 'MB03' AND SKIP FIRST SCREEN.
+ENDIF.
+*       請求書伝票照会
+WHEN 'BELNR_AP'.
+IF LTH_ALV-BELNR_AP IS NOT INITIAL AND
+LTH_ALV-GJAHR_AP IS NOT INITIAL.
+SET PARAMETER ID 'RBN' FIELD LTH_ALV-BELNR_AP.
+SET PARAMETER ID 'GJR' FIELD LTH_ALV-GJAHR_AP.
+CALL TRANSACTION 'MIR4' AND SKIP FIRST SCREEN.
+ENDIF.
+*       請求伝票照会
+WHEN 'BELNR_AR'.
+IF LTH_ALV-BELNR_AR IS NOT INITIAL.
+SET PARAMETER ID 'VF' FIELD LTH_ALV-BELNR_AR.
+CALL TRANSACTION 'VF03' AND SKIP FIRST SCREEN.
+ENDIF.
+WHEN OTHERS.
+MESSAGE E065.
+LEAVE TO LIST-PROCESSING.
+ENDCASE.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " USER_COMMAND_4000
+*&---------------------------------------------------------------------*
+*&      Form  GET_PRINT_PARAMETER
+*&---------------------------------------------------------------------*
+*       印刷パラメータ取得
+*----------------------------------------------------------------------*
+*      <--O_TH_PRINT  印刷パラメータ
+*----------------------------------------------------------------------*
+FORM GET_PRINT_PARAMETER
+CHANGING O_TH_PRINT TYPE LVC_S_PRNT.
+
+DATA LTH_PARA TYPE PRI_PARAMS.
+
+CALL FUNCTION 'GET_PRINT_PARAMETERS'
+EXPORTING
+**** START UPD BY ISID REN 2015/07/31 ****
+*      IMMEDIATELY            = SPACE
+*      LAYOUT                 = 'X_58_170"'
+*      LINE_COUNT             = '58'
+*      LINE_SIZE              = '1024'
+IMMEDIATELY            = ABAP_TRUE
+**** END UPD BY ISID REN 2015/07/31 ****
+NO_DIALOG              = ABAP_TRUE
+DESTINATION            = P_DEVICE
+IMPORTING
+OUT_PARAMETERS         = LTH_PARA
+EXCEPTIONS
+ARCHIVE_INFO_NOT_FOUND = 1
+INVALID_PRINT_PARAMS   = 2
+INVALID_ARCHIVE_PARAMS = 3
+OTHERS                 = 4.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+ELSE.
+O_TH_PRINT-PRINT = ABAP_TRUE.
+O_TH_PRINT-PRINT_CTRL-PRI_PARAMS = LTH_PARA.
+O_TH_PRINT-PRNT_INFO = 'N'.
+ENDIF.
+
+ENDFORM.                    " GET_PRINT_PARAMETER
+*&---------------------------------------------------------------------*
+*&      Form  CONVERT_MENGE
+*&---------------------------------------------------------------------*
+*       数量変換
+*----------------------------------------------------------------------*
+*      -->I_MATNR  品目コード
+*      -->I_MEINS  発注単位
+*      -->I_LMEIN  基本数量単位
+*      -->I_MENGE  数量
+*      <--O_MENGE  数量（基本数量単位へ変換）
+*----------------------------------------------------------------------*
+FORM CONVERT_MENGE
+USING    I_MATNR TYPE MARA-MATNR
+I_MEINS TYPE MARA-MEINS
+I_LMEIN TYPE MARA-MEINS
+I_MENGE TYPE EKPO-MENGE
+CHANGING O_MENGE TYPE EKPO-MENGE.
+
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR              = I_MATNR
+I_IN_ME              = I_MEINS
+I_OUT_ME             = I_LMEIN
+I_MENGE              = I_MENGE
+IMPORTING
+E_MENGE              = O_MENGE
+EXCEPTIONS
+ERROR_IN_APPLICATION = 1
+ERROR                = 2
+OTHERS               = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+ENDIF.
+
+ENDFORM.                    " CONVERT_MENGE
+*&---------------------------------------------------------------------*
+*&      Form  GET_OUB_DATA
+*&---------------------------------------------------------------------*
+*       出庫情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社間データ
+*      <--O_TD_OUB         出庫データ
+*----------------------------------------------------------------------*
+FORM GET_OUB_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_OUB        TYPE TYP_TD_OUB.
+
+TYPES:BEGIN OF LTYP_TH_KEY,
+VBELN TYPE VBFA-VBELN,    " 後続の販売管理伝票
+POSNN TYPE NUMC04,        " 販売管理伝票次明細
+MJAHR TYPE VBFA-MJAHR,    " 入出庫伝票年
+END OF LTYP_TH_KEY.
+
+DATA: LTD_DATA  TYPE TYP_TD_ZTEGSDT203,
+LTD_VBFA  TYPE TYP_TD_VBFA,
+LTD_MSEG  TYPE TYP_TD_MSEG,
+LTD_VBFA2 TYPE TYP_TD_VBFA,
+LTH_MSEG  TYPE TYP_TH_MSEG,
+LTH_OUB   TYPE TYP_TH_OUB,
+LTH_VBFA  TYPE TYP_TH_VBFA,
+LTH_KEY   TYPE LTYP_TH_KEY,
+LTD_KEY   TYPE STANDARD TABLE OF LTYP_TH_KEY.
+
+REFRESH O_TD_OUB.
+
+* 販売伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY VBELN POSNR.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING VBELN POSNR.
+
+* 伝票フロー取得
+IF LTD_DATA[] IS NOT INITIAL.
+SELECT VBELV           " 先行販売管理伝票
+POSNV           " 販売管理伝票前明細
+VBELN           " 後続の販売管理伝票
+POSNN           " 販売管理伝票次明細
+MJAHR           " 入出庫伝票年
+INTO TABLE LTD_VBFA
+FROM VBFA
+FOR ALL ENTRIES IN LTD_DATA
+WHERE VBELV   = LTD_DATA-VBELN
+AND POSNV   = LTD_DATA-POSNR
+AND ( VBTYP_N = CNS_VBTYP_R
+OR   VBTYP_N = CNS_VBTYP_T ).
+ENDIF.
+
+* 出庫伝票キー取得
+LTD_VBFA2[] = LTD_VBFA[].
+SORT LTD_VBFA2 BY VBELN POSNN MJAHR.
+DELETE ADJACENT DUPLICATES FROM LTD_VBFA2
+COMPARING VBELN POSNN MJAHR.
+LOOP AT LTD_VBFA2 INTO LTH_VBFA.
+CLEAR LTH_KEY.
+LTH_KEY-VBELN = LTH_VBFA-VBELN.
+LTH_KEY-POSNN = LTH_VBFA-POSNN+2(4).
+LTH_KEY-MJAHR = LTH_VBFA-MJAHR.
+APPEND LTH_KEY TO LTD_KEY.
+ENDLOOP.
+
+* 出庫情報
+IF LTD_KEY[] IS NOT INITIAL.
+SELECT MBLNR           " 入出庫伝票番号
+MJAHR           " 入出庫伝票年
+ZEILE           " 入出庫伝票の明細
+BWART           " 移動タイプ (在庫管理)
+SHKZG           " 借方/貸方フラグ
+MENGE           " 数量
+MEINS           " 基本数量単位
+SJAHR           " 入出庫伝票年
+SMBLN           " 入出庫伝票番号
+SMBLP           " 入出庫伝票の明細
+BUDAT_MKPF      " 伝票の転記日付
+XBLNR_MKPF      " 参照伝票番号
+VBELN_IM        " 出荷伝票
+VBELP_IM        " 出荷明細
+INTO TABLE LTD_MSEG
+FROM MSEG
+FOR ALL ENTRIES IN LTD_KEY
+WHERE MBLNR = LTD_KEY-VBELN
+AND MJAHR = LTD_KEY-MJAHR
+AND ZEILE = LTD_KEY-POSNN.
+ENDIF.
+
+SORT LTD_MSEG BY MBLNR MJAHR ZEILE.
+LOOP AT LTD_VBFA INTO LTH_VBFA.
+CLEAR LTH_OUB.
+CLEAR LTH_MSEG.
+READ TABLE LTD_MSEG INTO LTH_MSEG
+WITH KEY MBLNR = LTH_VBFA-VBELN
+MJAHR = LTH_VBFA-MJAHR
+ZEILE = LTH_VBFA-POSNN+2(4)
+BINARY SEARCH.
+MOVE-CORRESPONDING LTH_VBFA TO LTH_OUB.
+MOVE-CORRESPONDING LTH_MSEG TO LTH_OUB.
+APPEND LTH_OUB TO O_TD_OUB.
+ENDLOOP.
+
+SORT O_TD_OUB BY VBELV POSNV
+MBLNR MJAHR ZEILE.
+
+ENDFORM.                    " GET_OUB_DATA
+*Text symbol text・
+*001:PO/SO Level
+*002:PO/SO Item Level
+*003:Inbound/Outbound Item Level
+*004:Matched Data
+*005:Unmatched Data
+*006:OK
+*007:NG
+
+*Selection text・
+*P_BUKRSA:        Company Code A
+*P_BUKRSB:        Company Code B
+*P_DEVICE:        Output Device
+*S_BUDAT:        Posting Date(AP/AR)
+*S_EBELN:D       .
+*S_EKGRP:D       .
+*S_INVOC:        Invoice No.
+*S_LDATE:        Link Date(SO/PO)
+*S_VBELN:D       .
+*S_VKGRP:D       .
+*&---------------------------------------------------------------------*
+*& プログラムID  : ZEGSDR2050
+*&                 Cross Company Transaction Report Output
+*& 作成者        : ISID Zhu
+*& 作成日        : 2015/02/27
+*& 処理概要      : ・会社間取引を一覧として表示する
+*&                 ・債権債務一致性を簡単に確認できること
+*&                 ・入出庫一致性を簡単に確認できること
+*&                 ・受発注金額一致性を確認できること
+*&                 ・伝票レベルと明細レベルで一覧が出せること
+*& 変更履歴
+*& No   DATE       MODIFYED BY   SUMMARY
+*& 1    2015/04/21 ISID17        買掛情報よりALVItemデータの編集処理で
+*&                               数量を基本数量単位に変換する時に
+*&                               EKPOの発注単位(MEINS)から変換する
+*& 2    2015/06/08 ISID18        受注数量取得項目変更
+*& 3    2015/07/23 ISID REN      権限チェックの処理を削除する
+*& 4    2015/07/31 ISID REN      印刷パラメータ変更
+*&---------------------------------------------------------------------*
+REPORT ZEGSDR2050
+LINE-SIZE 153
+LINE-COUNT 58
+NO STANDARD PAGE HEADING
+MESSAGE-ID ZMEGSD01.
+
+*----------------------------------------------------------------------*
+* CONSTANTS定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+CNS_BSART_Z TYPE EKKO-BSART   VALUE 'ZB', " 返品発注
+CNS_VBTYP_R TYPE VBFA-VBTYP_N VALUE 'R',  " 在庫移動
+CNS_VBTYP_T TYPE VBFA-VBTYP_N VALUE 'h',  " 出庫取消
+CNS_VGABE_2 TYPE EKBE-VGABE   VALUE '2',  " 請求書受領
+CNS_SHKZG_S TYPE MSEG-SHKZG   VALUE 'S',  " 借
+CNS_SHKZG_H TYPE MSEG-SHKZG   VALUE 'H',  " 貸
+CNS_VBTYP_C TYPE VBAK-VBTYP   VALUE 'C',  " 販売伝票カテゴリ(受注)
+CNS_VBTYP_H TYPE VBAK-VBTYP   VALUE 'H',  " 販売伝票カテゴリ(返品)
+CNS_VBTYP_K TYPE VBAK-VBTYP   VALUE 'K',  " 販売伝票カテゴリ(借)
+CNS_VBTYP_L TYPE VBAK-VBTYP   VALUE 'L'.  " 販売伝票カテゴリ(貸)
+
+* 移動タイプ(入出庫取消)
+CONSTANTS:
+CNS_BWART_102 TYPE MSEG-BWART VALUE '102',
+CNS_BWART_162 TYPE MSEG-BWART VALUE '162',
+CNS_BWART_962 TYPE MSEG-BWART VALUE '962',
+CNS_BWART_964 TYPE MSEG-BWART VALUE '964'.
+
+* ALV
+CONSTANTS:
+CNS_TBNAM_H       TYPE TABNAME       VALUE 'ZSEGSD0025',
+CNS_TBNAM_I       TYPE TABNAME       VALUE 'ZSEGSD0026',
+CNS_TBNAM_L       TYPE TABNAME       VALUE 'ZSEGSD0024',
+CNS_PF_STATUS_SET TYPE SLIS_FORMNAME VALUE 'SET_PF_STATUS',
+CNS_USER_CMD_2000 TYPE SLIS_FORMNAME VALUE 'USER_COMMAND_2000',
+CNS_USER_CMD_3000 TYPE SLIS_FORMNAME VALUE 'USER_COMMAND_3000',
+CNS_USER_CMD_4000 TYPE SLIS_FORMNAME VALUE 'USER_COMMAND_4000'.
+
+*----------------------------------------------------------------------*
+* TYPES定義
+*----------------------------------------------------------------------*
+TYPES:
+TYP_RD_EKORG TYPE RANGE OF EKKO-EKORG,
+TYP_RD_VKORG TYPE RANGE OF VBAK-VKORG.
+
+* 会社情報
+TYPES:
+BEGIN OF TYP_TH_COMP,
+BUKRS_SO   TYPE T001-BUKRS,        " 会社(受注)
+BUTXT_SO   TYPE T001-BUTXT,        " 会社名称(受注)
+BUKRS_PO   TYPE T001-BUKRS,        " 会社(発注)
+BUTXT_PO   TYPE T001-BUTXT,        " 会社名称(発注)
+HDOFF_SO   TYPE CHAR01,            " 本社フラグ(受注)
+END OF TYP_TH_COMP.
+
+* 会社連携データ
+TYPES:
+BEGIN OF TYP_TH_ZTEGSDT203,
+EBELN    TYPE ZTEGSDT203-EBELN,    " 購買伝票番号
+EBELP    TYPE ZTEGSDT203-EBELP,    " 購買伝票の明細番号
+EKGRP    TYPE ZTEGSDT203-EKGRP,    " 購買グループ
+VBELN    TYPE ZTEGSDT203-VBELN,    " 販売伝票
+POSNR    TYPE ZTEGSDT203-POSNR,    " 販売伝票明細
+VKGRP    TYPE ZTEGSDT203-VKGRP,    " 営業グループ
+MATNR    TYPE ZTEGSDT203-MATNR_PO,    " 品目コード
+TXZ01    TYPE ZTEGSDT203-TXZ01,    " 品目テキスト
+END OF TYP_TH_ZTEGSDT203,
+TYP_TD_ZTEGSDT203 TYPE STANDARD TABLE OF TYP_TH_ZTEGSDT203.
+
+* 発注情報
+TYPES:
+BEGIN OF TYP_TH_PO,
+EBELN    TYPE EKPO-EBELN,      " 購買伝票番号
+EBELP    TYPE EKPO-EBELP,      " 購買伝票の明細番号
+NETWR    TYPE EKPO-NETWR,      " 正味発注額
+MENGE    TYPE EKPO-MENGE,      " 数量
+MEINS    TYPE EKPO-MEINS,      " 発注単位
+LMEIN    TYPE EKPO-LMEIN,      " 基本数量単位
+BSART    TYPE EKKO-BSART,      " 購買伝票タイプ
+LIFNR    TYPE EKKO-LIFNR,      " 仕入先
+WAERS    TYPE EKKO-WAERS,      " 通貨コード
+BEDAT    TYPE EKKO-BEDAT,      " 購買伝票日付
+NAME1    TYPE LFA1-NAME1,      " 名称1
+END OF TYP_TH_PO,
+TYP_TD_PO TYPE STANDARD TABLE OF TYP_TH_PO.
+
+* 受注情報
+TYPES:
+BEGIN OF TYP_TH_SO,
+VBELN    TYPE VBAP-VBELN,      " 販売伝票番号
+POSNR    TYPE VBAP-POSNR,      " 販売伝票明細
+ZMENG    TYPE VBAP-ZMENG,      " 目標数量（販売単位）
+ZIEME    TYPE VBAP-ZIEME,      " 販売単位
+MEINS    TYPE VBAP-MEINS,      " 基本数量単位
+NETWR    TYPE VBAP-NETWR,      " 受注明細正味額
+**** START UPD 2015/06/08 ISID18 ****
+*    KLMENG   TYPE VBAP-KLMENG,     " 数量
+KWMENG   TYPE VBAP-KWMENG,     " 数量
+VRKME    TYPE VBAP-VRKME,      " 販売単位
+**** END UPD 2015/06/08 ISID18 ****
+AUDAT    TYPE VBAK-AUDAT,      " 伝票日付
+VBTYP    TYPE VBAK-VBTYP,      " 販売管理伝票カテゴリ
+AUART    TYPE VBAK-AUART,      " 販売伝票タイプ
+WAERK    TYPE VBAK-WAERK,      " 販売伝票通貨
+KUNNR    TYPE VBAK-KUNNR,      " 受注先
+NAME1    TYPE KNA1-NAME1,      " 名称1
+END OF TYP_TH_SO,
+TYP_TD_SO TYPE STANDARD TABLE OF TYP_TH_SO.
+
+* 入庫情報
+TYPES:
+BEGIN OF TYP_TH_INB,
+MBLNR      TYPE MSEG-MBLNR,      " 入出庫伝票番号
+MJAHR      TYPE MSEG-MJAHR,      " 入出庫伝票年
+ZEILE      TYPE MSEG-ZEILE,      " 入出庫伝票の明細
+BWART      TYPE MSEG-BWART,      " 移動タイプ
+SHKZG      TYPE MSEG-SHKZG,      " 借方/貸方フラグ
+MENGE      TYPE MSEG-MENGE,      " 数量
+MEINS      TYPE MSEG-MEINS,      " 基本数量単位
+ERFME      TYPE MSEG-ERFME,      " 入力単位
+EBELN      TYPE MSEG-EBELN,      " 購買発注番号
+EBELP      TYPE MSEG-EBELP,      " 購買伝票の明細番号
+SJAHR      TYPE MSEG-SJAHR,      " 入出庫伝票年
+SMBLN      TYPE MSEG-SMBLN,      " 入出庫伝票番号
+SMBLP      TYPE MSEG-SMBLP,      " 入出庫伝票の明細
+BUDAT_MKPF TYPE MSEG-BUDAT_MKPF, " 伝票の転記日付
+XBLNR_MKPF TYPE MSEG-XBLNR_MKPF, " 参照伝票番号
+END OF TYP_TH_INB,
+TYP_TD_INB TYPE STANDARD TABLE OF TYP_TH_INB.
+
+* 伝票フロー
+TYPES:
+BEGIN OF TYP_TH_VBFA,
+VBELV      TYPE VBFA-VBELV,      " 先行販売管理伝票
+POSNV      TYPE VBFA-POSNV,      " 販売管理伝票前明細
+VBELN      TYPE VBFA-VBELN,      " 後続の販売管理伝票
+POSNN      TYPE VBFA-POSNN,      " 販売管理伝票次明細
+MJAHR      TYPE VBFA-MJAHR,      " 入出庫伝票年
+END OF TYP_TH_VBFA,
+TYP_TD_VBFA TYPE STANDARD TABLE OF TYP_TH_VBFA.
+
+* 出庫情報
+TYPES:
+BEGIN OF TYP_TH_MSEG,
+MBLNR      TYPE MSEG-MBLNR,      " 入出庫伝票番号
+MJAHR      TYPE MSEG-MJAHR,      " 入出庫伝票年
+ZEILE      TYPE MSEG-ZEILE,      " 入出庫伝票の明細
+BWART      TYPE MSEG-BWART,      " 移動タイプ
+SHKZG      TYPE MSEG-SHKZG,      " 借方/貸方フラグ
+MENGE      TYPE MSEG-MENGE,      " 数量
+MEINS      TYPE MSEG-MEINS,      " 基本数量単位
+SJAHR      TYPE MSEG-SJAHR,      " 入出庫伝票年
+SMBLN      TYPE MSEG-SMBLN,      " 入出庫伝票番号
+SMBLP      TYPE MSEG-SMBLP,      " 入出庫伝票の明細
+BUDAT_MKPF TYPE MSEG-BUDAT_MKPF, " 伝票の転記日付
+XBLNR_MKPF TYPE MSEG-XBLNR_MKPF, " 参照伝票番号
+VBELN_IM   TYPE MSEG-VBELN_IM,   " 出荷伝票
+VBELP_IM   TYPE MSEG-VBELP_IM,   " 出荷明細
+END OF TYP_TH_MSEG,
+TYP_TD_MSEG TYPE STANDARD TABLE OF TYP_TH_MSEG.
+
+* 出庫情報
+TYPES:
+BEGIN OF TYP_TH_OUB,
+VBELV      TYPE VBFA-VBELV,      " 先行販売管理伝票
+POSNV      TYPE VBFA-POSNV,      " 販売管理伝票前明細
+MBLNR      TYPE MSEG-MBLNR,      " 入出庫伝票番号
+MJAHR      TYPE MSEG-MJAHR,      " 入出庫伝票年
+ZEILE      TYPE MSEG-ZEILE,      " 入出庫伝票の明細
+BWART      TYPE MSEG-BWART,      " 移動タイプ
+SHKZG      TYPE MSEG-SHKZG,      " 借方/貸方フラグ
+MENGE      TYPE MSEG-MENGE,      " 数量
+MEINS      TYPE MSEG-MEINS,      " 基本数量単位
+SJAHR      TYPE MSEG-SJAHR,      " 入出庫伝票年
+SMBLN      TYPE MSEG-SMBLN,      " 入出庫伝票番号
+SMBLP      TYPE MSEG-SMBLP,      " 入出庫伝票の明細
+BUDAT_MKPF TYPE MSEG-BUDAT_MKPF, " 伝票の転記日付
+XBLNR_MKPF TYPE MSEG-XBLNR_MKPF, " 参照伝票番号
+VBELN_IM   TYPE MSEG-VBELN_IM,   " 出荷伝票
+VBELP_IM   TYPE MSEG-VBELP_IM,   " 出荷明細
+END OF TYP_TH_OUB,
+TYP_TD_OUB TYPE STANDARD TABLE OF TYP_TH_OUB.
+
+* InvoiceNo
+TYPES:
+BEGIN OF TYP_TH_INV,
+VBELN        TYPE ZTEGSDT001-VBELN,          " 出荷伝票
+Z_INVOICE_NO TYPE ZTEGSDT001-Z_INVOICE_NO,   " Invoice No
+END OF TYP_TH_INV,
+TYP_TD_INV TYPE STANDARD TABLE OF TYP_TH_INV.
+
+* 入出庫連携情報
+TYPES:
+BEGIN OF TYP_TH_ZTEGSDT206,
+KDAUF      TYPE ZTEGSDT206-KDAUF,          " 受注伝票番号
+MBLNR_OUTB TYPE ZTEGSDT206-MBLNR_OUTB,     " 入出庫伝票番号
+MJAHR_OUTB TYPE ZTEGSDT206-MJAHR_OUTB,     " 入出庫伝票年
+EBELN      TYPE ZTEGSDT206-EBELN,          " 購買伝票番号
+MBLNR_INB  TYPE ZTEGSDT206-MBLNR_INB,      " 入出庫伝票番号
+MJAHR_INB  TYPE ZTEGSDT206-MJAHR_INB,      " 入出庫伝票年
+END OF TYP_TH_ZTEGSDT206,
+TYP_TD_ZTEGSDT206 TYPE STANDARD TABLE OF TYP_TH_ZTEGSDT206.
+
+* 買掛（AP）情報
+TYPES:
+BEGIN OF TYP_TH_AP,
+GJAHR   TYPE EKBE-GJAHR,    " 入出庫伝票年
+BELNR   TYPE EKBE-BELNR,    " 入出庫伝票番号
+BUZEI   TYPE EKBE-BUZEI,    " 入出庫伝票の明細
+BUDAT   TYPE EKBE-BUDAT,    " 伝票の転記日付
+MENGE   TYPE EKBE-MENGE,    " 数量
+WRBTR   TYPE EKBE-WRBTR,    " 伝票通貨額
+WAERS   TYPE EKBE-WAERS,    " 通貨コード
+SHKZG   TYPE EKBE-SHKZG,    " 借方/貸方フラグ
+LFGJA   TYPE EKBE-LFGJA,    " 参照伝票の会計年度
+LFBNR   TYPE EKBE-LFBNR,    " 参照伝票の伝票番号
+LFPOS   TYPE EKBE-LFPOS,    " 参照伝票の明細
+END OF TYP_TH_AP,
+TYP_TD_AP TYPE STANDARD TABLE OF TYP_TH_AP.
+
+* 売掛（AR）情報
+TYPES:
+BEGIN OF TYP_TH_AR,
+VGBEL   TYPE VBRP-VGBEL,    " 参照伝票番号
+VGPOS   TYPE VBRP-VGPOS,    " 参照明細番号
+VBELN   TYPE VBRP-VBELN,    " 請求伝票
+POSNR   TYPE VBRP-POSNR,    " 請求明細
+FKIMG   TYPE VBRP-FKIMG,    " 請求数量
+VRKME   TYPE VBRP-VRKME,    " 販売単位
+MEINS   TYPE VBRP-MEINS,    " 基本数量単位
+NETWR   TYPE VBRP-NETWR,    " 伝票通貨の正味額
+WAERK   TYPE VBRK-WAERK,    " 通貨コード
+FKDAT   TYPE VBRK-FKDAT,    " 請求日
+END OF TYP_TH_AR,
+TYP_TD_AR TYPE STANDARD TABLE OF TYP_TH_AR.
+
+* 集計
+TYPES:
+BEGIN OF TYP_TH_SUM,
+NETWR_PO  TYPE ZSEGSD0025-NETWR_PO,      " 発注金額
+MENGE_PO  TYPE ZSEGSD0025-MENGE_PO,      " 発注数量
+MENGE_INB TYPE ZSEGSD0025-MENGE_INB,     " 入庫数量
+WRBTR_AP  TYPE ZSEGSD0025-WRBTR_AP,      " 照合金額
+MENGE_AP  TYPE ZSEGSD0025-MENGE_AP,      " 照合数量
+NETWR_SO  TYPE ZSEGSD0025-NETWR_SO,      " 受注数量
+MENGE_SO  TYPE ZSEGSD0025-MENGE_SO,      " 受注金額
+MENGE_OUB TYPE ZSEGSD0025-MENGE_OUB,     " 出庫数量
+WRBTR_AR  TYPE ZSEGSD0025-WRBTR_AR,      " 請求金額
+MENGE_AR  TYPE ZSEGSD0025-MENGE_AR,      " 請求数量
+END OF TYP_TH_SUM.
+
+* ALVデータ
+TYPES:
+TYP_TD_ZSEGSD0024 TYPE STANDARD TABLE OF ZSEGSD0024,
+TYP_TD_ZSEGSD0025 TYPE STANDARD TABLE OF ZSEGSD0025,
+TYP_TD_ZSEGSD0026 TYPE STANDARD TABLE OF ZSEGSD0026.
+
+*----------------------------------------------------------------------*
+* DATA定義
+*----------------------------------------------------------------------*
+* 画面パラメータ参照変数定義
+DATA:
+W_LDATE  TYPE ZTEGSDT203-Z_CRE_YMD,     " 受発注連携日付
+W_BUDAT  TYPE BKPF-BUDAT,               " 転記日付
+W_INVOC  TYPE ZTEGSDT001-Z_INVOICE_NO,  " Invoice no
+W_EKGRP  TYPE EKKO-EKGRP,               " 購買グループ
+W_EBELN  TYPE EKKO-EBELN,               " 購買伝票
+W_VBELN  TYPE VBAK-VBELN,               " 販売伝票
+W_VKGRP  TYPE VBAK-VKGRP.               " 営業グループ
+
+* ワーク変数
+DATA:
+W_BUTXT_A TYPE T001-BUTXT,         " 会社Ａ名称
+W_BUTXT_B TYPE T001-BUTXT.         " 会社Ｂ名称
+
+* 購買組織、販売組織レンジテーブル
+DATA:
+RD_EKORG_A    TYPE TYP_RD_EKORG,
+RD_EKORG_B    TYPE TYP_RD_EKORG,
+RD_VKORG_A    TYPE TYP_RD_VKORG,
+RD_VKORG_B    TYPE TYP_RD_VKORG.
+
+DATA:
+TH_COMP       TYPE TYP_TH_COMP,
+TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203,
+TD_ALV_LIST   TYPE TYP_TD_ZSEGSD0024,
+TD_ALV_POSOH  TYPE TYP_TD_ZSEGSD0025,
+TD_ALV_POSOI  TYPE TYP_TD_ZSEGSD0026.
+
+*----------------------------------------------------------------------*
+* 選択画面定義
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF LINE.
+* 受発注レベル
+SELECTION-SCREEN POSITION 3.
+PARAMETERS RB_POSOH RADIOBUTTON GROUP RB1.
+SELECTION-SCREEN COMMENT 5(20) TEXT-001 FOR FIELD RB_POSOH.
+* 受発注明細レベル
+SELECTION-SCREEN POSITION 27.
+PARAMETERS RB_POSOI RADIOBUTTON GROUP RB1.
+SELECTION-SCREEN COMMENT 29(25) TEXT-002 FOR FIELD RB_POSOI.
+* 入出庫明細レベル
+SELECTION-SCREEN POSITION 56.
+PARAMETERS RB_INOUT RADIOBUTTON GROUP RB1 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 58(30) TEXT-003 FOR FIELD RB_INOUT.
+SELECTION-SCREEN END OF LINE.
+
+* 選択項目
+PARAMETERS:
+P_BUKRSA TYPE T001-BUKRS OBLIGATORY,    " 会社コードＡ
+P_BUKRSB TYPE T001-BUKRS OBLIGATORY.    " 会社コードＢ
+SELECT-OPTIONS:
+S_LDATE FOR W_LDATE,                    " 受発注連携日付
+S_BUDAT FOR W_BUDAT,                    " 転記日付
+S_INVOC FOR W_INVOC,                    " Invoice
+S_EBELN FOR W_EBELN,                    " 購買発注
+S_EKGRP FOR W_EKGRP MEMORY ID EKG,      " 購買グループ
+S_VBELN FOR W_VBELN,                    " 販売伝票
+S_VKGRP FOR W_VKGRP.                    " 営業グループ
+
+* 一致データ
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(15) TEXT-004 FOR FIELD CB_MATH.
+PARAMETERS CB_MATH AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN END OF LINE.
+
+* 不一致データ
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(15) TEXT-005 FOR FIELD CB_NMATH.
+PARAMETERS CB_NMATH AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN END OF LINE.
+
+* 出力デバイス
+SELECTION-SCREEN SKIP 1.
+PARAMETERS P_DEVICE TYPE TSP03-PADEST.
+*----------------------------------------------------------------------*
+* 初期値定義
+*----------------------------------------------------------------------*
+INITIALIZATION.
+
+* 受発注連携日付初期値設定
+PERFORM GET_DEFAULT_LDATE.
+
+* 出力デバイス初期値設定
+PERFORM GET_DEFAULT_PRINTER.
+
+*----------------------------------------------------------------------*
+* 選択画面チェック
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+
+* 入力項目チェック
+PERFORM SEL_VALIDATE.
+
+*----------------------------------------------------------------------*
+* メイン処理
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 購買組織、販売組織取得
+PERFORM GET_EKORG_VKORG
+CHANGING RD_EKORG_A       " 購買組織Ａ
+RD_EKORG_B       " 購買組織Ｂ
+RD_VKORG_A       " 販売組織Ａ
+RD_VKORG_B.      " 販売組織Ｂ
+
+* 会社連携データ抽出(会社A 発注　⇒　会社B 受注)
+CLEAR TH_COMP.
+PERFORM GET_DATA_SO_PO
+USING    P_BUKRSB
+RD_EKORG_A       " 購買組織Ａ
+RD_VKORG_B       " 販売組織Ｂ
+CHANGING TH_COMP-HDOFF_SO " B社本社フラグ
+TD_ZTEGSDT203.   " 会社連携データ
+
+* 会社情報編集
+TH_COMP-BUKRS_SO = P_BUKRSB.
+TH_COMP-BUTXT_SO = W_BUTXT_B.
+TH_COMP-BUKRS_PO = P_BUKRSA.
+TH_COMP-BUTXT_PO = W_BUTXT_A.
+
+* その他データ抽出＆編集(会社A 発注　⇒　会社B 受注)
+PERFORM GET_DATA_ALV
+USING    TH_COMP          " 会社情報
+TD_ZTEGSDT203    " 会社連携データ
+CHANGING TD_ALV_LIST.     " ALVListデータ
+
+* 会社連携データ抽出(会社B 発注　⇒　会社A 受注)
+CLEAR TH_COMP.
+PERFORM GET_DATA_SO_PO
+USING    P_BUKRSA
+RD_EKORG_B       " 購買組織Ｂ
+RD_VKORG_A       " 販売組織Ａ
+CHANGING TH_COMP-HDOFF_SO " A社本社フラグ
+TD_ZTEGSDT203.   " 会社連携データ
+
+* 会社情報編集
+TH_COMP-BUKRS_SO = P_BUKRSA.
+TH_COMP-BUTXT_SO = W_BUTXT_A.
+TH_COMP-BUKRS_PO = P_BUKRSB.
+TH_COMP-BUTXT_PO = W_BUTXT_B.
+
+* その他データ抽出＆編集(会社B 発注　⇒　会社A 受注)
+PERFORM GET_DATA_ALV
+USING    TH_COMP          " 会社情報
+TD_ZTEGSDT203    " 会社連携データ
+CHANGING TD_ALV_LIST.     " ALVListデータ
+
+* データ存在しない場合
+IF TD_ALV_LIST[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* PO/SOレベルの集計
+IF RB_POSOH IS NOT INITIAL.
+PERFORM SUM_BY_POSOI
+USING    TD_ALV_LIST
+CHANGING TD_ALV_POSOI.
+PERFORM SUM_BY_POSOH
+USING    TD_ALV_POSOI
+CHANGING TD_ALV_POSOH.
+ENDIF.
+
+* PO/SO明細レベルの集計
+IF RB_POSOI IS NOT INITIAL.
+PERFORM SUM_BY_POSOI
+USING    TD_ALV_LIST
+CHANGING TD_ALV_POSOI.
+ENDIF.
+
+* 対象データの限定処理&ALV出力
+CASE ABAP_TRUE.
+WHEN RB_POSOH.
+PERFORM CHECK_OUTPUT_POSOH
+CHANGING TD_ALV_POSOH.
+PERFORM DISPLAY_ALV_POSOH
+USING TD_ALV_POSOH.
+WHEN RB_POSOI.
+PERFORM CHECK_OUTPUT_POSOI
+CHANGING TD_ALV_POSOI.
+PERFORM DISPLAY_ALV_POSOI
+USING TD_ALV_POSOI.
+WHEN RB_INOUT.
+PERFORM CHECK_OUTPUT_LIST
+CHANGING TD_ALV_LIST.
+PERFORM DISPLAY_ALV_LIST
+USING TD_ALV_LIST.
+WHEN OTHERS.
+ENDCASE.
+
+*----------------------------------------------------------------------*
+* END-OF-SELECTION
+*----------------------------------------------------------------------*
+END-OF-SELECTION.
+
+*----------------------------------------------------------------------*
+* TOP-OF-PAGE
+*----------------------------------------------------------------------*
+TOP-OF-PAGE.
+
+*----------------------------------------------------------------------*
+*&      Form  GET_DEFAULT_LDATE
+*----------------------------------------------------------------------*
+*       受発注連携日付初期値設定
+*----------------------------------------------------------------------*
+FORM GET_DEFAULT_LDATE .
+
+DATA: LRH_LDATE LIKE LINE OF S_LDATE.
+
+* 受発注連携日付From
+CONCATENATE SY-DATUM+0(6) '01' INTO LRH_LDATE-LOW.
+
+* 受発注連携日付To
+CALL FUNCTION 'DATE_GET_MONTH_LASTDAY'
+EXPORTING
+I_DATE = LRH_LDATE-LOW
+IMPORTING
+E_DATE = LRH_LDATE-HIGH.
+
+LRH_LDATE-SIGN = 'I'.
+LRH_LDATE-OPTION = 'BT'.
+APPEND LRH_LDATE TO S_LDATE.
+
+ENDFORM.                    " GET_DEFAULT_LDATE
+*----------------------------------------------------------------------*
+*&      Form  GET_DEFAULT_PRINTER
+*----------------------------------------------------------------------*
+*       出力デバイス初期値取得
+*----------------------------------------------------------------------*
+FORM GET_DEFAULT_PRINTER .
+
+DATA LST_USER_DEFAULTS  TYPE USDEFAULTS.
+
+CALL FUNCTION 'SUSR_USER_READ'
+EXPORTING
+USER_NAME            = SY-UNAME
+IMPORTING
+USER_DEFAULTS        = LST_USER_DEFAULTS
+EXCEPTIONS
+USER_NAME_NOT_EXISTS = 1
+INTERNAL_ERROR       = 2
+OTHERS               = 3.
+
+IF SY-SUBRC = 0.
+P_DEVICE = LST_USER_DEFAULTS-SPLD.
+ENDIF.
+
+ENDFORM.                    " GET_DEFAULT_PRINTER
+*----------------------------------------------------------------------*
+*&      Form  sel_validate
+*----------------------------------------------------------------------*
+*      選択画面入力項目チェック
+*----------------------------------------------------------------------*
+FORM SEL_VALIDATE.
+
+* 会社コードＡ存在性チェック
+SELECT SINGLE BUTXT
+INTO W_BUTXT_A
+FROM T001
+WHERE BUKRS = P_BUKRSA.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRSA'.
+MESSAGE E002 WITH P_BUKRSA.
+ENDIF.
+
+* 会社コードＢ存在性チェック
+SELECT SINGLE BUTXT
+INTO W_BUTXT_B
+FROM T001
+WHERE BUKRS = P_BUKRSB.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRSB'.
+MESSAGE E002 WITH P_BUKRSB.
+ENDIF.
+
+* 受発注連携日付と転記日付の入力チェック
+IF S_LDATE[] IS INITIAL AND
+S_BUDAT[] IS INITIAL.
+SET CURSOR FIELD 'S_LDATE-LOW'.
+MESSAGE E083.
+ENDIF.
+
+* チェックボックスの入力チェック
+IF CB_MATH  IS INITIAL AND
+CB_NMATH IS INITIAL.
+SET CURSOR FIELD 'CB_MATH'.
+MESSAGE E014.
+ENDIF.
+
+**** START DEL BY ISID REN 2015/07/23 ****
+** 会社コードＡの権限チェック
+*  AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+*    ID 'BUKRS' FIELD P_BUKRSA
+*    ID 'ACTVT' FIELD '03'.
+*
+*  IF SY-SUBRC <> 0.
+*    SET CURSOR FIELD 'P_BUKRSA'.
+*    MESSAGE E001.
+*  ENDIF.
+*
+** 会社コードＢの権限チェック
+*  AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+*    ID 'BUKRS' FIELD P_BUKRSB
+*    ID 'ACTVT' FIELD '03'.
+*
+*  IF SY-SUBRC <> 0.
+*    SET CURSOR FIELD 'P_BUKRSB'.
+*    MESSAGE E001.
+*  ENDIF.
+**** END DEL BY ISID REN 2015/07/23 ****
+
+ENDFORM.                    "GS_SELVALIDATE
+*----------------------------------------------------------------------*
+*&      Form  GET_EKORG_VKORG
+*----------------------------------------------------------------------*
+*       購買組織、販売組織取得
+*----------------------------------------------------------------------*
+*      <--O_RD_EKORG_A  会社Ａの購買組織
+*      <--O_RD_EKORG_B  会社Ｂの購買組織
+*      <--O_RD_VKORG_A  会社Ａの販売組織
+*      <--O_RD_VKORG_B  会社Ｂの販売組織
+*----------------------------------------------------------------------*
+FORM GET_EKORG_VKORG
+CHANGING O_RD_EKORG_A TYPE TYP_RD_EKORG
+O_RD_EKORG_B TYPE TYP_RD_EKORG
+O_RD_VKORG_A TYPE TYP_RD_VKORG
+O_RD_VKORG_B TYPE TYP_RD_VKORG.
+
+TYPES:BEGIN OF LTYP_T024E,
+EKORG TYPE T024E-EKORG,
+END OF LTYP_T024E,
+BEGIN OF LTYP_TVKO,
+VKORG TYPE TVKO-VKORG,
+END OF LTYP_TVKO.
+
+DATA: LRH_EKORG LIKE LINE OF O_RD_EKORG_A,
+LRH_VKORG LIKE LINE OF O_RD_VKORG_A,
+LRD_T024E TYPE STANDARD TABLE OF LTYP_T024E,
+LRD_TVKO  TYPE STANDARD TABLE OF LTYP_TVKO,
+LRH_T024E TYPE LTYP_T024E,
+LRH_TVKO  TYPE LTYP_TVKO.
+
+REFRESH: O_RD_EKORG_A,
+O_RD_EKORG_B,
+O_RD_VKORG_A,
+O_RD_VKORG_B.
+
+* レンジテーブル編集
+CLEAR: LRH_EKORG, LRH_VKORG.
+LRH_EKORG-SIGN = 'I'.
+LRH_EKORG-OPTION = 'EQ'.
+LRH_VKORG-SIGN = 'I'.
+LRH_VKORG-OPTION = 'EQ'.
+
+* 購買組織A取得
+SELECT EKORG
+INTO TABLE LRD_T024E
+FROM T024E
+WHERE BUKRS = P_BUKRSA.
+IF SY-SUBRC <> 0.
+MESSAGE S084 WITH P_BUKRSA
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_T024E INTO LRH_T024E.
+LRH_EKORG-LOW = LRH_T024E-EKORG.
+APPEND LRH_EKORG TO O_RD_EKORG_A.
+ENDLOOP.
+ENDIF.
+
+* 購買組織B取得
+REFRESH LRD_T024E.
+SELECT EKORG
+INTO TABLE LRD_T024E
+FROM T024E
+WHERE BUKRS = P_BUKRSB.
+IF SY-SUBRC <> 0.
+MESSAGE S084 WITH P_BUKRSB
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_T024E INTO LRH_T024E.
+LRH_EKORG-LOW = LRH_T024E-EKORG.
+APPEND LRH_EKORG TO O_RD_EKORG_B.
+ENDLOOP.
+ENDIF.
+
+* 販売組織A取得
+SELECT VKORG
+INTO TABLE LRD_TVKO
+FROM TVKO
+WHERE BUKRS = P_BUKRSA.
+IF SY-SUBRC <> 0.
+MESSAGE S085 WITH P_BUKRSA
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_TVKO INTO LRH_TVKO.
+LRH_VKORG-LOW = LRH_TVKO-VKORG.
+APPEND LRH_VKORG TO O_RD_VKORG_A.
+ENDLOOP.
+ENDIF.
+
+* 販売組織B取得
+REFRESH LRD_TVKO.
+SELECT VKORG
+INTO TABLE LRD_TVKO
+FROM TVKO
+WHERE BUKRS = P_BUKRSB.
+IF SY-SUBRC <> 0.
+MESSAGE S085 WITH P_BUKRSB
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ELSE.
+LOOP AT LRD_TVKO INTO LRH_TVKO.
+LRH_VKORG-LOW = LRH_TVKO-VKORG.
+APPEND LRH_VKORG TO O_RD_VKORG_B.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " GET_EKORG_VKORG
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_SO_PO
+*&---------------------------------------------------------------------*
+*       会社連携データ抽出
+*----------------------------------------------------------------------*
+*      -->I_BUKRS          会社コード
+*      -->I_RD_EKORG       購買組織
+*      -->I_RD_VKORG       販売組織
+*      <--O_FLG_HOSYA      本社フラグ
+*      <--O_TD_ZTEGSDT203  会社連携データ
+*----------------------------------------------------------------------*
+FORM GET_DATA_SO_PO
+USING    I_BUKRS         TYPE T001-BUKRS
+I_RD_EKORG      TYPE TYP_RD_EKORG
+I_RD_VKORG      TYPE TYP_RD_VKORG
+CHANGING O_FLG_HOSYA     TYPE CHAR01
+O_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203.
+
+* 本社フラグ取得
+CLEAR O_FLG_HOSYA.
+SELECT SINGLE ZFLGHEADOFFICE
+INTO O_FLG_HOSYA
+FROM ZTEGSDT204
+WHERE BUKRS = I_BUKRS.
+
+* 会社連携データ取得
+REFRESH O_TD_ZTEGSDT203.
+SELECT EBELN       " 購買伝票番号
+EBELP       " 購買伝票の明細番号
+EKGRP       " 購買グループ
+VBELN       " 販売伝票
+POSNR       " 販売伝票明細
+VKGRP       " 営業グループ
+MATNR_PO AS MATNR       " 品目コード
+TXZ01       " 品目テキスト
+INTO TABLE O_TD_ZTEGSDT203
+FROM ZTEGSDT203
+WHERE EKORG IN I_RD_EKORG    " 購買組織
+AND VKORG IN I_RD_VKORG    " 販売組織
+AND EKGRP IN S_EKGRP       " 購買グループ
+AND VKGRP IN S_VKGRP       " 営業グループ
+AND EBELN IN S_EBELN       " 購買伝票番号
+AND VBELN IN S_VBELN       " 販売伝票
+AND VBELN <> SPACE         " 販売伝票
+AND Z_CRE_YMD IN S_LDATE.  " 登録年月日
+
+ENDFORM.                    " GET_DATA_SO_PO
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ALV
+*&---------------------------------------------------------------------*
+*       その他データ抽出＆編集
+*----------------------------------------------------------------------*
+*      -->I_TH_COMP        会社データ
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_ALV_LIST    ALVListデータ
+*----------------------------------------------------------------------*
+FORM GET_DATA_ALV
+USING    I_TH_COMP       TYPE TYP_TH_COMP
+I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_ALV_LIST   TYPE TYP_TD_ZSEGSD0024.
+
+DATA: LTD_PO         TYPE TYP_TD_PO,
+LTD_SO         TYPE TYP_TD_SO,
+LTD_INB        TYPE TYP_TD_INB,
+LTD_OUB        TYPE TYP_TD_OUB,
+LTD_INV        TYPE TYP_TD_INV,
+LTD_206        TYPE TYP_TD_ZTEGSDT206,
+LTD_AP         TYPE TYP_TD_AP,
+LTD_AR_OR      TYPE TYP_TD_AR,
+LTD_AR_DC      TYPE TYP_TD_AR,
+LTH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203,
+LTH_ALV_LIST   TYPE ZSEGSD0024.
+
+* 連携データがない場合、下記処理をスキップ
+IF I_TD_ZTEGSDT203[] IS INITIAL.
+RETURN.
+ENDIF.
+
+* 発注情報取得
+PERFORM GET_PO_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING LTD_PO.
+
+* 受注情報取得
+PERFORM GET_SO_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING LTD_SO.
+
+* 入出庫情報取得
+PERFORM GET_MIGO_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING LTD_INB
+LTD_OUB
+LTD_INV
+LTD_206.
+
+* 買掛（AP）情報取得
+PERFORM GET_AP_DATA
+USING    LTD_INB
+CHANGING LTD_AP.
+
+* 売掛（AR）情報取得
+PERFORM GET_AR_DATA
+USING    I_TD_ZTEGSDT203
+LTD_OUB
+CHANGING LTD_AR_OR      " 受注と返品
+LTD_AR_DC.     " クレジットメモ とデビットメモ
+
+* ALVデータ編集
+LOOP AT I_TD_ZTEGSDT203 INTO LTH_ZTEGSDT203.
+CLEAR LTH_ALV_LIST.
+
+*   会社連携データより編集
+PERFORM SET_ALV_FROM_ZTEGSDT203
+USING    LTH_ZTEGSDT203
+I_TH_COMP
+CHANGING LTH_ALV_LIST.
+
+*   発注情報より編集
+PERFORM SET_ALV_FROM_PO
+USING    LTH_ZTEGSDT203
+LTD_PO
+CHANGING LTH_ALV_LIST.
+
+*   受注情報より編集
+PERFORM SET_ALV_FROM_SO
+USING    LTH_ZTEGSDT203
+LTD_SO
+CHANGING LTH_ALV_LIST.
+
+*   入出庫情報＆AP＆AR情報より編集
+PERFORM SET_ALV_FROM_INBOUB
+USING    I_TH_COMP
+LTD_INB
+LTD_OUB
+LTD_INV
+LTD_206
+LTD_AP
+LTD_AR_OR
+LTD_AR_DC
+**** START ADD BY ISID17 2015/04/21 ****
+LTD_PO
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING LTH_ALV_LIST
+O_TD_ALV_LIST.
+ENDLOOP.
+
+* ALVデータの限定処理
+IF S_BUDAT[] IS NOT INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE BUDAT_AP IS INITIAL AND
+BUDAT_AR IS INITIAL.
+ENDIF.
+IF S_INVOC[] IS NOT INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE Z_INVOICE_NO NOT IN S_INVOC[].
+ENDIF.
+
+* FLG設定
+PERFORM SET_FLG_ALV_LIST
+CHANGING O_TD_ALV_LIST.
+
+* SORT
+SORT O_TD_ALV_LIST
+BY BUKRS_PO
+EBELN EBELP
+VBELN POSNR
+MBLNR_OUB MBLNR_INB.
+
+ENDFORM.                    " GET_DATA_ALV
+*&---------------------------------------------------------------------*
+*&      Form  GET_PO_DATA
+*&---------------------------------------------------------------------*
+*       発注情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_PO          発注情報
+*----------------------------------------------------------------------*
+FORM GET_PO_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_PO         TYPE TYP_TD_PO.
+
+DATA LTD_DATA TYPE TYP_TD_ZTEGSDT203.
+
+* 購買伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY EBELN EBELP.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING EBELN EBELP.
+IF LTD_DATA[] IS INITIAL.
+RETURN.
+ENDIF.
+
+* 発注情報取得
+REFRESH O_TD_PO.
+SELECT EKPO~EBELN      " 購買伝票番号
+EKPO~EBELP      " 購買伝票の明細番号
+EKPO~NETWR      " 正味発注額
+EKPO~MENGE      " 数量
+EKPO~MEINS      " 発注単位
+EKPO~LMEIN      " 基本数量単位
+EKKO~BSART      " 購買伝票タイプ
+EKKO~LIFNR      " 仕入先
+EKKO~WAERS      " 通貨コード
+EKKO~BEDAT      " 購買伝票日付
+LFA1~NAME1      " 名称1
+INTO TABLE O_TD_PO
+FROM EKPO AS EKPO
+INNER JOIN EKKO AS EKKO
+ON EKKO~EBELN = EKPO~EBELN
+INNER JOIN LFA1 AS LFA1
+ON EKKO~LIFNR = LFA1~LIFNR
+FOR ALL ENTRIES IN LTD_DATA
+WHERE EKPO~EBELN = LTD_DATA-EBELN
+AND EKPO~EBELP = LTD_DATA-EBELP
+AND EKPO~LOEKZ = SPACE.
+
+* SORT
+SORT O_TD_PO BY EBELN EBELP.
+
+ENDFORM.                    " GET_PO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_SO_DATA
+*&---------------------------------------------------------------------*
+*       受注情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_SO          受注情報
+*----------------------------------------------------------------------*
+FORM GET_SO_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_SO         TYPE TYP_TD_SO.
+
+DATA LTD_DATA TYPE TYP_TD_ZTEGSDT203.
+
+* 販売伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY VBELN POSNR.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING VBELN POSNR.
+IF LTD_DATA[] IS INITIAL.
+RETURN.
+ENDIF.
+
+* 受注情報取得
+REFRESH O_TD_SO.
+SELECT VBAP~VBELN      " 販売伝票番号
+VBAP~POSNR      " 販売伝票明細
+VBAP~ZMENG      " 目標数量（販売単位）
+VBAP~ZIEME      " 目標数量 (数量単位)
+VBAP~MEINS      " 基本数量単位
+VBAP~NETWR      " 受注明細正味額
+**** START UPD 2015/06/08 ISID18 ****
+*         VBAP~KLMENG     " 数量
+VBAP~KWMENG     " 数量
+VBAP~VRKME      " 販売単位
+**** END UPD 2015/06/08 ISID18 ****
+VBAK~AUDAT      " 伝票日付
+VBAK~VBTYP      " 販売管理伝票カテゴリ
+VBAK~AUART      " 販売伝票タイプ
+VBAK~WAERK      " 販売伝票通貨
+VBAK~KUNNR      " 受注先
+KNA1~NAME1      " 名称1
+INTO TABLE O_TD_SO
+FROM VBAP AS VBAP
+INNER JOIN VBAK AS VBAK
+ON VBAK~VBELN = VBAP~VBELN
+INNER JOIN KNA1 AS KNA1
+ON VBAK~KUNNR = KNA1~KUNNR
+FOR ALL ENTRIES IN LTD_DATA
+WHERE VBAP~VBELN = LTD_DATA-VBELN
+AND VBAP~POSNR = LTD_DATA-POSNR.
+
+* SORT
+SORT O_TD_SO BY VBELN POSNR.
+
+ENDFORM.                    " GET_SO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_MIGO_DATA
+*&---------------------------------------------------------------------*
+*       入出庫情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      <--O_TD_INB         入庫情報
+*      <--O_TD_OUB         出庫情報
+*      <--O_TD_INV         InvoiceNo
+*      <--O_TD_ZTEGSDT206  入出庫連携情報
+*----------------------------------------------------------------------*
+FORM GET_MIGO_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_INB        TYPE TYP_TD_INB
+O_TD_OUB        TYPE TYP_TD_OUB
+O_TD_INV        TYPE TYP_TD_INV
+O_TD_ZTEGSDT206 TYPE TYP_TD_ZTEGSDT206.
+
+DATA: LTD_DATA  TYPE TYP_TD_ZTEGSDT203,
+LTD_OUB   TYPE TYP_TD_OUB.
+
+* 購買伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY EBELN EBELP.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING EBELN EBELP.
+
+* 入庫情報取得
+REFRESH O_TD_INB.
+IF LTD_DATA[] IS NOT INITIAL.
+SELECT MBLNR         " 入出庫伝票番号
+MJAHR         " 入出庫伝票年
+ZEILE         " 入出庫伝票の明細
+BWART         " 移動タイプ (在庫管理)
+SHKZG         " 借方/貸方フラグ
+MENGE         " 数量
+MEINS         " 基本数量単位
+ERFME         " 入力単位
+EBELN         " 購買発注番号
+EBELP         " 購買伝票の明細番号
+SJAHR         " 入出庫伝票年
+SMBLN         " 入出庫伝票番号
+SMBLP         " 入出庫伝票の明細
+BUDAT_MKPF    " 伝票の転記日付
+XBLNR_MKPF    " 参照伝票番号
+INTO TABLE O_TD_INB
+FROM MSEG
+FOR ALL ENTRIES IN LTD_DATA
+WHERE EBELN = LTD_DATA-EBELN
+AND EBELP = LTD_DATA-EBELP.
+ENDIF.
+SORT O_TD_INB BY EBELN EBELP
+MBLNR MJAHR ZEILE.
+
+* 出庫情報取得
+PERFORM GET_OUB_DATA
+USING    I_TD_ZTEGSDT203
+CHANGING O_TD_OUB.
+
+* 出荷伝票の重複データ削除
+LTD_OUB[] = O_TD_OUB[].
+SORT LTD_OUB BY VBELN_IM.
+DELETE ADJACENT DUPLICATES FROM LTD_OUB
+COMPARING VBELN_IM.
+
+* InvoiceNo取得
+REFRESH O_TD_INV.
+IF LTD_OUB[] IS NOT INITIAL.
+SELECT VBELN                   " 出荷伝票
+Z_INVOICE_NO            " Invoice No
+FROM ZTEGSDT001
+INTO TABLE O_TD_INV
+FOR ALL ENTRIES IN LTD_OUB
+WHERE VBELN = LTD_OUB-VBELN_IM.
+ENDIF.
+SORT O_TD_INV BY VBELN.
+
+* 購買伝票、販売伝票の重複キー削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY EBELN VBELN.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING EBELN VBELN.
+
+* 入出庫連携情報取得
+IF LTD_DATA[] IS NOT INITIAL.
+SELECT KDAUF                  " 受注伝票番号
+MBLNR_OUTB             " 入出庫伝票番号
+MJAHR_OUTB             " 入出庫伝票年
+EBELN                  " 購買伝票番号
+MBLNR_INB              " 入出庫伝票番号
+MJAHR_INB              " 入出庫伝票年
+INTO TABLE O_TD_ZTEGSDT206
+FROM ZTEGSDT206
+FOR ALL ENTRIES IN LTD_DATA
+WHERE KDAUF = LTD_DATA-VBELN
+AND EBELN = LTD_DATA-EBELN.
+ENDIF.
+SORT O_TD_ZTEGSDT206
+BY EBELN MBLNR_INB MJAHR_INB
+KDAUF MBLNR_OUTB MJAHR_OUTB.
+
+ENDFORM.                    " GET_MIGO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_AP_DATA
+*&---------------------------------------------------------------------*
+*       買掛（AP）情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_INB  入庫情報
+*      <--O_TD_AP   買掛（AP）情報
+*----------------------------------------------------------------------*
+FORM GET_AP_DATA
+USING    I_TD_INB TYPE TYP_TD_INB
+CHANGING O_TD_AP  TYPE TYP_TD_AP.
+
+DATA LTD_INB TYPE TYP_TD_INB.
+
+* 重複キー削除
+LTD_INB[] = I_TD_INB[].
+SORT LTD_INB BY MBLNR MJAHR ZEILE.
+DELETE ADJACENT DUPLICATES FROM LTD_INB
+COMPARING MBLNR MJAHR ZEILE.
+
+* 買掛（AP）情報取得
+REFRESH O_TD_AP.
+IF LTD_INB[] IS NOT INITIAL.
+SELECT GJAHR           " 入出庫伝票年
+BELNR           " 入出庫伝票番号
+BUZEI           " 入出庫伝票の明細
+BUDAT           " 伝票の転記日付
+MENGE           " 数量
+WRBTR           " 伝票通貨額
+WAERS           " 通貨コード
+SHKZG           " 借方/貸方フラグ
+LFGJA           " 参照伝票の会計年度
+LFBNR           " 参照伝票の伝票番号
+LFPOS           " 参照伝票の明細
+INTO TABLE O_TD_AP
+FROM EKBE
+FOR ALL ENTRIES IN LTD_INB
+WHERE LFGJA =  LTD_INB-MJAHR
+AND LFBNR =  LTD_INB-MBLNR
+AND LFPOS =  LTD_INB-ZEILE
+AND VGABE =  CNS_VGABE_2
+AND BUDAT IN S_BUDAT.
+ENDIF.
+
+* SORT
+SORT O_TD_AP BY LFBNR LFGJA LFPOS.
+
+ENDFORM.                    " GET_AP_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_AR_DATA
+*&---------------------------------------------------------------------*
+*       売掛（AR）情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社連携データ
+*      -->I_TD_OUB         出庫情報
+*      <--O_TD_AR_OR       売掛（AR）情報(受注と返品)
+*      <--O_TD_AR_DC       売掛（AR）情報(CR & DR)
+*----------------------------------------------------------------------*
+FORM GET_AR_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+I_TD_OUB        TYPE TYP_TD_OUB
+CHANGING O_TD_AR_OR      TYPE TYP_TD_AR
+O_TD_AR_DC      TYPE TYP_TD_AR.
+
+DATA: LTD_203 TYPE TYP_TD_ZTEGSDT203,
+LTD_OUB TYPE TYP_TD_OUB.
+
+* 受注と返品の場合
+LTD_OUB[] = I_TD_OUB[].
+SORT LTD_OUB BY VBELN_IM VBELP_IM.
+DELETE ADJACENT DUPLICATES FROM LTD_OUB
+COMPARING VBELN_IM VBELP_IM.
+
+* 売掛（AR）情報取得
+REFRESH O_TD_AR_OR.
+IF LTD_OUB[] IS NOT INITIAL.
+SELECT VBRP~VGBEL       " 参照伝票番号
+VBRP~VGPOS       " 参照明細番号
+VBRP~VBELN       " 請求伝票
+VBRP~POSNR       " 請求明細
+VBRP~FKIMG       " 請求数量
+VBRP~VRKME       " 販売単位
+VBRP~MEINS       " 基本数量単位
+VBRP~NETWR       " 伝票通貨の正味額
+VBRK~WAERK       " 通貨コード
+VBRK~FKDAT       " 請求日
+INTO TABLE O_TD_AR_OR
+FROM VBRP AS VBRP
+INNER JOIN VBRK AS VBRK
+ON VBRK~VBELN = VBRP~VBELN
+FOR ALL ENTRIES IN LTD_OUB
+WHERE VBRP~VGBEL  = LTD_OUB-VBELN_IM
+AND VBRP~VGPOS  = LTD_OUB-VBELP_IM
+AND VBRK~FKDAT IN S_BUDAT.
+ENDIF.
+
+* クレジットメモ とデビットメモの場合
+LTD_203[] = I_TD_ZTEGSDT203[].
+SORT LTD_203 BY VBELN POSNR.
+DELETE ADJACENT DUPLICATES FROM LTD_203
+COMPARING VBELN POSNR.
+
+* 売掛（AR）情報取得
+REFRESH O_TD_AR_DC.
+IF LTD_203[] IS NOT INITIAL.
+SELECT VBRP~VGBEL       " 参照伝票番号
+VBRP~VGPOS       " 参照明細番号
+VBRP~VBELN       " 請求伝票
+VBRP~POSNR       " 請求明細
+VBRP~FKIMG       " 請求数量
+VBRP~VRKME       " 販売単位
+VBRP~MEINS       " 基本数量単位
+VBRP~NETWR       " 伝票通貨の正味額
+VBRK~WAERK       " 通貨コード
+VBRK~FKDAT       " 請求日
+INTO TABLE O_TD_AR_DC
+FROM VBRP AS VBRP
+INNER JOIN VBRK AS VBRK
+ON VBRK~VBELN = VBRP~VBELN
+FOR ALL ENTRIES IN LTD_203
+WHERE VBRP~VGBEL  = LTD_203-VBELN
+AND VBRP~VGPOS  = LTD_203-POSNR
+AND VBRK~FKDAT IN S_BUDAT.
+ENDIF.
+
+* SORT
+SORT O_TD_AR_OR BY VGBEL VGPOS.
+SORT O_TD_AR_DC BY VGBEL VGPOS.
+
+ENDFORM.                    " GET_AR_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*       会社連携データよりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_ZTEGSDT203  会社連携データ
+*      -->I_TH_COMP        会社データ
+*      <--O_TH_ALV_LIST    ALVItemデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_ZTEGSDT203
+USING    I_TH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203
+I_TH_COMP       TYPE TYP_TH_COMP
+CHANGING O_TH_ALV_LIST   TYPE ZSEGSD0024.
+
+O_TH_ALV_LIST-EBELN = I_TH_ZTEGSDT203-EBELN.   " 購買伝票番号
+O_TH_ALV_LIST-EBELP = I_TH_ZTEGSDT203-EBELP.   " 購買伝票明細
+O_TH_ALV_LIST-EKGRP = I_TH_ZTEGSDT203-EKGRP.   " 購買グループ
+O_TH_ALV_LIST-VBELN = I_TH_ZTEGSDT203-VBELN.   " 販売伝票
+O_TH_ALV_LIST-POSNR = I_TH_ZTEGSDT203-POSNR.   " 販売伝票明細
+O_TH_ALV_LIST-VKGRP = I_TH_ZTEGSDT203-VKGRP.   " 営業グループ
+O_TH_ALV_LIST-MATNR = I_TH_ZTEGSDT203-MATNR.   " 品目コード
+O_TH_ALV_LIST-TXZ01 = I_TH_ZTEGSDT203-TXZ01.   " 品目テキスト
+
+O_TH_ALV_LIST-BUKRS_SO = I_TH_COMP-BUKRS_SO.   " Sales. Comp
+O_TH_ALV_LIST-BUTXT_SO = I_TH_COMP-BUTXT_SO.   " Name
+O_TH_ALV_LIST-BUKRS_PO = I_TH_COMP-BUKRS_PO.   " Puch. Comp
+O_TH_ALV_LIST-BUTXT_PO = I_TH_COMP-BUTXT_PO.   " Name
+
+ENDFORM.                    " SET_ALV_FROM_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_PO
+*&---------------------------------------------------------------------*
+*       発注情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_ZTEGSDT203  会社連携データ
+*      -->I_TD_PO          発注情報
+*      <--O_TH_ALV_LIST    ALVItemデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_PO
+USING    I_TH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203
+I_TD_PO         TYPE TYP_TD_PO
+CHANGING O_TH_ALV_LIST   TYPE ZSEGSD0024.
+
+DATA LTH_PO TYPE TYP_TH_PO.
+
+CLEAR LTH_PO.
+READ TABLE I_TD_PO INTO LTH_PO
+WITH KEY EBELN = I_TH_ZTEGSDT203-EBELN
+EBELP = I_TH_ZTEGSDT203-EBELP
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV_LIST-LIFNR      = LTH_PO-LIFNR.    " 仕入先
+O_TH_ALV_LIST-NAME_LIFNR = LTH_PO-NAME1.    " 名称1
+O_TH_ALV_LIST-BEDAT      = LTH_PO-BEDAT.    " 購買伝票日付
+O_TH_ALV_LIST-NETWR_PO   = LTH_PO-NETWR.    " 正味発注額
+O_TH_ALV_LIST-WAERS_PO   = LTH_PO-WAERS.    " 通貨コード
+O_TH_ALV_LIST-MEINS_PO   = LTH_PO-LMEIN.    " 基本数量単位
+
+* 数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV_LIST-MATNR        " 品目コード
+LTH_PO-MEINS               " 発注単位
+LTH_PO-LMEIN               " 基本数量単位
+LTH_PO-MENGE               " 数量
+CHANGING O_TH_ALV_LIST-MENGE_PO.    " 数量
+
+* 返品発注の場合
+IF LTH_PO-BSART = CNS_BSART_Z.
+O_TH_ALV_LIST-NETWR_PO = O_TH_ALV_LIST-NETWR_PO * ( -1 ).
+O_TH_ALV_LIST-MENGE_PO = O_TH_ALV_LIST-MENGE_PO * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_PO
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_SO
+*&---------------------------------------------------------------------*
+*       受注情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_ZTEGSDT203  会社連携データ
+*      -->I_TD_SO          受注情報
+*      <--O_TH_ALV_LIST    ALVItemデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_SO
+USING    I_TH_ZTEGSDT203 TYPE TYP_TH_ZTEGSDT203
+I_TD_SO         TYPE TYP_TD_SO
+CHANGING O_TH_ALV_LIST   TYPE ZSEGSD0024.
+
+DATA LTH_SO TYPE TYP_TH_SO.
+**** START ADD 2015/06/08 ISID18 ****
+DATA LW_MENGE TYPE EKPO-MENGE.
+**** END ADD 2015/06/08 ISID18 ****
+
+CLEAR LTH_SO.
+READ TABLE I_TD_SO INTO LTH_SO
+WITH KEY VBELN = I_TH_ZTEGSDT203-VBELN
+POSNR = I_TH_ZTEGSDT203-POSNR
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV_LIST-KUNNR      = LTH_SO-KUNNR.    " 受注先
+O_TH_ALV_LIST-NAME_KUNNR = LTH_SO-NAME1.    " 名称1
+O_TH_ALV_LIST-AUART      = LTH_SO-AUART.    " 販売伝票タイプ
+O_TH_ALV_LIST-AUDAT      = LTH_SO-AUDAT.    " 伝票日付
+O_TH_ALV_LIST-NETWR_SO   = LTH_SO-NETWR.    " 正味発注額
+O_TH_ALV_LIST-WAERS_SO   = LTH_SO-WAERK.    " 通貨コード
+O_TH_ALV_LIST-VBTYP      = LTH_SO-VBTYP.    " 受注伝票カテゴリ
+O_TH_ALV_LIST-MEINS_SO   = LTH_SO-MEINS.    " 基本数量単位
+
+* 数量編集
+CASE LTH_SO-VBTYP.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+**** START UPD 2015/06/08 ISID18 ****
+*      O_TH_ALV_LIST-MENGE_SO = LTH_SO-KLMENG.   " 数量
+LW_MENGE = LTH_SO-KWMENG.
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV_LIST-MATNR        " 品目コード
+LTH_SO-VRKME               " 販売単位
+LTH_SO-MEINS               " 基本数量単位
+LW_MENGE                   " 基本数量単位
+CHANGING O_TH_ALV_LIST-MENGE_SO.    " 数量
+**** END UPD 2015/06/08 ISID18 ****
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV_LIST-MATNR        " 品目コード
+LTH_SO-ZIEME               " 販売単位
+LTH_SO-MEINS               " 基本数量単位
+LTH_SO-ZMENG               " 数量
+CHANGING O_TH_ALV_LIST-MENGE_SO.    " 数量
+WHEN OTHERS.
+ENDCASE.
+
+* 返品、クレジットメモの場合
+IF LTH_SO-VBTYP = CNS_VBTYP_H OR
+LTH_SO-VBTYP = CNS_VBTYP_K.
+O_TH_ALV_LIST-NETWR_SO = O_TH_ALV_LIST-NETWR_SO * ( -1 ).
+O_TH_ALV_LIST-MENGE_SO = O_TH_ALV_LIST-MENGE_SO * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_SO
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_INBOUB
+*&---------------------------------------------------------------------*
+*       入出庫情報＆AP＆AR情報より編集
+*----------------------------------------------------------------------*
+*      -->I_TH_COMP   会社データ
+*      -->I_TD_INB    入庫情報
+*      -->I_TD_OUB    出庫情報
+*      -->I_TD_INV    Invoice情報
+*      -->I_TD_206    入出庫連携情報
+*      -->I_TD_AP     買掛情報
+*      -->I_TD_AR_OR  売掛情報(受注と返品)
+*      -->I_TD_AR_DC  売掛情報(CR　Or　DR)
+**** START ADD BY ISID17 2015/04/21 ****
+*      -->I_TD_PO     発注情報
+**** END ADD BY ISID17 2015/04/21 ****
+*      <--O_TH_ALV    ALVItem情報
+*      <--O_TD_ALV    ALVItem情報
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_INBOUB
+USING    I_TH_COMP  TYPE TYP_TH_COMP
+I_TD_INB   TYPE TYP_TD_INB
+I_TD_OUB   TYPE TYP_TD_OUB
+I_TD_INV   TYPE TYP_TD_INV
+I_TD_206   TYPE TYP_TD_ZTEGSDT206
+I_TD_AP    TYPE TYP_TD_AP
+I_TD_AR_OR TYPE TYP_TD_AR
+I_TD_AR_DC TYPE TYP_TD_AR
+**** START ADD BY ISID17 2015/04/21 ****
+I_TD_PO    TYPE TYP_TD_PO
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING O_TH_ALV   TYPE ZSEGSD0024
+O_TD_ALV   TYPE TYP_TD_ZSEGSD0024.
+
+DATA: LTH_INB      TYPE TYP_TH_INB,
+LTH_OUB      TYPE TYP_TH_OUB,
+LTD_INB      TYPE TYP_TD_INB,
+LTD_OUB      TYPE TYP_TD_OUB,
+LTD_OUB_OK   TYPE TYP_TD_OUB,
+LTD_AR       TYPE TYP_TD_AR,
+LTH_206      TYPE TYP_TH_ZTEGSDT206,
+LTH_ALV_TMP  TYPE ZSEGSD0024,
+**** START ADD BY ISID17 2015/04/21 ****
+LTH_PO       TYPE TYP_TH_PO,
+**** END ADD BY ISID17 2015/04/21 ****
+LW_SUBRC_206 TYPE CHAR01,
+LW_SUBRC_INB TYPE SY-SUBRC,
+LW_SUBRC_OUB TYPE SY-SUBRC.
+
+* 一時的に保存
+LTD_INB[] = I_TD_INB[].
+LTD_OUB[] = I_TD_OUB[].
+LTD_AR[]  = I_TD_AR_DC[].
+SORT LTD_INB BY EBELN EBELP.
+SORT LTD_OUB BY VBELV POSNV.
+SORT LTD_AR  BY VGBEL VGPOS.
+
+**** START ADD BY ISID17 2015/04/21 ****
+* 発注情報の取得
+READ TABLE I_TD_PO INTO LTH_PO
+TRANSPORTING MEINS                 "発注単位
+WITH KEY EBELN = O_TH_ALV-EBELN
+EBELP = O_TH_ALV-EBELP
+BINARY SEARCH.
+**** END ADD BY ISID17 2015/04/21 ****
+
+* 入庫情報あるか判定
+READ TABLE LTD_INB TRANSPORTING NO FIELDS
+WITH KEY EBELN = O_TH_ALV-EBELN
+EBELP = O_TH_ALV-EBELP.
+LW_SUBRC_INB = SY-SUBRC.
+
+* 出庫情報あるか判定
+READ TABLE LTD_OUB TRANSPORTING NO FIELDS
+WITH KEY VBELV = O_TH_ALV-VBELN
+POSNV = O_TH_ALV-POSNR
+BINARY SEARCH.
+LW_SUBRC_OUB = SY-SUBRC.
+
+* デビットメモ、クレジットメモの場合
+READ TABLE LTD_AR TRANSPORTING NO FIELDS
+WITH KEY VGBEL = O_TH_ALV-VBELN
+VGPOS = O_TH_ALV-POSNR
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING O_TH_ALV.
+ENDIF.
+
+* 入出庫情報がない場合
+IF LW_SUBRC_INB <> 0 AND
+LW_SUBRC_OUB <> 0.
+APPEND O_TH_ALV TO O_TD_ALV.
+RETURN.
+ENDIF.
+REFRESH LTD_OUB_OK.
+
+* 入庫情報設定
+IF LW_SUBRC_INB = 0.
+LOOP AT I_TD_INB INTO LTH_INB
+WHERE EBELN = O_TH_ALV-EBELN
+AND EBELP = O_TH_ALV-EBELP.
+CLEAR LTH_ALV_TMP.
+LTH_ALV_TMP = O_TH_ALV.
+
+*     入庫情報より編集
+PERFORM SET_ALV_FROM_INB
+USING    LTH_INB
+CHANGING LTH_ALV_TMP.
+
+*     買掛情報より編集
+PERFORM SET_ALV_FROM_AP
+USING    LTH_INB
+I_TD_AP
+**** START ADD BY ISID17 2015/04/21 ****
+LTH_PO-MEINS                 "発注単位
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING LTH_ALV_TMP.
+
+*     入出庫連携情報チェック
+CLEAR: LTH_206, LW_SUBRC_206.
+CASE LTH_INB-BWART.
+*       入出庫取消連携
+WHEN CNS_BWART_102
+OR CNS_BWART_162.
+LOOP AT I_TD_206 INTO LTH_206
+WHERE EBELN      = LTH_INB-EBELN
+AND MBLNR_INB  = LTH_INB-SMBLN
+AND MJAHR_INB  = LTH_INB-SJAHR
+AND KDAUF      = LTH_ALV_TMP-VBELN
+AND MBLNR_OUTB IS NOT INITIAL
+AND MJAHR_OUTB IS NOT INITIAL.
+LOOP AT LTD_OUB INTO LTH_OUB
+WHERE   VBELV = LTH_ALV_TMP-VBELN
+AND   POSNV = LTH_ALV_TMP-POSNR
+AND ( BWART = CNS_BWART_962 OR
+BWART = CNS_BWART_964 )
+AND   SMBLN = LTH_206-MBLNR_OUTB
+AND   SJAHR = LTH_206-MJAHR_OUTB.
+*             出庫情報より編集
+PERFORM SET_ALV_FROM_OUB
+USING    LTH_OUB
+I_TH_COMP
+I_TD_INV
+CHANGING LTH_ALV_TMP.
+*             売掛情報より編集
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING LTH_ALV_TMP.
+*             ALVに追加
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+APPEND LTH_OUB TO LTD_OUB_OK.
+LW_SUBRC_206 = ABAP_TRUE.
+ENDLOOP.
+ENDLOOP.
+
+*       入出庫連携
+WHEN OTHERS.
+LOOP AT I_TD_206 INTO LTH_206
+WHERE EBELN      = LTH_INB-EBELN
+AND MBLNR_INB  = LTH_INB-MBLNR
+AND MJAHR_INB  = LTH_INB-MJAHR
+AND KDAUF      = LTH_ALV_TMP-VBELN
+AND MBLNR_OUTB IS NOT INITIAL
+AND MJAHR_OUTB IS NOT INITIAL.
+LOOP AT LTD_OUB INTO LTH_OUB
+WHERE   VBELV = LTH_ALV_TMP-VBELN
+AND   POSNV = LTH_ALV_TMP-POSNR
+AND   MBLNR = LTH_206-MBLNR_OUTB
+AND   MJAHR = LTH_206-MJAHR_OUTB.
+*             出庫情報より編集
+PERFORM SET_ALV_FROM_OUB
+USING    LTH_OUB
+I_TH_COMP
+I_TD_INV
+CHANGING LTH_ALV_TMP.
+*             売掛情報より編集
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING LTH_ALV_TMP.
+*             ALVに追加
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+APPEND LTH_OUB TO LTD_OUB_OK.
+LW_SUBRC_206 = ABAP_TRUE.
+ENDLOOP.
+ENDLOOP.
+ENDCASE.
+IF LW_SUBRC_206 IS INITIAL.
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+SORT LTD_OUB_OK BY VBELV POSNV
+MBLNR MJAHR ZEILE.
+* 出庫情報設定
+IF LW_SUBRC_OUB = 0.
+LOOP AT LTD_OUB INTO LTH_OUB
+WHERE VBELV = O_TH_ALV-VBELN
+AND POSNV = O_TH_ALV-POSNR.
+READ TABLE LTD_OUB_OK TRANSPORTING NO FIELDS
+WITH KEY VBELV = LTH_OUB-VBELV
+POSNV = LTH_OUB-POSNV
+MBLNR = LTH_OUB-MBLNR
+MJAHR = LTH_OUB-MJAHR
+ZEILE = LTH_OUB-ZEILE
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+CLEAR: LTH_ALV_TMP.
+LTH_ALV_TMP = O_TH_ALV.
+*       出庫情報より編集
+PERFORM SET_ALV_FROM_OUB
+USING    LTH_OUB
+I_TH_COMP
+I_TD_INV
+CHANGING LTH_ALV_TMP.
+*       売掛情報より編集
+PERFORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR
+I_TD_AR_DC
+CHANGING LTH_ALV_TMP.
+APPEND LTH_ALV_TMP TO O_TD_ALV.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_INBOUB
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_INB
+*&---------------------------------------------------------------------*
+*       入庫情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_INB  入庫情報
+*      <--O_TH_ALV  ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_INB
+USING    I_TH_INB TYPE TYP_TH_INB
+CHANGING O_TH_ALV TYPE ZSEGSD0024.
+
+O_TH_ALV-MBLNR_INB    = I_TH_INB-MBLNR.         " 入庫伝票番号
+O_TH_ALV-MJAHR_INB    = I_TH_INB-MJAHR.         " 入庫伝票年
+O_TH_ALV-MBLPO_INB    = I_TH_INB-ZEILE.         " 入庫伝票明細
+O_TH_ALV-BUDAT_INB    = I_TH_INB-BUDAT_MKPF.    " 入庫転記日付
+O_TH_ALV-MEINS_INB    = I_TH_INB-MEINS.         " 基本数量単位
+O_TH_ALV-Z_INVOICE_NO = I_TH_INB-XBLNR_MKPF.    " Invoice
+
+CASE I_TH_INB-SHKZG.
+WHEN CNS_SHKZG_S.
+O_TH_ALV-MENGE_INB = I_TH_INB-MENGE.            " 入庫数量
+WHEN CNS_SHKZG_H.
+O_TH_ALV-MENGE_INB = I_TH_INB-MENGE * ( -1 ).   " 入庫数量
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " SET_ALV_FROM_INB
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_AP
+*&---------------------------------------------------------------------*
+*       買掛情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_INB  入庫情報
+*      -->I_TD_AP   買掛データ
+**** START ADD BY ISID17 2015/04/21 ****
+*      -->I_MEINS   発注単位
+**** END ADD BY ISID17 2015/04/21 ****
+*      <--O_TH_ALV  ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_AP
+USING    I_TH_INB TYPE TYP_TH_INB
+I_TD_AP  TYPE TYP_TD_AP
+**** START ADD BY ISID17 2015/04/21 ****
+I_MEINS  TYPE EKPO-MEINS
+**** END ADD BY ISID17 2015/04/21 ****
+CHANGING O_TH_ALV TYPE ZSEGSD0024.
+
+DATA LTH_AP TYPE TYP_TH_AP.
+
+IF I_TH_INB-MBLNR IS INITIAL OR
+I_TH_INB-MJAHR IS INITIAL OR
+I_TH_INB-ZEILE IS INITIAL.
+RETURN.
+ENDIF.
+
+CLEAR LTH_AP.
+READ TABLE I_TD_AP INTO LTH_AP
+WITH KEY LFBNR = I_TH_INB-MBLNR
+LFGJA = I_TH_INB-MJAHR
+LFPOS = I_TH_INB-ZEILE
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV-BELNR_AP = LTH_AP-BELNR.    " 請求書伝票番号
+O_TH_ALV-GJAHR_AP = LTH_AP-GJAHR.    " 請求書伝票年
+O_TH_ALV-BUZEI_AP = LTH_AP-BUZEI.    " 請求書伝票明細
+O_TH_ALV-BUDAT_AP = LTH_AP-BUDAT.    " 請求書転記日付
+O_TH_ALV-WRBTR_AP = LTH_AP-WRBTR.    " 照合金額
+O_TH_ALV-WAERS_AP = LTH_AP-WAERS.    " 通貨コード
+O_TH_ALV-MEINS_AP = I_TH_INB-MEINS.  " 基本数量単位
+
+* 数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV-MATNR             " 品目コード
+**** START UPD BY ISID17 2015/04/21 ****
+*             I_TH_INB-ERFME            "発注単位
+I_MEINS                    "発注単位
+**** END UPD BY ISID17 2015/04/21 ****
+I_TH_INB-MEINS             " 基本数量単位
+LTH_AP-MENGE               " 数量
+CHANGING O_TH_ALV-MENGE_AP.         " 数量
+
+* 貸方の場合
+IF LTH_AP-SHKZG = CNS_SHKZG_H.
+O_TH_ALV-WRBTR_AP = O_TH_ALV-WRBTR_AP * ( -1 ).
+O_TH_ALV-MENGE_AP = O_TH_ALV-MENGE_AP * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_AP
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_OUB
+*&---------------------------------------------------------------------*
+*       出庫情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TH_OUB    出庫情報
+*      -->I_TH_COMP   会社データ
+*      -->I_TD_INV    Invoice情報
+*      <--O_TH_ALV    ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_OUB
+USING    I_TH_OUB   TYPE TYP_TH_OUB
+I_TH_COMP  TYPE TYP_TH_COMP
+I_TD_INV   TYPE TYP_TD_INV
+CHANGING O_TH_ALV   TYPE ZSEGSD0024.
+
+DATA: LTH_INV    TYPE TYP_TH_INV,
+LW_INVOICE TYPE ZSEGSD0024-Z_INVOICE_NO.
+
+* Invoice番号取得
+CASE I_TH_COMP-HDOFF_SO.
+WHEN ABAP_TRUE.
+PERFORM CALL_READ_TEXT
+USING    I_TH_OUB-VBELN_IM
+CHANGING LW_INVOICE.
+WHEN SPACE.
+CLEAR LTH_INV.
+READ TABLE I_TD_INV INTO LTH_INV
+WITH KEY VBELN = I_TH_OUB-VBELN_IM
+BINARY SEARCH.
+LW_INVOICE = LTH_INV-Z_INVOICE_NO.
+WHEN OTHERS.
+ENDCASE.
+
+O_TH_ALV-MBLNR_OUB    = I_TH_OUB-MBLNR.         " 出庫伝票番号
+O_TH_ALV-MJAHR_OUB    = I_TH_OUB-MJAHR.         " 出庫伝票年
+O_TH_ALV-MBLPO_OUB    = I_TH_OUB-ZEILE.         " 出庫伝票明細
+O_TH_ALV-BUDAT_OUB    = I_TH_OUB-BUDAT_MKPF.    " 出庫転記日付
+O_TH_ALV-MEINS_OUB    = I_TH_OUB-MEINS.         " 基本数量単位
+O_TH_ALV-Z_INVOICE_NO = LW_INVOICE.             " Invoice
+O_TH_ALV-VBELN_IM     = I_TH_OUB-VBELN_IM.      " 出荷伝票
+O_TH_ALV-VBELP_IM     = I_TH_OUB-VBELP_IM.      " 出荷明細
+
+CASE I_TH_OUB-SHKZG.
+WHEN CNS_SHKZG_H.
+O_TH_ALV-MENGE_OUB = I_TH_OUB-MENGE.            " 出庫数量
+WHEN CNS_SHKZG_S.
+O_TH_ALV-MENGE_OUB = I_TH_OUB-MENGE * ( -1 ).   " 出庫数量
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " SET_ALV_FROM_OUB
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_FROM_AR
+*&---------------------------------------------------------------------*
+*       売掛情報よりALVItemデータの編集
+*----------------------------------------------------------------------*
+*      -->I_TD_AR_OR  売掛情報(受注と返品)
+*      -->I_TD_AR_DC  売掛情報(CR　Or　DR)
+*      <--O_TH_ALV    ALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_FROM_AR
+USING    I_TD_AR_OR TYPE TYP_TD_AR
+I_TD_AR_DC TYPE TYP_TD_AR
+CHANGING O_TH_ALV   TYPE ZSEGSD0024.
+
+DATA: LTH_AR TYPE TYP_TH_AR.
+
+CASE O_TH_ALV-VBTYP.
+
+*   受注と返品の場合
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+CLEAR LTH_AR.
+READ TABLE I_TD_AR_OR INTO LTH_AR
+WITH KEY VGBEL = O_TH_ALV-VBELN_IM
+VGPOS = O_TH_ALV-VBELP_IM
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV-BELNR_AR = LTH_AR-VBELN.    " 請求伝票番号
+O_TH_ALV-BUZEI_AR = LTH_AR-POSNR.    " 請求伝票明細
+O_TH_ALV-BUDAT_AR = LTH_AR-FKDAT.    " 請求転記日付
+O_TH_ALV-WRBTR_AR = LTH_AR-NETWR.    " 請求金額
+O_TH_ALV-WAERS_AR = LTH_AR-WAERK.    " 通貨コード
+O_TH_ALV-MEINS_AR = LTH_AR-MEINS.    " 基本数量単位
+
+*     数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV-MATNR            " 品目コード
+LTH_AR-VRKME              " 販売単位
+LTH_AR-MEINS              " 基本数量単位
+LTH_AR-FKIMG              " 数量
+CHANGING O_TH_ALV-MENGE_AR.        " 数量
+
+*   クレジットメモ or デビットメモの場合
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+CLEAR LTH_AR.
+READ TABLE I_TD_AR_DC INTO LTH_AR
+WITH KEY VGBEL = O_TH_ALV-VBELN
+VGPOS = O_TH_ALV-POSNR
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+RETURN.
+ENDIF.
+
+O_TH_ALV-BELNR_AR = LTH_AR-VBELN.    " 請求伝票番号
+O_TH_ALV-BUZEI_AR = LTH_AR-POSNR.    " 請求伝票明細
+O_TH_ALV-BUDAT_AR = LTH_AR-FKDAT.    " 請求転記日付
+O_TH_ALV-WRBTR_AR = LTH_AR-NETWR.    " 請求金額
+O_TH_ALV-WAERS_AR = LTH_AR-WAERK.    " 通貨コード
+O_TH_ALV-MEINS_AR = LTH_AR-MEINS.    " 基本数量単位
+
+*     数量変換
+PERFORM CONVERT_MENGE
+USING    O_TH_ALV-MATNR            " 品目コード
+LTH_AR-VRKME              " 販売単位
+LTH_AR-MEINS              " 基本数量単位
+LTH_AR-FKIMG              " 数量
+CHANGING O_TH_ALV-MENGE_AR.        " 数量
+WHEN OTHERS.
+ENDCASE.
+
+* 返品、クレジットメモの場合
+IF O_TH_ALV-VBTYP = CNS_VBTYP_H OR
+O_TH_ALV-VBTYP = CNS_VBTYP_K.
+O_TH_ALV-WRBTR_AR = O_TH_ALV-WRBTR_AR * ( -1 ).
+O_TH_ALV-MENGE_AR = O_TH_ALV-MENGE_AR * ( -1 ).
+ENDIF.
+
+ENDFORM.                    " SET_ALV_FROM_AR
+*&---------------------------------------------------------------------*
+*&      Form  CALL_READ_TEXT
+*&---------------------------------------------------------------------*
+*       Invoice番号取得
+*----------------------------------------------------------------------*
+*      -->I_VBELN    出荷伝票
+*      <--O_INVOICE  Invoice番号
+*----------------------------------------------------------------------*
+FORM CALL_READ_TEXT
+USING    I_VBELN   TYPE MSEG-VBELN_IM
+CHANGING O_INVOICE TYPE ZTEGSDT001-Z_INVOICE_NO.
+
+DATA: LW_NAME     TYPE THEAD-TDNAME,
+LW_MSG(128) TYPE C,
+LTH_LINES   TYPE TLINE,
+LTD_LINES   TYPE STANDARD TABLE OF TLINE.
+
+CLEAR O_INVOICE.
+
+LW_NAME = I_VBELN.
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID                      = 'Z031'
+LANGUAGE                = SY-LANGU
+NAME                    = LW_NAME
+OBJECT                  = 'VBBK'
+TABLES
+LINES                   = LTD_LINES
+EXCEPTIONS
+ID                      = 1
+LANGUAGE                = 2
+NAME                    = 3
+NOT_FOUND               = 4
+OBJECT                  = 5
+REFERENCE_CHECK         = 6
+WRONG_ACCESS_TO_ARCHIVE = 7
+OTHERS                  = 8.
+
+CASE SY-SUBRC.
+WHEN 0.
+READ TABLE LTD_LINES INTO LTH_LINES INDEX 1.
+O_INVOICE = LTH_LINES-TDLINE.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE ID SY-MSGID
+TYPE SY-MSGTY
+NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+INTO LW_MSG.
+*     汎用モジュールにて想定外のエラーが発生しました。
+MESSAGE S032
+WITH 'READ_TEXT' LW_MSG
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDCASE.
+
+ENDFORM.                    " CALL_READ_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  SET_FLG_ALV_LIST
+*&---------------------------------------------------------------------*
+*       フラグ設定
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_LIST  入出庫明細レベル
+*----------------------------------------------------------------------*
+FORM SET_FLG_ALV_LIST
+CHANGING O_TD_ALV_LIST TYPE TYP_TD_ZSEGSD0024.
+
+FIELD-SYMBOLS <LFS_ALV> TYPE ZSEGSD0024.
+
+LOOP AT O_TD_ALV_LIST ASSIGNING <LFS_ALV>.
+
+*   受発注
+IF <LFS_ALV>-NETWR_PO = <LFS_ALV>-NETWR_SO AND
+<LFS_ALV>-WAERS_PO = <LFS_ALV>-WAERS_SO AND
+<LFS_ALV>-MENGE_PO = <LFS_ALV>-MENGE_SO.
+<LFS_ALV>-FLG_PO_SO = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_PO_SO = TEXT-007.
+ENDIF.
+
+*   入出庫
+CASE <LFS_ALV>-VBTYP.
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+<LFS_ALV>-FLG_INB_OUB = TEXT-008.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+IF <LFS_ALV>-MENGE_INB = <LFS_ALV>-MENGE_OUB AND
+<LFS_ALV>-BUDAT_INB = <LFS_ALV>-BUDAT_OUB.
+<LFS_ALV>-FLG_INB_OUB = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_INB_OUB = TEXT-007.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+*   債権債務
+IF <LFS_ALV>-MENGE_AP = <LFS_ALV>-MENGE_AR AND
+<LFS_ALV>-WRBTR_AP = <LFS_ALV>-WRBTR_AR AND
+<LFS_ALV>-WAERS_AP = <LFS_ALV>-WAERS_AR AND
+<LFS_ALV>-BUDAT_AP = <LFS_ALV>-BUDAT_AR.
+<LFS_ALV>-FLG_AP_AR = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_AP_AR = TEXT-007.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_FLG_ALV_LIST
+*&---------------------------------------------------------------------*
+*&      Form  SUM_BY_POSOH
+*&---------------------------------------------------------------------*
+*       PO/SOレベルの集計
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_POSOI   PO/SO明細レベル
+*      <--O_TD_ALV_POSOH   PO/SOレベル
+*----------------------------------------------------------------------*
+FORM SUM_BY_POSOH
+USING    I_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026
+CHANGING O_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+DATA: LTD_ALV      TYPE TYP_TD_ZSEGSD0026,
+LTH_ALV_POSO TYPE ZSEGSD0025,
+LTH_ALV      TYPE ZSEGSD0026,
+LTH_SUM      TYPE TYP_TH_SUM,
+LTH_ALV_S    TYPE ZSEGSD0026.
+
+* SORT
+LTD_ALV[] = I_TD_ALV_POSOI[].
+SORT LTD_ALV BY EBELN EBELP
+VBELN POSNR.
+
+* 集計
+LOOP AT LTD_ALV INTO LTH_ALV.
+IF LTH_ALV-EBELN <> LTH_ALV_S-EBELN OR
+LTH_ALV-VBELN <> LTH_ALV_S-VBELN.
+IF LTH_ALV_S IS NOT INITIAL.
+*       PO/SOレベルのデータ設定
+PERFORM SET_ALV_POSOH
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOH.
+ENDIF.
+CLEAR LTH_SUM.
+LTH_ALV_S = LTH_ALV.
+ENDIF.
+LTH_SUM-NETWR_PO  = LTH_SUM-NETWR_PO  + LTH_ALV-NETWR_PO.
+LTH_SUM-NETWR_SO  = LTH_SUM-NETWR_SO  + LTH_ALV-NETWR_SO.
+LTH_SUM-MENGE_PO  = LTH_SUM-MENGE_PO  + LTH_ALV-MENGE_PO.
+LTH_SUM-MENGE_SO  = LTH_SUM-MENGE_SO  + LTH_ALV-MENGE_SO.
+LTH_SUM-MENGE_INB = LTH_SUM-MENGE_INB + LTH_ALV-MENGE_INB.
+LTH_SUM-MENGE_OUB = LTH_SUM-MENGE_OUB + LTH_ALV-MENGE_OUB.
+LTH_SUM-WRBTR_AP  = LTH_SUM-WRBTR_AP  + LTH_ALV-WRBTR_AP.
+LTH_SUM-WRBTR_AR  = LTH_SUM-WRBTR_AR  + LTH_ALV-WRBTR_AR.
+LTH_SUM-MENGE_AP  = LTH_SUM-MENGE_AP  + LTH_ALV-MENGE_AP.
+LTH_SUM-MENGE_AR  = LTH_SUM-MENGE_AR  + LTH_ALV-MENGE_AR.
+ENDLOOP.
+
+* PO/SOレベルのデータ設定
+PERFORM SET_ALV_POSOH
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOH.
+
+* フラグ設定
+PERFORM SET_FLG_POSOH
+CHANGING O_TD_ALV_POSOH.
+
+ENDFORM.                    " SUM_BY_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  SUM_BY_POSOI
+*&---------------------------------------------------------------------*
+*       PO/SO明細レベルの集計
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_LIST   入出庫明細レベル
+*      <--O_TD_ALV_POSOI  PO/SO明細レベル
+*----------------------------------------------------------------------*
+FORM SUM_BY_POSOI
+USING    I_TD_ALV_LIST  TYPE TYP_TD_ZSEGSD0024
+CHANGING O_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+DATA: LTD_ALV      TYPE TYP_TD_ZSEGSD0024,
+LTH_ALV_POSO TYPE ZSEGSD0026,
+LTH_ALV      TYPE ZSEGSD0024,
+LTH_SUM      TYPE TYP_TH_SUM,
+LTH_ALV_S    TYPE ZSEGSD0024.
+
+* SORT
+LTD_ALV[] = I_TD_ALV_LIST[].
+SORT LTD_ALV BY EBELN EBELP
+VBELN POSNR.
+
+* 集計
+LOOP AT LTD_ALV INTO LTH_ALV.
+IF LTH_ALV-EBELN <> LTH_ALV_S-EBELN OR
+LTH_ALV-EBELP <> LTH_ALV_S-EBELP OR
+LTH_ALV-VBELN <> LTH_ALV_S-VBELN OR
+LTH_ALV-POSNR <> LTH_ALV_S-POSNR.
+IF LTH_ALV_S IS NOT INITIAL.
+*       PO/SO明細レベルのデータ設定
+PERFORM SET_ALV_POSOI
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOI.
+ENDIF.
+CLEAR LTH_SUM.
+LTH_ALV_S = LTH_ALV.
+ENDIF.
+LTH_SUM-MENGE_INB = LTH_SUM-MENGE_INB + LTH_ALV-MENGE_INB.
+LTH_SUM-MENGE_OUB = LTH_SUM-MENGE_OUB + LTH_ALV-MENGE_OUB.
+LTH_SUM-WRBTR_AP  = LTH_SUM-WRBTR_AP + LTH_ALV-WRBTR_AP.
+LTH_SUM-WRBTR_AR  = LTH_SUM-WRBTR_AR + LTH_ALV-WRBTR_AR.
+LTH_SUM-MENGE_AP  = LTH_SUM-MENGE_AP + LTH_ALV-MENGE_AP.
+LTH_SUM-MENGE_AR  = LTH_SUM-MENGE_AR + LTH_ALV-MENGE_AR.
+LTH_ALV_S-WAERS_AR  = LTH_ALV-WAERS_AR.
+LTH_ALV_S-MEINS_SO  = LTH_ALV-MEINS_SO.
+LTH_ALV_S-MEINS_OUB = LTH_ALV-MEINS_OUB.
+LTH_ALV_S-MEINS_AR  = LTH_ALV-MEINS_AR.
+ENDLOOP.
+
+* PO/SO明細レベルのデータ設定
+PERFORM SET_ALV_POSOI
+USING    LTH_ALV_S
+LTH_SUM
+CHANGING LTH_ALV_POSO.
+APPEND LTH_ALV_POSO TO O_TD_ALV_POSOI.
+
+* フラグ設定
+PERFORM SET_FLG_POSOI
+CHANGING O_TD_ALV_POSOI.
+
+ENDFORM.                    " SUM_BY_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  SET_FLG_POSOH
+*&---------------------------------------------------------------------*
+*       フラグ設定
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOH  PO/SOレベル
+*----------------------------------------------------------------------*
+FORM SET_FLG_POSOH
+CHANGING O_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+FIELD-SYMBOLS <LFS_ALV> TYPE ZSEGSD0025.
+
+LOOP AT O_TD_ALV_POSOH ASSIGNING <LFS_ALV>.
+
+*   受発注
+IF <LFS_ALV>-NETWR_PO = <LFS_ALV>-NETWR_SO AND
+<LFS_ALV>-WAERS_PO = <LFS_ALV>-WAERS_SO AND
+<LFS_ALV>-MENGE_PO = <LFS_ALV>-MENGE_SO.
+<LFS_ALV>-FLG_PO_SO = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_PO_SO = TEXT-007.
+ENDIF.
+
+*   入出庫
+CASE <LFS_ALV>-VBTYP.
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+<LFS_ALV>-FLG_INB_OUB = TEXT-008.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+IF <LFS_ALV>-MENGE_INB = <LFS_ALV>-MENGE_OUB.
+<LFS_ALV>-FLG_INB_OUB = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_INB_OUB = TEXT-007.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+*   債権債務
+IF <LFS_ALV>-MENGE_AP = <LFS_ALV>-MENGE_AR AND
+<LFS_ALV>-WRBTR_AP = <LFS_ALV>-WRBTR_AR AND
+<LFS_ALV>-WAERS_AP = <LFS_ALV>-WAERS_AR.
+<LFS_ALV>-FLG_AP_AR = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_AP_AR = TEXT-007.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_FLG_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  SET_FLG_POSOI
+*&---------------------------------------------------------------------*
+*       フラグ設定
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOI  PO/SO明細レベル
+*----------------------------------------------------------------------*
+FORM SET_FLG_POSOI
+CHANGING O_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+FIELD-SYMBOLS <LFS_ALV> TYPE ZSEGSD0026.
+
+LOOP AT O_TD_ALV_POSOI ASSIGNING <LFS_ALV>.
+
+*   受発注
+IF <LFS_ALV>-NETWR_PO = <LFS_ALV>-NETWR_SO AND
+<LFS_ALV>-WAERS_PO = <LFS_ALV>-WAERS_SO AND
+<LFS_ALV>-MENGE_PO = <LFS_ALV>-MENGE_SO.
+<LFS_ALV>-FLG_PO_SO = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_PO_SO = TEXT-007.
+ENDIF.
+
+*   入出庫
+CASE <LFS_ALV>-VBTYP.
+WHEN CNS_VBTYP_K
+OR CNS_VBTYP_L.
+<LFS_ALV>-FLG_INB_OUB = TEXT-008.
+WHEN CNS_VBTYP_C
+OR CNS_VBTYP_H.
+IF <LFS_ALV>-MENGE_INB = <LFS_ALV>-MENGE_OUB.
+<LFS_ALV>-FLG_INB_OUB = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_INB_OUB = TEXT-007.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+*   債権債務
+IF <LFS_ALV>-MENGE_AP = <LFS_ALV>-MENGE_AR AND
+<LFS_ALV>-WRBTR_AP = <LFS_ALV>-WRBTR_AR AND
+<LFS_ALV>-WAERS_AP = <LFS_ALV>-WAERS_AR.
+<LFS_ALV>-FLG_AP_AR = TEXT-006.
+ELSE.
+<LFS_ALV>-FLG_AP_AR = TEXT-007.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_FLG_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_POSOH
+*&---------------------------------------------------------------------*
+*       PO/SOレベルのALVデータ設定
+*----------------------------------------------------------------------*
+*      -->I_TH_ALV_LIST  入出庫明細レベルのALVデータ
+*      -->I_TH_SUM       集計データ
+*      <--O_TH_ALV_H     PO/SOレベルのALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_POSOH
+USING    I_TH_ALV_LIST TYPE ZSEGSD0026
+I_TH_SUM      TYPE TYP_TH_SUM
+CHANGING O_TH_ALV_H    TYPE ZSEGSD0025.
+
+CLEAR O_TH_ALV_H.
+MOVE-CORRESPONDING I_TH_ALV_LIST TO O_TH_ALV_H.
+O_TH_ALV_H-MENGE_INB = I_TH_SUM-MENGE_INB.     " 入庫数量
+O_TH_ALV_H-MENGE_OUB = I_TH_SUM-MENGE_OUB.     " 出庫数量
+O_TH_ALV_H-WRBTR_AP  = I_TH_SUM-WRBTR_AP.      " 仕入額
+O_TH_ALV_H-WRBTR_AR  = I_TH_SUM-WRBTR_AR.      " 売上額
+O_TH_ALV_H-MENGE_AP  = I_TH_SUM-MENGE_AP.      " 照合数量
+O_TH_ALV_H-MENGE_AR  = I_TH_SUM-MENGE_AR.      " 請求数量
+O_TH_ALV_H-NETWR_PO  = I_TH_SUM-NETWR_PO.      " 発注金額
+O_TH_ALV_H-NETWR_SO  = I_TH_SUM-NETWR_SO.      " 受注金額
+O_TH_ALV_H-MENGE_PO  = I_TH_SUM-MENGE_PO.      " 発注数量
+O_TH_ALV_H-MENGE_SO  = I_TH_SUM-MENGE_SO.      " 受注数量
+
+ENDFORM.                    " SET_ALV_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_POSOI
+*&---------------------------------------------------------------------*
+*       PO/SO明細レベルのALVデータ設定
+*----------------------------------------------------------------------*
+*      -->I_TH_ALV_LIST  入出庫明細レベルのALVデータ
+*      -->I_TH_SUM       集計データ
+*      <--O_TH_ALV_I     PO/SO明細レベルのALVデータ
+*----------------------------------------------------------------------*
+FORM SET_ALV_POSOI
+USING    I_TH_ALV_LIST TYPE ZSEGSD0024
+I_TH_SUM      TYPE TYP_TH_SUM
+CHANGING O_TH_ALV_I    TYPE ZSEGSD0026.
+
+CLEAR O_TH_ALV_I.
+MOVE-CORRESPONDING I_TH_ALV_LIST TO O_TH_ALV_I.
+O_TH_ALV_I-MENGE_INB = I_TH_SUM-MENGE_INB.     " 入庫数量
+O_TH_ALV_I-MENGE_OUB = I_TH_SUM-MENGE_OUB.     " 出庫数量
+O_TH_ALV_I-WRBTR_AP  = I_TH_SUM-WRBTR_AP.      " 仕入額
+O_TH_ALV_I-WRBTR_AR  = I_TH_SUM-WRBTR_AR.      " 売上額
+O_TH_ALV_I-MENGE_AP  = I_TH_SUM-MENGE_AP.      " 照合数量
+O_TH_ALV_I-MENGE_AR  = I_TH_SUM-MENGE_AR.      " 請求数量
+
+ENDFORM.                    " SET_ALV_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_OUTPUT_POSOH
+*&---------------------------------------------------------------------*
+*       対象データの限定処理(受発注レベル)
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOH  受発注データ
+*----------------------------------------------------------------------*
+FORM CHECK_OUTPUT_POSOH
+CHANGING O_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+* 一致データがOFF
+IF CB_MATH IS INITIAL.
+DELETE O_TD_ALV_POSOH
+WHERE FLG_PO_SO  = TEXT-006
+AND ( FLG_INB_OUB = TEXT-008 OR
+FLG_INB_OUB = TEXT-006 )
+AND FLG_AP_AR = TEXT-006.
+ENDIF.
+
+* 不一致データがOFF
+IF CB_NMATH IS INITIAL.
+DELETE O_TD_ALV_POSOH
+WHERE FLG_PO_SO   = TEXT-007
+OR FLG_INB_OUB = TEXT-007
+OR FLG_AP_AR   = TEXT-007.
+ENDIF.
+
+* データ存在しない場合
+IF O_TD_ALV_POSOH[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* SORT
+SORT O_TD_ALV_POSOH
+BY BUKRS_PO
+EBELN
+VBELN.
+
+ENDFORM.                    " CHECK_OUTPUT_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_OUTPUT_POSOI
+*&---------------------------------------------------------------------*
+*       対象データの限定処理(受発注明細レベル)
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_POSOI  受発注明細データ
+*----------------------------------------------------------------------*
+FORM CHECK_OUTPUT_POSOI
+CHANGING O_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+* 一致データがOFF
+IF CB_MATH IS INITIAL.
+DELETE O_TD_ALV_POSOI
+WHERE FLG_PO_SO  = TEXT-006
+AND ( FLG_INB_OUB = TEXT-008 OR
+FLG_INB_OUB = TEXT-006 )
+AND FLG_AP_AR = TEXT-006.
+ENDIF.
+
+* 不一致データがOFF
+IF CB_NMATH IS INITIAL.
+DELETE O_TD_ALV_POSOI
+WHERE FLG_PO_SO   = TEXT-007
+OR FLG_INB_OUB = TEXT-007
+OR FLG_AP_AR   = TEXT-007.
+ENDIF.
+
+* データ存在しない場合
+IF O_TD_ALV_POSOI[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* SORT
+SORT O_TD_ALV_POSOI
+BY BUKRS_PO
+EBELN EBELP
+VBELN POSNR.
+
+ENDFORM.                    " CHECK_OUTPUT_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_OUTPUT_LIST
+*&---------------------------------------------------------------------*
+*       対象データの限定処理(入出庫明細レベル)
+*----------------------------------------------------------------------*
+*      <--O_TD_ALV_LIST  入出庫明細データ
+*----------------------------------------------------------------------*
+FORM CHECK_OUTPUT_LIST
+CHANGING O_TD_ALV_LIST TYPE TYP_TD_ZSEGSD0024.
+
+* 一致データがOFF
+IF CB_MATH IS INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE FLG_PO_SO  = TEXT-006
+AND ( FLG_INB_OUB = TEXT-008 OR
+FLG_INB_OUB = TEXT-006 )
+AND FLG_AP_AR = TEXT-006.
+ENDIF.
+
+* 不一致データがOFF
+IF CB_NMATH IS INITIAL.
+DELETE O_TD_ALV_LIST
+WHERE FLG_PO_SO   = TEXT-007
+OR FLG_INB_OUB = TEXT-007
+OR FLG_AP_AR   = TEXT-007.
+ENDIF.
+
+* データ存在しない場合
+IF O_TD_ALV_LIST[] IS INITIAL.
+MESSAGE S064.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " CHECK_OUTPUT_LIST
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_POSOH
+*&---------------------------------------------------------------------*
+*       ALV一覧出力(受発注レベル)
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_POSOH  受発注データ
+*----------------------------------------------------------------------*
+FORM DISPLAY_ALV_POSOH
+USING I_TD_ALV_POSOH TYPE TYP_TD_ZSEGSD0025.
+
+DATA: LTH_LAYOUT   TYPE LVC_S_LAYO,     "slis_layout_alv
+LTD_FIELDCAT TYPE LVC_T_FCAT,     "ALV fieldcat 属性の設定
+LTH_VARI     TYPE DISVARIANT,
+LTH_PRINT    TYPE LVC_S_PRNT.
+
+FIELD-SYMBOLS <LFS_FIELDCAT> TYPE LVC_S_FCAT.
+
+* fielcat 属性の設定
+CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = CNS_TBNAM_H
+CHANGING
+CT_FIELDCAT            = LTD_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* 販売伝票カテゴリ非表示
+LOOP AT LTD_FIELDCAT ASSIGNING <LFS_FIELDCAT>
+WHERE FIELDNAME = 'VBTYP'     OR
+FIELDNAME = 'MEINS_PO'  OR
+FIELDNAME = 'MEINS_SO'  OR
+FIELDNAME = 'MEINS_INB' OR
+FIELDNAME = 'MEINS_OUB' OR
+FIELDNAME = 'MEINS_AP'  OR
+FIELDNAME = 'MEINS_AR'.
+<LFS_FIELDCAT>-NO_OUT = ABAP_TRUE.
+ENDLOOP.
+
+* LAYOUT の設定
+LTH_LAYOUT-CWIDTH_OPT = ABAP_TRUE.
+LTH_LAYOUT-ZEBRA      = ABAP_TRUE.
+
+* バリアントなど の設定
+LTH_VARI-REPORT = SY-REPID.
+LTH_VARI-HANDLE = '2000'.
+
+* 印刷パラメータ取得
+CASE SY-BATCH.
+WHEN SPACE.
+CLEAR LTH_PRINT.
+WHEN ABAP_TRUE.
+PERFORM GET_PRINT_PARAMETER
+CHANGING LTH_PRINT.
+ENDCASE.
+
+* ALV出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+EXPORTING
+I_CALLBACK_PROGRAM       = SY-REPID
+I_CALLBACK_PF_STATUS_SET = CNS_PF_STATUS_SET
+I_CALLBACK_USER_COMMAND  = CNS_USER_CMD_2000
+IS_LAYOUT_LVC            = LTH_LAYOUT
+IT_FIELDCAT_LVC          = LTD_FIELDCAT
+I_SAVE                   = 'A'
+IS_VARIANT               = LTH_VARI
+IS_PRINT_LVC             = LTH_PRINT
+TABLES
+T_OUTTAB                 = I_TD_ALV_POSOH
+EXCEPTIONS
+PROGRAM_ERROR            = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_POSOH
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_POSOI
+*&---------------------------------------------------------------------*
+*       ALV一覧出力(受発注明細レベル)
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_POSOI  受発注明細データ
+*----------------------------------------------------------------------*
+FORM DISPLAY_ALV_POSOI
+USING I_TD_ALV_POSOI TYPE TYP_TD_ZSEGSD0026.
+
+DATA: LTH_LAYOUT   TYPE LVC_S_LAYO,     "slis_layout_alv
+LTD_FIELDCAT TYPE LVC_T_FCAT,     "ALV fieldcat 属性の設定
+LTH_VARI     TYPE DISVARIANT,
+LTH_PRINT    TYPE LVC_S_PRNT.
+
+FIELD-SYMBOLS <LFS_FIELDCAT> TYPE LVC_S_FCAT.
+
+* fielcat 属性の設定
+CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = CNS_TBNAM_I
+CHANGING
+CT_FIELDCAT            = LTD_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* 販売伝票カテゴリ非表示
+LOOP AT LTD_FIELDCAT ASSIGNING <LFS_FIELDCAT>
+WHERE FIELDNAME = 'VBTYP'     OR
+FIELDNAME = 'MEINS_PO'  OR
+FIELDNAME = 'MEINS_SO'  OR
+FIELDNAME = 'MEINS_INB' OR
+FIELDNAME = 'MEINS_OUB' OR
+FIELDNAME = 'MEINS_AP'  OR
+FIELDNAME = 'MEINS_AR'.
+<LFS_FIELDCAT>-NO_OUT = ABAP_TRUE.
+ENDLOOP.
+
+* LAYOUT の設定
+LTH_LAYOUT-CWIDTH_OPT = ABAP_TRUE.
+LTH_LAYOUT-ZEBRA      = ABAP_TRUE.
+
+* バリアントなど の設定
+LTH_VARI-REPORT = SY-REPID.
+LTH_VARI-HANDLE = '3000'.
+
+* 印刷パラメータ取得
+CASE SY-BATCH.
+WHEN SPACE.
+CLEAR LTH_PRINT.
+WHEN ABAP_TRUE.
+PERFORM GET_PRINT_PARAMETER
+CHANGING LTH_PRINT.
+ENDCASE.
+
+* ALV出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+EXPORTING
+I_CALLBACK_PROGRAM       = SY-REPID
+I_CALLBACK_PF_STATUS_SET = CNS_PF_STATUS_SET
+I_CALLBACK_USER_COMMAND  = CNS_USER_CMD_3000
+IS_LAYOUT_LVC            = LTH_LAYOUT
+IT_FIELDCAT_LVC          = LTD_FIELDCAT
+I_SAVE                   = 'A'
+IS_VARIANT               = LTH_VARI
+IS_PRINT_LVC             = LTH_PRINT
+TABLES
+T_OUTTAB                 = I_TD_ALV_POSOI
+EXCEPTIONS
+PROGRAM_ERROR            = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_POSOI
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_LIST
+*&---------------------------------------------------------------------*
+*       ALV一覧出力(入出庫明細レベル)
+*----------------------------------------------------------------------*
+*      -->I_TD_ALV_LIST  入出庫明細データ
+*----------------------------------------------------------------------*
+FORM DISPLAY_ALV_LIST
+USING I_TD_ALV_LIST TYPE TYP_TD_ZSEGSD0024.
+
+DATA: LTH_LAYOUT   TYPE LVC_S_LAYO,     "slis_layout_alv
+LTD_FIELDCAT TYPE LVC_T_FCAT,     "ALV fieldcat 属性の設定
+LTH_VARI     TYPE DISVARIANT,
+LTH_PRINT    TYPE LVC_S_PRNT.
+
+FIELD-SYMBOLS <LFS_FIELDCAT> TYPE LVC_S_FCAT.
+
+* fielcat 属性の設定
+CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = CNS_TBNAM_L
+CHANGING
+CT_FIELDCAT            = LTD_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* 販売伝票カテゴリ非表示
+LOOP AT LTD_FIELDCAT ASSIGNING <LFS_FIELDCAT>
+WHERE FIELDNAME = 'VBTYP'     OR
+FIELDNAME = 'MJAHR_INB' OR
+FIELDNAME = 'MJAHR_OUB' OR
+FIELDNAME = 'GJAHR_AP'  OR
+FIELDNAME = 'VBELN_IM'  OR
+FIELDNAME = 'VBELP_IM'  OR
+FIELDNAME = 'MEINS_PO'  OR
+FIELDNAME = 'MEINS_SO'  OR
+FIELDNAME = 'MEINS_AP'  OR
+FIELDNAME = 'MEINS_AR'.
+<LFS_FIELDCAT>-NO_OUT = ABAP_TRUE.
+ENDLOOP.
+
+* LAYOUT の設定
+LTH_LAYOUT-CWIDTH_OPT = ABAP_TRUE.
+LTH_LAYOUT-ZEBRA      = ABAP_TRUE.
+
+* バリアントなど の設定
+LTH_VARI-REPORT = SY-REPID.
+LTH_VARI-HANDLE = '4000'.
+
+* 印刷パラメータ取得
+CASE SY-BATCH.
+WHEN SPACE.
+CLEAR LTH_PRINT.
+WHEN ABAP_TRUE.
+PERFORM GET_PRINT_PARAMETER
+CHANGING LTH_PRINT.
+ENDCASE.
+
+* ALV出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+EXPORTING
+I_CALLBACK_PROGRAM       = SY-REPID
+I_CALLBACK_PF_STATUS_SET = CNS_PF_STATUS_SET
+I_CALLBACK_USER_COMMAND  = CNS_USER_CMD_4000
+IS_LAYOUT_LVC            = LTH_LAYOUT
+IT_FIELDCAT_LVC          = LTD_FIELDCAT
+I_SAVE                   = 'A'
+IS_VARIANT               = LTH_VARI
+IS_PRINT_LVC             = LTH_PRINT
+TABLES
+T_OUTTAB                 = I_TD_ALV_LIST
+EXCEPTIONS
+PROGRAM_ERROR            = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_LIST
+*&---------------------------------------------------------------------*
+*&      Form  SET_PF_STATUS
+*&---------------------------------------------------------------------*
+*       ALVのステータスの設定
+*----------------------------------------------------------------------*
+*      -->I_TD_EXTAB    function codes
+*----------------------------------------------------------------------*
+FORM SET_PF_STATUS
+USING I_TD_EXTAB TYPE SLIS_T_EXTAB.
+
+* ステータス設定
+SET PF-STATUS 'STATUS_2000'.
+
+* タイトル設定
+CASE ABAP_TRUE.
+WHEN RB_POSOH.
+SET TITLEBAR 'TITLE_2000'.
+WHEN RB_POSOI.
+SET TITLEBAR 'TITLE_3000'.
+WHEN RB_INOUT.
+SET TITLEBAR 'TITLE_4000'.
+ENDCASE.
+
+ENDFORM.                    " SET_PF_STATUS
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND_2000
+*&---------------------------------------------------------------------*
+*       ALV画面の事件
+*----------------------------------------------------------------------*
+*      -->I_UCOMM           機能コード
+*      -->I_TH_SELFIELD     ALV項目情報
+*----------------------------------------------------------------------*
+FORM USER_COMMAND_2000
+USING I_UCOMM       TYPE SY-UCOMM
+I_TH_SELFIELD TYPE SLIS_SELFIELD.
+
+DATA: LTH_ALV TYPE ZSEGSD0025.
+READ TABLE TD_ALV_POSOH INTO LTH_ALV INDEX I_TH_SELFIELD-TABINDEX.
+CASE I_UCOMM.
+WHEN 'DETAIL'
+OR '&IC1'.
+CASE I_TH_SELFIELD-FIELDNAME.
+*       購買伝票照会
+WHEN 'EBELN'.
+IF LTH_ALV-EBELN IS NOT INITIAL.
+SET PARAMETER ID 'BES' FIELD LTH_ALV-EBELN.
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+ENDIF.
+*       受注伝票照会
+WHEN 'VBELN'.
+IF LTH_ALV-VBELN IS NOT INITIAL.
+SET PARAMETER ID 'AUN' FIELD LTH_ALV-VBELN.
+CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN.
+ENDIF.
+WHEN OTHERS.
+MESSAGE E065.
+LEAVE TO LIST-PROCESSING.
+ENDCASE.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " USER_COMMAND_2000
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND_3000
+*&---------------------------------------------------------------------*
+*       ALV画面の事件
+*----------------------------------------------------------------------*
+*      -->I_UCOMM           機能コード
+*      -->I_TH_SELFIELD     ALV項目情報
+*----------------------------------------------------------------------*
+FORM USER_COMMAND_3000
+USING I_UCOMM       TYPE SY-UCOMM
+I_TH_SELFIELD TYPE SLIS_SELFIELD.
+
+DATA: LTH_ALV TYPE ZSEGSD0026.
+READ TABLE TD_ALV_POSOI INTO LTH_ALV INDEX I_TH_SELFIELD-TABINDEX.
+CASE I_UCOMM.
+WHEN 'DETAIL'
+OR '&IC1'.
+CASE I_TH_SELFIELD-FIELDNAME.
+*       購買伝票照会
+WHEN 'EBELN'.
+IF LTH_ALV-EBELN IS NOT INITIAL.
+SET PARAMETER ID 'BES' FIELD LTH_ALV-EBELN.
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+ENDIF.
+*       受注伝票照会
+WHEN 'VBELN'.
+IF LTH_ALV-VBELN IS NOT INITIAL.
+SET PARAMETER ID 'AUN' FIELD LTH_ALV-VBELN.
+CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN.
+ENDIF.
+WHEN OTHERS.
+MESSAGE E065.
+LEAVE TO LIST-PROCESSING.
+ENDCASE.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " USER_COMMAND_3000
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND_4000
+*&---------------------------------------------------------------------*
+*       ALV画面の事件
+*----------------------------------------------------------------------*
+*      -->I_UCOMM           機能コード
+*      -->I_TH_SELFIELD     ALV項目情報
+*----------------------------------------------------------------------*
+FORM USER_COMMAND_4000
+USING I_UCOMM       TYPE SY-UCOMM
+I_TH_SELFIELD TYPE SLIS_SELFIELD.
+
+DATA: LTH_ALV TYPE ZSEGSD0024.
+READ TABLE TD_ALV_LIST INTO LTH_ALV INDEX I_TH_SELFIELD-TABINDEX.
+CASE I_UCOMM.
+WHEN 'DETAIL'
+OR '&IC1'.
+CASE I_TH_SELFIELD-FIELDNAME.
+*       購買伝票照会
+WHEN 'EBELN'.
+IF LTH_ALV-EBELN IS NOT INITIAL.
+SET PARAMETER ID 'BES' FIELD LTH_ALV-EBELN.
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+ENDIF.
+*       受注伝票照会
+WHEN 'VBELN'.
+IF LTH_ALV-VBELN IS NOT INITIAL.
+SET PARAMETER ID 'AUN' FIELD LTH_ALV-VBELN.
+CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN.
+ENDIF.
+*       入出庫伝票照会
+WHEN 'MBLNR_INB'.
+IF LTH_ALV-MBLNR_INB IS NOT INITIAL AND
+LTH_ALV-MJAHR_INB IS NOT INITIAL.
+SET PARAMETER ID 'MBN' FIELD LTH_ALV-MBLNR_INB.
+SET PARAMETER ID 'MJA' FIELD LTH_ALV-MJAHR_INB.
+CALL TRANSACTION 'MB03' AND SKIP FIRST SCREEN.
+ENDIF.
+*       入出庫伝票照会
+WHEN 'MBLNR_OUB'.
+IF LTH_ALV-MBLNR_OUB IS NOT INITIAL AND
+LTH_ALV-MJAHR_OUB IS NOT INITIAL.
+SET PARAMETER ID 'MBN' FIELD LTH_ALV-MBLNR_OUB.
+SET PARAMETER ID 'MJA' FIELD LTH_ALV-MJAHR_OUB.
+CALL TRANSACTION 'MB03' AND SKIP FIRST SCREEN.
+ENDIF.
+*       請求書伝票照会
+WHEN 'BELNR_AP'.
+IF LTH_ALV-BELNR_AP IS NOT INITIAL AND
+LTH_ALV-GJAHR_AP IS NOT INITIAL.
+SET PARAMETER ID 'RBN' FIELD LTH_ALV-BELNR_AP.
+SET PARAMETER ID 'GJR' FIELD LTH_ALV-GJAHR_AP.
+CALL TRANSACTION 'MIR4' AND SKIP FIRST SCREEN.
+ENDIF.
+*       請求伝票照会
+WHEN 'BELNR_AR'.
+IF LTH_ALV-BELNR_AR IS NOT INITIAL.
+SET PARAMETER ID 'VF' FIELD LTH_ALV-BELNR_AR.
+CALL TRANSACTION 'VF03' AND SKIP FIRST SCREEN.
+ENDIF.
+WHEN OTHERS.
+MESSAGE E065.
+LEAVE TO LIST-PROCESSING.
+ENDCASE.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " USER_COMMAND_4000
+*&---------------------------------------------------------------------*
+*&      Form  GET_PRINT_PARAMETER
+*&---------------------------------------------------------------------*
+*       印刷パラメータ取得
+*----------------------------------------------------------------------*
+*      <--O_TH_PRINT  印刷パラメータ
+*----------------------------------------------------------------------*
+FORM GET_PRINT_PARAMETER
+CHANGING O_TH_PRINT TYPE LVC_S_PRNT.
+
+DATA LTH_PARA TYPE PRI_PARAMS.
+
+CALL FUNCTION 'GET_PRINT_PARAMETERS'
+EXPORTING
+**** START UPD BY ISID REN 2015/07/31 ****
+*      IMMEDIATELY            = SPACE
+*      LAYOUT                 = 'X_58_170"'
+*      LINE_COUNT             = '58'
+*      LINE_SIZE              = '1024'
+IMMEDIATELY            = ABAP_TRUE
+**** END UPD BY ISID REN 2015/07/31 ****
+NO_DIALOG              = ABAP_TRUE
+DESTINATION            = P_DEVICE
+IMPORTING
+OUT_PARAMETERS         = LTH_PARA
+EXCEPTIONS
+ARCHIVE_INFO_NOT_FOUND = 1
+INVALID_PRINT_PARAMS   = 2
+INVALID_ARCHIVE_PARAMS = 3
+OTHERS                 = 4.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+ELSE.
+O_TH_PRINT-PRINT = ABAP_TRUE.
+O_TH_PRINT-PRINT_CTRL-PRI_PARAMS = LTH_PARA.
+O_TH_PRINT-PRNT_INFO = 'N'.
+ENDIF.
+
+ENDFORM.                    " GET_PRINT_PARAMETER
+*&---------------------------------------------------------------------*
+*&      Form  CONVERT_MENGE
+*&---------------------------------------------------------------------*
+*       数量変換
+*----------------------------------------------------------------------*
+*      -->I_MATNR  品目コード
+*      -->I_MEINS  発注単位
+*      -->I_LMEIN  基本数量単位
+*      -->I_MENGE  数量
+*      <--O_MENGE  数量（基本数量単位へ変換）
+*----------------------------------------------------------------------*
+FORM CONVERT_MENGE
+USING    I_MATNR TYPE MARA-MATNR
+I_MEINS TYPE MARA-MEINS
+I_LMEIN TYPE MARA-MEINS
+I_MENGE TYPE EKPO-MENGE
+CHANGING O_MENGE TYPE EKPO-MENGE.
+
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR              = I_MATNR
+I_IN_ME              = I_MEINS
+I_OUT_ME             = I_LMEIN
+I_MENGE              = I_MENGE
+IMPORTING
+E_MENGE              = O_MENGE
+EXCEPTIONS
+ERROR_IN_APPLICATION = 1
+ERROR                = 2
+OTHERS               = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+ENDIF.
+
+ENDFORM.                    " CONVERT_MENGE
+*&---------------------------------------------------------------------*
+*&      Form  GET_OUB_DATA
+*&---------------------------------------------------------------------*
+*       出庫情報取得
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT203  会社間データ
+*      <--O_TD_OUB         出庫データ
+*----------------------------------------------------------------------*
+FORM GET_OUB_DATA
+USING    I_TD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203
+CHANGING O_TD_OUB        TYPE TYP_TD_OUB.
+
+TYPES:BEGIN OF LTYP_TH_KEY,
+VBELN TYPE VBFA-VBELN,    " 後続の販売管理伝票
+POSNN TYPE NUMC04,        " 販売管理伝票次明細
+MJAHR TYPE VBFA-MJAHR,    " 入出庫伝票年
+END OF LTYP_TH_KEY.
+
+DATA: LTD_DATA  TYPE TYP_TD_ZTEGSDT203,
+LTD_VBFA  TYPE TYP_TD_VBFA,
+LTD_MSEG  TYPE TYP_TD_MSEG,
+LTD_VBFA2 TYPE TYP_TD_VBFA,
+LTH_MSEG  TYPE TYP_TH_MSEG,
+LTH_OUB   TYPE TYP_TH_OUB,
+LTH_VBFA  TYPE TYP_TH_VBFA,
+LTH_KEY   TYPE LTYP_TH_KEY,
+LTD_KEY   TYPE STANDARD TABLE OF LTYP_TH_KEY.
+
+REFRESH O_TD_OUB.
+
+* 販売伝票の重複データ削除
+LTD_DATA[] = I_TD_ZTEGSDT203[].
+SORT LTD_DATA BY VBELN POSNR.
+DELETE ADJACENT DUPLICATES FROM LTD_DATA
+COMPARING VBELN POSNR.
+
+* 伝票フロー取得
+IF LTD_DATA[] IS NOT INITIAL.
+SELECT VBELV           " 先行販売管理伝票
+POSNV           " 販売管理伝票前明細
+VBELN           " 後続の販売管理伝票
+POSNN           " 販売管理伝票次明細
+MJAHR           " 入出庫伝票年
+INTO TABLE LTD_VBFA
+FROM VBFA
+FOR ALL ENTRIES IN LTD_DATA
+WHERE VBELV   = LTD_DATA-VBELN
+AND POSNV   = LTD_DATA-POSNR
+AND ( VBTYP_N = CNS_VBTYP_R
+OR   VBTYP_N = CNS_VBTYP_T ).
+ENDIF.
+
+* 出庫伝票キー取得
+LTD_VBFA2[] = LTD_VBFA[].
+SORT LTD_VBFA2 BY VBELN POSNN MJAHR.
+DELETE ADJACENT DUPLICATES FROM LTD_VBFA2
+COMPARING VBELN POSNN MJAHR.
+LOOP AT LTD_VBFA2 INTO LTH_VBFA.
+CLEAR LTH_KEY.
+LTH_KEY-VBELN = LTH_VBFA-VBELN.
+LTH_KEY-POSNN = LTH_VBFA-POSNN+2(4).
+LTH_KEY-MJAHR = LTH_VBFA-MJAHR.
+APPEND LTH_KEY TO LTD_KEY.
+ENDLOOP.
+
+* 出庫情報
+IF LTD_KEY[] IS NOT INITIAL.
+SELECT MBLNR           " 入出庫伝票番号
+MJAHR           " 入出庫伝票年
+ZEILE           " 入出庫伝票の明細
+BWART           " 移動タイプ (在庫管理)
+SHKZG           " 借方/貸方フラグ
+MENGE           " 数量
+MEINS           " 基本数量単位
+SJAHR           " 入出庫伝票年
+SMBLN           " 入出庫伝票番号
+SMBLP           " 入出庫伝票の明細
+BUDAT_MKPF      " 伝票の転記日付
+XBLNR_MKPF      " 参照伝票番号
+VBELN_IM        " 出荷伝票
+VBELP_IM        " 出荷明細
+INTO TABLE LTD_MSEG
+FROM MSEG
+FOR ALL ENTRIES IN LTD_KEY
+WHERE MBLNR = LTD_KEY-VBELN
+AND MJAHR = LTD_KEY-MJAHR
+AND ZEILE = LTD_KEY-POSNN.
+ENDIF.
+
+SORT LTD_MSEG BY MBLNR MJAHR ZEILE.
+LOOP AT LTD_VBFA INTO LTH_VBFA.
+CLEAR LTH_OUB.
+CLEAR LTH_MSEG.
+READ TABLE LTD_MSEG INTO LTH_MSEG
+WITH KEY MBLNR = LTH_VBFA-VBELN
+MJAHR = LTH_VBFA-MJAHR
+ZEILE = LTH_VBFA-POSNN+2(4)
+BINARY SEARCH.
+MOVE-CORRESPONDING LTH_VBFA TO LTH_OUB.
+MOVE-CORRESPONDING LTH_MSEG TO LTH_OUB.
+APPEND LTH_OUB TO O_TD_OUB.
+ENDLOOP.
+
+SORT O_TD_OUB BY VBELV POSNV
+MBLNR MJAHR ZEILE.
+
+ENDFORM.                    " GET_OUB_DATA
+*Text symbol text・
+*001:PO/SO Level
+*002:PO/SO Item Level
+*003:Inbound/Outbound Item Level
+*004:Matched Data
+*005:Unmatched Data
+*006:OK
+*007:NG
+
+*Selection text・
+*P_BUKRSA:        Company Code A
+*P_BUKRSB:        Company Code B
+*P_DEVICE:        Output Device
+*S_BUDAT:        Posting Date(AP/AR)
+*S_EBELN:D       .
+*S_EKGRP:D       .
+*S_INVOC:        Invoice No.
+*S_LDATE:        Link Date(SO/PO)
+*S_VBELN:D       .
+*S_VKGRP:D       .

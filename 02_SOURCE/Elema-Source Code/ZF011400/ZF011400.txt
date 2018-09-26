@@ -1,0 +1,538 @@
+*&-------------------------------------------------------------------
+*& Report  ZF011400
+*&-------------------------------------------------------------------
+* [プログラム名]
+*   ZF011400        未払仕入先プログラム
+*
+* [処理概要]
+*　　　移行用＋？
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/04/19   NDSC KURANO       とりあえずバージョン
+*  2002/06/07   PSC imai          取引銀行を追加
+*  2009/06/10   NDSC KODAMA
+*               ローカルよりタブ区切りファイルを取り込めるように変更
+*  2011/03/31   SOLFIS OZAKI      DMW3001
+*               サーバーからファイルをアップロードする機能を削除
+*& 2012/10/03   ISID              ES-UP
+*& 2014/08/29   ISID18            コードページを"UTF-8"に修正
+*  2015/02/04   ISID11            コードページ処理の再修正
+*&-------------------------------------------------------------------
+
+REPORT ZF011400 .
+
+* 使用テーブル
+TABLES BGR00. "セッションデータ用バッチ入力構造
+TABLES BLF00. "仕入先取引データ（バッチ入力構造）
+TABLES BLFA1. "一般仕入先マスタデータパート１（バッチ入力構造）
+TABLES BLFB1. "仕入先会社コードデータ（バッチ入力構造）
+TABLES BLFBK. "仕入先マスタレコード銀行データ（バッチインプット構造）
+TABLES LFA1. "仕入先マスタ（一般)
+TABLES BNKA. "銀行マスタ
+
+* 型定義
+TYPES: BEGIN OF ST_IN1,
+LIFNR LIKE LFA1-LIFNR, "仕入先コード
+BUKRS LIKE LFB1-BUKRS, "会社コード
+ANRED LIKE LFA1-ANRED, "敬称
+NAME1 LIKE LFA1-NAME1, "名称１
+NAME2 LIKE LFA1-NAME2, "名称２
+NAME3 LIKE LFA1-NAME3, "名称３
+SORTL LIKE LFA1-SORTL, "ソート項目:検索条件
+STRAS LIKE LFA1-STRAS, "都道府県名
+ORT01 LIKE LFA1-ORT01, "市区町村名
+ORT02 LIKE LFA1-ORT02, "所在地
+PSTLZ LIKE LFA1-PSTLZ, "郵便番号
+REGIO LIKE LFA1-REGIO, "地域 (州、地方、国、都道府県）
+TELF1 LIKE LFA1-TELF1, "電話番号
+TELFX LIKE LFA1-TELFX, "ファックス番号
+BANKS LIKE LFBK-BANKS, "銀行国コード
+BANKL LIKE LFBK-BANKL, "銀行コード
+BANKN LIKE LFBK-BANKN, "銀行口座番号
+KOINH LIKE LFBK-KOINH, "口座名義人名
+BKONT LIKE LFBK-BKONT, "銀行管理キー
+DTAWS LIKE LFA1-DTAWS, "手数料負担コード
+ZTERM LIKE LFB1-ZTERM, "支払条件
+HBKID LIKE LFB1-HBKID, "取引銀行
+END OF ST_IN1.
+
+* グローバル変数
+DATA I_DATA TYPE STANDARD TABLE OF ST_IN1 WITH HEADER LINE.
+*---APPEND START PSD T.SAITOH 2002/04/19 アスタリスク対応-----------*
+DATA I_DATA_TMP TYPE ST_IN1. "AT NEW アスタリスク対応
+*---APPEND END   PSD T.SAITOH 2002/04/19 ---------------------------*
+DATA W_INCNT LIKE SY-DBCNT.
+DATA W_OUTCNT LIKE SY-DBCNT.
+**** START ADD 2015/02/03 ISID11 ****
+DATA W_CODEPAGE TYPE ABAP_ENCODING.
+**** END ADD 2015/02/03 ISID11 ****
+
+* 選択画面
+SELECTION-SCREEN BEGIN OF BLOCK BLK1 WITH FRAME TITLE TEXT-T01.
+PARAMETERS P_IN1 LIKE RLGRAP-FILENAME LOWER CASE. "入力ファイル名
+*2011/03/31 DEL START OZAKI(SOLFIS) DMW3001
+*PARAMETERS P_LOCAL RADIOBUTTON GROUP RADI. "端末からアップロード
+*PARAMETERS P_SERVER RADIOBUTTON GROUP RADI. "サーバファイルを使用
+*2011/03/31 DEL END OZAKI(SOLFIS) DMW3001
+PARAMETERS P_CHECK AS CHECKBOX DEFAULT 'X'. "チェックのみ
+PARAMETERS P_OUT1 LIKE RLGRAP-FILENAME LOWER CASE. "出力ファイル名
+PARAMETERS P_GROUP LIKE BGR00-GROUP OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK BLK1.
+SELECTION-SCREEN BEGIN OF BLOCK BLK2 WITH FRAME TITLE TEXT-T02.
+PARAMETERS P_KTOKK LIKE RF02K-KTOKK OBLIGATORY. "勘定グループ
+PARAMETERS P_AKONT LIKE LFB1-AKONT OBLIGATORY. "統制勘定
+PARAMETERS P_ZWELS LIKE LFB1-ZWELS OBLIGATORY. "支払方法
+SELECTION-SCREEN END OF BLOCK BLK2.
+
+*----------------------------------------------------------------------*
+INITIALIZATION.
+CONCATENATE SY-REPID SY-DATUM SY-UNAME INTO P_GROUP.
+
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+IF P_CHECK IS INITIAL AND P_OUT1 IS INITIAL.
+MESSAGE E400(Y1) WITH '出力ファイル名が指定されていません'.
+ENDIF.
+
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+PERFORM F_OPEN_OUT1. "出力ファイルのオープン
+*2011/03/31 DEL START OZAKI(SOLFIS) DMW3001
+*  IF P_LOCAL = 'X'.
+*2011/03/31 DEL END OZAKI(SOLFIS) DMW3001
+PERFORM F_UPLOAD. "端末よりアップロード
+*2011/03/31 DEL START OZAKI(SOLFIS) DMW3001
+*  ELSE.
+*    PERFORM F_READ. "サーバファイルの読込
+*  ENDIF.
+*2011/03/31 DEL END OZAKI(SOLFIS) DMW3001
+DESCRIBE TABLE I_DATA LINES W_INCNT.
+MESSAGE I401(Y1) WITH W_INCNT '件入力しました'.
+PERFORM F_CHECK. "チェック
+PERFORM F_OUT_BGR00. "セッションデータ出力
+*  SORT i_data BY lifnr bukrs.
+LOOP AT I_DATA.
+*---APPEND START PSD T.SAITOH 2002/04/19 AT series 対応（退避する）-*
+I_DATA_TMP = I_DATA.
+*---APPEND END   PSD T.SAITOH 2002/04/19 ---------------------------*
+*    AT NEW lifnr.
+PERFORM F_OUT_BLF00. "仕入先マスタ開始
+PERFORM F_OUT_BLFA1. "一般データ出力
+*    ENDAT.
+*    AT NEW bukrs.
+PERFORM F_OUT_BLFB1. "会社データ出力
+*    ENDAT.
+PERFORM F_OUT_BLFBK. "銀行データ出力
+ENDLOOP.
+MESSAGE I401(Y1) WITH W_OUTCNT '件出力しました'.
+
+*---------------------------------------------------------------------*
+*       FORM f_open_out1                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_OPEN_OUT1.
+
+**** START ADD 2015/02/03 ISID11 ****
+DATA:
+L_SUBRC    TYPE SY-SUBRC,
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8  TYPE  FLAG.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-001
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+**** END ADD 2015/02/03 ISID11 ****
+
+* Mod ES-UP 2012/08/31 -->
+*  OPEN DATASET P_OUT1 FOR OUTPUT IN TEXT MODE.
+*  CONSTANTS:
+*    CNS_SJIS TYPE STRING VALUE `UTF-8`.
+*  DATA:
+*    L_CODEPAGE TYPE CPCODEPAGE value '4120'.
+*
+*  clear: l_codepage.
+*
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** START ADD 2015/02/03 ISID11 ****
+IF L_FLGUTF8 IS INITIAL.
+
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+W_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+
+TRY .
+OPEN DATASET P_OUT1 FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE W_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+
+L_SUBRC = 8.
+
+ENDTRY.
+ELSE.
+**** END ADD 2015/02/03 ISID11 ****
+OPEN DATASET P_OUT1 FOR OUTPUT
+IN TEXT MODE ENCODING UTF-8
+**** START ADD 2015/02/03 ISID11 ****
+IGNORING CONVERSION ERRORS.
+L_SUBRC = SY-SUBRC.
+ENDIF.
+**** END ADD 2015/02/03 ISID11 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+*    IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/08/31 <--
+**** START UPD 2015/02/03 ISID11 ****
+*  IF SY-SUBRC <> 0.
+IF L_SUBRC <> 0.
+**** END UPD 2015/02/03 ISID11 ****
+MESSAGE E402(Y1) WITH '出力ファイルが開けません' P_OUT1
+**** START UPD 2015/02/03 ISID11 ****
+*                                                            SY-SUBRC.
+L_SUBRC.
+**** END UPD 2015/02/03 ISID11 ****
+ENDIF.
+ENDFORM.                    "F_OPEN_OUT1
+
+*---------------------------------------------------------------------*
+*       FORM f_upload                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_UPLOAD.
+
+* Mod ES-UP 2012/08/13 -->
+*  CALL FUNCTION 'UPLOAD'
+*       EXPORTING
+*            FILENAME                = P_IN1
+**2009/06/10 APPEND START
+*            FILETYPE                = 'DAT'
+**2009/06/10 APPEND END
+*       TABLES
+*            DATA_TAB                = I_DATA
+*       EXCEPTIONS
+*            CONVERSION_ERROR        = 1
+*            INVALID_TABLE_WIDTH     = 2
+*            INVALID_TYPE            = 3
+*            NO_BATCH                = 4
+*            UNKNOWN_ERROR           = 5
+*            GUI_REFUSE_FILETRANSFER = 6
+*            OTHERS                  = 7.
+
+****START UPD 2014/08/29 ISID18****
+*  CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+**** START DEL 2015/02/03 ISID11 ****
+*  CONSTANTS CNS_UTF TYPE STRING VALUE `UTF-8`.
+**** END DEL 2015/02/03 ISID11 ****
+****END UPD 2014/08/29 ISID18****
+DATA: L_FILENAME TYPE STRING,
+L_RC TYPE I,
+I_FILE_TABLE TYPE FILETABLE,
+L_FILE_TABLE TYPE REF TO FILE_TABLE,
+L_DEFAULT TYPE STRING,
+L_INITIAL_DIRECTORY TYPE STRING.
+**** START DEL 2015/02/03 ISID11 ****
+*       L_CODEPAGE TYPE ABAP_ENCODING.
+**** END DEL 2015/02/03 ISID11 ****
+
+PERFORM SPLIT_FILE USING P_IN1
+L_INITIAL_DIRECTORY
+L_DEFAULT.
+
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+*      WINDOW_TITLE            = WINDOW_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+DEFAULT_FILENAME        = L_DEFAULT
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+INITIAL_DIRECTORY       = L_INITIAL_DIRECTORY
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = I_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 5 ).
+
+IF SY-SUBRC = 0.
+READ TABLE I_FILE_TABLE REFERENCE INTO L_FILE_TABLE INDEX 1.
+IF SY-SUBRC = 0.
+L_FILENAME = L_FILE_TABLE->FILENAME.
+*--- シフトJISのコードページを取得
+****START UPD 2014/08/29 ISID18****
+*      L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** START DEL 2015/02/03 ISID11 ****
+*      L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+**** END DEL 2015/02/03 ISID11 ****
+****END UPD 2014/08/29 ISID18****
+
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILENAME
+FILETYPE                = 'DAT'
+HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*        HEADER_LENGTH           = 0
+*        READ_BY_LINE            = 'X'
+*        DAT_MODE                = SPACE
+**** START UPD 2015/02/03 ISID11 ****
+*         CODEPAGE                = L_CODEPAGE
+CODEPAGE                = W_CODEPAGE
+**** END UPD 2015/02/03 ISID11 ****
+*         IGNORE_CERR             = ABAP_FALSE
+*        REPLACEMENT             = '#'
+*        VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*      IMPORTING
+*        FILELENGTH              = FILELENGTH
+*        HEADER                  = HEADER
+CHANGING
+DATA_TAB                = I_DATA[]
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+ENDIF.
+ENDIF.
+* Mod ES-UP 2012/08/13 <--
+IF SY-SUBRC <> 0.
+MESSAGE E401(Y1) WITH 'UPLOADが失敗しました' SY-SUBRC.
+ENDIF.
+*2011/03/31 ADD START OZAKI(SOLFIS) DMW3001
+* Mod ES-UP 2012/10/29 -->
+*  IF I_DATA IS INITIAL.
+IF I_DATA[] IS INITIAL.
+* Mod ES-UP 2012/10/29 <--
+MESSAGE S204(Y1).
+STOP.
+ENDIF.
+*2011/03/31 ADD END OZAKI(SOLFIS) DMW3001
+ENDFORM.                    "F_UPLOAD
+* Add ES-UP 2012/11/01 -->
+FORM SPLIT_FILE USING P_FULL TYPE CLIKE
+P_PATH TYPE STRING
+P_NAME TYPE STRING.
+DATA: L_DELIMITER TYPE C LENGTH 1,
+L_SPLIT     TYPE REF TO STRING,
+I_SPLIT     TYPE STANDARD TABLE OF STRING,
+L_TABIX     TYPE I.
+*
+CLEAR: P_PATH, P_NAME.
+CL_GUI_FRONTEND_SERVICES=>GET_FILE_SEPARATOR(
+CHANGING FILE_SEPARATOR    = L_DELIMITER ).
+SPLIT P_FULL AT L_DELIMITER INTO TABLE I_SPLIT.
+L_TABIX = LINES( I_SPLIT ).
+IF L_TABIX = 0.
+RETURN.
+ENDIF.
+READ TABLE I_SPLIT INTO P_NAME INDEX L_TABIX.
+DELETE I_SPLIT INDEX L_TABIX.
+CONCATENATE LINES OF I_SPLIT INTO P_PATH SEPARATED BY L_DELIMITER.
+ENDFORM.                    "split_file
+* Add ES-UP 2012/11/01 <--
+*2011/03/31 DEL START OZAKI(SOLFIS) DMW3001
+*---------------------------------------------------------------------*
+*       FORM f_read                                                   *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*FORM F_READ.
+** ローカル変数
+*  DATA W_CNT LIKE SY-DBCNT.
+**
+*  OPEN DATASET P_IN1 FOR INPUT IN TEXT MODE.
+*  IF SY-SUBRC <> 0.
+*    MESSAGE E402(Y1)
+*            WITH '入力ファイルがオープンできません' P_IN1 SY-SUBRC.
+*  ENDIF.
+*  DO.
+*    READ DATASET P_IN1 INTO I_DATA.
+*    IF SY-SUBRC <> 0.
+*      EXIT.
+*    ENDIF.
+*    APPEND I_DATA.
+*  ENDDO.
+*  CLOSE DATASET P_IN1.
+*ENDFORM.
+*2011/03/31 DEL END OZAKI(SOLFIS) DMW3001
+*---------------------------------------------------------------------*
+*       FORM f_check                                                  *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_CHECK.
+
+ENDFORM.                    "F_CHECK
+
+*---------------------------------------------------------------------*
+*       FORM f_out_bgr00                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_OUT_BGR00.
+PERFORM INIT_SET USING 'BGR00'.
+BGR00-STYPE  = '0'.
+BGR00-GROUP  = P_GROUP. "セッション名
+BGR00-MANDT  = SY-MANDT.
+BGR00-USNAM  = SY-UNAME.
+CLEAR  BGR00-START. "開始日
+BGR00-XKEEP  = 'X'. "セッションの保存
+BGR00-NODATA = '/'. "バッチインプットなし項目
+TRANSFER BGR00 TO P_OUT1.
+ADD 1 TO W_OUTCNT.
+ENDFORM.                    "F_OUT_BGR00
+
+*---------------------------------------------------------------------*
+*       FORM f_out_blf00                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_OUT_BLF00.
+PERFORM INIT_SET USING 'BLF00'.
+BLF00-STYPE = '1'. "レコードタイプ
+BLF00-TCODE = 'XK01'. "登録
+*   insert 2010/08/09 S.MIKAMI {
+IF P_KTOKK <> 'Z005'.
+BLF00-LIFNR = I_DATA-LIFNR. "仕入先コード
+ENDIF.
+* } insert 2010/08/09 S.MIKAMI
+*---MODIFY START PSD T.SAITOH 2002/04/19 ---------------------------*
+*  blf00-lifnr = i_data-lifnr. "仕入先コード
+*  blf00-bukrs = i_data-bukrs. "会社コード
+*  blf00-lifnr = i_data_TMP-lifnr. "仕入先コード
+BLF00-BUKRS = I_DATA_TMP-BUKRS. "会社コード
+*---MODIFY END   PSD T.SAITOH 2002/04/19 ---------------------------*
+BLF00-KTOKK = P_KTOKK. "仕入先勘定グループ
+TRANSFER BLF00 TO P_OUT1.
+ADD 1 TO W_OUTCNT.
+ENDFORM.                    "F_OUT_BLF00
+
+*---------------------------------------------------------------------*
+*       FORM f_out_blfa1                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_OUT_BLFA1.
+PERFORM INIT_SET USING 'BLFA1'.
+BLFA1-STYPE = '2'.            "バッチインプットインタフェースレコー
+BLFA1-TBNAM = 'BLFA1'.        "テーブル名
+
+*---MODIFY START PSD T.SAITOH 2002/04/19 ---------------------------*
+BLFA1-ANRED = I_DATA_TMP-ANRED.   "敬称
+BLFA1-NAME1 = I_DATA_TMP-NAME1.   "名称１
+BLFA1-NAME2 = I_DATA_TMP-NAME2.   "名称２
+BLFA1-NAME3 = I_DATA_TMP-NAME3.   "名称３
+BLFA1-SORTL = I_DATA_TMP-SORTL.   "ソート項目:検索条件
+BLFA1-STRAS = I_DATA_TMP-STRAS.   "都道府県名
+* BLFA1-PFACH = i_data-PFACH.       "私書箱
+BLFA1-ORT01 = I_DATA_TMP-ORT01.   "市区町村名
+BLFA1-PSTLZ = I_DATA_TMP-PSTLZ.   "郵便番号
+BLFA1-ORT02 = I_DATA_TMP-ORT02.   "所在地
+* BLFA1-PSTL2 = i_data-PSTL2.       "私書箱郵便番号
+BLFA1-LAND1 = 'JP'.               "国コード
+BLFA1-REGIO = I_DATA_TMP-REGIO.   "地域 (州、地方、国、都道府県）
+BLFA1-SPRAS = 'JA'.               "言語コード
+BLFA1-TELF1 = I_DATA_TMP-TELF1.   "電話番号
+BLFA1-TELFX = I_DATA_TMP-TELFX.   "ファックス番号
+* BLFA1-KUNNR = i_data-KUNNR.   "得意先コード
+* blfa1-fiskn = i_data-fiskn.   "本社住所を持つマスタの勘定コード
+*---MODIFY START PSD T.SAITOH 2002/04/19 ---------------------------*
+*  blfa1-dtaws = i_data-dtaws.   "手数料負担コード
+BLFA1-DTAWS = I_DATA_TMP-DTAWS.   "手数料負担コード
+*---MODIFY END   PSD T.SAITOH 2002/04/19 ---------------------------*
+TRANSFER BLFA1 TO P_OUT1.
+ENDFORM.                    "F_OUT_BLFA1
+
+*---------------------------------------------------------------------*
+*       FORM f_out_blfb1                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_OUT_BLFB1.
+PERFORM INIT_SET USING 'BLFB1'.
+BLFB1-STYPE = '2'.            "バッチインプットインタフェースレコー
+BLFB1-TBNAM = 'BLFB1'.        "テーブル名
+BLFB1-AKONT = P_AKONT.        "総勘定元帳統制勘定コード
+* BLFB1-ZUAWA = '/'.            "割当番号によるソートのためのキー
+BLFB1-ZTERM = I_DATA_TMP-ZTERM.  "支払条件キー
+BLFB1-HBKID = I_DATA_TMP-HBKID. "取引銀行
+BLFB1-ZWELS = P_ZWELS.        "支払方法
+* BLFB1-KVERM = i_data-KVERM.   "コメント
+* BLFB1-ZSABE  = i_data-ZSABE.  "仕入先担当者
+* BLFB1-TLFNS  = i_data-TLFNS.  "Act.clk tel.no.
+* BLFB1-TLFXS  = i_data-TLFXS.  "経理担当者FAX
+* BLFB1-EIKTO  = i_data-EIKTO.  "仕入先での勘定コード
+TRANSFER BLFB1 TO P_OUT1.
+ENDFORM.                    "F_OUT_BLFB1
+*---------------------------------------------------------------------*
+*       FORM f_out_blfbk                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_OUT_BLFBK.
+PERFORM INIT_SET USING 'BLFBK'.
+BLFBK-STYPE = '2'.            "バッチインプットインタフェースレコー
+BLFBK-TBNAM = 'BLFBK'.        "テーブル名
+BLFBK-BANKS = I_DATA_TMP-BANKS.   "銀行国コード
+BLFBK-BANKL = I_DATA_TMP-BANKL.   "銀行コード
+BLFBK-BANKN = I_DATA_TMP-BANKN.   "銀行口座番号
+BLFBK-KOINH = I_DATA_TMP-KOINH.   "口座名義人名
+BLFBK-BKONT = I_DATA_TMP-BKONT.   "銀行管理キー
+TRANSFER BLFBK TO P_OUT1.
+ENDFORM.                    "F_OUT_BLFBK
+*---------------------------------------------------------------------*
+*       FORM init_set                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  VALUE(P_DB)                                                   *
+*---------------------------------------------------------------------*
+FORM INIT_SET USING    VALUE(P_DB).
+FIELD-SYMBOLS <PT> TYPE ANY.
+TABLES:DD03L.
+DATA: WK_DB(60) TYPE C.
+* Mod ES-UP 2012/09/13 -->
+*  SELECT * FROM DD03L WHERE TABNAME = P_DB.
+SELECT * FROM DD03L WHERE TABNAME = P_DB
+AND COMPTYPE IN (SPACE, 'E').
+* Mod ES-UP 2012/09/13 <--
+*    IF DD03L-DATATYPE = 'CHAR'.
+CONCATENATE P_DB '-' DD03L-FIELDNAME INTO WK_DB.
+ASSIGN (WK_DB) TO <PT>.
+<PT> = '/'.
+*    ENDIF.
+ENDSELECT.
+
+ENDFORM.                    "INIT_SET

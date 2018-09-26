@@ -1,0 +1,687 @@
+************************************************************************
+* プログラムID : ZF012200
+* プログラム名 : 銀行マスタバッチインプット
+* 作成日       : 2003/05/15
+* 作成者       : NTT DATA SCIENCE
+* 変更履歴     : 2003/04/21 NDSC KURI IT ⇒ 商社
+*                PROGURAM        ZFB0010 ⇒ Y1012140
+*                MESSAGE クラス変更   Z1 ⇒ Y1
+*                TABLE              Z307 ⇒ YFBNKA
+*                INCLUDE ZKYOUTU 廃止　CST_UPATHは、プログラム固定
+*                2003/05/15 K.ABE(NDSC)
+*                並びコードチェックの追加
+*                YFBNKAの処理削除
+*                2012/10/24 ISID ES-UP
+*                2014/08/29 ISID18
+*                コードページを"UTF-8"に修正
+*                2015/02/03 ISID18
+*                コードページ修正
+************************************************************************
+REPORT  ZF012200
+NO STANDARD PAGE HEADING
+LINE-SIZE 170
+LINE-COUNT 58
+MESSAGE-ID Y1.
+*----------------------------------------------------------------------*
+*   宣言部
+*----------------------------------------------------------------------*
+TABLES: BNKA.     " 銀行マスタ
+*        YFBNKA.   " 銀行グループ変換テーブル  "203/05/15 DEL
+
+DATA: BEGIN OF BDC_TAB OCCURS 0.
+INCLUDE STRUCTURE BDCDATA.
+DATA: END   OF BDC_TAB.
+
+DATA: BEGIN OF READ_TAB OCCURS 0,
+DATA(265)        TYPE C,
+END   OF READ_TAB.
+
+DATA: BEGIN OF TAB OCCURS 0,
+KCODE(4)        TYPE C,     "金融機関コード
+TCODE(3)        TYPE C,     "店舗コード
+BANKA(35)       TYPE C,     "金融機関名（カナ）
+STRAS(35)       TYPE C,     "金融機関名（漢字）
+BRNCH(35)       TYPE C,     "店舗名（カナ）
+ORT01(35)       TYPE C,     "店舗名（漢字）
+*        BGRUP LIKE YFBNKA-BGRUP,      "銀行グループ
+BGRUP(2)        TYPE C,       "銀行グループ  "2003/05/15 MOD
+ADRNO(8)        TYPE C,     "郵便番号
+ADRSS(60)       TYPE C,     "店舗所在地
+TELPH(12)       TYPE C,     "電話番号
+CHANG(4)        TYPE C,     "手形交換所番号
+SORT(1)         TYPE C,     "並びコード
+ERR(80)         TYPE C,     "エラー情報
+END   OF TAB.
+
+DATA  OK_CNT            TYPE P.
+DATA  NG_CNT            TYPE P.
+DATA  UP_CNT            TYPE P.
+DATA  KANA_CNT          TYPE P.
+DATA  KANJ_CNT          TYPE P.
+DATA  CANCEL(1).
+DATA  ERR(1).
+DATA: BEGIN OF W_MSG.
+INCLUDE STRUCTURE MESSAGE.
+DATA: END   OF W_MSG.
+
+DATA: WK_CODE(7)        TYPE C,
+WK_DATUM          TYPE D,
+WK_UZEIT          TYPE T.
+
+DATA: WK_KCODE(4)       TYPE C,     "金融機関コード
+WK_TCODE(3)       TYPE C.     "店舗コード
+
+DATA CST_UPATH(128) TYPE C VALUE 'C:\SAPDATA'.
+
+*INCLUDE ZKYOUTU.                         "共通コンスタント定義
+* Add ES-UP 2012/10/24 -->
+constants:
+****START UPD 2014/08/29 ISID18****
+*  CNS_SJIS TYPE STRING VALUE `shift_jis`.
+CNS_UTF TYPE STRING VALUE `UTF-8`.
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/10/24 <--
+*----------------------------------------------------------------------*
+*   入力画面定義
+*----------------------------------------------------------------------*
+PARAMETERS:P_FILE   LIKE RLGRAP-FILENAME         "金融機関店舗ファイル
+OBLIGATORY.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(4)  TEXT-001.
+SELECTION-SCREEN POSITION 35.
+*  PARAMETERS:P_WRITE  AS CHECKBOX.  "印刷
+PARAMETERS: P_WRITE RADIOBUTTON GROUP RADI.
+SELECTION-SCREEN END   OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(10) TEXT-002.
+SELECTION-SCREEN POSITION 35.
+*  PARAMETERS:P_BDC    AS CHECKBOX.  "ＢＤＣ登録
+PARAMETERS: P_BDC RADIOBUTTON GROUP RADI.
+SELECTION-SCREEN END   OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(22) TEXT-003.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS:P_UPDATE AS CHECKBOX.  "同一金融機関の場合更新
+SELECTION-SCREEN END   OF LINE.
+************************************************************************
+INITIALIZATION.
+************************************************************************
+*  PERFORM PARAM_GET_PATH.                   " ファイルパス初期値提案
+CONCATENATE CST_UPATH '\金融機関店舗ﾌｧｲﾙ.CSV'
+INTO P_FILE.
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+************************************************************************
+PERFORM WS_FILENAME_GET.       " 汎用モジュール「WS_FILENAME_GET」
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+* 初期処理
+PERFORM INT-SEC.
+* 主処理
+PERFORM MAIN-SEC.
+* 終了処理
+PERFORM END-SEC.
+
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+************************************************************************
+TOP-OF-PAGE.
+************************************************************************
+PERFORM WRITE_HEADER.          " 帳票ヘッダ出力
+*&---------------------------------------------------------------------*
+*&      Form  INT-SEC
+*&---------------------------------------------------------------------*
+FORM INT-SEC.
+*
+CLEAR:OK_CNT,NG_CNT,UP_CNT,ERR.
+REFRESH TAB.
+
+WK_DATUM = SY-DATUM.
+WK_UZEIT = SY-UZEIT.
+
+ENDFORM.                    " INT-SEC
+*&---------------------------------------------------------------------*
+*&      Form  MAIN-SEC
+*&---------------------------------------------------------------------*
+FORM MAIN-SEC.
+* 金融機関店舗ファイルのアップロード
+PERFORM WS_UPLOAD TABLES READ_TAB USING P_FILE.
+* 入力データを区切り文字で分割する
+PERFORM SPLIT_DATA.
+* 入力データのチェック
+PERFORM CHECK-TAB.    "チェック
+* エラーチェック
+CHECK ERR IS INITIAL.       "エラーがない場合
+* ＢＤＣ登録
+IF NOT P_BDC IS INITIAL.    "ＢＤＣ登録だったら
+PERFORM CALL-TRN.         "登録
+* 印刷
+ELSEIF NOT P_WRITE IS INITIAL.  "印刷だったら
+LOOP AT TAB.
+TAB-ERR = SPACE.
+PERFORM PRT-TAB.                "一覧表
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " MAIN-SEC
+*&---------------------------------------------------------------------*
+*&      Form  END-SEC
+*&---------------------------------------------------------------------*
+FORM END-SEC.
+
+ENDFORM.                    " END-SEC
+*&---------------------------------------------------------------------*
+*&      Form  SET-BDC
+*&---------------------------------------------------------------------*
+FORM SET-BDC.
+*
+REFRESH: BDC_TAB.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF02B' '0100',
+' ' 'BNKA-BANKS' 'JP',
+' ' 'BNKA-BANKL' WK_CODE,
+' ' 'BDC_OKCODE' '/00'.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF02B' '0110',
+' ' 'BNKA-BANKA' TAB-BANKA,
+' ' 'BNKA-STRAS' TAB-STRAS,
+' ' 'BNKA-ORT01' TAB-ORT01,
+' ' 'BNKA-BRNCH' TAB-BRNCH,
+' ' 'BNKA-BGRUP' TAB-BGRUP,
+' ' 'BDC_OKCODE' '/11'.
+ENDFORM.                    " SET-BDC
+*&---------------------------------------------------------------------*
+*&      Form  CHECK-TAB
+*&---------------------------------------------------------------------*
+FORM CHECK-TAB.
+*
+LOOP AT TAB.
+IF TAB-KCODE IS INITIAL.
+TAB-ERR = '金融機関ｺｰﾄﾞが入力されていません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+*
+IF TAB-KCODE CN '0123456789 '.
+TAB-ERR = '金融機関ｺｰﾄﾞが数値ではありません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+*
+IF TAB-TCODE IS INITIAL.
+TAB-ERR = '店舗ｺｰﾄﾞが入力されていません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+*
+IF TAB-TCODE CN '0123456789 '.
+TAB-ERR = '店舗ｺｰﾄﾞが数値ではありません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+*
+IF TAB-BANKA IS INITIAL.
+TAB-ERR = '金融機関名（カナ）が入力されていません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+*
+IF TAB-STRAS IS INITIAL.
+TAB-ERR = '金融機関名（漢字）が入力されていません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+*
+IF TAB-BRNCH IS INITIAL.
+TAB-ERR = '店舗名（カナ）が入力されていません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+*
+IF TAB-ORT01 IS INITIAL.
+TAB-ERR = '店舗名（漢字）が入力されていません'.
+PERFORM PRT-TAB.
+DELETE TAB INDEX SY-TABIX.
+ERR = '1'.
+CONTINUE.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK-TAB
+*&---------------------------------------------------------------------*
+*&      Form  CALL-TRN
+*&---------------------------------------------------------------------*
+FORM CALL-TRN.
+*   金融機関ｺｰﾄﾞ･店舗ｺｰﾄﾞの初期化
+CLEAR: WK_KCODE, WK_TCODE.
+*
+LOOP AT TAB.
+* 2003/05/15 ADD-S
+*   並びコードチェック
+IF TAB-SORT <> '1'.
+TAB-ERR = '支店区分が１以外です'.
+PERFORM PRT-TAB.
+CONTINUE.
+ENDIF.
+* 2003/05/15 ADD-E
+*   金融機関ｺｰﾄﾞ･店舗ｺｰﾄﾞの重複チェック
+IF  WK_KCODE = TAB-KCODE
+AND WK_TCODE = TAB-TCODE.
+TAB-ERR = '金融機関ｺｰﾄﾞ･店舗ｺｰﾄﾞが重複しています'.
+PERFORM PRT-TAB.
+CONTINUE.
+ENDIF.
+
+*   金融機関ｺｰﾄﾞ･店舗ｺｰﾄﾞの待避
+WK_KCODE = TAB-KCODE.
+WK_TCODE = TAB-TCODE.
+*
+CONCATENATE TAB-KCODE TAB-TCODE INTO WK_CODE.
+*
+PERFORM SET-BDC.
+*
+PERFORM CHK_BNKA.
+*   エラーチェック
+IF  SY-SUBRC = 0.
+IF P_UPDATE IS INITIAL.
+TAB-ERR = '銀行ｺｰﾄﾞが登録済みです'.
+PERFORM PRT-TAB.
+CONTINUE.
+ELSE.
+CALL TRANSACTION 'FI02'
+USING BDC_TAB
+MODE 'N'
+UPDATE 'S'.
+IF SY-SUBRC = 0.
+TAB-ERR = '銀行ﾏｽﾀ更新完了'.
+PERFORM PRT-TAB.
+ELSE.
+TAB-ERR = '銀行ﾏｽﾀ更新ができませんでした'.
+PERFORM PRT-TAB.
+ENDIF.
+ENDIF.
+ELSE.
+CALL TRANSACTION 'FI01'
+USING BDC_TAB
+MODE 'N'
+UPDATE 'S'.
+IF SY-SUBRC = 0.
+TAB-ERR = '銀行ﾏｽﾀ登録完了'.
+PERFORM PRT-TAB.
+ELSE.
+TAB-ERR = '銀行ﾏｽﾀ登録ができませんでした'.
+PERFORM PRT-TAB.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CALL-TRN
+*&---------------------------------------------------------------------*
+*&      Form  PRT-TAB
+*&---------------------------------------------------------------------*
+FORM PRT-TAB.
+*
+RESERVE 2 LINES.
+*
+WRITE:/002(02) TAB-BGRUP,           "ｸﾞﾙｰﾌﾟ
+(04) TAB-KCODE   UNDER       '金融機関ｺｰﾄﾞ',
+(35) TAB-BANKA   UNDER       '金融機関名（カナ）',
+(35) TAB-STRAS   UNDER       '金融機関名（漢字）',
+(80) TAB-ERR     UNDER       '処理結果'.
+WRITE:/(03) TAB-TCODE   UNDER       '店舗ｺｰﾄﾞ',
+(35) TAB-BRNCH   UNDER       '店舗名（カナ）',
+(35) TAB-ORT01   UNDER       '店舗名（漢字）'.
+SKIP.
+
+ENDFORM.                    " PRT-TAB
+*&---------------------------------------------------------------------*
+*&      Form  WS_UPLOAD
+*&---------------------------------------------------------------------*
+FORM WS_UPLOAD TABLES    UPCTAB
+USING     P1.
+*
+* Mod ES-UP 2012/10/24 -->
+*     CALL FUNCTION 'WS_UPLOAD'
+*          EXPORTING
+**              CODEPAGE            = ' '
+*               FILENAME            = P1
+**              FILETYPE            = ' '
+**              HEADLEN             = ' '
+**              LINE_EXIT           = ' '
+**              TRUNCLEN            = ' '
+**              USER_FORM           = ' '
+**              USER_PROG           = ' '
+**         IMPORTING
+**              FILELENGTH          =
+*          TABLES
+*               DATA_TAB            = UPCTAB
+*          EXCEPTIONS
+*               CONVERSION_ERROR    = 1
+*               FILE_OPEN_ERROR     = 2
+*               FILE_READ_ERROR     = 3
+*               INVALID_TABLE_WIDTH = 4
+*               INVALID_TYPE        = 5
+*               NO_BATCH            = 6
+*               UNKNOWN_ERROR       = 7
+*               OTHERS              = 8.
+DATA: L_FILENAME TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING.
+
+**** BEGIN OF ADD 2015/02/03 ISID18 ****
+DATA:
+L_Z_OUTPUT_CP TYPE ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING.
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-004
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP.
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+**** END OF ADD 2015/02/03 ISID18 ****
+L_FILENAME = P1.
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** BEGIN OF UPD 2015/02/03 ISID18 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+**** END OF UPD 2015/02/03 ISID18 ****
+****END UPD 2014/08/29 ISID18****
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILENAME
+FILETYPE                = 'ASC'
+*      HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER_LENGTH           = 0
+*      READ_BY_LINE            = 'X'
+*      DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+*      IGNORE_CERR             = ABAP_TRUE
+*      REPLACEMENT             = '#'
+*      VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*    IMPORTING
+*      FILELENGTH              = FILELENGTH
+*      HEADER                  = HEADER
+CHANGING
+DATA_TAB                = UPCTAB[]
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+* Mod ES-UP 2012/10/18 <--
+
+* Mod ES-UP 2012/10/24 <--
+IF SY-SUBRC <> 0.
+WRITE:/     'アップロードエラー',SY-SUBRC,
+P1.
+STOP.
+ENDIF.
+ENDFORM.                    " WS_UPLOAD
+*&---------------------------------------------------------------------*
+*&      Form  WS_FILENAME_GET
+*&---------------------------------------------------------------------*
+*       汎用モジュール「WS_FILENAME_GET」
+*----------------------------------------------------------------------*
+FORM WS_FILENAME_GET.
+
+* Mod ES-UP 2012/10/24 -->
+*  CALL FUNCTION 'WS_FILENAME_GET'
+*     EXPORTING
+*        DEF_PATH         = CST_UPATH
+*        MASK             = '*.CSV,ALL FILES,*.*.'
+*        MODE             = 'O'
+*    IMPORTING
+*         FILENAME         = P_FILE
+*     EXCEPTIONS
+*          INV_WINSYS       = 1
+*          NO_BATCH         = 2
+*          SELECTION_CANCEL = 3
+*          SELECTION_ERROR  = 4
+*          OTHERS           = 5.
+
+DATA: L_FILE_TABLE TYPE FILETABLE,
+L_FILE       TYPE REF TO FILE_TABLE,
+L_TITLE      TYPE STRING,
+L_RC         TYPE I.
+
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+*      WINDOW_TITLE            = L_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+*      DEFAULT_FILENAME        = DEFAULT_FILENAME
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+INITIAL_DIRECTORY       = 'C:\SAPDATA'
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = L_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS "POVの時は、すべて0にすること
+FILE_OPEN_DIALOG_FAILED = 0
+CNTL_ERROR              = 0
+ERROR_NO_GUI            = 0
+NOT_SUPPORTED_BY_GUI    = 0
+OTHERS                  = 0 ).
+
+IF L_RC > 0.
+READ TABLE L_FILE_TABLE REFERENCE INTO L_FILE INDEX 1.
+IF SY-SUBRC = 0.
+P_FILE = L_FILE->FILENAME.
+
+else.
+MESSAGE I000 WITH '汎用モジュール｢FILE_SAVE_DIALOG｣でエラー'.
+STOP.
+
+ENDIF.
+
+ENDIF.
+
+* Mod ES-UP 2012/10/24 <--
+
+ENDFORM.                    " WS_FILENAME_GET
+*&---------------------------------------------------------------------*
+*&      Form  GEN_BDC
+*&---------------------------------------------------------------------*
+*       ＢＤＣテーブルの設定
+*----------------------------------------------------------------------*
+FORM GEN_BDC USING DYNBEGIN
+FNAM
+FVAL.
+*
+CLEAR BDC_TAB.
+*   dynbeginがスペースの場合
+IF DYNBEGIN IS INITIAL.
+BDC_TAB-FNAM      =  FNAM.
+BDC_TAB-FVAL      =  FVAL.
+ELSE.
+*   dynbeginがスペース以外の場合
+BDC_TAB-PROGRAM   =  FNAM.
+BDC_TAB-DYNPRO    =  FVAL.
+BDC_TAB-DYNBEGIN  =  'X'.
+ENDIF.
+*   ＢＤＣテーブルに追加
+APPEND BDC_TAB.
+ENDFORM.                    " GEN_BDC
+*&---------------------------------------------------------------------*
+*&      Form  CHK_BNKA
+*&---------------------------------------------------------------------*
+*       銀行マスタのチェック
+*----------------------------------------------------------------------*
+FORM CHK_BNKA.
+*
+SELECT SINGLE BANKS
+INTO BNKA-BANKS
+FROM BNKA
+WHERE BANKS = 'JP'
+AND BANKL = WK_CODE.
+*
+CASE  SY-SUBRC.
+WHEN  0.
+WHEN  4.
+WHEN  OTHERS.
+MESSAGE I000 WITH '銀行マスタの読込でエラー'.
+STOP.
+ENDCASE.
+
+ENDFORM.                    " CHK_BNKA
+*&---------------------------------------------------------------------*
+*&      Form  SPLIT_DATA
+*&---------------------------------------------------------------------*
+*       入力データを区切り文字で分割する
+*----------------------------------------------------------------------*
+FORM SPLIT_DATA.
+*
+REFRESH TAB.
+*
+LOOP AT READ_TAB.
+TRANSLATE READ_TAB USING '" '.
+CONDENSE READ_TAB NO-GAPS.
+CLEAR: TAB.
+SPLIT READ_TAB AT ',' INTO TAB-KCODE     "金融機関コード
+TAB-TCODE     "店舗コード
+TAB-BANKA     "金融機関名（カナ）
+TAB-STRAS     "金融機関名（漢字）
+TAB-BRNCH     "店舗名（カナ）
+TAB-ORT01     "店舗名（漢字）
+TAB-ADRNO     "郵便番号
+TAB-ADRSS     "店舗所在地
+TAB-TELPH     "電話番号
+TAB-CHANG     "手形交換所番号
+TAB-SORT.     "並びコード
+*   データが数字と半角スペースの場合 前ゼロを追加
+PERFORM SET_BEFORE_ZERO USING : TAB-KCODE,     "金融機関コード
+TAB-TCODE.     "店舗コード
+* 2003/05/15 DEL-S
+**   銀行グループのセット
+*    PERFORM SET_BGRUP USING    TAB-KCODE
+*                      CHANGING TAB-BGRUP.
+* 2003/05/15 DEL-E
+
+APPEND TAB.
+ENDLOOP.
+ENDFORM.                    " SPLIT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_BEFORE_ZERO
+*&---------------------------------------------------------------------*
+*       データが数字と半角スペースの場合 前ゼロを追加
+*----------------------------------------------------------------------*
+FORM SET_BEFORE_ZERO USING WK_INPUT.
+*
+DATA: WK_OUTPUT(40) TYPE C.
+*
+WK_OUTPUT = WK_INPUT.
+*
+CALL FUNCTION 'CONVERSION_EXIT_NUMCV_INPUT'
+EXPORTING
+INPUT   = WK_OUTPUT
+IMPORTING
+OUTPUT  = WK_INPUT
+EXCEPTIONS
+OTHERS  = 1.
+*
+IF SY-SUBRC <> 0.
+MESSAGE I000 WITH
+'汎用モジュール｢CONVERSION_EXIT_NUMCV_INPUT｣でエラー'.
+STOP.
+ENDIF.
+
+ENDFORM.                    " SET_BEFORE_ZERO
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_HEADER
+*&---------------------------------------------------------------------*
+*       帳票ヘッダ出力
+*----------------------------------------------------------------------*
+FORM WRITE_HEADER.
+*
+FORMAT INTENSIFIED ON COLOR COL_NORMAL.
+SKIP.
+ULINE.
+WRITE:/0(170) '＊＊＊ 銀行マスタＢＤＣ確認リスト ＊＊＊' CENTERED,
+134(01) '(',
+136(10) WK_DATUM USING EDIT MASK '____/__/__',
+148(08) WK_UZEIT USING EDIT MASK '__:__:__',
+157(01) ')',
+160(04) SY-PAGNO,
+164(02) '頁',
+170(01) SPACE.
+ULINE.
+FORMAT INTENSIFIED ON COLOR COL_HEADING.
+WRITE:/001 'ｸﾞﾙｰﾌﾟ',
+007 '/',
+008 '金融機関ｺｰﾄﾞ',
+021 '金融機関名（カナ）',
+057 '金融機関名（漢字）',
+090 '処理結果',
+170(01) SPACE.
+WRITE:/008 '店舗ｺｰﾄﾞ',
+021 '店舗名（カナ）',
+057 '店舗名（漢字）',
+170(01) SPACE.
+ULINE.
+FORMAT INTENSIFIED OFF.
+
+ENDFORM.                    " WRITE_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  SET_BGRUP
+*&---------------------------------------------------------------------*
+*       銀行グループの取得
+*----------------------------------------------------------------------*
+*      -->P_KCODE  金融機関コード
+*      <--P_BGRUP  銀行グループ
+*----------------------------------------------------------------------*
+*FORM SET_BGRUP USING    P_KCODE
+*               CHANGING P_BGRUP.
+**
+*  SELECT SINGLE BGRUP FROM YFBNKA
+*                      INTO P_BGRUP
+*                      WHERE BNKCD = P_KCODE.
+*
+*  CASE SY-SUBRC.
+*    WHEN  0.
+*    WHEN  4.
+*      CLEAR: P_BGRUP.
+*    WHEN  OTHERS.
+*      MESSAGE I000 WITH '銀行グループ変換テーブルの読込でエラー'.
+*      STOP.
+*  ENDCASE.
+*
+*ENDFORM.                    " SET_BGRUP

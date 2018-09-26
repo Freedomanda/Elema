@@ -1,0 +1,3681 @@
+*&---------------------------------------------------------------------*
+*& プログラムID : ZEGSDR2010
+*& 作成者       : iSiD Chen
+*& 作成日       : 2014/10/11
+*& 処理概要     : 1.抽出条件を元に未連携の購買発注を取得する
+*&                2.受注側の得意先と販売組織を自動決定する
+*&                3.購買発注デ‐タをチェックし、受発注連携
+*&                  アドオンテ‐ブルに登録する
+*&                4.エラ‐デ‐タをエラ‐ファイルに保存し、
+*&                  自動的にメ‐ル通知する
+*&                5.エラ‐デ‐タをリカバリするため、オンラインALVで
+*&                  登録済とエラ‐一覧を確認する
+*&                6.エラ‐一覧のデ‐タを削除及び再取込むことができる
+*&---------------------------------------------------------------------*
+*& 改定履歴
+*& No   DATE       MODIFYED BY   SUMMARY
+*& 1    2015/02/10 iSiD Chen     基本設計r5の仕様変更対応
+*& 2    2015/03/06 iSiD Chen     受入テストで発見した問題の対応
+*& 3    2015/04/24 iSiD Zhao     メッセージ変数追加対応
+*& 4    2015/07/01 iSiD Ren      選択画面に「処理区分」と
+*&                              「出力デバイス」を追加
+*&                               連携されたデータの印刷機能を追加
+*& 5    2015/07/08 iSiD Ren      受発注連携の出荷指示と
+*&                               エンドユーザ単価情報を追加
+*& 6    2015/07/30 iSiD Ren      印刷パラメータ変更
+*& 7    2015/08/05 iSiD Ren      最終仕向地の変更
+*&                               取引条件の対応
+*&                               エンドユーザ(価格)の設定変更
+*& 8    2015/08/12 iSiD Ren      品目読替え対応
+*&                               購買発注SAP品目　→　仕入先品目
+*&                               →　得意先品目　→　受注SAP品目
+*& 9    2015/08/25 iSiD Ren      最終仕向地を実需マスタから優先に
+*&                               取得する
+*&                               仕入先品目が空白の場合は、
+*&                               SAP品目を仕入先品目として連携する
+*& 10   2015/08/27 iSiD Ren      仕入先品目　→　得意先品目へ
+*&                               変換できない場合、エラーせず
+*&                               仕入先品目を受注側の得意先品目として
+*&                               保存する
+*&---------------------------------------------------------------------*
+REPORT ZEGSDR2010 NO STANDARD PAGE HEADING.
+
+*&----------------------------------------------------------------------
+* 定数の宣言
+*&----------------------------------------------------------------------
+CONSTANTS:
+CNS_RNG_SIGN    TYPE DDSIGN VALUE 'I',
+CNS_RNG_OPTION  TYPE DDOPTION VALUE 'EQ',
+CNS_MSG_E       TYPE SY-MSGTY VALUE 'E',
+CNS_MSG_S       TYPE SY-MSGTY VALUE 'S',
+CNS_MSG_MSGV1   TYPE SY-MSGV1 VALUE 'ZTEGSDT203',
+CNS_TIME_MAX    TYPE ZTEGSDT202-JOB_TIME VALUE '235959',   "実行時刻
+CNS_OBJECTCLAS  TYPE CDHDR-OBJECTCLAS VALUE 'EINKBELEG',   "OBJクラス
+CNS_CHANGE_IND  TYPE CDHDR-CHANGE_IND VALUE 'I',           "変更タイプ
+CNS_MSG_CDHDR   TYPE SY-MSGV1 VALUE 'CDHDR',               "変更文書
+CNS_MSG_EKKO    TYPE SY-MSGV1 VALUE 'EKKO',                "購買伝票
+CNS_HEKORG       TYPE EKKO-EKORG VALUE '1000',              "本社購買グループ
+CNS_MSG_T203    TYPE SY-MSGV1 VALUE 'ZTEGSDT203',          "Sales Data
+CNS_FDGRV       TYPE LFB1-FDGRV VALUE 'A3',                "関連会社
+CNS_ZKBUNCC     TYPE ZTEGSDT203-ZKBUNCC VALUE '1',         "処理区分
+CNS_STATUS      TYPE ZTEGSDT203-STATUS VALUE 'C',          "ステータス
+CNS_STATUS_E    TYPE ZTEGSDT203-STATUS VALUE 'E',          "ステータス
+CNS_STATUS_D    TYPE ZTEGSDT203-STATUS VALUE 'D',          "ステータス
+**** START ADD 2015/02/10 ISID11 ****
+CNS_KNTTP_M     TYPE ZTEGSDT203-KNTTP VALUE 'M',           "個別購買
+**** END ADD 2015/02/10 ISID11 ****
+**** START ADD BY ISID REN 2015/07/09 ****
+CNS_EVERS_Z1    TYPE ZTEGSDT203-EVERS VALUE 'Z1',          "出荷指示
+**** END ADD BY ISID REN 2015/07/09 ****
+CNS_TABNAME     TYPE DD02L-TABNAME VALUE 'ZSEGSD0006',     "ALV
+CNS_FILEHEADER  TYPE DD02L-TABNAME VALUE 'ZSEGSD0007',     "テキスト
+CNS_ON          TYPE CHAR1 VALUE 'X',
+CNS_PF_STATUS   TYPE SLIS_FORMNAME VALUE 'SET_STATUS',
+CNS_USER_CMD    TYPE SLIS_FORMNAME VALUE 'USER_COMMAND',
+CNS_REEXCUTE    TYPE SY-UCOMM      VALUE 'RE-EXEC',
+CNS_DELETE      TYPE SY-UCOMM      VALUE 'DELETE',
+CNS_DETAIL      TYPE SY-UCOMM      VALUE 'DETAIL',
+CNS_DOUBLE      TYPE SY-UCOMM      VALUE '&IC1'.
+
+*&----------------------------------------------------------------------
+* 型定義
+*&----------------------------------------------------------------------
+TYPES:
+TYP_RD_BUKRS   TYPE RANGE OF T001-BUKRS,   "対象組織-会社コード
+
+BEGIN OF TYP_BUKRS,
+BUKRS TYPE T001-BUKRS,                   "会社コード
+END OF TYP_BUKRS,
+
+BEGIN OF TYP_EKORG,
+EKORG TYPE T024E-EKORG,                  "購買組織
+BUKRS TYPE T024E-BUKRS,                  "会社コード
+END OF TYP_EKORG,
+
+BEGIN OF TYP_CDHDR,
+OBJECTID TYPE CDHDR-OBJECTID,            "対象値
+UDATE    TYPE CDHDR-UDATE,               "変更伝票の登録日付
+UTIME    TYPE CDHDR-UTIME,               "変更時刻
+END OF TYP_CDHDR,
+TYP_TD_CDHDR TYPE STANDARD TABLE OF TYP_CDHDR,
+
+BEGIN OF TYP_EBELN,
+EBELN    TYPE EKKO-EBELN,
+END OF TYP_EBELN,
+TYP_TD_EBELN TYPE STANDARD TABLE OF TYP_EBELN,
+
+* 受発注連携データ
+**** START UPD 2015/02/10 ISID11 ****
+*  TYP_TD_EKKO TYPE STANDARD TABLE OF ZTEGSDT203,
+BEGIN OF TYP_EKKO.
+INCLUDE TYPE ZTEGSDT203.
+TYPES:
+SPRAS     TYPE EKKO-SPRAS,                "言語キー
+**** START ADD BY ISID REN 2015/08/12 ****
+IDNLF     TYPE EKPO-IDNLF,                "仕入先品目
+**** END ADD BY ISID REN 2015/08/12 ****
+END OF TYP_EKKO,
+TYP_TD_EKKO TYPE STANDARD TABLE OF TYP_EKKO,
+TYP_TD_INSERT TYPE STANDARD TABLE OF ZTEGSDT203.
+
+TYPES:
+**** END UPD 2015/02/10 ISID11 ****
+**** START ADD BY ISID REN 2015/08/12 ****
+* 得意先品目マスタ
+BEGIN OF TYP_KNMT,
+VKORG TYPE KNMT-VKORG, "販売組織
+VTWEG TYPE KNMT-VTWEG, "流通チャネル
+KUNNR TYPE KNMT-KUNNR, "得意先コード
+MATNR TYPE KNMT-MATNR, "品目コード
+KDMAT TYPE KNMT-KDMAT, "得意先が使用する品目コード
+END OF TYP_KNMT,
+TYP_TD_KNMT TYPE STANDARD TABLE OF TYP_KNMT,
+**** END ADD BY ISID REN 2015/08/12 ****
+
+BEGIN OF TYP_ZTEGSDT201,
+WERKS    TYPE ZTEGSDT201-WERKS,          "プラント
+LIFNR    TYPE ZTEGSDT201-LIFNR,          "仕入先勘定コード
+WAERS    TYPE ZTEGSDT201-WAERS,          "通貨コード
+KUNNR    TYPE ZTEGSDT201-KUNNR,          "受注先
+END OF TYP_ZTEGSDT201,
+TYP_TD_ZTEGSDT201 TYPE STANDARD TABLE OF TYP_ZTEGSDT201,
+
+BEGIN OF TYP_KNVV,
+KUNNR    TYPE KNVV-KUNNR,                "得意先コード
+VKORG    TYPE KNVV-VKORG,                "販売組織
+VTWEG    TYPE KNVV-VTWEG,                "流通チャネル
+SPART    TYPE KNVV-SPART,                "製品部門
+VKGRP    TYPE KNVV-VKGRP,                "営業グループ
+VKBUR    TYPE KNVV-VKBUR,                "営業所
+END OF TYP_KNVV,
+TYP_TD_KNVV TYPE STANDARD TABLE OF TYP_KNVV,
+
+BEGIN OF TYP_EKET,
+EBELN    TYPE EKET-EBELN,                "購買伝票番号
+EBELP    TYPE EKET-EBELP,                "明細番号
+EINDT    TYPE EKET-EINDT,                "明細納入期日
+ETENR    TYPE EKET-ETENR,                "納入日程行カウンタ
+END OF TYP_EKET,
+TYP_TD_EKET TYPE STANDARD TABLE OF TYP_EKET,
+
+**** START ADD BY ISID REN 2015/08/05 ****
+BEGIN OF TYP_T005T,
+SPRAS    TYPE T005T-SPRAS,                "言語キー
+LAND1    TYPE T005T-LAND1,                "国コード
+LANDX    TYPE T005T-LANDX,                "国名
+END OF TYP_T005T,
+TYP_TD_T005T TYPE STANDARD TABLE OF TYP_T005T,
+**** END ADD BY ISID REN 2015/08/05 ****
+
+**** START ADD 2015/02/10 ISID11 ****
+BEGIN OF TYP_VBKD,
+EBELN    TYPE EKKN-EBELN,                "購買伝票番号
+EBELP    TYPE EKKN-EBELP,                "明細番号
+BSTKD    TYPE VBKD-BSTKD,                "得意先発注番号
+END OF TYP_VBKD,
+TYP_TD_VBKD TYPE STANDARD TABLE OF TYP_VBKD,
+
+BEGIN OF TYP_ZTEGMMM001,
+MATNR          TYPE ZTEGMMM001-MATNR,          "品目コード
+BUKRS          TYPE ZTEGMMM001-BUKRS,          "会社コード
+**** START UPD BY ISID REN 2015/07/08 ****
+*    Z_ENDUSER_CD   TYPE ZTEGMMM001-Z_ENDUSER_CD,   "エンドユーザ
+*    Z_PURPOSE_TEXT TYPE ZTEGMMM001-Z_PURPOSE_TEXT, "用途
+Z_PURPOSE_TEXT TYPE ZTEGMMM001-Z_PURPOSE_TEXT,  "用途
+**** START DEL BY ISID REN 2015/08/05 ****
+*    Z_ACTDEMAND_CD TYPE ZTEGMMM001-Z_ACTDEMAND_CD,  "最終需要者
+**** END DEL BY ISID REN 2015/08/05 ****
+Z_ENDUSER_CD   TYPE ZTEGMMM001-Z_ENDUSER_CD,    "エンドユーザ
+**** END UPD BY ISID REN 2015/07/08 ****
+END OF TYP_ZTEGMMM001,
+TYP_TD_ZTEGMMM001  TYPE STANDARD TABLE OF TYP_ZTEGMMM001,
+
+**** START ADD BY ISID REN 2015/08/25 ****
+* 最終仕向地の再取得
+BEGIN OF TYP_KNA1_T005T,
+KUNNR TYPE KNA1-KUNNR,  "最終需要者
+LANDX TYPE T005T-LANDX, "最終仕向地
+END OF TYP_KNA1_T005T,
+TYP_TD_KNA1_T005T TYPE STANDARD TABLE OF TYP_KNA1_T005T,
+**** END ADD BY ISID REN 2015/08/25 ****
+
+BEGIN OF TYP_VBAK,
+EBELN    TYPE EKKN-EBELN,                "購買伝票番号
+EBELP    TYPE EKKN-EBELP,                "明細番号
+KUNNR    TYPE VBAK-KUNNR,                "エンドユーザ
+**** START ADD BY ISID REN 2015/07/09 ****
+NETPR    TYPE VBAP-NETPR,                "正味価格
+KPEIN    TYPE VBAP-KPEIN,                "価格条件単位
+KMEIN    TYPE VBAP-KMEIN,                "条件単位
+WAERK    TYPE VBAP-WAERK,                "販売伝票通貨
+**** END ADD BY ISID REN 2015/07/09 ****
+END OF TYP_VBAK,
+TYP_TD_VBAK  TYPE STANDARD TABLE OF TYP_VBAK,
+**** END ADD 2015/02/10 ISID11 ****
+
+BEGIN OF TYP_ZTEGSDT203,
+EBELN        TYPE ZTEGSDT203-EBELN,      "購買伝票番号
+EBELP        TYPE ZTEGSDT203-EBELP,      "購買伝票の明細番号
+ZKBUNCC      TYPE ZTEGSDT203-ZKBUNCC,    "処理区分
+Z_CRE_YMD    TYPE ZTEGSDT203-Z_CRE_YMD,    "登録年月日
+Z_CRE_HMS    TYPE ZTEGSDT203-Z_CRE_HMS,    "登録時分秒
+Z_CRE_USERID TYPE ZTEGSDT203-Z_CRE_USERID, "ユーザ名
+END OF TYP_ZTEGSDT203,
+TYP_TD_ZTEGSDT203 TYPE STANDARD TABLE OF TYP_ZTEGSDT203,
+
+**** START ADD 2015/04/24 ISID11 ****
+BEGIN OF TYP_RECOVERY_LIST,
+EBELN        TYPE ZTEGSDT203-EBELN,      "購買伝票番号
+EBELP        TYPE ZTEGSDT203-EBELP,      "購買伝票の明細番号
+**** START UPD BY ISID REN 2015/08/12 ****
+*    MATNR        TYPE ZTEGSDT203-MATNR,     "品目コード
+MATNR        TYPE ZTEGSDT203-MATNR_PO,   "品目コード(PO)
+**** END UPD BY ISID REN 2015/08/12 ****
+TXZ01        TYPE ZTEGSDT203-TXZ01,      "品目テキスト
+BUKRS        TYPE ZTEGSDT203-BUKRS,      "会社コード
+BUTXT        TYPE T001-BUTXT,                 "会社の名称
+EKORG        TYPE ZTEGSDT203-EKORG,     "購買組織
+EKGRP        TYPE ZTEGSDT203-EKGRP,     "購買グループ
+VKORG        TYPE ZTEGSDT203-VKORG,    "販売組織
+VTEXT        TYPE TVKOT-VTEXT,              "販売組織名称
+VTWEG        TYPE ZTEGSDT203-VTWEG,    "流通チャネル
+SPART        TYPE ZTEGSDT203-SPART,    "製品部門
+VKBUR        TYPE ZTEGSDT203-VKBUR,    "営業所
+VKGRP        TYPE ZTEGSDT203-VKGRP,    "営業グループ
+KUNNR        TYPE ZTEGSDT203-KUNNR,    "受注先
+NAME1        TYPE KNA1-NAME1,               "受注先の名称
+STATUS       TYPE ZTEGSDT203-STATUS,  "ステータス
+MSGID       TYPE ZTEGSDT203-MSGID,  "メッセージ ID
+MSGNO       TYPE ZTEGSDT203-MSGNO,  "システムメッセージ番号
+MSGV1      TYPE ZTEGSDT203-MSGV1,  "メッセージ変数
+MSGV2      TYPE ZTEGSDT203-MSGV2,  "メッセージ変数
+MSGV3      TYPE ZTEGSDT203-MSGV3,  "メッセージ変数
+MSGV4      TYPE ZTEGSDT203-MSGV4,  "メッセージ変数
+AEDAT       TYPE ZTEGSDT203-AEDAT,    "登録日
+ERNAM       TYPE ZTEGSDT203-ERNAM,   "登録者名
+Z_CRE_YMD    TYPE ZTEGSDT203-Z_CRE_YMD,    "登録年月日
+Z_CRE_HMS    TYPE ZTEGSDT203-Z_CRE_HMS,    "登録時分秒
+END OF TYP_RECOVERY_LIST,
+**** END ADD 2015/04/24 ISID11 ****
+
+TYP_TD_ALV TYPE STANDARD TABLE OF ZSEGSD0006. "ALVデータ
+
+*&----------------------------------------------------------------------
+* グローバル変数
+*&----------------------------------------------------------------------
+DATA:
+W_SYST_DATE    TYPE SY-DATUM,             "システム日付
+W_SYST_TIME    TYPE SY-UZEIT,             "システム時刻
+W_SEQNO        TYPE ZTEGSDT202-SEQNO,     "連番
+W_BUKRS        TYPE T001-BUKRS ,          "Company Code
+**** START ADD BY ISID REN 2015/07/01 ****
+W_WERKS        TYPE ZTEGSDT203-WERKS,     "プラント
+W_ZKBUNCC      TYPE ZTEGSDT203-ZKBUNCC,   "処理区分
+**** END ADD BY ISID REN 2015/07/01 ****
+W_EKORG        TYPE EKKO-EKORG ,          "Purch. Org.
+W_EKGRP        TYPE EKKO-EKGRP,           "Purch. Group
+W_LIFNR        TYPE LFA1-LIFNR,           "Vendor
+W_BSART        TYPE EKKO-BSART,           "Purchasing Doc. Type
+W_EBELN        TYPE EKKO-EBELN,           "Purch.Doc.
+W_UDATE        TYPE ZECREUDATE,           "Create Date
+W_UTIME        TYPE ZECREUTIME,           "Create Time
+**** START UPD 2015/03/03 ISID11 ****
+*  W_ERNAM        TYPE EKKO-ERNAM,           "Create User
+W_ERNAM        TYPE ZTEGSDT203-ERNAM,     "Create User
+**** END UPD 2015/03/03 ISID11 ****
+**** START UPD 2015/02/10 ISID11 ****
+*  W_STATUS       TYPE ZTEGSDT203-STATUS,    "Status
+W_STATUS       TYPE ZSEGSD0006-STATUS,    "Status
+**** END UPD 2015/02/10 ISID11 ****
+W_CREYMD       TYPE ZECRE_YMD,            "Job Date
+W_CREHMS       TYPE ZECRE_HMS,            "Job Time
+**** START ADD 2015/02/10 ISID11 ****
+W_TOTAL        TYPE I,                    "対象件数
+W_NORMAL       TYPE I,                    "成功件数
+W_ERROR        TYPE I.                    "エラー件数
+**** END ADD 2015/02/10 ISID11 ****
+
+*&----------------------------------------------------------------------
+* 内部テーブル
+*&----------------------------------------------------------------------
+DATA:
+RD_BUKRS       TYPE TYP_RD_BUKRS,         "対象組織-会社コード
+TD_EKKO        TYPE TYP_TD_EKKO,          "ITAB:受発注連携データ
+TD_ALV         TYPE TYP_TD_ALV.           "ITAB:ALVデータ
+
+TYPES:
+TYPE_LINE_BUKRS LIKE LINE OF RD_BUKRS.
+
+*&----------------------------------------------------------------------
+* SELECTION-SCREEN
+*&----------------------------------------------------------------------
+SELECTION-SCREEN BEGIN OF BLOCK BK_1.
+SELECTION-SCREEN BEGIN OF LINE.
+* Process Type
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: RB_1 RADIOBUTTON GROUP GP1 DEFAULT 'X' USER-COMMAND SEL.
+SELECTION-SCREEN COMMENT 37(15) TEXT-001 FOR FIELD RB_1.
+SELECTION-SCREEN POSITION 54.
+PARAMETERS: RB_2 RADIOBUTTON GROUP GP1.
+SELECTION-SCREEN COMMENT 56(20) TEXT-002 FOR FIELD RB_2.
+SELECTION-SCREEN END OF LINE.
+
+SELECT-OPTIONS:
+S_BUKRS     FOR W_BUKRS MEMORY ID BUK OBLIGATORY,   "Company Code
+**** START ADD BY ISID REN 2015/07/01 ****
+S_WERKS     FOR W_WERKS MEMORY ID WRK OBLIGATORY,   "Plant
+**** END ADD BY ISID REN 2015/07/01 ****
+S_EKORG     FOR W_EKORG MEMORY ID EKO OBLIGATORY,   "Purch. Org.
+S_EKGRP     FOR W_EKGRP,                            "Purch. Group
+S_LIFNR     FOR W_LIFNR,                            "Vendor
+S_BSART     FOR W_BSART,                      "Purchasing Doc. Type
+S_EBELN     FOR W_EBELN,                            "Purch.Doc.
+S_UDATE     FOR W_UDATE NO-EXTENSION,               "Create Date
+S_UTIME     FOR W_UTIME NO-EXTENSION.               "Create Time
+
+PARAMETERS:
+P_ERROR     TYPE ZEFILENAME.                        "Error File
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS:
+S_ERNAM     FOR W_ERNAM,                            "Create User
+S_STATUS    FOR W_STATUS,                           "Status
+S_CREYMD    FOR W_CREYMD,                           "Job Date
+S_CREHMS    FOR W_CREHMS.                           "Job Time
+
+SELECTION-SCREEN END OF BLOCK BK_1.
+
+**** START ADD BY ISID REN 2015/07/01 ****
+SELECTION-SCREEN SKIP 1.
+SELECT-OPTIONS:
+S_ZC        FOR W_ZKBUNCC.                          "処理区分
+PARAMETERS:
+P_PADEST    TYPE TSP03-PADEST.                      "出力デバイス
+**** END ADD BY ISID REN 2015/07/01 ****
+
+*----------------------------------------------------------------------*
+* INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+* Create Date Time Control
+PERFORM CONTROL_SELECT_OPTIONS.
+
+*----------------------------------------------------------------------*
+* AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_ERROR.
+* エラーファイルパス
+PERFORM INIT_ERRORFILE_HELP CHANGING P_ERROR.
+
+*----------------------------------------------------------------------*
+* AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* A-1．初期処理
+PERFORM INIT_SCREEN_CHK CHANGING RD_BUKRS.    "対象組織-会社コード
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+W_SYST_DATE = SY-DATUM.                  "システム日付
+W_SYST_TIME = SY-UZEIT.                  "システム時刻
+
+IF RB_1 IS NOT INITIAL.
+*   A-2．データ抽出編集処理
+PERFORM GET_DATA_MAIN USING RD_BUKRS     "対象組織-会社コード
+W_SYST_DATE
+W_SYST_TIME
+CHANGING TD_EKKO      "ITAB:受発注連携データ
+W_SEQNO.
+
+*   A-3．デ‐タ更新処理
+PERFORM EDIT_DATA_MAIN USING
+**** START DEL 2015/03/09 ISID11 ****
+*                                 TD_EKKO     "ITAB:受発注連携データ
+**** END DEL 2015/03/09 ISID11 ****
+W_SYST_DATE
+W_SYST_TIME
+**** START ADD 2015/03/09 ISID11 ****
+CHANGING TD_EKKO.     "ITAB:受発注連携データ
+**** END ADD 2015/03/09 ISID11 ****
+
+*   A-4．エラーファイル出力処理
+PERFORM OUTPUT_FILE_ERR USING TD_EKKO    "ITAB:受発注連携データ
+**** START ADD 2015/02/10 ISID11 ****
+W_SYST_DATE
+W_SYST_TIME.
+**** END ADD 2015/02/10 ISID11 ****
+ELSE.
+*   B-2．デ‐タ抽出編集処理
+PERFORM GET_DATA_ALV USING RD_BUKRS      "対象組織-会社コード
+CHANGING TD_ALV.       "ITAB:ALVデータ
+
+*   B-3．画面出力
+PERFORM OUTPUT_ALV_DISPLAY CHANGING TD_ALV. "ITAB:ALVデータ
+ENDIF.
+
+*----------------------------------------------------------------------*
+* END-OF-SELECTION
+*----------------------------------------------------------------------*
+END-OF-SELECTION.
+IF RB_1 IS NOT INITIAL.
+* A-5．終了メッセ‐ジの出力処理
+PERFORM OUTPUT_MESSAGE_END USING W_SYST_DATE
+W_SYST_TIME
+W_SEQNO
+TD_EKKO. "ITAB:受発注連携データ
+ENDIF.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_ERRORFILE_HELP
+*&---------------------------------------------------------------------*
+*       エラーファイルパス
+*----------------------------------------------------------------------*
+*      <--O_ERROR  エラーファイルパス
+*----------------------------------------------------------------------*
+FORM INIT_ERRORFILE_HELP  CHANGING O_ERROR TYPE RLGRAP-FILENAME.
+DATA:
+LTD_FILETABLE   TYPE FILETABLE,
+LREF_FILETABLE  TYPE REF TO FILE_TABLE,
+LW_RC           TYPE I.
+
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+CHANGING
+FILE_TABLE              = LTD_FILETABLE
+RC                      = LW_RC
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 5.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+CLEAR LREF_FILETABLE.
+READ TABLE LTD_FILETABLE REFERENCE INTO LREF_FILETABLE INDEX 1.
+
+IF SY-SUBRC = 0.
+O_ERROR = LREF_FILETABLE->FILENAME.
+ENDIF.
+
+ENDFORM.                    " INIT_ERRORFILE_HELP
+*&---------------------------------------------------------------------*
+*&      Form  INIT_SCREEN_CHK
+*&---------------------------------------------------------------------*
+*       A-1．初期処理
+*----------------------------------------------------------------------*
+*      <--O_BUKRS 対象組織-会社コード
+*----------------------------------------------------------------------*
+FORM INIT_SCREEN_CHK CHANGING O_BUKRS  TYPE TYP_RD_BUKRS.
+
+DATA:
+LTD_BUKRS    TYPE STANDARD TABLE OF TYP_BUKRS,   "ITAB:会社
+LTD_EKORG    TYPE STANDARD TABLE OF TYP_EKORG,   "ITAB:対象組織
+LST_EKORG    TYPE TYP_EKORG,                     "対象組織
+LST_RD_BUKRS TYPE TYPE_LINE_BUKRS,               "STRU:会社
+**** START ADD BY ISID REN 2015/07/01 ****
+LTD_WERKS    TYPE STANDARD TABLE OF WERKS_D,     "プラント
+**** END ADD BY ISID REN 2015/07/01 ****
+LW_INDEX     TYPE SY-INDEX.
+
+* A-1-1．入力チェック
+CLEAR:
+O_BUKRS.
+
+* A-1-1-1．会社コ‐ド（Company Code）存在チェック
+SELECT BUKRS                  "会社コ‐ド
+INTO TABLE LTD_BUKRS
+FROM T001
+WHERE BUKRS IN S_BUKRS.
+
+* （1）．存在しない場合、エラ‐メッセ‐ジを出力し処理を終了する
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'S_BUKRS-LOW'.
+MESSAGE E002(ZMEGSD01) WITH S_BUKRS-LOW.
+*   会社コ‐ド ( &1 )は存在しません
+ENDIF.
+
+**** START ADD BY ISID REN 2015/07/01 ****
+* プラント（Plant）存在チェック
+SELECT WERKS                  "プラント
+INTO TABLE LTD_WERKS
+FROM T001W
+WHERE WERKS IN S_WERKS.      "プラント
+
+* 存在しない場合
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'S_WERKS-LOW'.
+
+*   プラント&1は存在しません
+MESSAGE E075(ZMEGSD01)
+WITH SPACE.
+ENDIF.
+**** END ADD BY ISID REN 2015/07/01 ****
+
+* A-1-1-2．購買組織(Purch. Org.)存在チェック
+* 購買組織(T024E)より、指定画面の購買組織の存在チェックをする
+SELECT EKORG                   "購買組織
+BUKRS                   "会社コード
+INTO TABLE LTD_EKORG
+FROM T024E
+WHERE EKORG IN S_EKORG.       "購買組織
+
+* （1）．存在しない場合、エラ‐メッセ‐ジを出力し処理を終了する
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'S_EKORG-LOW'.
+MESSAGE E017(ZMEGSD01) WITH S_EKORG-LOW.
+*   購買組織( &1 )は存在しません
+ENDIF.
+
+**** START ADD BY ISID REN 2015/07/01 ****
+* 出力デバイスが空白以外の場合のみ、チェック処理を行う
+IF P_PADEST IS NOT INITIAL.
+*   出力デバイスの存在チェック
+SELECT SINGLE PADEST                 "出力デバイス
+INTO P_PADEST
+FROM TSP03
+WHERE PADEST = P_PADEST.            "出力デバイス
+
+*   存在しない場合
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_PADEST'.
+
+*     出力デバイス&1は存在しません
+MESSAGE E120(ZMEGSD01)
+WITH P_PADEST.
+ENDIF.
+ENDIF.
+**** END ADD BY ISID REN 2015/07/01 ****
+
+* A-1-2．整合性チェック
+* A-1-2-1．会社コ‐ドと販売組織の整合性チェック
+SORT LTD_BUKRS BY BUKRS ASCENDING.
+
+CLEAR:
+LST_RD_BUKRS.
+
+LOOP AT LTD_EKORG INTO LST_EKORG.
+CLEAR:
+LW_INDEX.
+
+LW_INDEX = SY-TABIX.
+
+READ TABLE LTD_BUKRS TRANSPORTING NO FIELDS
+WITH KEY BUKRS = LST_EKORG-BUKRS
+BINARY SEARCH.
+
+*   （1）．存在しない場合、対象外会社コ‐ドとする
+IF SY-SUBRC <> 0.
+DELETE LTD_EKORG INDEX LW_INDEX.
+ENDIF.
+ENDLOOP.
+
+* （3）．上記A-1-1-2で取得した「ITAB:対象組織」で全ての会社コ‐ドが
+* 指定画面の会社コ‐ドに存在しない場合エラ‐メッセ‐ジを出力し処理を終了
+IF LTD_EKORG IS INITIAL.
+SET CURSOR FIELD 'S_BUKRS-LOW'.
+MESSAGE E018(ZMEGSD01).
+*   指定された会社コ‐ドと購買組織の整合性がありません
+ENDIF.
+
+* A-1-2-2．登録日付と登録時刻の整合性チェック
+* ・指定画面の登録時刻が初期値ではない場合、登録日付を確認する
+* （1）．登録日付が初期値の場合、エラ‐メッセ‐ジを出力し処理を終了する
+IF S_UTIME[] IS NOT INITIAL AND
+S_UDATE[] IS INITIAL.
+SET CURSOR FIELD 'S_UDATE-LOW'.
+MESSAGE E019(ZMEGSD01).
+*   登録日付を指定してください
+ENDIF.
+
+* A-1-3．権限チェック
+* ・会社コ‐ドの権限チェックを行う
+LST_RD_BUKRS-SIGN = CNS_RNG_SIGN.
+LST_RD_BUKRS-OPTION = CNS_RNG_OPTION.
+SORT LTD_EKORG BY BUKRS ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_EKORG
+COMPARING BUKRS.
+
+LOOP AT LTD_EKORG INTO LST_EKORG.
+AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+ID 'BUKRS' FIELD LST_EKORG-BUKRS
+ID 'ACTVT' FIELD '01'.
+
+IF SY-SUBRC = 0.
+LST_RD_BUKRS-LOW = LST_EKORG-BUKRS.
+APPEND LST_RD_BUKRS TO O_BUKRS.
+ENDIF.
+ENDLOOP.
+
+* （2）．全ての会社コ‐ドをチェックエラ‐の場合
+IF O_BUKRS IS INITIAL.
+SET CURSOR FIELD 'S_BUKRS-LOW'.
+MESSAGE E001(ZMEGSD01).
+*   会社コ‐ドに対する実行権限がありません
+ENDIF.
+
+SORT O_BUKRS BY SIGN   ASCENDING
+OPTION ASCENDING
+LOW    ASCENDING.
+
+ENDFORM.                    " INIT_SCREEN_CHK
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_MAIN
+*&---------------------------------------------------------------------*
+*       A-2．データ抽出編集処理
+*----------------------------------------------------------------------*
+*      -->I_RD_BUKRS     対象組織-会社コード
+*      -->I_EKORG     対象組織-購買組織
+*      -->I_SYST_DATE システム日付
+*      -->I_SYST_TIME システム時刻
+*      <--O_TD_EKKO      ITAB:受発注連携デ‐タ
+*      <--O_SEQNO     連番
+*----------------------------------------------------------------------*
+FORM GET_DATA_MAIN  USING I_RD_BUKRS     TYPE TYP_RD_BUKRS
+I_SYST_DATE    TYPE SY-DATUM
+I_SYST_TIME    TYPE SY-UZEIT
+CHANGING O_TD_EKKO      TYPE TYP_TD_EKKO
+O_SEQNO        TYPE ZTEGSDT202-SEQNO.
+DATA:
+LW_JOB_DATE_F   TYPE ZTEGSDT202-JOB_DATE,   "実行日付From
+LW_JOB_TIME_F   TYPE ZTEGSDT202-JOB_TIME,   "実行時刻From
+LW_JOB_DATE_T   TYPE ZTEGSDT202-JOB_DATE,   "実行日付To
+LW_JOB_TIME_T   TYPE ZTEGSDT202-JOB_TIME.   "実行時刻To
+
+* A-2-1-1．指定画面の登録日付（Create Date）が初期値の場合
+CLEAR:
+LW_JOB_DATE_F,
+LW_JOB_TIME_F,
+LW_JOB_DATE_T,
+LW_JOB_TIME_T.
+
+IF S_UDATE[] IS INITIAL.
+*   A-2-1-1-1．以下のキ‐でジョブ実行履歴テ‐ブル（ZTEGSDT202）を
+*   ロックする
+PERFORM LOCK_TABLE_T202 CHANGING O_SEQNO
+LW_JOB_DATE_F
+LW_JOB_TIME_F.
+*   A-2-1-1-3．今回実行日付と時刻を設定する
+LW_JOB_DATE_T = I_SYST_DATE.               "システム日付
+LW_JOB_TIME_T = I_SYST_TIME.               "システム時刻
+
+ELSE.
+*   A-2-1-2．指定画面の登録日付Fromのみ指定された場合
+IF S_UDATE-LOW IS NOT INITIAL AND
+S_UDATE-HIGH IS INITIAL.
+LW_JOB_DATE_T = S_UDATE-LOW.
+ELSE.
+LW_JOB_DATE_T = S_UDATE-HIGH.
+ENDIF.
+
+*   A-2-1-3．指定画面の登録日付FromとToとも指定された場合
+*   以下の通り、発注登録日付を設定する
+LW_JOB_DATE_F = S_UDATE-LOW.
+LW_JOB_TIME_F = S_UTIME-LOW.
+
+IF S_UTIME-HIGH IS INITIAL.
+LW_JOB_TIME_T = CNS_TIME_MAX.
+ELSE.
+LW_JOB_TIME_T = S_UTIME-HIGH.
+ENDIF.
+ENDIF.
+
+* A-2-2．新規購買発注の取得処理
+PERFORM GET_DATA_PURCHASE USING LW_JOB_DATE_F
+LW_JOB_TIME_F
+LW_JOB_DATE_T
+LW_JOB_TIME_T
+I_RD_BUKRS
+CHANGING O_TD_EKKO.
+
+* A-2-3．受発注連携デ‐タの編集処理
+PERFORM EDIT_DATA_PURCHASE USING I_SYST_DATE
+I_SYST_TIME
+CHANGING O_TD_EKKO.
+
+ENDFORM.                    " GET_DATA_MAIN
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_TABLE_T202
+*&---------------------------------------------------------------------*
+*       ジョブ実行履歴テ‐ブル（ZTEGSDT202）をロック
+*----------------------------------------------------------------------*
+*      <--O_SEQNO    連番
+*      <--O_JOB_DATE 実行日付
+*      <--O_JOB_TIME 実行時刻
+*----------------------------------------------------------------------*
+FORM LOCK_TABLE_T202 CHANGING O_SEQNO    TYPE ZTEGSDT202-SEQNO
+O_JOB_DATE TYPE ZTEGSDT202-JOB_DATE
+O_JOB_TIME TYPE ZTEGSDT202-JOB_TIME.
+DATA:
+LW_JOBID  TYPE ZTEGSDT202-JOBID.   "ジョブID
+
+CLEAR:
+O_SEQNO,
+O_JOB_DATE,
+O_JOB_TIME.
+
+CONCATENATE SY-CPROG '-' SY-SLSET INTO LW_JOBID.
+
+CALL FUNCTION 'ENQUEUE_EZZTEGSDT202'
+EXPORTING
+MODE_ZTEGSDT202 = 'E'
+JOBID           = LW_JOBID
+EXCEPTIONS
+FOREIGN_LOCK    = 1
+SYSTEM_FAILURE  = 2
+OTHERS          = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* A-2-1-1-2．ジョブ実行履歴テ‐ブルにより、
+* 前回実行日付と時刻を取得する
+SELECT SEQNO      "連番
+JOB_DATE   "実行日付
+JOB_TIME   "実行時刻
+INTO (O_SEQNO, O_JOB_DATE, O_JOB_TIME)
+UP TO 1 ROWS
+FROM ZTEGSDT202
+WHERE JOBID = LW_JOBID
+ORDER BY SEQNO DESCENDING.
+ENDSELECT.
+
+ENDFORM.                    " LOCK_TABLE_T202
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_PURCHASE
+*&---------------------------------------------------------------------*
+*       A-2-2．新規購買発注の取得処理
+*----------------------------------------------------------------------*
+*      -->I_DATE_F  実行日付From
+*      -->I_TIME_F  実行時刻From
+*      -->I_DATE_T  実行日付To
+*      -->I_TIME_T  実行時刻To
+*      -->I_rd_BUKRS   対象組織-会社コード
+*      <--O_TD_EKKO    ITAB:受発注連携デ‐タ
+*----------------------------------------------------------------------*
+FORM GET_DATA_PURCHASE  USING I_DATE_F TYPE ZTEGSDT202-JOB_DATE
+I_TIME_F TYPE ZTEGSDT202-JOB_TIME
+I_DATE_T TYPE ZTEGSDT202-JOB_DATE
+I_TIME_T TYPE ZTEGSDT202-JOB_TIME
+I_RD_BUKRS  TYPE TYP_RD_BUKRS
+CHANGING O_TD_EKKO   TYPE TYP_TD_EKKO.
+DATA:
+LTD_CDHDR TYPE TYP_TD_CDHDR.   "ITAB:新規発注
+
+* A-2-2-1．以下の通り、期間内新規登録した購買発注を取得する
+PERFORM GET_DATA_CDHDR USING I_DATE_F
+I_TIME_F
+I_DATE_T
+I_TIME_T
+CHANGING LTD_CDHDR.
+
+* A-2-2-2．以下の通り、購買発注の情報を取得する
+PERFORM GET_DATA_EKKO USING LTD_CDHDR
+I_RD_BUKRS
+CHANGING O_TD_EKKO.
+
+ENDFORM.                    " GET_DATA_PURCHASE
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_CDHDR
+*&---------------------------------------------------------------------*
+*       A-2-2-1．以下の通り、期間内新規登録した購買発注を取得する
+*----------------------------------------------------------------------*
+*      -->I_DATE_F  実行日付From
+*      -->I_TIME_F  実行時刻From
+*      -->I_DATE_T  実行日付To
+*      -->I_TIME_T  実行時刻To
+*      <--O_CDHDR   ITAB:新規発注
+*----------------------------------------------------------------------*
+FORM GET_DATA_CDHDR USING I_DATE_F TYPE ZTEGSDT202-JOB_DATE
+I_TIME_F TYPE ZTEGSDT202-JOB_TIME
+I_DATE_T TYPE ZTEGSDT202-JOB_DATE
+I_TIME_T TYPE ZTEGSDT202-JOB_TIME
+CHANGING O_CDHDR TYPE TYP_TD_CDHDR.
+* 「W:発注登録日付（From）」 <> 「W:発注登録日付（To）」の場合
+CLEAR O_CDHDR.
+IF I_DATE_F <> I_DATE_T.
+SELECT OBJECTID               "対象値
+UDATE                  "変更伝票の登録日付
+UTIME                  "変更時刻
+INTO TABLE O_CDHDR
+FROM CDHDR
+WHERE OBJECTCLAS = CNS_OBJECTCLAS
+AND CHANGE_IND = CNS_CHANGE_IND
+AND OBJECTID   IN S_EBELN[]
+AND ( ( UDATE =  I_DATE_F   AND
+UTIME >= I_TIME_F )
+OR   ( UDATE >  I_DATE_F   AND
+UDATE <  I_DATE_T )
+OR   ( UDATE =  I_DATE_T   AND
+UTIME <= I_TIME_T ) ).
+
+* 「W:発注登録日付（From）」 = 「W:発注登録日付（To）」の場合
+ELSE.
+SELECT OBJECTID               "対象値
+UDATE                  "変更伝票の登録日付
+UTIME                  "変更時刻
+INTO TABLE O_CDHDR
+FROM CDHDR
+WHERE OBJECTCLAS = CNS_OBJECTCLAS
+AND CHANGE_IND = CNS_CHANGE_IND
+AND OBJECTID   IN S_EBELN[]
+AND UDATE =  I_DATE_F
+AND UTIME >= I_TIME_F
+AND UTIME <= I_TIME_T.
+ENDIF.
+
+* （1）．デ‐タが存在しない場合、メッセ‐ジを出力し処理を終了する
+IF O_CDHDR IS INITIAL.
+MESSAGE S006(ZMEGSD01) WITH CNS_MSG_CDHDR.
+*   対象デ‐タが存在しません。(TBL = &1)
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+SORT O_CDHDR BY OBJECTID ASCENDING.
+DELETE ADJACENT DUPLICATES FROM O_CDHDR
+COMPARING OBJECTID.
+
+ENDFORM.                    " GET_DATA_CDHDR
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_EKKO
+*&---------------------------------------------------------------------*
+*       A-2-2-2．以下の通り、購買発注の情報を取得する
+*----------------------------------------------------------------------*
+*      -->I_TD_CDHDR  ITAB:新規発注
+*      -->I_RD_BUKRS  対象組織-会社コード
+*      <--O_TD_EKKO   ITAB:受発注連携デ‐タ
+*----------------------------------------------------------------------*
+FORM GET_DATA_EKKO USING I_TD_CDHDR  TYPE TYP_TD_CDHDR
+I_RD_BUKRS  TYPE TYP_RD_BUKRS
+CHANGING O_TD_EKKO   TYPE TYP_TD_EKKO.
+DATA:
+LTD_EBELN TYPE TYP_TD_EBELN,
+LST_EBELN TYPE TYP_EBELN,
+LST_CDHDR TYPE TYP_CDHDR,
+LTD_CDHDR TYPE TYP_TD_CDHDR.
+
+LTD_CDHDR = I_TD_CDHDR.
+SORT LTD_CDHDR BY OBJECTID ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_CDHDR
+COMPARING OBJECTID.
+
+LOOP AT LTD_CDHDR INTO LST_CDHDR.
+CLEAR LST_EBELN.
+LST_EBELN-EBELN = LST_CDHDR-OBJECTID+0(10).
+APPEND LST_EBELN TO LTD_EBELN.
+ENDLOOP.
+
+SELECT EKPO~EBELN                             "購買伝票番号
+EKPO~EBELP                             "明細番号
+**** START UPD BY ISID REN 2015/08/12 ****
+*         EKPO~MATNR                             "品目コード
+EKPO~MATNR AS MATNR_PO                 "品目コード
+EKPO~IDNLF                             "仕入先品目
+**** END UPD BY ISID REN 2015/08/12 ****
+EKPO~TXZ01                             "品目テキスト
+EKPO~KNTTP                             "勘定設定カテゴリ
+**** START ADD BY ISID REN 2015/07/08 ****
+EKPO~EVERS                             "出荷指示
+**** END ADD BY ISID REN 2015/07/08 ****
+EKKO~BSART                             "購買伝票タイプ
+EKKO~BUKRS                             "会社コード
+EKKO~EKORG                             "購買組織
+EKKO~EKGRP                             "購買グループ
+EKKO~LIFNR                             "仕入先勘定コード
+**** START ADD 2015/02/10 ISID11 ****
+EKKO~SPRAS                             "言語キー
+EKKO~SUBMI                             "一括番号
+EKPO~LGORT                             "保管場所
+**** START DEL BY ISID REN 2015/08/05 ****
+*         EKKO~INCO1                             "インコタームズ
+**** END DEL BY ISID REN 2015/08/05 ****
+**** START ADD 2015/03/06 ISID11 ****
+**** START DEL BY ISID REN 2015/08/05 ****
+*         EKKO~INCO2                             "インコタームズ２
+**** END DEL BY ISID REN 2015/08/05 ****
+**** END ADD 2015/03/06 ISID11 ****
+**** END ADD 2015/02/10 ISID11 ****
+EKPO~WERKS                             "プラント
+EKKO~ZTERM                             "購買発注量
+EKPO~MENGE                             "支払条件キー
+**** START ADD BY ISID REN 2015/08/05 ****
+EKPO~INCO1                             "インコタームズ
+EKPO~INCO2                             "取引条件
+EKKO~INCO2 AS Z_LASTDEST               "最終仕向地
+**** END ADD BY ISID REN 2015/08/05 ****
+EKPO~MEINS                             "発注単位
+EKPO~NETPR                             "正味価格
+EKPO~PEINH                             "価格単位
+EKPO~BPRME                             "購買発注価格単位
+EKPO~NETWR                             "正味発注額
+EKKO~WAERS                             "通貨コード
+EKKO~AEDAT                             "登録日
+EKKO~ERNAM                             "登録者名
+INTO CORRESPONDING FIELDS OF TABLE O_TD_EKKO
+FROM EKKO
+INNER JOIN EKPO
+ON EKKO~EBELN = EKPO~EBELN
+INNER JOIN LFB1
+ON EKKO~LIFNR = LFB1~LIFNR
+AND EKKO~BUKRS = LFB1~BUKRS
+FOR ALL ENTRIES IN LTD_EBELN
+WHERE EKKO~EBELN =  LTD_EBELN-EBELN           "購買伝票番号
+AND EKPO~BUKRS IN I_RD_BUKRS                "会社コ‐ド
+AND EKKO~EKORG IN S_EKORG[]                 "購買組織
+AND EKKO~EKGRP IN S_EKGRP[]                 "購買グル‐プ
+**** START ADD 2015/03/06 ISID11 ****
+AND EKKO~LIFNR IN S_LIFNR[]                 "仕入先勘定コード
+**** END ADD 2015/03/06 ISID11 ****
+AND EKKO~BSART IN S_BSART[]                 "購買伝票タイプ
+**** START ADD BY ISID REN 2015/07/01 ****
+AND EKPO~WERKS IN S_WERKS[]                 "プラント
+**** END ADD BY ISID REN 2015/07/01 ****
+AND EKPO~LOEKZ = SPACE                      "削除フラグ
+AND LFB1~FDGRV = CNS_FDGRV.                 "計画グル‐プ
+
+* （1）．デ‐タが存在しない場合、メッセ‐ジを出力し処理を終了する
+IF SY-SUBRC <> 0.
+MESSAGE S006(ZMEGSD01) WITH CNS_MSG_EKKO.
+*   対象デ‐タが存在しません。(TBL = &1)
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+**** START ADD 2015/02/10 ISID11 ****
+SORT O_TD_EKKO BY EBELN ASCENDING              "購買伝票番号
+EBELP ASCENDING.             "明細番号
+**** END ADD 2015/02/10 ISID11 ****
+
+ENDFORM.                    " GET_DATA_EKKO
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_DATA_PURCHASE
+*&---------------------------------------------------------------------*
+*       A-2-3．受発注連携デ‐タの編集処理
+*----------------------------------------------------------------------*
+*      -->I_SYST_DATE  システム日付
+*      -->I_SYST_TIME  システム時刻
+*      <--O_TD_EKKO    ITAB:受発注連携デ‐タ
+*----------------------------------------------------------------------*
+FORM EDIT_DATA_PURCHASE USING I_SYST_DATE TYPE SY-DATUM
+I_SYST_TIME TYPE SY-UZEIT
+CHANGING O_TD_EKKO TYPE TYP_TD_EKKO.
+FIELD-SYMBOLS:
+<LFS_EKKO>   TYPE
+**** START UPD 2015/02/10 ISID11 ****
+*                        ZTEGSDT203.            "FS:受発注連携データ
+TYP_EKKO.            "FS:受発注連携データ
+**** END UPD 2015/02/10 ISID11 ****
+
+DATA:
+LTD_ZTEGSDT201 TYPE TYP_TD_ZTEGSDT201,   "ITAB:得意先決定テーブル
+LTD_KNVV       TYPE TYP_TD_KNVV,         "ITAB:販売組織決定テーブル
+LTD_EKET       TYPE TYP_TD_EKET,         "ITAB:分納契約納入日程行
+LST_ZTEGSDT201 TYPE TYP_ZTEGSDT201,     "得意先決定CONS
+LST_KNVV       TYPE TYP_KNVV,           "販売組織決定CONS
+**** START ADD 2015/02/10 ISID11 ****
+LTD_VBKD       TYPE TYP_TD_VBKD,   "ITAB:得意先発注番号（一括番号）
+LTD_ZTEGMMM001 TYPE TYP_TD_ZTEGMMM001,  "ITAB:用途・エンドユーザ
+LTD_VBAK       TYPE TYP_TD_VBAK,        "ITAB:エンドユーザ
+LST_ADRC       TYPE ZSEGZZ0002,         "ST:出荷先の住所
+LW_SUBRC       TYPE SY-SUBRC,           "W:リターンコード
+LW_GET_FLG     TYPE CHAR1,         "W:出荷先住所取得エラーフラグ
+LST_VBKD       TYPE TYP_VBKD,      "得意先発注番号（一括番号）
+LW_NAME        TYPE THEAD-TDNAME,  "読込テキスト名
+LTD_LINES      TYPE STANDARD TABLE OF TLINE,  "ITAB:テキスト
+LST_LINES      TYPE TLINE,
+LST_ZTEGMMM001 TYPE TYP_ZTEGMMM001,  "用途・エンドユーザ
+LST_VBAK       TYPE TYP_VBAK,        "エンドユーザ
+**** END ADD 2015/02/10 ISID11 ****
+**** START ADD BY ISID REN 2015/08/05 ****
+LTD_T005T      TYPE TYP_TD_T005T,       "国名
+LST_T005T      TYPE TYP_T005T,          "国名
+**** END ADD BY ISID REN 2015/08/05 ****
+**** START ADD BY ISID REN 2015/08/12 ****
+LTD_KNMT       TYPE TYP_TD_KNMT, "得意先品目マスタ
+LST_KNMT       TYPE TYP_KNMT,    "得意先品目マスタ
+LW_TABIX       TYPE SY-TABIX,    "行目
+LW_KUNNR       TYPE ZTEGSDT201-KUNNR, "受注先
+LW_BSTKD       TYPE CHAR50,      "得意先発注番号
+LW_EBELP        TYPE CHAR5,        "明細番号
+LW_COUNT       TYPE I,                "行数
+**** END ADD BY ISID REN 2015/08/12 ****
+**** START ADD BY ISID REN 2015/08/17 ****
+LTD_CHK_EKKO   TYPE TYP_TD_EKKO,        "チェックエラー
+**** END ADD BY ISID REN 2015/08/17 ****
+**** START ADD BY ISID REN 2015/08/25 ****
+LTD_KNA1_T005T  TYPE TYP_TD_KNA1_T005T,
+LST_KNA1_T005T  TYPE TYP_KNA1_T005T,
+**** END ADD BY ISID REN 2015/08/25 ****
+LST_EKET       TYPE TYP_EKET.           "分納契約納入日程行CONS
+
+**** START ADD BY ISID REN 2015/08/25 ****
+*「受発注連携データ」-仕入先品目が空白の場合、
+*「受発注連携データ」-品目コード（PO）を
+*「受発注連携データ」-仕入先品目に設定する
+LOOP AT O_TD_EKKO
+ASSIGNING <LFS_EKKO>
+WHERE IDNLF = SPACE.
+*   品目コード変換
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_OUTPUT'
+EXPORTING
+INPUT  = <LFS_EKKO>-MATNR_PO
+IMPORTING
+OUTPUT = <LFS_EKKO>-IDNLF.
+ENDLOOP.
+**** END ADD BY ISID REN 2015/08/25 ****
+
+* 「ITAB:受発注連携デ‐タ」をル‐プし、「FS:受発注連携データ」に格納し、
+* 以下の編集処理を行う
+LOOP AT O_TD_EKKO ASSIGNING <LFS_EKKO>.
+AT FIRST.
+*     A-2-3-1．受注先の検索
+PERFORM GET_DATA_ZTEGSDT201 USING O_TD_EKKO
+CHANGING LTD_ZTEGSDT201.
+
+*     A-2-3-2．販売組織の検索
+PERFORM GET_DATA_KNVV USING LTD_ZTEGSDT201
+CHANGING LTD_KNVV.
+
+**** START ADD BY ISID REN 2015/08/12 ****
+*     受注側の品目を取得する
+PERFORM GET_DATA_KNMT USING O_TD_EKKO
+CHANGING LTD_KNMT. "得意先品目マスタ
+**** END ADD BY ISID REN 2015/08/12 ****
+
+*     A-2-3-3．納入日付の検索
+PERFORM GET_DATA_EKET USING O_TD_EKKO
+CHANGING LTD_EKET.
+
+**** START ADD BY ISID REN 2015/08/05 ****
+*     国名の抽出
+PERFORM GET_DATA_T005T USING O_TD_EKKO
+CHANGING LTD_T005T.
+**** END ADD BY ISID REN 2015/08/05 ****
+
+**** START ADD 2015/02/10 ISID11 ****
+*     得意先発注番号（一括番号）を取得する
+PERFORM GET_DATA_VBKD USING O_TD_EKKO
+CHANGING LTD_VBKD.
+
+*     品目より用途とエンドユーザを取得する
+PERFORM GET_DATA_ZTEGMMM001 USING O_TD_EKKO
+**** START ADD BY ISID REN 2015/08/25 ****
+LTD_KNA1_T005T
+**** END ADD BY ISID REN 2015/08/25 ****
+CHANGING LTD_ZTEGMMM001.
+
+*     エンドユーザを取得する
+PERFORM GET_DATA_VBAK USING O_TD_EKKO
+CHANGING LTD_VBAK.
+**** END ADD 2015/02/10 ISID11 ****
+ENDAT.
+
+**** START ADD BY ISID REN 2015/08/05 ****
+AT NEW EBELN.
+**** START ADD BY ISID REN 2015/08/05 ****
+*     インコタームズ と取引条件の展開
+*     購買発注有効の明細の1件目に、
+*     インコタームズ と取引条件を設定するので、
+*     購買発注の全ての明細に展開必要
+MODIFY O_TD_EKKO
+FROM <LFS_EKKO>
+TRANSPORTING INCO1   "インコタームズ
+INCO2   "取引条件
+WHERE EBELN	= <LFS_EKKO>-EBELN.     "購買伝票番号
+**** END ADD BY ISID REN 2015/08/05 ****
+ENDAT.
+**** END ADD BY ISID REN 2015/08/05 ****
+
+**** START ADD 2015/02/10 ISID11 ****
+**** START UPD BY ISID REN 2015/08/05 ****
+*    AT NEW EBELN.
+*   共通汎用Mをコールし、購買発注番号+明細で出荷先の情報を取得する
+AT NEW EBELP.
+**** END UPD BY ISID REN 2015/08/05 ****
+CLEAR:
+LST_ADRC,
+LW_GET_FLG.
+
+*     出荷先の情報を取得する
+PERFORM GET_DATA_ADRC USING <LFS_EKKO>
+CHANGING LST_ADRC
+LW_GET_FLG.
+ENDAT.
+**** END ADD 2015/02/10 ISID11 ****
+
+*   A-2-3-4．受注先を取得する
+*   ITAB:得意先決定テーブル データの編集
+CLEAR LST_ZTEGSDT201.
+READ TABLE LTD_ZTEGSDT201 INTO LST_ZTEGSDT201
+WITH KEY WERKS = <LFS_EKKO>-WERKS
+LIFNR = <LFS_EKKO>-LIFNR
+WAERS = <LFS_EKKO>-WAERS
+BINARY SEARCH.
+
+*   （1）．デ‐タが存在しない場合、以下の通りに設定し、
+*   次のレコ‐ドへ処理する
+IF SY-SUBRC <> 0.
+MESSAGE E020(ZMEGSD01)
+WITH <LFS_EKKO>-WERKS               "プラント
+<LFS_EKKO>-LIFNR               "仕入先勘定コード
+<LFS_EKKO>-WAERS               "通貨コード
+INTO <LFS_EKKO>-MSGTX.              "メッセージテキスト
+
+<LFS_EKKO>-STATUS = CNS_MSG_E.         "ステータス
+<LFS_EKKO>-MSGID  = SY-MSGID.          "メッセージ ID
+<LFS_EKKO>-MSGNO  = SY-MSGNO.          "システムメッセージ番号
+**** START ADD 2015/04/24 ISID11 ****
+<LFS_EKKO>-MSGV1  = SY-MSGV1.          "メッセージ変数１
+<LFS_EKKO>-MSGV2  = SY-MSGV2.          "メッセージ変数2
+<LFS_EKKO>-MSGV3  = SY-MSGV3.          "メッセージ変数3
+<LFS_EKKO>-MSGV4  = SY-MSGV4.          "メッセージ変数4
+**** END ADD 2015/04/24 ISID11 ****
+CONTINUE.
+
+*   （2）．デ‐タが存在した場合
+ELSE.
+*     「ST:得意先決定テ‐ブル」-受注先
+<LFS_EKKO>-KUNNR = LST_ZTEGSDT201-KUNNR.
+ENDIF.
+
+**** START ADD BY ISID REN 2015/08/14 ****
+CLEAR LW_KUNNR.  "受注先
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+EXPORTING
+INPUT  = <LFS_EKKO>-KUNNR
+IMPORTING
+OUTPUT = LW_KUNNR.  "受注先
+**** END ADD BY ISID REN 2015/08/14 ****
+
+*   A-2-3-5．販売組織を取得する
+*   ITAB:販売組織決定テーブル データの編集
+CLEAR:
+LST_KNVV.
+
+READ TABLE LTD_KNVV INTO LST_KNVV
+WITH KEY KUNNR = <LFS_EKKO>-KUNNR
+BINARY SEARCH.
+
+*   （1）．デ‐タが存在しない場合、メッセ‐ジ情報を以下の通りに設定し、
+*   次のレコ‐ドへ処理する
+IF SY-SUBRC <> 0.
+MESSAGE E021(ZMEGSD01)
+**** START UPD BY ISID REN 2015/08/13 ****
+*        WITH <LFS_EKKO>-KUNNR              "受注先
+WITH LW_KUNNR                       "受注先
+**** END UPD BY ISID REN 2015/08/13 ****
+INTO <LFS_EKKO>-MSGTX.              "メッセージテキスト
+
+<LFS_EKKO>-STATUS = CNS_MSG_E.         "ステータス
+<LFS_EKKO>-MSGID  = SY-MSGID.          "メッセージ ID
+<LFS_EKKO>-MSGNO  = SY-MSGNO.          "システムメッセージ番号
+**** START ADD 2015/04/24 ISID11 ****
+<LFS_EKKO>-MSGV1  = SY-MSGV1.          "メッセージ変数１
+<LFS_EKKO>-MSGV2  = SY-MSGV2.          "メッセージ変数2
+<LFS_EKKO>-MSGV3  = SY-MSGV3.          "メッセージ変数3
+<LFS_EKKO>-MSGV4  = SY-MSGV4.          "メッセージ変数4
+**** END ADD 2015/04/24 ISID11 ****
+CONTINUE.
+
+*   （2）．デ‐タが存在した場合、以下の通りに設定し、次の処理へ
+ELSE.
+<LFS_EKKO>-VKORG = LST_KNVV-VKORG.     "販売組織
+<LFS_EKKO>-VTWEG = LST_KNVV-VTWEG.     "流通チャネル
+<LFS_EKKO>-SPART = LST_KNVV-SPART.     "製品部門
+<LFS_EKKO>-VKGRP = LST_KNVV-VKGRP.     "営業グループ
+<LFS_EKKO>-VKBUR = LST_KNVV-VKBUR.     "営業所
+ENDIF.
+
+*   A-2-3-6．納入日付を取得する
+*   ITAB:分納契約納入日程行 データの編集
+CLEAR:
+LST_EKET.
+
+**** START ADD BY ISID REN 2015/08/13 ****
+CLEAR: LW_COUNT,    "行数
+LW_TABIX.    "行目
+
+*   受注側の品目を取得する
+LOOP AT LTD_KNMT INTO LST_KNMT
+WHERE VKORG = <LFS_EKKO>-VKORG      "販売組織
+AND VTWEG = <LFS_EKKO>-VTWEG      "流通チャネル
+AND KUNNR = <LFS_EKKO>-KUNNR      "受注先
+AND KDMAT = <LFS_EKKO>-IDNLF.     "得意先品目
+LW_TABIX = SY-TABIX.
+LW_COUNT = LW_COUNT + 1.
+
+IF LW_COUNT > 2.
+DELETE LTD_KNMT INDEX LW_TABIX.
+ENDIF.
+ENDLOOP.
+
+CASE LW_COUNT. "行目
+*     データが存在しない場合
+WHEN 0.
+**** START UPD BY ISID REN 2015/08/27 ****
+*        <LFS_EKKO>-MSGV1 = LW_KUNNR.             "受注先
+*        <LFS_EKKO>-MSGV2 = <LFS_EKKO>-IDNLF.     "得意先品目
+**       得意先品目を取得できません。（受注先=&1 得意先品目=&2 ）
+*        MESSAGE E122(ZMEGSD01)
+*          WITH <LFS_EKKO>-MSGV1      "受注先
+*               <LFS_EKKO>-MSGV2      "得意先品目
+*          INTO <LFS_EKKO>-MSGTX.     "メッセージテキスト
+*
+*        <LFS_EKKO>-STATUS = CNS_MSG_E.         "ステータス
+*        <LFS_EKKO>-MSGID  = SY-MSGID.          "メッセージ ID
+*        <LFS_EKKO>-MSGNO  = SY-MSGNO.          "システムメッセージ番号
+*        <LFS_EKKO>-MSGV1  = SY-MSGV1.          "メッセージ変数１
+*        <LFS_EKKO>-MSGV2  = SY-MSGV2.          "メッセージ変数2
+*        <LFS_EKKO>-MSGV3  = SY-MSGV3.          "メッセージ変数3
+*        <LFS_EKKO>-MSGV4  = SY-MSGV4.          "メッセージ変数4
+*        CONTINUE.
+CLEAR <LFS_EKKO>-MATNR_SO.
+<LFS_EKKO>-KDMAT = <LFS_EKKO>-IDNLF. "仕入先品目
+**** END UPD BY ISID REN 2015/08/27 ****
+
+**** START DEL BY ISID REN 2015/08/27 ****
+**     1件のみの場合
+*      WHEN 1.
+**       受注側のSAP品目コードに設定する
+*        <LFS_EKKO>-MATNR_SO = LST_KNMT-MATNR.
+**** END DEL BY ISID REN 2015/08/27 ****
+
+*     存在する場合
+WHEN OTHERS.
+**** START UPD BY ISID REN 2015/08/27 ****
+*        <LFS_EKKO>-MSGV1 = LW_KUNNR.             "受注先
+*        <LFS_EKKO>-MSGV2 = <LFS_EKKO>-IDNLF.     "得意先品目
+**       受注側のSAP品目を確定できません。（受注先=&1 得意先品目=&2 ）
+*        MESSAGE E123(ZMEGSD01)
+*          WITH <LFS_EKKO>-MSGV1      "受注先
+*               <LFS_EKKO>-MSGV2      "得意先品目
+*          INTO <LFS_EKKO>-MSGTX.     "メッセージテキスト
+*
+*        <LFS_EKKO>-STATUS = CNS_MSG_E.         "ステータス
+*        <LFS_EKKO>-MSGID  = SY-MSGID.          "メッセージ ID
+*        <LFS_EKKO>-MSGNO  = SY-MSGNO.          "システムメッセージ番号
+*        <LFS_EKKO>-MSGV1  = SY-MSGV1.          "メッセージ変数１
+*        <LFS_EKKO>-MSGV2  = SY-MSGV2.          "メッセージ変数2
+*        <LFS_EKKO>-MSGV3  = SY-MSGV3.          "メッセージ変数3
+*        <LFS_EKKO>-MSGV4  = SY-MSGV4.          "メッセージ変数4
+*        CONTINUE.
+<LFS_EKKO>-MATNR_SO = LST_KNMT-MATNR.
+<LFS_EKKO>-KDMAT = LST_KNMT-KDMAT. "仕入先品目
+**** END UPD BY ISID REN 2015/08/27 ****
+
+ENDCASE.
+**** END ADD BY ISID REN 2015/08/13 ****
+
+*   1件のみ、BINARY SEARCH使用しない
+READ TABLE LTD_EKET INTO LST_EKET
+WITH KEY EBELN = <LFS_EKKO>-EBELN
+EBELP = <LFS_EKKO>-EBELP.
+
+*   （1）．デ‐タが存在しない場合、メッセ‐ジ情報を以下の通りに設定し、
+*   次のレコ‐ドへ処理する
+IF SY-SUBRC <> 0.
+MESSAGE E022(ZMEGSD01)
+WITH <LFS_EKKO>-EBELN               "購買伝票番号
+<LFS_EKKO>-EBELP               "購買伝票の明細番号
+INTO <LFS_EKKO>-MSGTX.              "メッセージテキスト
+
+<LFS_EKKO>-STATUS = CNS_MSG_E.         "ステータス
+<LFS_EKKO>-MSGID  = SY-MSGID.          "メッセージ ID
+<LFS_EKKO>-MSGNO  = SY-MSGNO.          "システムメッセージ番号
+**** START ADD 2015/04/24 ISID11 ****
+<LFS_EKKO>-MSGV1  = SY-MSGV1.          "メッセージ変数１
+<LFS_EKKO>-MSGV2  = SY-MSGV2.          "メッセージ変数2
+<LFS_EKKO>-MSGV3  = SY-MSGV3.          "メッセージ変数3
+<LFS_EKKO>-MSGV4  = SY-MSGV4.          "メッセージ変数4
+**** END ADD 2015/04/24 ISID11 ****
+CONTINUE.
+
+*   （2）．デ‐タが存在した場合、以下の通りに設定し、次の処理へ
+ELSE.
+<LFS_EKKO>-EINDT = LST_EKET-EINDT.     "明細納入期日
+ENDIF.
+
+**** START ADD 2015/02/10 ISID11 ****
+*   出荷先の情報を設定する
+IF LW_GET_FLG IS INITIAL.
+<LFS_EKKO>-Z_VEND_NAME_DT = LST_ADRC-Z_NAME.       "出荷先名
+<LFS_EKKO>-Z_ADDRESS1_DT  = LST_ADRC-Z_ADDRESS1.   "出荷先住所1
+<LFS_EKKO>-Z_ADDRESS2_DT  = LST_ADRC-Z_ADDRESS2.   "出荷先住所2
+<LFS_EKKO>-Z_ADDRESS3_DT  = LST_ADRC-Z_ADDRESS3.   "出荷先住所3
+<LFS_EKKO>-Z_ADDRESS4_DT  = LST_ADRC-Z_ADDRESS4.   "出荷先住所4
+<LFS_EKKO>-Z_TEL_DT       = LST_ADRC-TEL_NUMBER.   "出荷先電話番号
+<LFS_EKKO>-Z_FAX_DT       = LST_ADRC-FAX_NUMBER.   "出荷先FAX番号
+
+**** START ADD BY ISID REN 2015/08/05 ****
+*     個別購買（「受発注連携データ」-勘定設定カテゴリ　=　'M'）の場合
+IF <LFS_EKKO>-KNTTP = CNS_KNTTP_M.
+*       国名の取得
+READ TABLE LTD_T005T
+INTO LST_T005T
+WITH KEY SPRAS = <LFS_EKKO>-SPRAS  "言語キー
+LAND1 = LST_ADRC-COUNTRY. "国コード
+
+IF SY-SUBRC = 0.
+<LFS_EKKO>-Z_LASTDEST = LST_T005T-LANDX. "最終仕向地
+ELSE.
+CLEAR <LFS_EKKO>-Z_LASTDEST.
+ENDIF.
+ENDIF.
+**** END ADD BY ISID REN 2015/08/05 ****
+
+ELSE.
+MESSAGE E079(ZMEGSD01) INTO <LFS_EKKO>-MSGTX.  "メッセージテキスト
+*     出荷先の住所を取得できません
+<LFS_EKKO>-STATUS = CNS_MSG_E.         "ステータス
+<LFS_EKKO>-MSGID  = SY-MSGID.          "メッセージ ID
+<LFS_EKKO>-MSGNO  = SY-MSGNO.          "システムメッセージ番号
+**** START ADD 2015/04/24 ISID11 ****
+<LFS_EKKO>-MSGV1  = SY-MSGV1.          "メッセージ変数１
+<LFS_EKKO>-MSGV2  = SY-MSGV2.          "メッセージ変数2
+<LFS_EKKO>-MSGV3  = SY-MSGV3.          "メッセージ変数3
+<LFS_EKKO>-MSGV4  = SY-MSGV4.          "メッセージ変数4
+**** END ADD 2015/04/24 ISID11 ****
+CONTINUE.
+
+ENDIF.
+
+**** START DEL 2015/09/22 ISID21 ****
+**   得意先発注番号（一括番号）を検索し、受発注連携データに設定する
+**   勘定設定カテゴリ　=　'M'（個別購買）のみ以下の取得処理を行う
+*    IF <LFS_EKKO>-KNTTP = CNS_KNTTP_M
+***** START ADD 2015/03/06 ISID11 ****
+*    AND <LFS_EKKO>-SUBMI IS INITIAL.
+***** END ADD 2015/03/06 ISID11 ****
+*      CLEAR:
+*        LST_VBKD.
+*
+*      READ TABLE LTD_VBKD INTO LST_VBKD
+*        WITH KEY EBELN  = <LFS_EKKO>-EBELN  "購買伝票番号
+*                 EBELP  = <LFS_EKKO>-EBELP  "明細番号
+*                 BINARY SEARCH.
+*
+*      IF SY-SUBRC = 0.
+*        <LFS_EKKO>-SUBMI = LST_VBKD-BSTKD.  "一括番号
+*
+***** START ADD 2015/03/06 ISID11 ****
+*      ELSE.
+*        CLEAR:
+*          LST_VBKD.
+*
+*        READ TABLE LTD_VBKD INTO LST_VBKD
+*          WITH KEY EBELN  = <LFS_EKKO>-EBELN  "購買伝票番号
+*                   BINARY SEARCH.
+*
+*        IF SY-SUBRC = 0.
+*          <LFS_EKKO>-SUBMI = LST_VBKD-BSTKD.  "一括番号
+*        ENDIF.
+***** END ADD 2015/03/06 ISID11 ****
+*      ENDIF.
+*    ENDIF.
+**** END DEL 2015/09/22 ISID21 ****
+
+*   注文書備考（購買発注テキスト）を取得する
+CLEAR:
+LW_NAME,
+LW_SUBRC.
+
+LW_NAME+0(10) = <LFS_EKKO>-EBELN.
+LW_NAME+10(5) = <LFS_EKKO>-EBELP.
+
+*   テキスト読込
+CLEAR:
+LTD_LINES,
+LW_SUBRC.
+
+PERFORM GET_READ_TEXT USING 'F02'
+<LFS_EKKO>-SPRAS
+LW_NAME
+'EKPO'
+CHANGING LTD_LINES
+LW_SUBRC.
+
+IF LW_SUBRC = 0.
+CLEAR:
+LST_LINES.
+
+READ TABLE LTD_LINES INTO LST_LINES INDEX 1.
+<LFS_EKKO>-Z_PO_ITEM_TXT = LST_LINES-TDLINE.
+ELSE.
+CLEAR:
+<LFS_EKKO>-Z_PO_ITEM_TXT.
+ENDIF.
+
+*   用途とエンドユーザを検索し、受発注連携データに設定する
+CLEAR:
+LST_ZTEGMMM001.
+
+READ TABLE LTD_ZTEGMMM001 INTO LST_ZTEGMMM001
+WITH KEY
+**** START UPD BY ISID REN 2015/08/13
+*        MATNR = <LFS_EKKO>-MATNR    "品目コード
+MATNR = <LFS_EKKO>-MATNR_PO  "品目コード
+**** END UPD BY ISID REN 2015/08/13
+BUKRS = <LFS_EKKO>-BUKRS    "会社コード
+BINARY SEARCH.
+
+IF SY-SUBRC = 0.
+<LFS_EKKO>-Z_PURPOSE_TEXT = LST_ZTEGMMM001-Z_PURPOSE_TEXT. "用途
+
+*     最終需要者
+**** START UPD BY ISID REN 2015/07/08 ****
+*      <LFS_EKKO>-ZKUNNR_ZJ = LST_ZTEGMMM001-Z_ENDUSER_CD.
+<LFS_EKKO>-ZKUNNR_ZJ
+**** START UPD BY ISID REN 2015/08/05 ****
+*        = LST_ZTEGMMM001-Z_ACTDEMAND_CD. "最終需要者
+= LST_ZTEGMMM001-Z_ENDUSER_CD.    "エンドユーザ(価格)
+
+**** START ADD BY ISID REN 2015/08/25 ****
+*     内部テーブル「受発注連携データ」-最終需要者が初期値以外の場合
+IF <LFS_EKKO>-ZKUNNR_ZJ <> SPACE.
+*       最終仕向地の再取得処理を行う
+READ TABLE LTD_KNA1_T005T
+INTO LST_KNA1_T005T
+WITH KEY KUNNR = <LFS_EKKO>-ZKUNNR_ZJ "最終需要者
+BINARY SEARCH.
+
+IF SY-SUBRC = 0.
+<LFS_EKKO>-Z_LASTDEST = LST_KNA1_T005T-LANDX. "最終仕向地
+ELSE.
+CLEAR <LFS_EKKO>-Z_LASTDEST.
+ENDIF.
+ENDIF.
+**** END ADD BY ISID REN 2015/08/25 ****
+
+*     直送(出荷指示=Z1)場合のみ、エンドユーザ（価格）を設定する
+IF <LFS_EKKO>-EVERS = CNS_EVERS_Z1.
+**** END UPD BY ISID REN 2015/08/05 ****
+
+<LFS_EKKO>-ZKUNNR_ZE
+= LST_ZTEGMMM001-Z_ENDUSER_CD.    "エンドユーザ(価格)
+
+**** START UPD BY ISID REN 2015/08/05 ****
+ELSE.
+CLEAR <LFS_EKKO>-ZKUNNR_ZE. "エンドユーザ(価格)
+ENDIF.
+**** END UPD BY ISID REN 2015/08/05 ****
+**** END UPD BY ISID REN 2015/07/08 ****
+
+ELSE.
+CLEAR:
+**** START ADD BY REN 2015/07/08 ****
+<LFS_EKKO>-ZKUNNR_ZJ,   "最終需要者
+<LFS_EKKO>-ZKUNNR_ZE,   "エンドユーザ
+**** END ADD BY REN 2015/07/08 ****
+<LFS_EKKO>-Z_PURPOSE_TEXT.   "用途
+
+**** START DEL BY ISID REN 2015/07/08 ****
+*      IF <LFS_EKKO>-KNTTP = CNS_KNTTP_M.
+**       エンドユーザの再取得処理を行う
+*        CLEAR:
+*          LST_VBAK.
+*
+*        READ TABLE LTD_VBAK INTO LST_VBAK
+*          WITH KEY EBELN = <LFS_EKKO>-EBELN  "購買伝票番号
+*                   EBELP = <LFS_EKKO>-EBELP  "明細番号
+*                   BINARY SEARCH.
+*
+*        IF SY-SUBRC = 0.
+**         最終需要者
+*          <LFS_EKKO>-ZKUNNR_ZJ      = LST_VBAK-KUNNR.
+**         エンドユーザ(価格)
+**          <LFS_EKKO>-ZKUNNR_ZE      = LST_VBAK-KUNNR.
+*        ELSE.
+*          CLEAR:
+*            <LFS_EKKO>-ZKUNNR_ZJ.
+**            <LFS_EKKO>-ZKUNNR_ZE.
+*        ENDIF.
+*      ELSE.
+*        CLEAR:
+*          <LFS_EKKO>-ZKUNNR_ZJ.
+**          <LFS_EKKO>-ZKUNNR_ZE.
+*      ENDIF.
+**** END DEL BY ISID REN 2015/07/08 ****
+ENDIF.
+**** END ADD 2015/02/10 ISID11 ****
+
+**** START ADD BY ISID REN 2015/07/08 ****
+*   内部テーブル「受発注連携データ」-勘定設定カテゴリが「M」の場合
+IF <LFS_EKKO>-KNTTP = CNS_KNTTP_M.
+*       エンドユーザ及び販売単価の再取得処理を行う
+CLEAR LST_VBAK.
+
+READ TABLE LTD_VBAK INTO LST_VBAK
+WITH KEY EBELN = <LFS_EKKO>-EBELN  "購買伝票番号
+EBELP = <LFS_EKKO>-EBELP  "明細番号
+BINARY SEARCH.
+
+IF SY-SUBRC = 0.
+*       内部テーブル「受発注連携データ」-出荷指示が「Z1」の場合
+IF <LFS_EKKO>-EVERS = CNS_EVERS_Z1.
+<LFS_EKKO>-NETPR_EU = LST_VBAK-NETPR.  "正味価格（EU）
+<LFS_EKKO>-KPEIN_EU = LST_VBAK-KPEIN.  "価格条件単位（EU）
+<LFS_EKKO>-KMEIN_EU = LST_VBAK-KMEIN.  "条件単位（EU）
+<LFS_EKKO>-WAERK_EU = LST_VBAK-WAERK.  "販売伝票通貨（EU）
+
+**** START DEL BY ISID17 2016/05/18 ****
+**         最終需要者が初期値の場合
+*          IF <LFS_EKKO>-ZKUNNR_ZJ IS INITIAL.      "最終需要者
+*            <LFS_EKKO>-ZKUNNR_ZJ = LST_VBAK-KUNNR. "受注先（個別購買）
+*          ENDIF.
+**** END DEL BY ISID17 2016/05/18 ****
+
+**** START DEL BY ISID REN 2015/08/05 ****
+**         変数エンドユーザ(価格)が初期値の場合
+*          IF <LFS_EKKO>-ZKUNNR_ZE IS INITIAL.  "エンドユーザ(価格)
+*            <LFS_EKKO>-ZKUNNR_ZE = LST_VBAK-KUNNR. "受注先（個別購買）
+*          ENDIF.
+**** END DEL BY ISID REN 2015/08/05 ****
+ENDIF.
+
+**** START Add BY ISID17 2016/05/18 ****
+*       最終需要者が初期値の場合
+IF <LFS_EKKO>-ZKUNNR_ZJ IS INITIAL.      "最終需要者
+<LFS_EKKO>-ZKUNNR_ZJ = LST_VBAK-KUNNR. "受注先（個別購買）
+ENDIF.
+**** End Add BY ISID17 2016/05/18 ****
+ENDIF.
+ENDIF.
+**** END ADD BY ISID REN 2015/07/08 ****
+
+**** START ADD BY ISID21 2015/09/22 ****
+*  得意先発注番号の設定
+WRITE <LFS_EKKO>-EBELP NO-ZERO  TO LW_EBELP.
+SHIFT LW_EBELP LEFT DELETING LEADING SPACE.
+IF  <LFS_EKKO>-EKORG = CNS_HEKORG.
+*     本社の場合
+CONCATENATE <LFS_EKKO>-WERKS+1(2)
+'-'
+<LFS_EKKO>-EBELN
+'/'
+LW_EBELP
+INTO  <LFS_EKKO>-Z_ITEM_BSTKD.
+ELSE.
+*    海外の場合
+CONCATENATE <LFS_EKKO>-WERKS(2)
+'-'
+<LFS_EKKO>-EBELN
+'/'
+LW_EBELP
+INTO  <LFS_EKKO>-Z_ITEM_BSTKD.
+ENDIF.
+
+* 個別の場合は、得意先発注番号に顧客POを付ける。
+IF <LFS_EKKO>-KNTTP = CNS_KNTTP_M.
+CLEAR:
+LST_VBKD.
+
+READ TABLE LTD_VBKD INTO LST_VBKD
+WITH KEY EBELN  = <LFS_EKKO>-EBELN  "購買伝票番号
+EBELP  = <LFS_EKKO>-EBELP  "明細番号
+BINARY SEARCH.
+
+IF SY-SUBRC = 0.
+LW_BSTKD = LST_VBKD-BSTKD.  "一括番号
+
+**** START ADD 2015/03/06 ISID11 ****
+ELSE.
+CLEAR:
+LST_VBKD.
+
+READ TABLE LTD_VBKD INTO LST_VBKD
+WITH KEY EBELN  = <LFS_EKKO>-EBELN  "購買伝票番号
+BINARY SEARCH.
+
+IF SY-SUBRC = 0.
+LW_BSTKD = LST_VBKD-BSTKD.  "一括番号
+ENDIF.
+**** END ADD 2015/03/06 ISID11 ****
+ENDIF.
+
+*    桁数をチェックし、35桁を超えない場合、セットする。
+CONCATENATE   <LFS_EKKO>-Z_ITEM_BSTKD
+'/'
+LW_BSTKD
+INTO   LW_BSTKD.
+IF STRLEN( LW_BSTKD ) <= 35.
+<LFS_EKKO>-Z_ITEM_BSTKD = LW_BSTKD.
+ENDIF.
+ELSE.
+IF <LFS_EKKO>-SUBMI  IS NOT INITIAL.
+CONCATENATE <LFS_EKKO>-Z_ITEM_BSTKD
+'/'
+<LFS_EKKO>-SUBMI
+INTO <LFS_EKKO>-Z_ITEM_BSTKD.
+ENDIF.
+ENDIF.
+
+**** END ADD BY ISID21 2015/09/22 ****
+
+*   A-2-3-7．その他項目を設定する
+<LFS_EKKO>-ZKBUNCC      = CNS_ZKBUNCC.   "処理区分
+<LFS_EKKO>-STATUS       = CNS_STATUS.    "ステータス
+
+*   タイムスタンプ
+<LFS_EKKO>-Z_CRE_YMD    = I_SYST_DATE.   "登録年月日
+<LFS_EKKO>-Z_CRE_HMS    = I_SYST_TIME.   "登録時分秒
+<LFS_EKKO>-Z_CRE_USERID = SY-UNAME.      "ユーザ名
+<LFS_EKKO>-Z_MOD_YMD    = I_SYST_DATE.   "登録年月日
+<LFS_EKKO>-Z_MOD_HMS    = I_SYST_TIME.   "登録時分秒
+<LFS_EKKO>-Z_MOD_USERID = SY-UNAME.      "ユーザ名
+ENDLOOP.
+
+**** START ADD BY ISID REN 2015/08/17 ****
+* エラー伝票の全明細にエラーステータスを設定
+APPEND LINES OF O_TD_EKKO TO LTD_CHK_EKKO.
+DELETE LTD_CHK_EKKO WHERE STATUS <> CNS_MSG_E.    "ステータス
+SORT LTD_CHK_EKKO BY EBELN  ASCENDING.   "購買伝票番号
+DELETE ADJACENT DUPLICATES FROM LTD_CHK_EKKO
+COMPARING EBELN.     "購買伝票番号
+
+LOOP AT LTD_CHK_EKKO ASSIGNING <LFS_EKKO>.
+MODIFY O_TD_EKKO
+FROM         <LFS_EKKO>
+TRANSPORTING STATUS               "ステータス
+WHERE EBELN = <LFS_EKKO>-EBELN.   "購買伝票番号
+ENDLOOP.
+**** END ADD BY ISID REN 2015/08/17 ****
+
+ENDFORM.                    " EDIT_DATA_PURCHASE
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ZTEGSDT201
+*&---------------------------------------------------------------------*
+*       A-2-3-1．受注先の検索
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO        ITAB:受発注連携デ‐タ
+*      <--O_TD_ZTEGSDT201  ITAB:得意先決定テ‐ブル
+*----------------------------------------------------------------------*
+FORM GET_DATA_ZTEGSDT201 USING I_TD_EKKO       TYPE TYP_TD_EKKO
+CHANGING O_TD_ZTEGSDT201 TYPE TYP_TD_ZTEGSDT201.
+DATA:
+LTD_EKKO TYPE TYP_TD_EKKO.
+
+LTD_EKKO = I_TD_EKKO.
+
+SORT LTD_EKKO BY WERKS ASCENDING
+LIFNR ASCENDING
+WAERS ASCENDING.
+
+DELETE ADJACENT DUPLICATES FROM LTD_EKKO
+COMPARING WERKS
+LIFNR
+WAERS.
+
+SELECT WERKS                       "プラント
+LIFNR                       "仕入先勘定コード
+WAERS                       "通貨コード
+KUNNR                       "受注先
+INTO TABLE O_TD_ZTEGSDT201
+FROM ZTEGSDT201
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE WERKS = LTD_EKKO-WERKS      "プラント
+AND LIFNR = LTD_EKKO-LIFNR      "仕入先勘定コ‐ド
+AND WAERS = LTD_EKKO-WAERS.     "通貨コ‐ド
+
+SORT O_TD_ZTEGSDT201 BY WERKS ASCENDING
+LIFNR ASCENDING
+WAERS ASCENDING.
+
+ENDFORM.                    " GET_DATA_ZTEGSDT201
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_KNVV
+*&---------------------------------------------------------------------*
+*       A-2-3-2．販売組織の検索
+*----------------------------------------------------------------------*
+*      -->I_TD_ZTEGSDT201 ITAB:得意先決定テーブル
+*      <--O_TD_KNVV       ITAB:販売組織決定テーブル
+*----------------------------------------------------------------------*
+FORM GET_DATA_KNVV USING I_TD_ZTEGSDT201 TYPE TYP_TD_ZTEGSDT201
+CHANGING O_TD_KNVV       TYPE TYP_TD_KNVV.
+DATA:
+LTD_ZTEGSDT201 TYPE TYP_TD_ZTEGSDT201 .
+
+LTD_ZTEGSDT201 = I_TD_ZTEGSDT201.
+SORT LTD_ZTEGSDT201 BY KUNNR ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_ZTEGSDT201
+COMPARING KUNNR.
+
+SELECT KUNNR                "得意先コード
+VKORG                "販売組織
+VTWEG                "流通チャネル
+SPART                "製品部門
+VKGRP                "営業グループ
+VKBUR                "営業所
+INTO TABLE O_TD_KNVV
+FROM KNVV
+FOR ALL ENTRIES IN LTD_ZTEGSDT201
+WHERE KUNNR = LTD_ZTEGSDT201-KUNNR.
+
+SORT O_TD_KNVV BY KUNNR ASCENDING.
+
+ENDFORM.                    " GET_DATA_KNVV
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_EKET
+*&---------------------------------------------------------------------*
+*       A-2-3-3．納入日付の検索
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ITAB:受発注連携デ‐タ
+*      <--O_TD_EKET  ITAB:分納契約納入日程行
+*----------------------------------------------------------------------*
+FORM GET_DATA_EKET USING I_TD_EKKO TYPE TYP_TD_EKKO
+CHANGING O_TD_EKET TYPE TYP_TD_EKET.
+
+DATA:
+LTD_EKKO TYPE TYP_TD_EKKO.
+
+LTD_EKKO = I_TD_EKKO.
+SORT LTD_EKKO BY EBELN ASCENDING
+EBELP ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_EKKO
+COMPARING EBELN
+EBELP.
+
+SELECT EBELN                        "購買伝票番号
+EBELP                        "明細番号
+EINDT                        "明細納入期日
+ETENR                        "納入日程行カウンタ
+INTO TABLE O_TD_EKET
+FROM EKET
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE EBELN = LTD_EKKO-EBELN       "購買伝票番号
+AND EBELP = LTD_EKKO-EBELP.      "明細番号
+
+SORT O_TD_EKET BY ETENR ASCENDING.
+
+ENDFORM.                    " GET_DATA_EKET
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_DATA_MAIN
+*&---------------------------------------------------------------------*
+*       A-3．デ‐タ更新処理
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ITAB:受発注連携データ
+*      -->I_SYST_DATE システム日付
+*      -->I_SYST_TIME システム時刻
+*----------------------------------------------------------------------*
+FORM EDIT_DATA_MAIN USING
+**** START DEL 2015/03/09 ISID11 ****
+*                          I_TD_EKKO   TYPE TYP_TD_EKKO
+**** END DEL 2015/03/09 ISID11 ****
+I_SYST_DATE TYPE SY-DATUM
+I_SYST_TIME TYPE SY-UZEIT
+**** START ADD 2015/03/09 ISID11 ****
+CHANGING O_TD_EKKO   TYPE TYP_TD_EKKO.
+**** END ADD 2015/03/09 ISID11 ****
+
+DATA:
+**** START ADD 2015/02/10 ISID11 ****
+LST_EKKO_LOOP TYPE TYP_EKKO,            "ST:受発注連携データ
+**** END ADD 2015/02/10 ISID11 ****
+**** START ADD 2015/03/09 ISID11 ****
+LW_TABIX TYPE SY-TABIX,
+**** END ADD 2015/03/09 ISID11 ****
+LST_EKKO TYPE ZTEGSDT203,               "ST:受発注連携データ
+LTD_ZTEGSDT203 TYPE TYP_TD_ZTEGSDT203,  "ITAB:受発注連携データ
+LST_ZTEGSDT203 TYPE TYP_ZTEGSDT203,     "ST:存在チェック用
+LTD_T_EKKO  TYPE TYP_TD_EKKO,
+LTD_CREATE_ZTEGSDT203 TYPE
+**** START UPD 2015/02/10 ISID11 ****
+*                         TYP_TD_EKKO, "ITAB:新規用受発注連携データ
+TYP_TD_INSERT, "ITAB:新規用受発注連携データ
+**** END UPD 2015/02/10 ISID11 ****
+LTD_UPDATE_ZTEGSDT203 TYPE
+**** START UPD 2015/02/10 ISID11 ****
+*                         TYP_TD_EKKO. "ITAB:更新用受発注連携データ
+TYP_TD_INSERT. "ITAB:更新用受発注連携データ
+**** END UPD 2015/02/10 ISID11 ****
+
+* A-3-1．受発注デ‐タの処理方式を分類する
+**** START UPD 2015/03/09 ISID11 ****
+*  LOOP AT I_TD_EKKO INTO
+LOOP AT O_TD_EKKO INTO
+**** END UPD 2015/03/09 ISID11 ****
+**** START UPD 2015/02/10 ISID11 ****
+*                          LST_EKKO.
+LST_EKKO_LOOP.
+**** START ADD 2015/03/09 ISID11 ****
+LW_TABIX = SY-TABIX.
+**** END ADD 2015/03/09 ISID11 ****
+
+*   登録レコード作成
+CLEAR:
+LST_EKKO.
+
+MOVE-CORRESPONDING LST_EKKO_LOOP TO LST_EKKO.
+**** END UPD 2015/02/10 ISID11 ****
+
+AT FIRST.
+*     A-3-1-1．受発注連携データの検索
+LTD_T_EKKO = O_TD_EKKO.
+SORT LTD_T_EKKO BY EBELN ASCENDING
+EBELP ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_T_EKKO
+COMPARING EBELN
+EBELP.
+
+CLEAR LTD_ZTEGSDT203.
+
+SELECT EBELN          "購買伝票番号
+EBELP          "購買伝票の明細番号
+ZKBUNCC        "処理区分
+Z_CRE_YMD      "登録年月日
+Z_CRE_HMS      "登録時分秒
+Z_CRE_USERID   "ユーザ名
+INTO TABLE LTD_ZTEGSDT203
+FROM ZTEGSDT203
+FOR ALL ENTRIES IN LTD_T_EKKO
+WHERE EBELN = LTD_T_EKKO-EBELN
+AND EBELP = LTD_T_EKKO-EBELP.
+
+IF SY-SUBRC = 0.
+SORT LTD_ZTEGSDT203 BY EBELN ASCENDING
+EBELP ASCENDING.
+ENDIF.
+ENDAT.
+
+*   A-3-1-2．受発注連携データの検索
+CLEAR:
+LST_ZTEGSDT203.
+
+READ TABLE LTD_ZTEGSDT203
+INTO LST_ZTEGSDT203
+WITH KEY EBELN = LST_EKKO-EBELN
+EBELP = LST_EKKO-EBELP
+BINARY SEARCH.
+
+*   （1）．データを存在しない場合
+IF SY-SUBRC <> 0.
+IF LST_EKKO-STATUS = CNS_STATUS_E.
+LST_EKKO-ZKBUNCC = CNS_ZKBUNCC.                 "処理区分
+LST_EKKO-Z_CRE_YMD    = I_SYST_DATE.            "登録年月日
+LST_EKKO-Z_CRE_HMS    = I_SYST_TIME.            "登録時分秒
+LST_EKKO-Z_CRE_USERID = SY-UNAME.               "ユーザ名
+ELSE.
+CLEAR:
+**** START ADD 2015/02/10 ISID11 ****
+*         初期値対象
+LST_EKKO-DWERK,
+LST_EKKO-PERNR,
+LST_EKKO-ZKUNNR_S,
+LST_EKKO-AUGRU,
+LST_EKKO-VBELN,
+LST_EKKO-POSNR,
+**** END ADD 2015/02/10 ISID11 ****
+LST_EKKO-Z_MOD_YMD,
+LST_EKKO-Z_MOD_HMS,
+LST_EKKO-Z_MOD_USERID.
+ENDIF.
+
+APPEND LST_EKKO TO LTD_CREATE_ZTEGSDT203.
+
+*   （2）．デ‐タを存在する場合
+ELSE.
+*     「ST:存在チェック用受発注連携データ」-処理区分固定値「1」の場合
+IF LST_ZTEGSDT203-ZKBUNCC = CNS_ZKBUNCC.
+LST_EKKO-ZKBUNCC = CNS_ZKBUNCC.                      "処理区分
+LST_EKKO-Z_CRE_YMD    = LST_ZTEGSDT203-Z_CRE_YMD.    "登録年月日
+LST_EKKO-Z_CRE_HMS    = LST_ZTEGSDT203-Z_CRE_HMS.    "登録時分秒
+LST_EKKO-Z_CRE_USERID = LST_ZTEGSDT203-Z_CRE_USERID. "ユーザ名
+APPEND LST_EKKO TO LTD_UPDATE_ZTEGSDT203.
+
+**** START ADD 2015/03/09 ISID11 ****
+ELSE.
+DELETE O_TD_EKKO INDEX LW_TABIX.
+**** END ADD 2015/03/09 ISID11 ****
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+* （1）．デ‐タが存在しない場合、メッセ‐ジを出力し処理を終了する
+* 処理区分が対象外
+IF O_TD_EKKO IS INITIAL.
+MESSAGE S006(ZMEGSD01) WITH CNS_MSG_T203.
+*   対象デ‐タが存在しません。(TBL = &1)
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* A-3-2．受発注連携データの登録処理を行う
+IF LTD_CREATE_ZTEGSDT203 IS NOT INITIAL.
+INSERT ZTEGSDT203 FROM TABLE LTD_CREATE_ZTEGSDT203
+ACCEPTING DUPLICATE KEYS.
+
+*   （1）．データ登録に失敗した場合、ロ‐ルバックし、
+*   メッセ‐ジを出力し処理を終了する
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+
+*     Unlock ZTEGSDT202
+PERFORM UNLOCK_ZTEGSDT202.
+
+MESSAGE S023(ZMEGSD01) WITH CNS_MSG_MSGV1
+DISPLAY LIKE CNS_MSG_E.
+*     データ登録に失敗しました(テーブル = &1)
+
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+
+* A-3-3．受発注連携データの更新処理を行う
+IF LTD_UPDATE_ZTEGSDT203 IS NOT INITIAL.
+UPDATE ZTEGSDT203 FROM TABLE LTD_UPDATE_ZTEGSDT203.
+
+*   （1）．データ更新に失敗した場合、ロールバックし、
+*   メッセージを出力し処理を終了する
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+
+*     Unlock ZTEGSDT202
+PERFORM UNLOCK_ZTEGSDT202.
+
+MESSAGE S024(ZMEGSD01) WITH CNS_MSG_MSGV1
+DISPLAY LIKE CNS_MSG_E.
+*     データ更新に失敗しました(テ‐ブル = &1)
+
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " EDIT_DATA_MAIN
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_FILE_ERR
+*&---------------------------------------------------------------------*
+*       A-4．エラーファイル出力処理
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ITAB:受発注連携データ
+*      -->I_SYST_DATE システム日付
+*      -->I_SYST_TIME システム時刻
+*----------------------------------------------------------------------*
+FORM OUTPUT_FILE_ERR USING I_TD_EKKO TYPE TYP_TD_EKKO
+**** START ADD 2015/02/10 ISID11 ****
+I_SYST_DATE TYPE SY-DATUM
+I_SYST_TIME TYPE SY-UZEIT.
+**** END ADD 2015/02/10 ISID11 ****
+DATA:
+LST_EKKO  TYPE ZTEGSDT203,               "ST:受発注連携データ
+**** START ADD 2015/02/10 ISID11 ****
+LW_COL1   TYPE STRING,
+*    LW_COL2   TYPE STRING,
+*    LW_COL3   TYPE STRING,
+LW_DATE   TYPE CHAR10,
+LW_TIME   TYPE CHAR8,
+LW_STR_TOTAL   TYPE STRING,
+LW_STR_NORMAL  TYPE STRING,
+LW_STR_ERROR   TYPE STRING,
+**** END ADD 2015/02/10 ISID11 ****
+LW_OUTPUT TYPE STRING,
+LW_TAB    TYPE STRING,
+LTD_EKKO  TYPE TYP_TD_EKKO,
+LW_PATH   TYPE RLGRAP-FILENAME.          "エラーファイルパース
+
+* 「ITAB:エラーファイル」にデ‐タが存在しない場合
+**** START ADD 2015/02/10 ISID11 ****
+CLEAR:
+W_TOTAL,
+W_NORMAL,
+W_ERROR.
+
+W_TOTAL  = LINES( I_TD_EKKO ).
+**** END ADD 2015/02/10 ISID11 ****
+
+LTD_EKKO = I_TD_EKKO.
+DELETE LTD_EKKO WHERE STATUS <> CNS_STATUS_E.
+
+**** START ADD 2015/02/10 ISID11 ****
+W_ERROR  = LINES( LTD_EKKO ).
+W_NORMAL = W_TOTAL - W_ERROR.
+**** END ADD 2015/02/10 ISID11 ****
+
+IF LTD_EKKO IS INITIAL.
+RETURN.
+ENDIF.
+
+* 「ITAB:エラーファイル」にデ‐タが存在した場合、
+* エラーファイルの出力処理を行う
+LW_TAB = CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+
+* A-4-1．エラーデ‐タの編集処理を行う
+CLEAR:
+LW_PATH.
+
+CONCATENATE P_ERROR
+W_SYST_DATE
+W_SYST_TIME+0(4)
+'.CSV'
+INTO LW_PATH.
+
+OPEN DATASET LW_PATH FOR OUTPUT
+IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS.
+
+* エラーファイルOpenに失敗した場合
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+
+*   Unlock ZTEGSDT202
+PERFORM UNLOCK_ZTEGSDT202.
+
+MESSAGE S025(ZMEGSD01) WITH LW_PATH
+DISPLAY LIKE CNS_MSG_E.
+*   エラーファイル出力に失敗しました(パス = &1)
+
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+**** START ADD 2015/02/10 ISID11 ****
+* Header1
+CLEAR:
+LW_COL1,
+LW_OUTPUT.
+
+* PG-ID/Name: プログラムID / プログラムTitle
+CONCATENATE SY-REPID
+TEXT-W07
+SY-TITLE
+INTO LW_COL1
+SEPARATED BY SPACE.
+
+CONCATENATE TEXT-W01
+LW_COL1
+INTO LW_OUTPUT
+SEPARATED BY LW_TAB.
+
+TRANSFER LW_OUTPUT TO LW_PATH.
+
+* Header2
+CLEAR:
+LW_OUTPUT,
+LW_COL1.
+
+* Run Date/Time/User: Date / Time / User
+WRITE I_SYST_DATE TO LW_DATE.
+WRITE I_SYST_TIME TO LW_TIME.
+
+CONCATENATE LW_DATE
+TEXT-W07
+LW_TIME
+TEXT-W07
+SY-UNAME
+INTO LW_COL1
+SEPARATED BY SPACE.
+
+CONCATENATE TEXT-W02
+LW_COL1
+INTO LW_OUTPUT
+SEPARATED BY LW_TAB.
+
+TRANSFER LW_OUTPUT TO LW_PATH.
+
+* Header3
+CLEAR:
+LW_OUTPUT,
+LW_STR_TOTAL,
+LW_STR_NORMAL,
+LW_STR_ERROR,
+LW_COL1.
+
+LW_STR_TOTAL  = W_TOTAL.
+LW_STR_NORMAL = W_NORMAL.
+LW_STR_ERROR  = W_ERROR.
+
+*  CONCATENATE TEXT-W03
+*              LW_STR_TOTAL
+*         INTO LW_COL1
+*         SEPARATED BY SPACE.
+*
+*  CONCATENATE TEXT-W04
+*              LW_STR_NORMAL
+*         INTO LW_COL2
+*         SEPARATED BY SPACE.
+*
+*  CONCATENATE TEXT-W05
+*              LW_STR_ERROR
+*         INTO LW_COL3
+*         SEPARATED BY SPACE.
+CONDENSE LW_STR_TOTAL.
+CONDENSE LW_STR_NORMAL.
+CONDENSE LW_STR_ERROR.
+
+CONCATENATE TEXT-W03
+LW_STR_TOTAL
+TEXT-W07
+TEXT-W04
+LW_STR_NORMAL
+TEXT-W07
+TEXT-W05
+LW_STR_ERROR
+INTO LW_COL1
+SEPARATED BY SPACE.
+
+* Records Info: Total  &1  /  Normal &2  /  Error &3
+CONCATENATE TEXT-W06
+LW_COL1
+INTO LW_OUTPUT
+SEPARATED BY LW_TAB.
+
+TRANSFER LW_OUTPUT TO LW_PATH.
+
+CLEAR:
+LW_OUTPUT.
+
+TRANSFER LW_OUTPUT TO LW_PATH.
+**** END ADD 2015/02/10 ISID11 ****
+
+CLEAR:
+LW_OUTPUT.
+
+* データエレメントに対するテキストの取得
+
+CALL FUNCTION 'ZEG_ZZ_DD04T_GET'
+EXPORTING
+IMPTSNAME    = CNS_FILEHEADER
+IMPORTING
+EXPSCRTEXT_M = LW_OUTPUT.
+
+TRANSFER LW_OUTPUT TO LW_PATH.
+
+LOOP AT LTD_EKKO INTO LST_EKKO.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+EXPORTING
+INPUT  = LST_EKKO-EBELN
+IMPORTING
+OUTPUT = LST_EKKO-EBELN.
+
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_OUTPUT'
+EXPORTING
+**** START UPD BY ISID REN 2015/08/13 ****
+*        INPUT  = LST_EKKO-MATNR
+INPUT  = LST_EKKO-MATNR_PO
+**** END UPD BY ISID REN 2015/08/13 ****
+IMPORTING
+**** START UPD BY ISID REN 2015/08/13 ****
+*        OUTPUT = LST_EKKO-MATNR.
+OUTPUT = LST_EKKO-MATNR_PO.
+**** END UPD BY ISID REN 2015/08/13 ****
+
+CLEAR:
+LW_OUTPUT.
+
+CONCATENATE LST_EKKO-EKGRP        "購買グループ
+LST_EKKO-EBELN        "購買伝票番号
+LST_EKKO-EBELP        "明細番号
+**** START UPD BY ISID REN 2015/08/13 ****
+*                LST_EKKO-MATNR        "品目コード
+LST_EKKO-MATNR_PO     "品目コード
+**** END UPD BY ISID REN 2015/08/13 ****
+LST_EKKO-TXZ01        "テキスト
+LST_EKKO-ERNAM        "オブジェクト登録者名
+LST_EKKO-MSGID        "メッセージID
+LST_EKKO-MSGNO        "システムメッセージ番号
+LST_EKKO-MSGTX        "システムメッセージ
+INTO LW_OUTPUT
+SEPARATED BY LW_TAB.
+
+TRANSFER LW_OUTPUT TO LW_PATH.
+
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+
+*     Unlock ZTEGSDT202
+PERFORM UNLOCK_ZTEGSDT202.
+
+MESSAGE S025(ZMEGSD01) WITH LW_PATH.
+*     エラーファイル出力に失敗しました(パス = &1)
+
+CLOSE DATASET P_ERROR.
+
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+
+CLOSE DATASET P_ERROR.
+
+ENDFORM.                    " OUTPUT_FILE_ERR
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_MESSAGE_END
+*&---------------------------------------------------------------------*
+*       A-5．終了メッセ‐ジの出力処理
+*----------------------------------------------------------------------*
+*      -->I_SYST_DATE  システム日付
+*      -->I_SYST_TIME  システム時刻
+*      -->I_SEQNO      連番
+*      -->I_TD_EKKO    ITAB:受発注連携データ
+*----------------------------------------------------------------------*
+FORM OUTPUT_MESSAGE_END USING I_SYST_DATE TYPE SY-DATUM
+I_SYST_TIME TYPE SY-UZEIT
+I_SEQNO     TYPE ZTEGSDT202-SEQNO
+I_TD_EKKO   TYPE TYP_TD_EKKO.
+DATA:
+LST_ZTEGSDT202   TYPE ZTEGSDT202,
+LW_JOBID         TYPE ZTEGSDT202-JOBID.        "ジョブID
+
+* A-5-1．ジョブ実行履歴テ‐ブルの登録処理
+* A-5-1-1．指定画面の登録日付（Create Date）が初期値の場合
+IF S_UDATE[] IS INITIAL.
+CLEAR:
+LST_ZTEGSDT202,
+LW_JOBID.
+
+CONCATENATE SY-CPROG '-' SY-SLSET INTO LW_JOBID.
+
+*   ジョブ実行履歴テ‐ブルの実行日付と時刻を登録する
+LST_ZTEGSDT202-JOBID        = LW_JOBID.        "ジョブID
+LST_ZTEGSDT202-SEQNO        = I_SEQNO + 1.     "連番
+LST_ZTEGSDT202-JOB_DATE     = I_SYST_DATE.     "実行日付
+LST_ZTEGSDT202-JOB_TIME     = I_SYST_TIME.     "実行時刻
+LST_ZTEGSDT202-JOB_USER     = SY-UNAME.        "実行ユーザ
+LST_ZTEGSDT202-Z_CRE_YMD    = I_SYST_DATE.     "登録年月日
+LST_ZTEGSDT202-Z_CRE_HMS    = I_SYST_TIME.     "登録時分秒
+LST_ZTEGSDT202-Z_CRE_USERID = SY-UNAME.        "ユーザ名
+
+INSERT ZTEGSDT202 FROM LST_ZTEGSDT202.
+
+*   （1）．デ‐タ登録に失敗した場合、ロ‐ルバックし、
+*   メッセ‐ジを出力し処理を終了する
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+
+*     Unlock ZTEGSDT202
+PERFORM UNLOCK_ZTEGSDT202.
+
+MESSAGE S023(ZMEGSD01) WITH CNS_MSG_MSGV1
+DISPLAY LIKE CNS_MSG_E.
+*     データ登録に失敗しました(テーブル = &1)
+
+LEAVE LIST-PROCESSING.
+
+*   （2）．データ登録に成功した場合、コミットし、次の処理へ
+ELSE.
+COMMIT WORK AND WAIT.
+ENDIF.
+
+* A-5-1-2．指定画面の登録日付（Create Date）が初期値以外の場合
+ELSE.
+COMMIT WORK AND WAIT.
+ENDIF.
+
+* ジョブ実行履歴テーブルのロックを解除する
+PERFORM UNLOCK_ZTEGSDT202.
+
+* A-5-2．終了メッセージを出力する
+READ TABLE I_TD_EKKO TRANSPORTING NO FIELDS
+WITH KEY STATUS = CNS_STATUS_E.
+
+* A-5-2-1．「ITAB:エラーファイル」にデータが存在した場合
+IF SY-SUBRC = 0.
+*   エラーデ‐タ存在するメッセ‐ジを出力する
+**** START UPD 2015/03/02 ISID11 ****
+*    MESSAGE S026(ZMEGSD01).
+**   エラーデータが存在し、エラーファイルを別途担当者へメ‐ル送付する
+MESSAGE S086(ZMEGSD01) WITH W_TOTAL
+W_NORMAL
+W_ERROR .
+*   エラーが存在し、エラーファイルを別途担当者へメール送付する
+*   (処理&1件/正常&2件/エラー&3件)
+**** END UPD 2015/03/02 ISID11 ****
+
+* A-5-2-2．「ITAB:エラーファイル」にデ‐タが存在しない場合
+ELSE.
+**** START UPD 2015/03/02 ISID11 ****
+*    MESSAGE S027(ZMEGSD01).
+**   処理正常に終了しました
+MESSAGE S087(ZMEGSD01) WITH W_TOTAL
+W_NORMAL
+W_ERROR .
+**** END UPD 2015/03/02 ISID11 ****
+ENDIF.
+
+ENDFORM.                    " OUTPUT_MESSAGE_END
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ALV
+*&---------------------------------------------------------------------*
+*       B-2．デ‐タ抽出編集処理
+*----------------------------------------------------------------------*
+*      -->I_RD_BUKRS  対象組織-会社コード
+*      <--O_TD_ALV    ITAB:ALVデータ
+*----------------------------------------------------------------------*
+FORM GET_DATA_ALV USING I_RD_BUKRS TYPE TYP_RD_BUKRS
+CHANGING O_TD_ALV   TYPE TYP_TD_ALV.
+**** START ADD 2015/04/24 ISID11 ****
+DATA:
+LST_ALV            TYPE ZSEGSD0006,
+LST_RECOVERY_LIST  TYPE TYP_RECOVERY_LIST,
+LTD_RECOVERY_LIST  TYPE TABLE OF TYP_RECOVERY_LIST.
+
+REFRESH O_TD_ALV.
+**** END ADD 2015/04/24 ISID11 ****
+
+* B-2-1．受発注の連携デ‐タを取得する
+**** START ADD BY ISID REN 2015/07/01 ****
+* 処理区分が初期値の場合
+IF LINES( S_ZC ) = 0.
+**** END ADD BY ISID REN 2015/07/01 ****
+SELECT ZTEGSDT203~EBELN                    "購買伝票番号
+ZTEGSDT203~EBELP                    "明細番号
+**** START UPD BY ISID REN 2015/08/13 ****
+*           ZTEGSDT203~MATNR                   "品目コード
+ZTEGSDT203~MATNR_PO AS MATNR        "品目コード
+**** END UPD BY ISID REN 2015/08/13 ****
+ZTEGSDT203~TXZ01                    "品目テキスト
+ZTEGSDT203~BUKRS                    "会社コード
+T001~BUTXT                          "会社の名称
+ZTEGSDT203~EKORG                    "購買組織
+ZTEGSDT203~EKGRP                    "購買グループ
+ZTEGSDT203~VKORG                    "販売組織
+TVKOT~VTEXT                         "販売組織名称
+ZTEGSDT203~VTWEG                    "流通チャネル
+ZTEGSDT203~SPART                    "製品部門
+ZTEGSDT203~VKBUR                    "営業グループ
+ZTEGSDT203~VKGRP                    "営業所
+ZTEGSDT203~KUNNR                    "受注先
+KNA1~NAME1                          "受注先の名称
+ZTEGSDT203~STATUS                   "ステータス
+**** START ADD 2015/04/24 ISID11 ****
+ZTEGSDT203~MSGID                    "メッセージ ID
+ZTEGSDT203~MSGNO                    "システムメッセージ番号
+ZTEGSDT203~MSGV1                    "メッセージ変数
+ZTEGSDT203~MSGV2                    "メッセージ変数
+ZTEGSDT203~MSGV3                    "メッセージ変数
+ZTEGSDT203~MSGV4                    "メッセージ変数
+**** END ADD 2015/04/24 ISID11 ****
+ZTEGSDT203~AEDAT                    "登録日
+ZTEGSDT203~ERNAM                    "登録者名
+ZTEGSDT203~Z_CRE_YMD                "登録年月日
+ZTEGSDT203~Z_CRE_HMS                "登録時分秒
+**** START ADD 2015/04/24 ISID11 ****
+INTO TABLE LTD_RECOVERY_LIST
+**** END ADD 2015/04/24 ISID11 ****
+FROM ZTEGSDT203
+LEFT JOIN T001
+ON ZTEGSDT203~BUKRS = T001~BUKRS
+LEFT JOIN TVKOT
+ON ZTEGSDT203~VKORG = TVKOT~VKORG
+AND TVKOT~SPRAS     = SY-LANGU
+LEFT JOIN KNA1
+ON ZTEGSDT203~KUNNR = KNA1~KUNNR
+WHERE ZTEGSDT203~ZKBUNCC   = CNS_ZKBUNCC  "処理区分
+AND ZTEGSDT203~BUKRS     IN I_RD_BUKRS  "会社コード
+**** START ADD BY ISID REN 2015/07/01 ****
+AND ZTEGSDT203~WERKS     IN S_WERKS[]   "プラント
+**** END ADD BY ISID REN 2015/07/01 ****
+AND ZTEGSDT203~EKORG     IN S_EKORG[]   "購買組織
+AND ZTEGSDT203~EKGRP     IN S_EKGRP[]   "購買グループ
+AND ZTEGSDT203~LIFNR     IN S_LIFNR[]   "仕入先勘定コード
+AND ZTEGSDT203~BSART     IN S_BSART[]   "購買伝票タイプ
+AND ZTEGSDT203~EBELN     IN S_EBELN[]   "購買伝票番号
+AND ZTEGSDT203~ERNAM     IN S_ERNAM[]   "オブジェクト登録者名
+AND ZTEGSDT203~STATUS    IN S_STATUS[]  "ステータス
+AND ZTEGSDT203~Z_CRE_YMD IN S_CREYMD[]  "登録年月日
+AND ZTEGSDT203~Z_CRE_HMS IN S_CREHMS[]. "登録時分秒
+**** START ADD BY ISID REN 2015/07/01 ****
+* 処理区分が初期値以外の場合のみが条件にする
+ELSE.
+SELECT ZTEGSDT203~EBELN                    "購買伝票番号
+ZTEGSDT203~EBELP                    "明細番号
+**** START UPD BY ISID REN 2015/08/13 ****
+*           ZTEGSDT203~MATNR                   "品目コード
+ZTEGSDT203~MATNR_PO AS MATNR        "品目コード
+**** END UPD BY ISID REN 2015/08/13 ****
+ZTEGSDT203~TXZ01                    "品目テキスト
+ZTEGSDT203~BUKRS                    "会社コード
+T001~BUTXT                          "会社の名称
+ZTEGSDT203~EKORG                    "購買組織
+ZTEGSDT203~EKGRP                    "購買グループ
+ZTEGSDT203~VKORG                    "販売組織
+TVKOT~VTEXT                         "販売組織名称
+ZTEGSDT203~VTWEG                    "流通チャネル
+ZTEGSDT203~SPART                    "製品部門
+ZTEGSDT203~VKBUR                    "営業グループ
+ZTEGSDT203~VKGRP                    "営業所
+ZTEGSDT203~KUNNR                    "受注先
+KNA1~NAME1                          "受注先の名称
+ZTEGSDT203~STATUS                   "ステータス
+ZTEGSDT203~MSGID                    "メッセージ ID
+ZTEGSDT203~MSGNO                    "システムメッセージ番号
+ZTEGSDT203~MSGV1                    "メッセージ変数
+ZTEGSDT203~MSGV2                    "メッセージ変数
+ZTEGSDT203~MSGV3                    "メッセージ変数
+ZTEGSDT203~MSGV4                    "メッセージ変数
+ZTEGSDT203~AEDAT                    "登録日
+ZTEGSDT203~ERNAM                    "登録者名
+ZTEGSDT203~Z_CRE_YMD                "登録年月日
+ZTEGSDT203~Z_CRE_HMS                "登録時分秒
+INTO TABLE LTD_RECOVERY_LIST
+FROM ZTEGSDT203
+LEFT JOIN T001
+ON ZTEGSDT203~BUKRS = T001~BUKRS
+LEFT JOIN TVKOT
+ON ZTEGSDT203~VKORG = TVKOT~VKORG
+AND TVKOT~SPRAS     = SY-LANGU
+LEFT JOIN KNA1
+ON ZTEGSDT203~KUNNR = KNA1~KUNNR
+WHERE ZTEGSDT203~BUKRS     IN I_RD_BUKRS  "会社コード
+**** START ADD BY ISID REN 2015/07/01 ****
+AND ZTEGSDT203~WERKS     IN S_WERKS[]   "プラント
+**** END ADD BY ISID REN 2015/07/01 ****
+AND ZTEGSDT203~EKORG     IN S_EKORG[]   "購買組織
+AND ZTEGSDT203~EKGRP     IN S_EKGRP[]   "購買グループ
+AND ZTEGSDT203~LIFNR     IN S_LIFNR[]   "仕入先勘定コード
+AND ZTEGSDT203~BSART     IN S_BSART[]   "購買伝票タイプ
+AND ZTEGSDT203~EBELN     IN S_EBELN[]   "購買伝票番号
+AND ZTEGSDT203~ERNAM     IN S_ERNAM[]   "オブジェクト登録者名
+AND ( ( ZTEGSDT203~ZKBUNCC = CNS_ZKBUNCC   "処理区分
+AND     ZTEGSDT203~STATUS  IN S_STATUS[] ) "ステータス
+OR      ZTEGSDT203~ZKBUNCC IN S_ZC[] )     "処理区分
+AND ZTEGSDT203~Z_CRE_YMD IN S_CREYMD[]  "登録年月日
+AND ZTEGSDT203~Z_CRE_HMS IN S_CREHMS[]. "登録時分秒
+ENDIF.
+**** END ADD BY ISID REN 2015/07/01 ****
+
+* （1）．デ‐タが存在しない場合、メッセ‐ジを出力し処理を終了する
+IF SY-UCOMM IS INITIAL.
+IF SY-SUBRC <> 0.
+MESSAGE S006(ZMEGSD01) WITH CNS_MSG_MSGV1.
+*     対象デ‐タが存在しません。(TBL = &1)
+
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+
+**** START ADD 2015/04/24 ISID11 ****
+* 登録言語でMessageを再取得する。
+LOOP AT LTD_RECOVERY_LIST INTO LST_RECOVERY_LIST.
+**** START ADD BY ISID REN 2015/07/02 ****
+CLEAR LST_ALV.
+**** END ADD BY ISID REN 2015/07/02 ****
+MOVE-CORRESPONDING  LST_RECOVERY_LIST TO LST_ALV.
+
+IF LST_RECOVERY_LIST-MSGNO IS NOT INITIAL.
+MESSAGE ID          LST_RECOVERY_LIST-MSGID
+TYPE     CNS_MSG_S
+NUMBER  LST_RECOVERY_LIST-MSGNO
+WITH       LST_RECOVERY_LIST-MSGV1
+LST_RECOVERY_LIST-MSGV2
+LST_RECOVERY_LIST-MSGV3
+LST_RECOVERY_LIST-MSGV4
+INTO       LST_ALV-MSGTX.
+ENDIF.
+
+APPEND LST_ALV TO O_TD_ALV.
+ENDLOOP.
+**** END ADD 2015/04/24 ISID11 ****
+
+SORT O_TD_ALV BY BUKRS ASCENDING              "会社コード
+EBELN ASCENDING              "購買伝票番号
+EBELP ASCENDING.             "明細番号
+
+ENDFORM.                    " GET_DATA_ALV
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ALV_DISPLAY
+*&---------------------------------------------------------------------*
+*       B-3．画面出力
+*----------------------------------------------------------------------*
+*       <--O_TD_ALV  ITAB:ALVデータ
+*----------------------------------------------------------------------*
+FORM OUTPUT_ALV_DISPLAY CHANGING O_TD_ALV TYPE TYP_TD_ALV.
+DATA:
+**** START ADD BY ISID REN 2015/07/01 ****
+LTH_PRINT    TYPE LVC_S_PRNT,
+**** END ADD BY ISID REN 2015/07/01 ****
+LTD_FIELDCAT TYPE LVC_T_FCAT,     "ITAB:FIELDCAT
+LST_LAYOUT   TYPE LVC_S_LAYO.     "ST:LAYOUT
+
+FIELD-SYMBOLS:
+<LFS_FIELDCAT> TYPE LVC_S_FCAT.
+
+* FIELDCAT属性の設定
+CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = CNS_TABNAME
+CHANGING
+CT_FIELDCAT            = LTD_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+READ TABLE LTD_FIELDCAT ASSIGNING <LFS_FIELDCAT> INDEX 1.
+
+IF SY-SUBRC = 0.
+<LFS_FIELDCAT>-NO_OUT = CNS_ON.
+ENDIF.
+
+* レイアウト属性の設定
+* ストライプ
+LST_LAYOUT-ZEBRA = CNS_ON.
+LST_LAYOUT-BOX_FNAME = 'SEL'.
+LST_LAYOUT-SEL_MODE  = 'D'.
+
+* ALV コントロール: 列幅の最適化
+LST_LAYOUT-CWIDTH_OPT = CNS_ON.
+
+**** START ADD BY ISID REN 2015/07/01 ****
+* 印刷パラメータ取得
+CASE SY-BATCH.
+WHEN SPACE.
+CLEAR LTH_PRINT.
+WHEN ABAP_TRUE.
+PERFORM GET_PRINT_PARAMETER
+CHANGING LTH_PRINT.
+ENDCASE.
+**** END ADD BY ISID REN 2015/07/01 ****
+
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+EXPORTING
+I_CALLBACK_PROGRAM       = SY-REPID
+I_CALLBACK_PF_STATUS_SET = CNS_PF_STATUS
+I_CALLBACK_USER_COMMAND  = CNS_USER_CMD
+IS_LAYOUT_LVC            = LST_LAYOUT
+IT_FIELDCAT_LVC          = LTD_FIELDCAT
+**** START ADD BY ISID REN 2015/07/06 ****
+IS_PRINT_LVC             = LTH_PRINT
+**** END ADD BY IS ISID REN 2015/07/06 ****
+TABLES
+T_OUTTAB                 = O_TD_ALV
+EXCEPTIONS
+PROGRAM_ERROR            = 1
+OTHERS                   = 2.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " OUTPUT_ALV_DISPLAY
+*&---------------------------------------------------------------------*
+*&      Form  SET_STATUS
+*&---------------------------------------------------------------------*
+*       2000 ALV画面のステータスの設定
+*----------------------------------------------------------------------*
+FORM SET_STATUS USING UT_EXTAB TYPE SLIS_T_EXTAB.
+REFRESH: UT_EXTAB.
+SET TITLEBAR 'TTB_2000'.
+SET PF-STATUS 'STT_2000' EXCLUDING UT_EXTAB.
+ENDFORM.                    " SET_STATUS
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND
+*&---------------------------------------------------------------------*
+*       2000）ALV画面の事件
+*----------------------------------------------------------------------*
+FORM USER_COMMAND USING UCOMM    TYPE SY-UCOMM
+SELFIELD TYPE SLIS_SELFIELD.
+* B-4．ボタンイベント処理
+CASE UCOMM.
+*   B-4-1．「Re-Excu」ボタン押下時の処理
+WHEN CNS_REEXCUTE.
+*     選択された明細を再度取込む処理を行う
+PERFORM EXCUTE_RECORD.
+
+*   B-4-2．「Delete」ボタン押下時の処理
+WHEN CNS_DELETE.
+*     「Delete」ボタン押下時には、該当対象デ‐タのステ‐タスを
+*      「削除」に更新する
+PERFORM DELETE_RECORD.
+
+*   B-4-3．「Detail」ボタン押下時の処理
+WHEN CNS_DETAIL.
+*     「Detail」ボタン押下時には、購買伝票照会画面（ME23N）へ飛ぶ
+PERFORM DETAIL_RECORD.
+
+*   ダブルクリック
+WHEN CNS_DOUBLE.
+*     ダブルクリックボタン押下時には、購買伝票照会画面（ME23N）へ飛ぶ
+PERFORM DOUBLECLICK_RECORD USING SELFIELD.
+
+WHEN OTHERS.
+ENDCASE.
+
+SELFIELD-REFRESH = CNS_ON.
+
+ENDFORM.                    " SET_STATUS
+*&---------------------------------------------------------------------*
+*&      Form  EXCUTE_RECORD
+*&---------------------------------------------------------------------*
+*       B-4-1．「Re-Excu」ボタン押下時の処理
+*----------------------------------------------------------------------*
+FORM EXCUTE_RECORD .
+DATA:
+LTD_EKKO TYPE TYP_TD_EKKO.
+
+* C-1．初期処理
+PERFORM INIT_PROCESS.
+
+* C-2．データ抽出編集処理
+PERFORM GET_DATA_SELECTED CHANGING LTD_EKKO.
+
+* C-3．デ‐タ更新処理
+PERFORM UPDATE_ZTEGSDT203 USING LTD_EKKO.
+
+* C-4．ALV画面を再表示処理
+PERFORM DISPLAY_ALV_AGAIN.
+
+ENDFORM.                    " EXCUTE_RECORD
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROCESS
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INIT_PROCESS .
+* C-1-1．入力チェック
+* 明細1行も選択されてない場合、メッセ‐ジを出力し処理を終了する
+READ TABLE TD_ALV TRANSPORTING NO FIELDS
+WITH KEY SEL = CNS_ON.
+
+IF SY-SUBRC <> 0.
+MESSAGE E028(ZMEGSD01).
+*   明細を指定ください
+ENDIF.
+
+ENDFORM.                    " INIT_PROCESS
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_SELECTED
+*&---------------------------------------------------------------------*
+*       C-2．データ抽出編集処理
+*----------------------------------------------------------------------*
+*      <--O_TD_EKKO  ITAB:再取込受発注連携データ
+*----------------------------------------------------------------------*
+FORM GET_DATA_SELECTED CHANGING O_TD_EKKO TYPE TYP_TD_EKKO.
+DATA:
+LTD_ALV_SELECTED   TYPE TYP_TD_ALV.
+
+LTD_ALV_SELECTED = TD_ALV.
+
+* C-2-1．再取込対象デ‐タの取得処理
+DELETE LTD_ALV_SELECTED WHERE SEL <> CNS_ON.
+SORT LTD_ALV_SELECTED BY EBELN ASCENDING
+EBELP ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_ALV_SELECTED
+COMPARING EBELN
+EBELP.
+
+SELECT EKPO~EBELN                             "購買伝票番号
+EKPO~EBELP                             "明細番号
+**** START UPD BY ISID REN 2015/08/13 ****
+*         EKPO~MATNR                             "品目コード
+EKPO~MATNR AS MATNR_PO                  "品目コード
+EKPO~IDNLF                              "仕入先品目
+**** END UPD BY ISID REN 2015/08/13 ****
+EKPO~TXZ01                             "品目テキスト
+EKPO~KNTTP                             "勘定設定カテゴリ
+**** START ADD BY ISID REN 2015/07/09 ****
+EKPO~EVERS                             "出荷指示
+**** END ADD BY ISID REN 2015/07/09 ****
+EKKO~BSART                             "購買伝票タイプ
+EKKO~BUKRS                             "会社コード
+EKKO~EKORG                             "購買組織
+EKKO~EKGRP                             "購買グループ
+EKKO~LIFNR                             "仕入先勘定コード
+**** START ADD 2015/02/10 ISID11 ****
+EKKO~SPRAS                             "言語キー
+EKKO~SUBMI                             "一括番号
+**** END ADD 2015/02/10 ISID11 ****
+EKPO~WERKS                             "プラント
+**** START ADD 2015/02/10 ISID11 ****
+EKPO~LGORT                             "保管場所
+**** END ADD 2015/02/10 ISID11 ****
+EKKO~ZTERM                             "購買発注量
+**** START ADD 2015/02/10 ISID11 ****
+**** START DEL BY ISID REN 2015/08/05 ****
+*         EKKO~INCO1                             "インコタームズ
+**** END DEL BY ISID REN 2015/08/05 ****
+**** START ADD 2015/03/06 ISID11 ****
+**** START DEL BY ISID REN 2015/08/05 ****
+*         EKKO~INCO2                             "インコタームズ2
+**** END DEL BY ISID REN 2015/08/05 ****
+**** END ADD 2015/03/06 ISID11 ****
+**** END ADD 2015/02/10 ISID11 ****
+EKPO~MENGE                             "支払条件キー
+**** START ADD BY ISID REN 2015/08/05 ****
+EKPO~INCO1                             "インコタームズ
+EKPO~INCO2                             "取引条件
+EKKO~INCO2 AS Z_LASTDEST               "最終仕向地
+**** END ADD BY ISID REN 2015/08/05 ****
+EKPO~MEINS                             "発注単位
+EKPO~NETPR                             "正味価格
+EKPO~PEINH                             "価格単位
+EKPO~BPRME                             "購買発注価格単位
+EKPO~NETWR                             "正味発注額
+EKKO~WAERS                             "通貨コード
+EKKO~AEDAT                             "登録日
+EKKO~ERNAM                             "登録者名
+INTO CORRESPONDING FIELDS OF TABLE O_TD_EKKO
+FROM EKKO
+INNER JOIN EKPO
+ON EKKO~EBELN = EKPO~EBELN
+INNER JOIN LFB1
+ON EKKO~LIFNR = LFB1~LIFNR
+AND EKKO~BUKRS = LFB1~BUKRS
+FOR ALL ENTRIES IN LTD_ALV_SELECTED
+WHERE EKKO~EBELN = LTD_ALV_SELECTED-EBELN   "購買伝票番号
+**** START DEL BY ISID REN 2015/08/17 ****
+*     AND EKPO~EBELP = LTD_ALV_SELECTED-EBELP   "購買伝票明細
+**** END DEL BY ISID REN 2015/08/17 ****
+AND EKPO~LOEKZ = SPACE.                   "削除フラグ
+
+* （1）．デ‐タが存在しない場合、メッセ‐ジを出力し処理を終了する
+IF SY-SUBRC <> 0.
+MESSAGE E030(ZMEGSD01).
+*   デ‐タ再取込処理にエラ‐発生しました
+ENDIF.
+
+**** START ADD 2015/02/10 ISID11 ****
+SORT O_TD_EKKO BY EBELN ASCENDING              "購買伝票番号
+EBELP ASCENDING.             "明細番号
+**** END ADD 2015/02/10 ISID11 ****
+
+* C-2-2．受発注連携デ‐タの編集処理
+* A-2-3．受発注連携デ‐タの編集処理
+* 処理「A-2-3．受発注連携デ‐タの編集処理」を参照
+PERFORM EDIT_DATA_PURCHASE USING W_SYST_DATE
+W_SYST_TIME
+CHANGING O_TD_EKKO.
+
+* C-2-3．ロック処理
+PERFORM LOCK_ZTEGSDT203 USING O_TD_EKKO.
+
+ENDFORM.                    " GET_DATA_SELECTED
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*       C-2-3．ロック処理
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ITAB:再取込受発注連携デ‐タ
+*----------------------------------------------------------------------*
+FORM LOCK_ZTEGSDT203 USING I_TD_EKKO TYPE TYP_TD_EKKO.
+DATA:
+LST_EKKO   TYPE ZTEGSDT203,      "ST:受発注連携デ‐タ
+LTD_EKKO TYPE TYP_TD_EKKO.
+
+LOOP AT I_TD_EKKO INTO LST_EKKO.
+CALL FUNCTION 'ENQUEUE_EZZTEGSDT203'
+EXPORTING
+MODE_ZTEGSDT203 = 'E'
+EBELN           = LST_EKKO-EBELN
+EBELP           = LST_EKKO-EBELP
+EXCEPTIONS
+FOREIGN_LOCK    = 1
+SYSTEM_FAILURE  = 2
+OTHERS          = 3.
+
+IF SY-SUBRC <> 0.
+*     ロックの解除
+PERFORM UNLOCK_ZTEGSDT203 USING LTD_EKKO.
+
+MESSAGE ID SY-MSGID TYPE CNS_MSG_E NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+APPEND LST_EKKO TO LTD_EKKO.
+ENDLOOP.
+
+ENDFORM.                    " LOCK_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*       C-3．デ‐タ更新処理
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ITAB:再取込受発注連携デ‐タ
+*----------------------------------------------------------------------*
+FORM UPDATE_ZTEGSDT203 USING I_TD_EKKO TYPE TYP_TD_EKKO.
+DATA:
+LST_EKKO   TYPE
+**** START UPD 2015/02/10 ISID11 ****
+*                    ZTEGSDT203,                 "ST:受発注連携デ‐タ
+TYP_EKKO,                 "ST:受発注連携デ‐タ
+LTD_EKKO   TYPE TYP_TD_EKKO,
+**** END UPD 2015/02/10 ISID11 ****
+LW_DATUM   TYPE SY-DATUM,                   "更新年月日
+LW_UZEIT   TYPE SY-UZEIT.                   "更新時分秒
+
+LW_DATUM = SY-DATUM.
+LW_UZEIT = SY-UZEIT.
+
+* C-3-1．受発注連携デ‐タの更新処理を行う
+LOOP AT I_TD_EKKO INTO LST_EKKO.
+UPDATE ZTEGSDT203
+SET
+**** START UPD BY ISID REN 2015/08/13 ****
+*           MATNR        = LST_EKKO-MATNR        "品目コ‐ド
+MATNR_PO     = LST_EKKO-MATNR_PO      "品目コ‐ド
+**** END UPD BY ISID REN 2015/08/13 ****
+TXZ01        = LST_EKKO-TXZ01        "テキスト (短)
+KNTTP        = LST_EKKO-KNTTP        "勘定設定カテゴリ
+BSART        = LST_EKKO-BSART        "購買伝票タイプ
+BUKRS        = LST_EKKO-BUKRS        "会社コ‐ド
+EKORG        = LST_EKKO-EKORG        "購買組織
+EKGRP        = LST_EKKO-EKGRP        "購買グル‐プ
+LIFNR        = LST_EKKO-LIFNR        "仕入先勘定コ‐ド
+WERKS        = LST_EKKO-WERKS        "プラント
+ZTERM        = LST_EKKO-ZTERM        "支払条件キ‐
+EINDT        = LST_EKKO-EINDT        "明細納入期日
+AEDAT        = LST_EKKO-AEDAT        "レコ‐ド登録日
+ERNAM        = LST_EKKO-ERNAM        "オブジェクト登録者名
+MENGE        = LST_EKKO-MENGE        "購買発注量
+MEINS        = LST_EKKO-MEINS        "発注単位
+NETPR        = LST_EKKO-NETPR        "正味価格
+PEINH        = LST_EKKO-PEINH        "価格単位
+BPRME        = LST_EKKO-BPRME        "購買発注価格単位
+NETWR        = LST_EKKO-NETWR        "正味発注額
+WAERS        = LST_EKKO-WAERS        "通貨コ‐ド
+**** START ADD BY ISID REN 2015/07/09 ****
+EVERS        = LST_EKKO-EVERS        "出荷指示
+NETPR_EU     = LST_EKKO-NETPR_EU     "正味価格（EU）
+KPEIN_EU     = LST_EKKO-KPEIN_EU     "価格条件単位（EU）
+KMEIN_EU     = LST_EKKO-KMEIN_EU     "条件単位（EU）
+WAERK_EU     = LST_EKKO-WAERK_EU     "販売伝票通貨（EU）
+**** END ADD BY ISID REN 2015/07/09 ****
+**** START ADD 2015/02/10 ISID11 ****
+LGORT          = LST_EKKO-LGORT          "保管場所
+Z_VEND_NAME_DT = LST_EKKO-Z_VEND_NAME_DT "出荷先名
+Z_ADDRESS1_DT  = LST_EKKO-Z_ADDRESS1_DT  "出荷先住所1
+Z_ADDRESS2_DT  = LST_EKKO-Z_ADDRESS2_DT  "出荷先住所2
+Z_ADDRESS3_DT  = LST_EKKO-Z_ADDRESS3_DT  "出荷先住所3
+Z_ADDRESS4_DT  = LST_EKKO-Z_ADDRESS4_DT  "出荷先住所4
+Z_TEL_DT       = LST_EKKO-Z_TEL_DT       "出荷先電話番号
+Z_FAX_DT       = LST_EKKO-Z_FAX_DT       "出荷先FAX番号
+INCO1          = LST_EKKO-INCO1          "インコタームズ
+**** START ADD 2015/03/06 ISID11 ****
+INCO2          = LST_EKKO-INCO2          "取引条件
+**** END ADD 2015/03/06 ISID11 ****
+**** START ADD BY ISID REN 2015/08/05 ****
+Z_LASTDEST     = LST_EKKO-Z_LASTDEST     "最終仕向地
+**** END ADD BY ISID REN 2015/08/05 ****
+Z_PURPOSE_TEXT = LST_EKKO-Z_PURPOSE_TEXT "用途
+SUBMI          = LST_EKKO-SUBMI          "一括番号
+Z_PO_ITEM_TXT  = LST_EKKO-Z_PO_ITEM_TXT "購買発注明細テキスト
+**** END ADD 2015/02/10 ISID11 ****
+VKORG        = LST_EKKO-VKORG        "販売組織
+VTWEG        = LST_EKKO-VTWEG        "流通チャネル
+SPART        = LST_EKKO-SPART        "製品部門
+VKGRP        = LST_EKKO-VKGRP        "営業グル‐プ
+VKBUR        = LST_EKKO-VKBUR        "営業所
+KUNNR        = LST_EKKO-KUNNR        "受注先
+**** START ADD 2015/02/10 ISID11 ****
+ZKUNNR_ZJ    = LST_EKKO-ZKUNNR_ZJ    "最終需要者
+ZKUNNR_ZE    = LST_EKKO-ZKUNNR_ZE    "エンドユーザ(価格)
+**** END ADD 2015/02/10 ISID11 ****
+**** START ADD BY ISID REN 2015/08/13 ****
+MATNR_SO     = LST_EKKO-MATNR_SO     "品目コード（SO）
+**** END ADD BY ISID REN 2015/08/13 ****
+**** START ADD BY ISID REN 2015/08/27 ****
+KDMAT        = LST_EKKO-KDMAT        "得意先品目
+**** END ADD BY ISID REN 2015/08/27 ****
+STATUS       = LST_EKKO-STATUS       "ステ‐タス
+MSGID        = LST_EKKO-MSGID        "メッセ‐ジID
+MSGNO        = LST_EKKO-MSGNO        "システムメッセ‐ジ番号
+**** START ADD 2015/04/24 ISID11 ****
+MSGV1        = LST_EKKO-MSGV1        "メッセ‐ジ変数1
+MSGV2        = LST_EKKO-MSGV2        "メッセ‐ジ変数2
+MSGV3        = LST_EKKO-MSGV3        "メッセ‐ジ変数3
+MSGV4        = LST_EKKO-MSGV4        "メッセ‐ジ変数4
+**** END ADD 2015/04/24 ISID11 ****
+MSGTX        = LST_EKKO-MSGTX        "メッセ‐ジテキスト
+Z_MOD_YMD    = LW_DATUM              "更新年月日
+Z_MOD_HMS    = LW_UZEIT              "更新時分秒
+Z_MOD_USERID = SY-UNAME              "更新ユ‐ザ
+WHERE EBELN = LST_EKKO-EBELN
+AND EBELP = LST_EKKO-EBELP.
+
+*   （1）．デ‐タ更新に失敗した場合、ロ‐ルバックし、メッセ‐ジを出力し
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+
+*     ロックの解除
+PERFORM UNLOCK_ZTEGSDT203 USING I_TD_EKKO.
+
+MESSAGE E030(ZMEGSD01).
+*     デ‐タ再取込処理にエラ‐発生しました
+ENDIF.
+ENDLOOP.
+
+COMMIT WORK AND WAIT.
+
+* C-3-2．ロックの解除
+PERFORM UNLOCK_ZTEGSDT203 USING I_TD_EKKO.
+
+**** START ADD 2015/02/10 ISID11 ****
+CLEAR:
+W_TOTAL,
+W_NORMAL,
+W_ERROR.
+
+LTD_EKKO = I_TD_EKKO.
+W_TOTAL  = LINES( I_TD_EKKO ).
+
+DELETE LTD_EKKO WHERE STATUS = CNS_STATUS_E.
+W_NORMAL = LINES( LTD_EKKO ).
+
+CLEAR:
+LTD_EKKO.
+LTD_EKKO = I_TD_EKKO.
+DELETE LTD_EKKO WHERE STATUS <> CNS_STATUS_E.
+W_ERROR = LINES( LTD_EKKO ).
+
+MESSAGE S088(ZMEGSD01) WITH W_TOTAL
+W_NORMAL
+W_ERROR .
+* 再処理終了しました(処理&1件/正常&2件/エラー&3件)
+**** END ADD 2015/02/10 ISID11 ****
+
+ENDFORM.                    " UPDATE_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_AGAIN
+*&---------------------------------------------------------------------*
+*       C-4．ALV画面を再表示処理
+*----------------------------------------------------------------------*
+FORM DISPLAY_ALV_AGAIN.
+* B-2．デ‐タ抽出編集処理
+PERFORM GET_DATA_ALV USING RD_BUKRS      "対象組織-会社コード
+CHANGING TD_ALV.       "ITAB:ALVデータ
+
+* 更新された内容をALV一覧に反映する
+PERFORM REFRESH_ALV.
+
+ENDFORM.                    " DISPLAY_ALV_AGAIN
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_RECORD
+*&---------------------------------------------------------------------*
+*       B-4-2．「Delete」ボタン押下時の処理
+*----------------------------------------------------------------------*
+FORM DELETE_RECORD.
+DATA:
+LW_QUESTION   TYPE CHAR72,
+LW_ANSWER     TYPE CHAR1.
+
+* D-1．初期処理
+PERFORM INIT_PROCESS.
+
+* D-1-3．削除確認
+CLEAR:
+LW_QUESTION,
+LW_ANSWER.
+
+MESSAGE S034(ZMEGSD01) INTO LW_QUESTION.
+* 削除しますか？
+
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+TITLEBAR              = TEXT-B01
+TEXT_QUESTION         = LW_QUESTION
+TEXT_BUTTON_1         = TEXT-B02
+TEXT_BUTTON_2         = TEXT-B03
+DISPLAY_CANCEL_BUTTON = SPACE
+IMPORTING
+ANSWER                = LW_ANSWER
+EXCEPTIONS
+TEXT_NOT_FOUND        = 1
+OTHERS                = 2.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_E NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+
+ENDIF.
+
+IF LW_ANSWER <> '1'.
+RETURN.
+ENDIF.
+
+* D-2．デ‐タ更新処理
+PERFORM UPDATE_ZTEGSDT203_DELFLG.
+
+* D-3．ALV画面を再表示処理
+PERFORM DISPLAY_ALV_AGAIN.
+
+ENDFORM.                    " DELETE_RECORD
+*&---------------------------------------------------------------------*
+*&      Form  REFRESH_ALV
+*&---------------------------------------------------------------------*
+*       更新された内容をALV一覧に反映する
+*----------------------------------------------------------------------*
+FORM REFRESH_ALV.
+DATA:
+LREF_GUID         TYPE REF TO CL_GUI_ALV_GRID.
+
+CALL FUNCTION 'GET_GLOBALS_FROM_SLVC_FULLSCR'
+IMPORTING
+E_GRID = LREF_GUID.
+
+CALL METHOD LREF_GUID->CHECK_CHANGED_DATA.
+
+ENDFORM.                    " REFRESH_ALV
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZTEGSDT203_DELFLG
+*&---------------------------------------------------------------------*
+*       D-2．デ‐タ更新処理
+*----------------------------------------------------------------------*
+FORM UPDATE_ZTEGSDT203_DELFLG .
+DATA:
+LTD_LOCK   TYPE TYP_TD_ALV,
+LST_EKKO   TYPE ZTEGSDT203,
+LTD_EKKO   TYPE TYP_TD_EKKO,
+LW_DATUM   TYPE SY-DATUM,                   "更新年月日
+LW_UZEIT   TYPE SY-UZEIT,                   "更新時分秒
+LST_DEL    TYPE ZSEGSD0006.                 "ST:受発注連携デ‐タ
+
+LTD_LOCK = TD_ALV.
+DELETE LTD_LOCK WHERE SEL <> CNS_ON.
+
+* D-2-1．ロック処理
+LOOP AT LTD_LOCK INTO LST_DEL.
+CALL FUNCTION 'ENQUEUE_EZZTEGSDT203'
+EXPORTING
+MODE_ZTEGSDT203 = 'E'
+EBELN           = LST_DEL-EBELN
+EBELP           = LST_DEL-EBELP
+EXCEPTIONS
+FOREIGN_LOCK    = 1
+SYSTEM_FAILURE  = 2
+OTHERS          = 3.
+
+IF SY-SUBRC <> 0.
+*     ロックの解除
+PERFORM UNLOCK_ZTEGSDT203 USING LTD_EKKO.
+
+MESSAGE ID SY-MSGID TYPE CNS_MSG_E NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+CLEAR:
+LST_EKKO.
+
+*   ロック解除対象
+LST_EKKO-EBELN = LST_DEL-EBELN.
+LST_EKKO-EBELP = LST_DEL-EBELP.
+
+APPEND LST_EKKO TO LTD_EKKO.
+ENDLOOP.
+
+LW_DATUM   = SY-DATUM.
+LW_UZEIT   = SY-UZEIT.
+
+* D-2-2．受発注連携デ‐タのステ‐タス更新処理を行う
+LOOP AT LTD_LOCK INTO LST_DEL.
+UPDATE ZTEGSDT203
+SET STATUS       = CNS_STATUS_D     "ステータス
+Z_MOD_YMD    = LW_DATUM         "更新年月日
+Z_MOD_HMS    = LW_UZEIT         "更新時分秒
+Z_MOD_USERID = SY-UNAME         "ユーザ名
+WHERE EBELN        = LST_DEL-EBELN
+AND EBELP        = LST_DEL-EBELP.
+
+*   （1）．デ‐タ更新に失敗した場合、ロ‐ルバックし、
+*   メッセ‐ジを出力し処理を終了する
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+
+*     ロックの解除
+PERFORM UNLOCK_ZTEGSDT203 USING LTD_EKKO.
+
+MESSAGE E024(ZMEGSD01) WITH CNS_MSG_MSGV1.
+*     デ‐タ更新に失敗しました(テ‐ブル = &1)
+ENDIF.
+ENDLOOP.
+
+* （2）．デ‐タ更新に成功した場合、コミットし、次の処理へ
+COMMIT WORK AND WAIT.
+
+* ロックを解除する
+PERFORM UNLOCK_ZTEGSDT203 USING LTD_EKKO.
+
+ENDFORM.                    " UPDATE_ZTEGSDT203_DELFLG
+*&---------------------------------------------------------------------*
+*&      Form  DETAIL_RECORD
+*&---------------------------------------------------------------------*
+*       B-4-3．「Detail」ボタン押下時の処理
+*----------------------------------------------------------------------*
+FORM DETAIL_RECORD .
+
+DATA:
+LTD_ALV_SELECTED   TYPE TYP_TD_ALV,
+LST_ZSEGSD0006     TYPE ZSEGSD0006.
+
+* （1）．明細1行も選択されてない場合、メッセ‐ジを出力し処理を終了する
+PERFORM INIT_PROCESS.
+
+* （2）．明細複数行を選択された場合、メッセ‐ジを出力し処理を終了する
+LTD_ALV_SELECTED = TD_ALV.
+
+DELETE LTD_ALV_SELECTED WHERE SEL <> CNS_ON.
+
+IF LINES( LTD_ALV_SELECTED ) > 1.
+MESSAGE E029(ZMEGSD01).
+*   複数件明細を指定できません
+ENDIF.
+
+* 購買伝票照会画面（ME23N）へ飛ぶ
+READ TABLE LTD_ALV_SELECTED INTO LST_ZSEGSD0006 INDEX 1.
+
+SET PARAMETER ID: 'BES' FIELD LST_ZSEGSD0006-EBELN.
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+
+ENDFORM.                    " DETAIL_RECORD
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*       ロックの解除
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ST:受発注連携デ‐タ
+*----------------------------------------------------------------------*
+FORM UNLOCK_ZTEGSDT203 USING I_TD_EKKO TYPE TYP_TD_EKKO.
+DATA:
+LST_EKKO   TYPE ZTEGSDT203.      "ST:受発注連携デ‐タ
+
+LOOP AT I_TD_EKKO INTO LST_EKKO.
+CALL FUNCTION 'DEQUEUE_EZZTEGSDT203'
+EXPORTING
+MODE_ZTEGSDT203 = 'E'
+EBELN           = LST_EKKO-EBELN
+EBELP           = LST_EKKO-EBELP.
+ENDLOOP.
+
+ENDFORM.                    " UNLOCK_ZTEGSDT203
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK_ZTEGSDT202
+*&---------------------------------------------------------------------*
+*       Unlock ZTEGSDT202
+*----------------------------------------------------------------------*
+FORM UNLOCK_ZTEGSDT202 .
+DATA:
+LW_JOBID  TYPE ZTEGSDT202-JOBID.        "ジョブID
+
+CLEAR LW_JOBID.
+
+CONCATENATE SY-CPROG '-' SY-SLSET INTO LW_JOBID.
+CALL FUNCTION 'DEQUEUE_EZZTEGSDT202'
+EXPORTING
+MODE_ZTEGSDT202 = 'E'
+JOBID           = LW_JOBID.
+
+ENDFORM.                    " UNLOCK_ZTEGSDT202
+*&---------------------------------------------------------------------*
+*&      Form  DOUBLECLICK_RECORD
+*&---------------------------------------------------------------------*
+*       ダブルクリック
+*----------------------------------------------------------------------*
+*      -->I_SELFIELD
+*----------------------------------------------------------------------*
+FORM DOUBLECLICK_RECORD USING I_SELFIELD TYPE SLIS_SELFIELD.
+DATA:
+LST_ZSEGSD0006     TYPE ZSEGSD0006.
+
+IF I_SELFIELD-FIELDNAME <> 'EBELN'.
+RETURN.
+ENDIF.
+
+READ TABLE TD_ALV INTO LST_ZSEGSD0006
+INDEX I_SELFIELD-TABINDEX.
+
+IF SY-SUBRC = 0.
+SET PARAMETER ID: 'BES' FIELD LST_ZSEGSD0006-EBELN.
+
+CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+ENDIF.
+
+ENDFORM.                    " DOUBLECLICK_RECORD
+*&---------------------------------------------------------------------*
+*&      Form  CONTROL_SELECT_OPTIONS
+*&---------------------------------------------------------------------*
+*       Create Date Time Control
+*----------------------------------------------------------------------*
+FORM CONTROL_SELECT_OPTIONS .
+
+DATA:
+LST_RESTRICT TYPE SSCR_RESTRICT,
+LST_OPTLIST  TYPE SSCR_OPT_LIST,
+**** START ADD BY ISID REN 2015/07/01 ****
+LST_USDEFAULTS TYPE USDEFAULTS,     "ユーザ: 固定値移送構造
+**** END ADD BY ISID REN 2015/07/01 ****
+LST_ASS TYPE SSCR_ASS.
+
+LST_OPTLIST-NAME = 'OBJECTKEY1'.
+LST_OPTLIST-OPTIONS-EQ = 'X'.
+LST_OPTLIST-OPTIONS-BT = 'X'.
+APPEND LST_OPTLIST TO LST_RESTRICT-OPT_LIST_TAB.
+LST_ASS-KIND = 'S'.
+LST_ASS-NAME = 'S_UDATE'.
+LST_ASS-SG_MAIN = 'I'.
+LST_ASS-SG_ADDY = SPACE.
+LST_ASS-OP_MAIN = 'OBJECTKEY1'.
+APPEND LST_ASS TO LST_RESTRICT-ASS_TAB.
+
+LST_ASS-NAME = 'S_UTIME'.
+APPEND LST_ASS TO LST_RESTRICT-ASS_TAB.
+
+CALL FUNCTION 'SELECT_OPTIONS_RESTRICT'
+EXPORTING
+RESTRICTION            = LST_RESTRICT
+EXCEPTIONS
+TOO_LATE               = 1
+REPEATED               = 2
+SELOPT_WITHOUT_OPTIONS = 3
+SELOPT_WITHOUT_SIGNS   = 4
+INVALID_SIGN           = 5
+EMPTY_OPTION_LIST      = 6
+INVALID_KIND           = 7
+REPEATED_KIND_A        = 8
+OTHERS                 = 9.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+**** START ADD BY ISID REN 2015/07/01 ****
+* 出力デバイスの初期値を取得する
+CALL FUNCTION 'SUSR_USER_READ'
+EXPORTING
+USER_NAME            = SY-UNAME
+IMPORTING
+USER_DEFAULTS        = LST_USDEFAULTS
+EXCEPTIONS
+USER_NAME_NOT_EXISTS = 1
+INTERNAL_ERROR       = 2
+OTHERS               = 3.
+
+IF SY-SUBRC <> 0.
+CLEAR P_PADEST.     "出力デバイス
+ELSE.
+P_PADEST = LST_USDEFAULTS-SPLD.
+ENDIF.
+**** END ADD BY ISID REN 2015/07/01 ****
+
+ENDFORM.                    " CONTROL_SELECT_OPTIONS
+**** START ADD 2015/02/10 ISID11 ****
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_VBKD
+*&---------------------------------------------------------------------*
+*       得意先発注番号（一括番号）を取得する
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ITAB:受発注連携デ‐タ
+*      <--O_TD_VBKD  ITAB:得意先発注番号（一括番号）
+*----------------------------------------------------------------------*
+FORM GET_DATA_VBKD USING I_TD_EKKO  TYPE TYP_TD_EKKO
+CHANGING O_TD_VBKD  TYPE TYP_TD_VBKD.
+
+DATA:
+LTD_EKKO TYPE TYP_TD_EKKO,
+LTD_VBKD_H TYPE TYP_TD_VBKD.
+
+LTD_EKKO = I_TD_EKKO.
+SORT LTD_EKKO BY EBELN ASCENDING
+EBELP ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_EKKO
+COMPARING EBELN
+EBELP.
+
+* 明細の得意先発注番号を取得する。
+SELECT EKKN~EBELN                "購買伝票番号
+EKKN~EBELP                "明細番号
+VBKD~BSTKD                "得意先発注番号
+INTO TABLE O_TD_VBKD
+FROM VBKD
+INNER JOIN EKKN
+ON VBKD~VBELN = EKKN~VBELN   "販売管理伝票番号
+AND VBKD~POSNR = EKKN~VBELP   "販売伝票明細
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE EKKN~EBELN  = LTD_EKKO-EBELN  "購買伝票番号
+AND EKKN~EBELP  = LTD_EKKO-EBELP. "明細番号
+
+* ヘッダの得意先発注番号を取得する。
+SELECT EKKN~EBELN                "購買伝票番号
+VBKD~BSTKD                "得意先発注番号
+INTO CORRESPONDING FIELDS OF TABLE LTD_VBKD_H
+FROM VBKD
+INNER JOIN EKKN
+ON VBKD~VBELN = EKKN~VBELN   "販売管理伝票番号
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE EKKN~EBELN  = LTD_EKKO-EBELN  "購買伝票番号
+AND VBKD~POSNR  = '000000'. "明細番号
+
+IF LTD_VBKD_H[] IS NOT INITIAL.
+APPEND LINES OF LTD_VBKD_H TO O_TD_VBKD.
+ENDIF.
+
+IF O_TD_VBKD[]  IS NOT INITIAL.
+SORT O_TD_VBKD BY EBELN ASCENDING
+EBELP ASCENDING.
+ENDIF.
+
+ENDFORM.                    " GET_DATA_VBKD
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ZTEGMMM001
+*&---------------------------------------------------------------------*
+*       品目より用途とエンドユーザを取得する
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO        ITAB:受発注連携デ‐タ
+*      <--O_TD_ZTEGMMM001  ITAB:用途・エンドユーザ
+**** START ADD BY ISID REN 2015/08/25 ****
+*      <--O_TD_KNA1_T005T   最終仕向地の再取得
+**** END ADD BY ISID REN 2015/08/25 ****
+*----------------------------------------------------------------------*
+FORM GET_DATA_ZTEGMMM001
+USING    I_TD_EKKO       TYPE TYP_TD_EKKO
+CHANGING
+**** START ADD BY ISID REN 2015/08/25 ****
+O_TD_KNA1_T005T  TYPE TYP_TD_KNA1_T005T
+**** END ADD BY ISID REN 2015/08/25 ****
+O_TD_ZTEGMMM001 TYPE TYP_TD_ZTEGMMM001.
+DATA:
+**** START ADD BY ISID REN 2015/08/25 ****
+LTD_ZTEGMMM001 TYPE TYP_TD_ZTEGMMM001,
+**** END ADD BY ISID REN 2015/08/25 ****
+LTD_EKKO TYPE TYP_TD_EKKO.
+
+LTD_EKKO = I_TD_EKKO.
+SORT LTD_EKKO
+BY
+**** START UPD BY ISID REN 2015/08/13 ****
+*      MATNR ASCENDING
+MATNR_PO ASCENDING
+**** END UPD BY ISID REN 2015/08/13 ****
+BUKRS ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_EKKO
+COMPARING
+**** START UPD BY ISID REN 2015/08/13 ****
+*      MATNR
+MATNR_PO
+**** END UPD BY ISID REN 2015/08/13 ****
+BUKRS.
+
+SELECT MATNR                     "品目コード
+BUKRS                     "会社コード
+**** START UPD BY ISID REN 2015/07/08 ****
+*         Z_ENDUSER_CD              "エンドユーザ
+*         Z_PURPOSE_TEXT            "用途
+Z_PURPOSE_TEXT            "用途
+**** START DEL BY ISID REN 2015/08/05 ****
+*         Z_ACTDEMAND_CD            "最終需要者
+**** END DEL BY ISID REN 2015/08/05 ****
+Z_ENDUSER_CD              "エンドユーザ
+**** END UPD BY ISID REN 2015/07/08 ****
+INTO CORRESPONDING FIELDS OF TABLE O_TD_ZTEGMMM001
+FROM ZTEGMMM001
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE
+**** START UPD BY ISID REN 2015/08/13 ****
+*       MATNR = LTD_EKKO-MATNR    "品目コード
+MATNR = LTD_EKKO-MATNR_PO "品目コード
+**** END UPD BY ISID REN 2015/08/13 ****
+AND BUKRS = LTD_EKKO-BUKRS.   "会社コード
+
+IF SY-SUBRC = 0.
+SORT O_TD_ZTEGMMM001 BY MATNR ASCENDING
+BUKRS ASCENDING.
+
+**** START ADD BY ISID REN 2015/08/25 ****
+APPEND LINES OF O_TD_ZTEGMMM001 TO LTD_ZTEGMMM001.
+SORT LTD_ZTEGMMM001
+BY Z_ENDUSER_CD ASCENDING. "エンドユーザ
+DELETE ADJACENT DUPLICATES FROM LTD_ZTEGMMM001
+COMPARING Z_ENDUSER_CD. "エンドユーザ
+DELETE LTD_ZTEGMMM001 WHERE Z_ENDUSER_CD = SPACE.
+
+*   最終仕向地の再取得処理を行う
+SELECT KNA1~KUNNR     "最終需要者
+T005T~LANDX    "最終仕向地
+FROM KNA1
+INNER JOIN T005T
+ON  KNA1~SPRAS = T005T~SPRAS     "言語キー
+AND KNA1~LAND1 = T005T~LAND1     "国コード
+INTO CORRESPONDING FIELDS OF TABLE O_TD_KNA1_T005T
+FOR ALL ENTRIES IN LTD_ZTEGMMM001
+WHERE KNA1~KUNNR = LTD_ZTEGMMM001-Z_ENDUSER_CD.
+
+IF SY-SUBRC = 0.
+SORT O_TD_KNA1_T005T
+BY KUNNR ASCENDING.    "最終需要者
+ENDIF.
+**** END ADD BY ISID REN 2015/08/25 ****
+ENDIF.
+
+ENDFORM.                    " GET_DATA_ZTEGMMM001
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_VBAK
+*&---------------------------------------------------------------------*
+*       エンドユーザを取得する
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  ITAB:受発注連携デ‐タ
+*      <--O_TD_VBAK  ITAB:エンドユーザ
+*----------------------------------------------------------------------*
+FORM GET_DATA_VBAK USING I_TD_EKKO TYPE TYP_TD_EKKO
+CHANGING O_TD_VBAK TYPE TYP_TD_VBAK.
+DATA:
+LTD_EKKO TYPE TYP_TD_EKKO.
+
+LTD_EKKO = I_TD_EKKO.
+SORT LTD_EKKO BY EBELN ASCENDING
+EBELP ASCENDING.
+DELETE ADJACENT DUPLICATES FROM LTD_EKKO
+COMPARING EBELN
+EBELP.
+
+SELECT EKKN~EBELN                   "購買伝票番号
+EKKN~EBELP                   "明細番号
+VBAK~KUNNR                   "エンドユーザ
+**** START ADD BY ISID REN 2015/07/09 ****
+VBAP~NETPR                   "正味価格
+VBAP~KPEIN                   "価格条件単位
+VBAP~KMEIN                   "条件単位
+VBAP~WAERK                   "販売伝票通貨
+**** END ADD BY ISID REN 2015/07/09 ****
+INTO TABLE O_TD_VBAK
+FROM EKKN
+INNER JOIN VBAK
+ON EKKN~VBELN = VBAK~VBELN
+**** START ADD BY ISID REN 2015/07/09 ****
+INNER JOIN VBAP
+ON VBAK~VBELN = VBAP~VBELN
+AND EKKN~VBELP = VBAP~POSNR
+**** END ADD BY ISID REN 2015/07/09 ****
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE EKKN~EBELN = LTD_EKKO-EBELN  "購買伝票番号
+AND EKKN~EBELP = LTD_EKKO-EBELP. "明細番号
+
+IF SY-SUBRC = 0.
+SORT O_TD_VBAK BY EBELN ASCENDING
+EBELP ASCENDING.
+ENDIF.
+
+ENDFORM.                    " GET_DATA_VBAK
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ADRC
+*&---------------------------------------------------------------------*
+*       出荷先の情報を取得する
+*----------------------------------------------------------------------*
+*      -->I_ST_EKKO   FS:受発注連携データ
+*      <--O_ST_ADRC   ST:出荷先の住所
+*      <--O_SUBRC     W:リターンコード
+*      <--O_FLG       W:出荷先住所取得エラーフラグ
+*----------------------------------------------------------------------*
+FORM GET_DATA_ADRC USING I_ST_EKKO TYPE TYP_EKKO
+CHANGING O_ST_ADRC TYPE ZSEGZZ0002
+O_FLG     TYPE CHAR1.
+
+DATA:
+LW_SUBRC  TYPE SY-SUBRC.
+
+CALL FUNCTION 'ZEG_ZZ_ADRC_GET_FROM_PO'
+EXPORTING
+IMPEBELN = I_ST_EKKO-EBELN
+**** START ADD BY ISID REN 2015/08/05 ****
+IMPEBELP = I_ST_EKKO-EBELP  "購買伝票の明細番号
+**** END ADD BY ISID REN 2015/08/05 ****
+IMPORTING
+EXPADRC  = O_ST_ADRC
+EXPSUBRC = LW_SUBRC.
+
+* 出荷先の情報を取得失敗（「W:リターンコード」<>0）の場合、
+* W:出荷先住所取得エラーフラグをONにする
+IF LW_SUBRC <> 0.
+O_FLG = 'X'.
+ENDIF.
+
+ENDFORM.                    " GET_DATA_ADRC
+*&---------------------------------------------------------------------*
+*&      Form  GET_READ_TEXT
+*&---------------------------------------------------------------------*
+*       テキスト読込
+*----------------------------------------------------------------------*
+*      -->I_ID
+*      -->I_LANGUAGE
+*      -->I_NAME
+*      -->I_OBJECT
+*      <--O_TD_LINES    「ITAB:テキスト
+*      <--O_SUBRC       例外
+*----------------------------------------------------------------------*
+FORM GET_READ_TEXT USING I_ID       TYPE THEAD-TDID
+I_LANGUAGE TYPE THEAD-TDSPRAS
+I_NAME     TYPE THEAD-TDNAME
+I_OBJECT   TYPE THEAD-TDOBJECT
+CHANGING O_TD_LINES TYPE STANDARD TABLE
+O_SUBRC    TYPE SY-SUBRC.
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID                      = I_ID
+LANGUAGE                = I_LANGUAGE
+NAME                    = I_NAME
+OBJECT                  = I_OBJECT
+TABLES
+LINES                   = O_TD_LINES
+EXCEPTIONS
+ID                      = 1
+LANGUAGE                = 2
+NAME                    = 3
+NOT_FOUND               = 4
+OBJECT                  = 5
+REFERENCE_CHECK         = 6
+WRONG_ACCESS_TO_ARCHIVE = 7
+OTHERS                  = 8.
+
+O_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " GET_READ_TEXT
+**** END ADD 2015/02/10 ISID11 ****
+**** STATY ADD BY ISID REN 2015/07/01 ****
+*&---------------------------------------------------------------------*
+*&      Form  GET_PRINT_PARAMETER
+*&---------------------------------------------------------------------*
+*       印刷パラメータ取得
+*----------------------------------------------------------------------*
+*      <--O_TH_PRINT  印刷パラメータ
+*----------------------------------------------------------------------*
+FORM GET_PRINT_PARAMETER
+CHANGING O_TH_PRINT TYPE LVC_S_PRNT.
+
+DATA LTH_PARA TYPE PRI_PARAMS.
+
+CALL FUNCTION 'GET_PRINT_PARAMETERS'
+EXPORTING
+**** START UPD BY ISID REN 2015/07/31 ****
+*      IMMEDIATELY            = SPACE
+IMMEDIATELY            = ABAP_TRUE
+**** START UPD BY ISID REN 2015/07/31 ****
+**** START DEL BY ISID REN 2015/07/30 ****
+*      LAYOUT                 = 'X_58_170"'
+*      LINE_COUNT             = '58'
+*      LINE_SIZE              = '1024'
+**** END DEL BY ISID REN 2015/07/30 ****
+NO_DIALOG              = ABAP_TRUE
+DESTINATION            = P_PADEST
+IMPORTING
+OUT_PARAMETERS         = LTH_PARA
+EXCEPTIONS
+ARCHIVE_INFO_NOT_FOUND = 1
+INVALID_PRINT_PARAMS   = 2
+INVALID_ARCHIVE_PARAMS = 3
+OTHERS                 = 4.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE 'E'.
+ELSE.
+O_TH_PRINT-PRINT = ABAP_TRUE.
+O_TH_PRINT-PRINT_CTRL-PRI_PARAMS = LTH_PARA.
+O_TH_PRINT-PRNT_INFO = 'N'.
+ENDIF.
+
+ENDFORM.                    " GET_PRINT_PARAMETER
+**** END ADD BY ISID REN 2015/07/01 ****
+**** START ADD BY ISID REN 2015/08/05 ****
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_T005T
+*&---------------------------------------------------------------------*
+*       国名の抽出
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO   受発注連携デ‐タ
+*      <--O_TD_T005T  国名
+*----------------------------------------------------------------------*
+FORM GET_DATA_T005T USING I_TD_EKKO  TYPE TYP_TD_EKKO
+CHANGING O_TD_T005T TYPE TYP_TD_T005T.
+* ローカル変数定義
+DATA LTD_EKKO TYPE TYP_TD_EKKO.
+
+APPEND LINES OF I_TD_EKKO TO LTD_EKKO.
+SORT LTD_EKKO BY SPRAS ASCENDING. "言語キー
+DELETE ADJACENT DUPLICATES FROM LTD_EKKO
+COMPARING SPRAS. "言語キー
+
+SELECT SPRAS   "言語キー
+LAND1   "国コード
+LANDX   "国名
+INTO CORRESPONDING FIELDS OF TABLE O_TD_T005T
+FROM T005T
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE SPRAS = LTD_EKKO-SPRAS.      "言語キー
+
+SORT O_TD_T005T BY SPRAS ASCENDING  "言語キー
+LAND1 ASCENDING. "国コード
+
+ENDFORM.                    " GET_DATA_T005T
+**** END ADD BY ISID REN 2015/08/05 ****
+**** START ADD BY ISID REN 2015/08/12 ****
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_KNMT
+*&---------------------------------------------------------------------*
+*       受注側の品目を取得する
+*----------------------------------------------------------------------*
+*      -->I_TD_EKKO  受発注連携デ‐タ
+*      <--O_TD_KNMT  得意先品目マスタ
+*----------------------------------------------------------------------*
+FORM GET_DATA_KNMT USING I_TD_EKKO TYPE TYP_TD_EKKO
+CHANGING O_TD_KNMT TYPE TYP_TD_KNMT.
+* ローカル変数定義
+DATA LTD_EKKO TYPE TYP_TD_EKKO.
+
+LTD_EKKO = I_TD_EKKO.
+SORT LTD_EKKO
+BY IDNLF ASCENDING.  "仕入先品目
+DELETE ADJACENT DUPLICATES FROM LTD_EKKO
+COMPARING IDNLF.  "仕入先品目
+
+SELECT VKORG   "販売組織
+VTWEG   "流通チャネル
+KUNNR   "得意先コード
+MATNR   "品目コード
+KDMAT   "得意先が使用する品目コード
+INTO TABLE O_TD_KNMT
+FROM KNMT         "得意先/品目情報レコードデータテーブル
+FOR ALL ENTRIES IN LTD_EKKO
+WHERE KDMAT = LTD_EKKO-IDNLF.  "仕入先品目
+
+SORT O_TD_KNMT BY VKORG ASCENDING  "販売組織
+VTWEG ASCENDING  "流通チャネル
+KUNNR ASCENDING  "得意先コード
+KDMAT ASCENDING. "得意先が使用する品目コード
+
+ENDFORM.                    " GET_DATA_KNMT
+**** END ADD BY ISID REN 2015/08/12 ****
+*Text symbol text・
+*001:Job
+*002:List
+*B01:Delete
+*B02:YES
+*B03:NO
+*W01:PG-ID/Name:
+*W02:Run Date/Time/User:
+*W03:Total
+*W04:Normal
+*W05:Error
+*W06:Records Info:
+*W07:/
+*Selection text・
+*P_ERROR:D       .
+*P_PADEST:D       Output Device
+*S_BSART:D       .
+*S_BUKRS:D       .
+*S_CREHMS:D       .
+*S_CREYMD:D       .
+*S_EBELN:D       .
+*S_EKGRP:D       .
+*S_EKORG:D       .
+*S_ERNAM:D       .
+*S_LIFNR:D       .
+*S_STATUS:D       .
+*S_UDATE:D       .
+*S_UTIME:D       .
+*S_WERKS:D       .
+*S_ZC:D       .

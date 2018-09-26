@@ -1,0 +1,577 @@
+*&---------------------------------------------------------------------*
+*&  INCLUDE           YN01_YN010200_0001
+*&                    YN010200 EXIT番号:0001
+*&---------------------------------------------------------------------*
+
+
+
+*&---------------------------------------------------------------------*
+*&      Form  EXIT_0001
+*&---------------------------------------------------------------------*
+*       EXIT番号：0001（売上照合)
+*----------------------------------------------------------------------*
+FORM EXIT_0001 .
+
+DATA: LW_YN120 LIKE YN120,
+LW_VBRP LIKE TBL_VBRP,
+LW_VBRK LIKE TBL_VBRK,
+LW_BKPF LIKE TBL_BKPF_T,
+LW_BSID LIKE TBL_BSID,
+LC_NETPR(17) TYPE C,
+L_KNUNTPRC LIKE LW_YN120-KNUNTPRC,
+L_FLG TYPE C,
+L_ERR_MSG(128) TYPE C.
+
+*  SORT TBL_VBRP BY VBELN.
+LOOP AT TBL_VBRP WHERE BUKRS = TBL_OBJECT-TDNAME+10(4)
+AND KUNNR = TBL_OBJECT-TDNAME+0(10).
+CLEAR: LW_YN120.
+LW_VBRP = TBL_VBRP.
+G_READ_COUNT = G_READ_COUNT + 1.
+AT NEW VBELN.
+READ TABLE TBL_VBRK WITH TABLE KEY VBELN = LW_VBRP-VBELN
+INTO LW_VBRK.
+READ TABLE TBL_BKPF_T WITH TABLE KEY AWKEY = LW_VBRP-VBELN
+INTO LW_BKPF.
+READ TABLE TBL_BSID_H WITH TABLE KEY BELNR = LW_BKPF-BELNR
+GJAHR = LW_BKPF-GJAHR
+INTO LW_BSID.
+ENDAT.
+
+*-- 20090113 MOV STA
+*-- 更新、挿入処理の振り分け処理を各種編集処理の前に移動
+*-- 20090113 UPD STA
+*-- YN120存在チェック 事前取得した自社データをREADするように変更
+CLEAR:WA_YN120_CHK.
+READ TABLE TBL_YN120_CHK INTO WA_YN120_CHK
+WITH TABLE KEY GJAHR   = LW_VBRP-GJAHR
+SLPDOC  = LW_VBRP-VBELN
+DTLDOC  = LW_VBRP-POSNR
+VRFCTON = LW_VBRP-KUNNR
+BUKRS   = LW_VBRP-BUKRS.
+*-- 20090113 UPD END
+*-- YN120に該当データが存在する場合、更新処理へ
+IF SY-SUBRC = 0.
+IF P_OVWRT = 'X'. "選択画面で更新を許可
+*-- 20090113 INS STA
+IF  WA_YN120_CHK-ZFBDT  = LW_BSID-ZFBDT.       " 日付 変化なし
+G_OUT_COUNT = G_OUT_COUNT + 1.          "対象外カウンタ+1で次#
+CONTINUE.
+ELSE.
+*-- 20090113 INS END
+*-- 更新は１件ずつ行う
+UPDATE YN120
+SET ZFBDT  = LW_BSID-ZFBDT
+UPDDAT = SY-DATUM
+UPDTIM = SY-UZEIT
+UPDUSR = SY-UNAME
+UPDPRG = 'YN010200'
+WHERE GJAHR  = LW_VBRP-GJAHR
+AND SLPDOC = LW_VBRP-VBELN
+AND DTLDOC = LW_VBRP-POSNR
+AND VRFCTON = LW_VBRP-KUNNR
+AND BUKRS   = LW_VBRP-BUKRS.
+IF SY-SUBRC <> 0.
+* YN120更新エラー
+ROLLBACK WORK.
+MESSAGE I758 WITH TEXT-M12.
+* 20080122 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*          STOP.
+* 20080122 <<<
+ELSE.
+G_UPDATE_COUNT = G_UPDATE_COUNT + 1.
+ENDIF.
+CONTINUE.                               "次明細へ
+ENDIF.
+*-- 選択画面で更新を許可していない場合、対象外とし次明細処理へ
+ELSE.
+G_OUT_COUNT = G_OUT_COUNT + 1.     "対象外カウンタ+1で次明細へ
+CONTINUE.
+ENDIF.
+*-- YN120に該当データが存在しない場合、新規挿入処理へ
+ELSE.
+ENDIF.
+*-- 20090113 MOV END
+
+* 値引き、値増しの数量は０をセットする
+IF  LW_VBRP-AUTYP = 'L'
+OR LW_VBRP-AUTYP = 'K'.
+LW_VBRP-FKIMG = 0.
+ENDIF.
+
+* 数量、税抜金額、消費税額の符号をセットする
+IF  LW_VBRK-VBTYP = 'N'
+OR  LW_VBRK-VBTYP = 'O'.
+*&Ver2 対応 2007/02/28 >>> マイナス単価対応
+LW_VBRP-FKIMG = LW_VBRP-FKIMG * ( -1 ).          " 数量
+LW_VBRP-MWSBP = LW_VBRP-MWSBP * ( -1 ).          " 消費税額
+LW_VBRP-NETWR = LW_VBRP-NETWR * ( -1 ).          " 税抜金額
+*&Ver2 対応 2007/02/28 <<<
+ENDIF.
+
+*-- 20090113 UPD STA SELECT SINGLE から READ TABLE に変更
+* 単価、得意先品目コードの取得
+CLEAR: WA_VBAP,
+L_KNUNTPRC,
+LC_NETPR.
+READ TABLE TBL_VBAP INTO WA_VBAP
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL
+POSNR = LW_VBRP-AUPOS.
+*-- 20090113 UPD END
+IF SY-SUBRC = 0.
+* 単位変換
+WRITE WA_VBAP-NETPR TO LC_NETPR
+CURRENCY WA_VBAP-WAERK
+NO-GROUPING.
+IF SY-SUBRC <> 0.
+* 単位変換エラー
+CLEAR: L_ERR_MSG.
+MESSAGE I757 INTO L_ERR_MSG.
+PERFORM SET_ERRLOG USING LW_BSID-GJAHR
+LW_VBRP-VBELN
+LW_VBRP-POSNR
+LW_VBRP-KUNNR
+LW_VBRP-BUKRS
+L_ERR_MSG.
+G_ERR_COUNT = G_ERR_COUNT  + 1.
+CONTINUE.
+ENDIF.
+L_KNUNTPRC = LC_NETPR / WA_VBAP-KPEIN.
+ENDIF.
+
+*-- 20090113 UPD STA SELECT SINGLE から READ TABLE に変更
+* 担当者の取得
+CLEAR: WA_VBPA.
+READ TABLE TBL_VBPA INTO WA_VBPA
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL.
+*-- 20090113 UPD END
+
+*-- 20090113 UPD STA SELECT SINGLE から READ TABLE に変更
+* 受注先コードの取得
+CLEAR: WA_VBAK.
+READ TABLE TBL_VBAK INTO WA_VBAK
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL.
+*-- 20090113 UPD END
+
+*-- 20090113 UPD STA SELECT SINGLE から READ TABLE に変更
+* 得意先発注番号の取得
+CLEAR: WA_VBKD.
+READ TABLE TBL_VBKD INTO WA_VBKD
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL.
+*-- 20090113 UPD END
+
+* セットYN120
+
+*INSERT 20061031 HATTORI
+LW_YN120-GJAHR = LW_VBRP-GJAHR.           " 伝票会計年度
+*INSERT END
+LW_YN120-SLPDOC = LW_VBRP-VBELN.          " 伝票番号
+LW_YN120-DTLDOC = LW_VBRP-POSNR.          " 伝票明細番号
+LW_YN120-VRFCTON = LW_VBRP-KUNNR.         " 得意先コード
+LW_YN120-BUKRS   = LW_VBRP-BUKRS.         " 会社コード
+LW_YN120-ZFBDT   = LW_BSID-ZFBDT.         " 日付
+LW_YN120-PRCTR   = LW_VBRP-PRCTR.         " 利益センタ
+LW_YN120-PERNR   = WA_VBPA-PERNR.         " 担当者
+LW_YN120-CSTS    = '1'.                   " 照合ステータス(未照合)
+LW_YN120-YNGJAHR = LW_BSID-GJAHR.         " 会計伝票会計年度
+LW_YN120-BELNR   = LW_BSID-BELNR.         " 会計伝票番号
+LW_YN120-BUZEI   = LW_BSID-BUZEI.         " 会計伝票明細番号
+LW_YN120-KNQUAN  = LW_VBRP-FKIMG.         " 数量
+LW_YN120-KNUNIT  =  LW_VBRP-VRKME.        " 単位
+LW_YN120-KNUNTPRC = L_KNUNTPRC.           " 単価
+LW_YN120-KNTAXAMT = LW_VBRP-MWSBP.        " 消費税額
+LW_YN120-KNITXAMT = LW_VBRP-NETWR.        " 税抜金額
+LW_YN120-KNETXAMT = LW_VBRP-MWSBP
++ LW_VBRP-NETWR.        " 税込金額
+LW_YN120-WAERS = LW_VBRK-WAERK.           " 通貨コード
+LW_YN120-UPDDAT = SYST-DATUM.             " 更新日
+LW_YN120-UPDTIM = SYST-UZEIT.             " 更新時刻
+LW_YN120-UPDUSR = SYST-UNAME.             " 更新ユーザ
+LW_YN120-UPDPRG = 'YN010200'.             " 更新プログラム
+LW_YN120-CKEY1 = WA_VBKD-BSTKD.           " 得意先発注番号
+*&Ver2 対応 2007/02/28 >>> 得意先/仕入先品目コードを一覧表示項目へ変更
+*   LW_YN120-CKEY2 = LW_VBAP-KDMAT.           " 得意先品目コード
+LW_YN120-LIST5 = WA_VBAP-KDMAT.           " 得意先品目コード
+*&Ver2 対応 2007/02/28 <<<
+LW_YN120-LIST1 = LW_VBRP-MATNR.           " 自社品目コード
+LW_YN120-LIST2 = LW_VBRP-ARKTX.           " 品名
+LW_YN120-LIST3 = WA_VBAK-KUNNR.           " 受注先コード
+*-- 20090113 INS STA
+*-- 一括登録用内部テーブルに格納
+APPEND LW_YN120 TO TBL_YN120_INS.
+*-- 20090113 INS END
+G_INSERT_COUNT = G_INSERT_COUNT + 1.
+CLEAR: LW_YN120.
+ENDLOOP.
+
+ENDFORM.                                                    " EXIT_0001
+*&---------------------------------------------------------------------*
+*&      Form  EXIT_1001_3
+*&---------------------------------------------------------------------*
+*       EXIT番号：1001から1003（売上照合)
+*----------------------------------------------------------------------*
+FORM EXIT_1001_3 USING P_OWNEXITDOC.
+
+DATA: LW_YN120 LIKE YN120,
+LW_VBRP LIKE TBL_VBRP,
+LW_VBRK LIKE TBL_VBRK,
+LW_BKPF LIKE TBL_BKPF_T,
+LW_BSID LIKE TBL_BSID,
+LC_NETPR(17) TYPE C,
+*** 2013/11/12 MOD START ***
+*** 2012/05/29 INSERT START ***
+LC_NETWR(17) TYPE C,
+*** 2012/05/29 INSERT END ***
+*        L_NETPRA(13) TYPE C,
+*        L_KBETR LIKE KONV-KBETR,
+*        L_KPEIN LIKE KONV-KPEIN,
+*        L_WAERS LIKE KONV-WAERS,
+*** 2013/11/12 MOD END ***
+L_KNUNTPRC LIKE LW_YN120-KNUNTPRC,
+L_FLG TYPE C,
+L_ERR_MSG(128) TYPE C.
+*elematec 対応 INSERT START 2011/12/08
+DATA L_C40(40) TYPE C.
+DATA L_SUBRC   TYPE SY-SUBRC.
+DATA LS_TEXTPOOL LIKE TEXTPOOL.
+*elematec 対応 INSERT END   2011/12/08
+*  SORT TBL_VBRP BY VBELN.
+LOOP AT TBL_VBRP WHERE BUKRS = TBL_OBJECT-TDNAME+10(4)
+AND KUNNR = TBL_OBJECT-TDNAME+0(10).
+CLEAR: LW_YN120.
+LW_VBRP = TBL_VBRP.
+G_READ_COUNT = G_READ_COUNT + 1.
+AT NEW VBELN.
+READ TABLE TBL_VBRK WITH TABLE KEY VBELN = LW_VBRP-VBELN
+INTO LW_VBRK.
+READ TABLE TBL_BKPF_T WITH TABLE KEY AWKEY = LW_VBRP-VBELN
+INTO LW_BKPF.
+READ TABLE TBL_BSID_H WITH TABLE KEY BELNR = LW_BKPF-BELNR
+GJAHR = LW_BKPF-GJAHR
+INTO LW_BSID.
+ENDAT.
+*elematec 対応 INSERT START 2012/01/08
+*得意先発注伝票のチェック
+IF NOT S_BSTKD[] IS INITIAL.
+CLEAR: WA_VBKD.
+READ TABLE TBL_VBKD INTO WA_VBKD
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL.
+IF SY-SUBRC <> 0.
+CONTINUE.
+ELSE.
+IF NOT WA_VBKD-BSTKD IN S_BSTKD.
+CONTINUE.
+ENDIF.
+ENDIF.
+ENDIF.
+*elematec 対応 INSERT END   2012/01/08
+
+*-- 更新、挿入処理の振り分け処理を各種編集処理の前に移動
+*-- YN120存在チェック 事前取得した自社データをREADするように変更
+CLEAR:WA_YN120_CHK.
+READ TABLE TBL_YN120_CHK INTO WA_YN120_CHK
+WITH TABLE KEY GJAHR   = LW_VBRP-GJAHR
+SLPDOC  = LW_VBRP-VBELN
+DTLDOC  = LW_VBRP-POSNR
+VRFCTON = LW_VBRP-KUNNR
+BUKRS   = LW_VBRP-BUKRS.
+*-- YN120に該当データが存在する場合、更新処理へ
+IF SY-SUBRC = 0.
+IF P_OVWRT = 'X'. "選択画面で更新を許可
+IF  WA_YN120_CHK-ZFBDT  = LW_BSID-ZFBDT.       " 日付 変化なし
+G_OUT_COUNT = G_OUT_COUNT + 1.          "対象外カウンタ+1で次#
+CONTINUE.
+ELSE.
+*-- 更新は１件ずつ行う
+UPDATE YN120
+SET ZFBDT  = LW_BSID-ZFBDT
+UPDDAT = SY-DATUM
+UPDTIM = SY-UZEIT
+UPDUSR = SY-UNAME
+UPDPRG = 'YN010200'
+WHERE GJAHR  = LW_VBRP-GJAHR
+AND SLPDOC = LW_VBRP-VBELN
+AND DTLDOC = LW_VBRP-POSNR
+AND VRFCTON = LW_VBRP-KUNNR
+AND BUKRS   = LW_VBRP-BUKRS.
+IF SY-SUBRC <> 0.
+* YN120更新エラー
+ROLLBACK WORK.
+MESSAGE I758 WITH TEXT-M12.
+LEAVE LIST-PROCESSING.
+ELSE.
+G_UPDATE_COUNT = G_UPDATE_COUNT + 1.
+ENDIF.
+CONTINUE.                               "次明細へ
+ENDIF.
+*-- 選択画面で更新を許可していない場合、対象外とし次明細処理へ
+ELSE.
+G_OUT_COUNT = G_OUT_COUNT + 1.     "対象外カウンタ+1で次明細へ
+CONTINUE.
+ENDIF.
+*-- YN120に該当データが存在しない場合、新規挿入処理へ
+ELSE.
+ENDIF.
+*-- 20090113 MOV END
+
+*** 2012/05/30 DEL START ***
+** 値引き、値増しの数量は０をセットする
+*    IF  LW_VBRP-AUTYP = 'L'
+*    OR LW_VBRP-AUTYP = 'K'.
+*      LW_VBRP-FKIMG = 0.
+*    ENDIF.
+*** 2012/05/30 DEL END ***
+
+* 数量、税抜金額、消費税額の符号をセットする
+IF  LW_VBRK-VBTYP = 'N'
+OR  LW_VBRK-VBTYP = 'O'.
+*&Ver2 対応 2007/02/28 >>> マイナス単価対応
+LW_VBRP-FKIMG = LW_VBRP-FKIMG * ( -1 ).          " 数量
+LW_VBRP-MWSBP = LW_VBRP-MWSBP * ( -1 ).          " 消費税額
+LW_VBRP-NETWR = LW_VBRP-NETWR * ( -1 ).          " 税抜金額
+*&Ver2 対応 2007/02/28 <<<
+ENDIF.
+
+*-- 20090113 UPD STA SELECT SINGLE から READ TABLE に変更
+* 単価、得意先品目コードの取得
+CLEAR: WA_VBAP,
+L_KNUNTPRC,
+LC_NETPR.
+READ TABLE TBL_VBAP INTO WA_VBAP
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL
+POSNR = LW_VBRP-AUPOS.
+*-- 20090113 UPD END
+IF SY-SUBRC = 0.
+* 単位変換
+WRITE WA_VBAP-NETPR TO LC_NETPR
+CURRENCY WA_VBAP-WAERK
+NO-GROUPING.
+IF SY-SUBRC <> 0.
+* 単位変換エラー
+CLEAR: L_ERR_MSG.
+MESSAGE I757 INTO L_ERR_MSG.
+PERFORM SET_ERRLOG USING LW_BSID-GJAHR
+LW_VBRP-VBELN
+LW_VBRP-POSNR
+LW_VBRP-KUNNR
+LW_VBRP-BUKRS
+L_ERR_MSG.
+G_ERR_COUNT = G_ERR_COUNT  + 1.
+CONTINUE.
+ENDIF.
+*** 2013/11/12 MOD START ***
+*** 2012/05/29 MOD START ***
+*      L_KNUNTPRC = LC_NETPR / WA_VBAP-KPEIN.
+WRITE LW_VBRP-NETWR TO LC_NETWR
+CURRENCY LW_VBRK-WAERK
+NO-GROUPING.
+IF LW_VBRP-FKIMG = 0.
+L_KNUNTPRC = 0.
+ELSE.
+L_KNUNTPRC = LC_NETWR / LW_VBRP-FKIMG.
+ENDIF.
+*** 2012/05/29 MOD END ***
+*   条件レート・価格条件単位取得
+*      PERFORM FRM_GET_KONV USING    LW_VBRK-KNUMV
+*                                    LW_VBRP-POSNR
+*                           CHANGING L_KBETR
+*                                    L_KPEIN
+*                                    L_WAERS.
+*      IF L_KPEIN <> C_ZERO.
+**       条件レートを通貨変換
+*        WRITE L_KBETR TO L_NETPRA CURRENCY L_WAERS NO-GROUPING.
+**       売上単価 = 条件レート ÷ 価格条件単位
+*        L_KNUNTPRC = L_NETPRA / L_KPEIN.
+*      ELSE.
+*        L_KNUNTPRC = 0.
+*      ENDIF.
+*** 2013/11/12 MOD END ***
+ENDIF.
+* 受注先コードの取得
+CLEAR: WA_VBAK.
+READ TABLE TBL_VBAK INTO WA_VBAK
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL.
+* 得意先発注番号の取得
+CLEAR: WA_VBKD.
+READ TABLE TBL_VBKD INTO WA_VBKD
+WITH TABLE KEY VBELN = LW_VBRP-AUBEL.
+* セットYN120
+LW_YN120-GJAHR   = LW_VBRP-GJAHR.           " 伝票会計年度
+LW_YN120-SLPDOC  = LW_VBRP-VBELN.          " 伝票番号
+LW_YN120-DTLDOC  = LW_VBRP-POSNR.          " 伝票明細番号
+LW_YN120-VRFCTON = LW_VBRP-KUNNR.         " 得意先コード
+LW_YN120-BUKRS   = LW_VBRP-BUKRS.         " 会社コード
+LW_YN120-ZFBDT   = LW_BSID-ZFBDT.         " 日付
+LW_YN120-PRCTR   = LW_VBRP-PRCTR.         " 利益センタ
+*elematec 対応 UPDATE START 2012/01/16
+*    LW_YN120-PERNR   = WA_VBPA-PERNR.         " 担当者
+LW_YN120-PERNR   = SYST-UNAME.             " 担当者
+*elematec 対応 UPDATE END   2012/01/16
+LW_YN120-CSTS    = '1'.                   " 照合ステータス(未照合)
+LW_YN120-YNGJAHR = LW_BSID-GJAHR.         " 会計伝票会計年度
+LW_YN120-BELNR   = LW_BSID-BELNR.         " 会計伝票番号
+LW_YN120-BUZEI   = LW_BSID-BUZEI.         " 会計伝票明細番号
+LW_YN120-KNQUAN  = LW_VBRP-FKIMG.         " 数量
+LW_YN120-KNUNIT  =  LW_VBRP-VRKME.        " 単位
+LW_YN120-KNUNTPRC = L_KNUNTPRC.           " 単価
+LW_YN120-KNTAXAMT = LW_VBRP-MWSBP.        " 消費税額
+LW_YN120-KNITXAMT = LW_VBRP-NETWR.        " 税抜金額
+LW_YN120-KNETXAMT = LW_VBRP-MWSBP
++ LW_VBRP-NETWR.        " 税込金額
+LW_YN120-WAERS = LW_VBRK-WAERK.           " 通貨コード
+LW_YN120-UPDDAT = SYST-DATUM.             " 更新日
+LW_YN120-UPDTIM = SYST-UZEIT.             " 更新時刻
+LW_YN120-UPDUSR = SYST-UNAME.             " 更新ユーザ
+LW_YN120-UPDPRG = 'YN010200'.             " 更新プログラム
+LW_YN120-CKEY1 = WA_VBKD-BSTKD.           " 得意先発注番号
+LW_YN120-LIST5 = WA_VBAP-KDMAT.           " 得意先品目コード
+LW_YN120-LIST1 = LW_VBRP-MATNR.           " 自社品目コード
+LW_YN120-LIST2 = LW_VBRP-ARKTX.           " 品名
+LW_YN120-LIST3 = WA_VBAK-KUNNR.           " 受注先コード
+*elematec 対応 INSERT START 2011/12/08
+LW_YN120-PERNR = SY-UNAME.        "担当者
+LW_YN120-DVSON = LW_VBRP-VKBUR.   "営業所
+*    LW_YN120-CKEY1 = WA_VBKD-BSTKD.   "照合キー1：得意先発注番号
+*    LW_YN120-CKEY2 =                 "照合キー2：インボイスNo
+LW_YN120-LIST1 = WA_VBAK-KUNNR.   "得意先コード（受注先）
+LW_YN120-LIST2 = WA_VBKD-BSTKD.   "得意先発注番号
+LW_YN120-LIST3 = LW_VBRP-AUBEL.   "受注伝票
+LW_YN120-LIST4 = LW_VBRP-VKGRP.   "営業グループ
+LW_YN120-LIST5 = LW_VBRP-MATNR.   "品目コード
+LW_YN120-LIST6 = LW_VBRP-ARKTX.   "品目テキスト
+LW_YN120-LIST7 = WA_VBAP-KDMAT.   "得意先品目
+*    LW_YN120-LIST8 = LW_VBRP-        "インボイスNo
+LW_YN120-INSDT  = SY-DATUM.       "登録日
+LW_YN120-LDATE1 = LW_VBRK-FKDAT.  "請求日
+CLEAR:L_C40,L_SUBRC.
+*インボイス取得
+PERFORM GET_READ_TEXT USING LW_VBRK-VBELN
+CHANGING L_C40 L_SUBRC.
+IF L_SUBRC <> 0.
+*インボイス№取得エラー
+CLEAR: L_ERR_MSG, LS_TEXTPOOL.
+READ TABLE T_TEXTPOOL INTO LS_TEXTPOOL
+WITH KEY ID = 'I' KEY = 'M33'.
+MESSAGE I754 INTO L_ERR_MSG
+WITH LS_TEXTPOOL-ENTRY.
+PERFORM SET_ERRLOG USING LW_BSID-GJAHR
+LW_VBRP-VBELN
+LW_VBRP-POSNR
+LW_VBRP-KUNNR
+LW_VBRP-BUKRS
+L_ERR_MSG.
+G_ERR_COUNT = G_ERR_COUNT  + 1.
+CONTINUE.
+ENDIF.
+LW_YN120-LIST8 = L_C40.                  "インボイスNo
+CASE P_OWNEXITDOC.
+WHEN '1001'.
+LW_YN120-CKEY1    = WA_VBKD-BSTKD.   "照合キー1：得意先発注番号
+CLEAR:LW_YN120-CKEY2.
+WHEN '1002'.
+CLEAR:LW_YN120-CKEY1.
+LW_YN120-CKEY2    = L_C40.           "照合キー2：インボイスNo
+WHEN '1003'.
+LW_YN120-CKEY1    = WA_VBKD-BSTKD.   "照合キー1：得意先発注番号
+LW_YN120-CKEY2    = L_C40.           "照合キー2：インボイスNo
+ENDCASE.
+*
+*elematec 対応 INSERT END   2011/12/08
+APPEND LW_YN120 TO TBL_YN120_INS.
+G_INSERT_COUNT = G_INSERT_COUNT + 1.
+CLEAR: LW_YN120.
+ENDLOOP.
+*
+ENDFORM.                    " EXIT_1001_3
+*&---------------------------------------------------------------------*
+*&      Form  GET_READ_TEXT
+*&---------------------------------------------------------------------*
+*       請求伝票ヘッダテキスト(社内用備考)
+*----------------------------------------------------------------------*
+FORM GET_READ_TEXT USING P_VBELN CHANGING P_LINE P_SUBRC.
+*
+DATA : BEGIN OF LT_TLINE OCCURS 10.             " CALL FUNC用
+INCLUDE STRUCTURE TLINE.                  " CALL FUNC用
+DATA : END OF LT_TLINE.                         " CALL FUNC用
+DATA : L_NAME  LIKE  THEAD-TDNAME.
+
+L_NAME = P_VBELN.
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+*     CLIENT                        = SY-MANDT
+ID                            = '0001'
+LANGUAGE                      = 'J'
+NAME                          = L_NAME
+OBJECT                        = 'VBBK'
+*     ARCHIVE_HANDLE                = 0
+*     LOCAL_CAT                     = ' '
+*   IMPORTING
+*     HEADER                        =
+TABLES
+LINES                         = LT_TLINE
+EXCEPTIONS
+NOT_FOUND                     = 4
+OTHERS                        = 8
+.
+CASE SY-SUBRC.
+WHEN 0.
+READ TABLE LT_TLINE INDEX 1.
+P_LINE = LT_TLINE-TDLINE.
+WHEN 8.
+P_SUBRC = SY-SUBRC.
+ENDCASE.
+*
+ENDFORM.                    " GET_READ_TEXT
+*** 2013/11/12 ADD START ***
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_KONV
+*&---------------------------------------------------------------------*
+*       条件レート・価格条件単位取得
+*----------------------------------------------------------------------*
+*      -->I_KNUMV  伝票条件番号
+*      -->I_POSNR  請求伝票明細
+*      <--O_KBETR  条件レート
+*      <--O_KPEIN  価格条件単位
+*      <--O_WAERS  通貨コード
+*----------------------------------------------------------------------*
+*FORM FRM_GET_KONV USING    I_KNUMV
+*                           I_POSNR
+*                  CHANGING O_KBETR
+*                           O_KPEIN
+*                           O_WAERS.
+**構造の宣言：条件カウンタZAEHKも取得する
+*DATA: BEGIN OF LO_WA_TEMP,
+*      ZAEHK LIKE KONV-ZAEHK,
+**ステップ番号STUNRも取得する
+*      STUNR LIKE KONV-STUNR,
+*      KBETR LIKE KONV-KBETR,
+*      WAERS LIKE KONV-WAERS,
+*      KPEIN LIKE KONV-KPEIN,
+*END OF LO_WA_TEMP.
+**一時テーブルの宣言：条件カウンタZAEHKが異なる全てのレコードを格納する
+*DATA LO_TA_TEMP LIKE STANDARD TABLE OF LO_WA_TEMP.
+*
+*SELECT ZAEHK STUNR KBETR WAERS KPEIN
+*INTO TABLE LO_TA_TEMP
+*    FROM KONV
+*   WHERE KNUMV = I_KNUMV
+*     AND KPOSN = I_POSNR
+*     AND ( KSCHL = 'ZPR0'
+*           OR KSCHL = 'ZPR1'
+*           OR KSCHL = 'ZPR2' ).
+*
+*CLEAR LO_WA_TEMP.
+**一時テーブルを条件カウンタZAEHK降順、ステップ番号STUNR降順でソート
+*SORT LO_TA_TEMP BY STUNR DESCENDING ZAEHK DESCENDING.
+*
+**ソートされた一時テーブルの先頭行を読込
+*READ TABLE LO_TA_TEMP INTO LO_WA_TEMP INDEX 1.
+*
+**読込んだ行のコンポーネントKBETR, KPEIN, WAERSをCHANGING変数にセット
+*O_KBETR = LO_WA_TEMP-KBETR.
+*O_KPEIN = LO_WA_TEMP-KPEIN.
+*O_WAERS = LO_WA_TEMP-WAERS.
+*ENDFORM.                    " FRM_GET_KONV
+*** 2013/11/12 ADD END ***

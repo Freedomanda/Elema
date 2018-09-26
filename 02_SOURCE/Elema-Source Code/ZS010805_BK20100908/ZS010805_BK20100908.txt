@@ -1,0 +1,2250 @@
+************************************************************************
+* [プログラム名]
+*   ZS010805    受注残リスト作成_外貨対応
+*
+* [処理概要]
+*   発注情報の把握のため、選択画面で指定された下記の帳票を出力する。
+*     ①受注残一覧表
+*       営業所/営業グループ(営業員)/得意先レベルの帳票を出力
+*       →得意先合計･営業グループ合計(営業員)/営業所合計を出力
+*     ②全社
+*       営業所レベルの帳票出力
+*     ③営業所
+*       営業所/営業グループレベルの帳票出力
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2001/12/07   PSD K.igarashi        新規開発
+*  2001/12/14   PSD k.igarashi        仕様変更対応
+*  2002/01/09   PSD k.igarashi        内部テーブルタイプ修正
+*  2002/01/09   PSD k.igarashi        データ構造追加
+*  2002/01/10   PSD k.igarashi        ABAPリストビューア仕様変更対応
+*  2002/01/17   PSD k.igarashi        初期化処理追加
+*  2002/01/23   PSD k.igarashi        仕様変更対応
+*  2002/01/25   PSD k.igarashi        仕様変更対応
+*  2002/01/30   PSD k.igarashi        仕様変更対応
+*  2002/02/01   PSD k.igarashi        仕様変更対応
+*  2002/03/18   PSD M.Arai            営業員取得エラー削除
+*  2002/03/19   PSD T.SAITOH          ALVステータス印刷拒否設定
+*  2002/05/20   PSD K.ARAI            受注残分析情報抽出条件変更
+*  2002/05/24   PSD K.ARAI            営業所選択時の
+*                                     受注残金額算出方法修正
+*  2002/05/24   PSD K.ARAI            伝票タイプ考慮
+*  2002/06/06   PSD T.SAITOH          日付デフォルト廃止、全件OK！
+*  2002/06/20   PSD T.SAITOH          再移送
+*  2002/08/08   カットオーバー ---------------------------------------*
+*  2002/08/08   PSD T.SAITOH          ページ番号付加
+*  2002/08/14   PSD T.SAITOH          営業員コードで指定外を対象外
+*                             ただし、条件は下記の通りとする
+*                             a:営業員ボタンを押下
+*                             b:営業員コードを指定
+*                             c:営業員名存在有り
+*                             ab (not r) の時対象外レコードとなる
+*  2002/08/30   PSD T.SAITOH          受注残金額項目追加【２帳票】
+*                                     受注残金額計算式変更【１帳票】
+*  2002/09/12   PSD T.SAITOH          希望納期、得意先回答納期、受注日の
+*                                     フル桁対応
+*  2003/05/29       K.MURATA  単価、金額項目は小数点4桁まで表示する
+*  2008/12/24   NDSC R.Hata           全社出力時に回答納期を優先して集計
+*  2009/10/20   SOLFIS K.Kajisa       仕入先回答納期を明細TXTからセット
+*  2010/04/26   SOLFIS R.Hata         販売数量単位追加
+************************************************************************
+REPORT  ZS010800.
+
+************************************************************************
+* TYPES
+************************************************************************
+TYPE-POOLS SLIS.
+
+* ①営業所内部ＴＢＬ型
+TYPES: BEGIN OF TYP_EIGYOUSHO,
+VKBUR TYPE TVKBT-VKBUR,                          "営業所コード
+BEZEI TYPE TVKBT-BEZEI,                              "テキスト
+END OF TYP_EIGYOUSHO.
+
+* ②営業グループ内部ＴＢＬ型
+TYPES: BEGIN OF TYP_EIGYOUGRP,
+VKGRP TYPE TVGRT-VKGRP,                          "営業グループ
+BEZEI TYPE TVGRT-BEZEI,                              "テキスト
+END OF TYP_EIGYOUGRP.
+
+* ③個人情報内部ＴＢＬ型
+TYPES: BEGIN OF TYP_KOJIN_INFO,
+PERNR TYPE PA0002-PERNR,                           "従業員番号
+NACHN TYPE PA0002-NACHN,                                   "姓
+END OF TYP_KOJIN_INFO.
+
+* ⑤分析(受注残)内部ＴＢＬ型
+TYPES: BEGIN OF TYP_BUNSEKI_A,
+VBELN    TYPE YS0011-VBELN,                      "販売伝票番号
+POSNR    TYPE YS0011-POSNR,                      "販売伝票明細
+JUCHU    TYPE YS0011-JUCHU,                          "受注数量
+SEIKYU   TYPE YS0011-SEIKYU,                       "売上済数量
+PICKUP   TYPE YS0011-PICKUP,                       "引当済数量
+MSHUKKO  TYPE YS0011-MSHUKKO,                      "出荷済数量
+KINGAKU1 TYPE YS0011-KINGAKU1,                       "受注金額
+KUNNR    TYPE YS0011-KUNNR,                      "得意先コード
+NOUKI    TYPE YS0011-NOUKI,                      "分納日程日付
+BSTNK    TYPE YS0011-BSTNK,                    "得意先発注番号
+MAKTX    TYPE YS0011-MAKTX,                      "品目テキスト
+KINGAKU5 TYPE YS0011-KINGAKU5,                     "売上済金額
+VKBUR    TYPE YS0011-VKBUR,                            "営業所
+VKGRP    TYPE YS0011-VKGRP,                      "営業グループ
+* 2002/02/01  PSD k.igarashi  ADD ↓
+BACKODR  TYPE YS0011-BACKODR,                      "未引当数量
+* 2002/02/01  PSD k.igarashi  ADD ↑
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+WAERK    TYPE YS0011-WAERK,                        "通貨コード
+KINGAKU2 TYPE YS0011-KINGAKU2,                     "引当済金額
+KINGAKU3 TYPE YS0011-KINGAKU3,                     "未引当金額
+KINGAKU4 TYPE YS0011-KINGAKU4,                     "出荷済金額
+KINGAKU6 TYPE YS0011-KINGAKU6,                     "出庫済金額
+AUART    TYPE YS0011-AUART,                        "伝票タイプ
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+* Add 2006.06.16--->
+YUSOUTOU TYPE YS0011-YUSOUTOU ,
+* Add 2006.06.16<---
+* Add 2010.04.26--->
+vrkme    TYPE YS0011-vrkme    ,                   "販売単位
+* Add 2010.04.26<---
+
+
+
+END OF TYP_BUNSEKI_A.
+
+* ⑥分析(全社･営業所)ＴＢＬ型
+TYPES: BEGIN OF TYP_BUNSEKI_B,
+VBELN    TYPE YS0011-VBELN,                      "販売伝票番号
+POSNR    TYPE YS0011-POSNR,                      "販売明細番号
+KINGAKU1 TYPE YS0011-KINGAKU1,                       "受注金額
+KINGAKU5 TYPE YS0011-KINGAKU5,                     "売上済金額
+VKBUR    TYPE YS0011-VKBUR,                            "営業所
+VKGRP    TYPE YS0011-VKGRP,                      "営業グループ
+WAERK    TYPE YS0011-WAERK,                              "通貨
+STCUR    TYPE VBAP-STCUR,                    "統計用換算レート
+EDATU    TYPE VBEP-EDATU,                            "納入期日
+* APPEND PSD K.ARAI 2002/05/24
+JUCHU    TYPE YS0011-JUCHU,                         " 受注数量
+SEIKYU   TYPE YS0011-SEIKYU,                      " 売上済数量
+MSHUKKO  TYPE YS0011-MSHUKKO,                     " 出荷済数量
+NETPR    TYPE VBAP-NETPR,                           " 販売単価
+KPEIN    TYPE VBAP-KPEIN,                       " 価格条件単位
+AUART    TYPE VBAK-AUART,
+* APPEN END
+END OF TYP_BUNSEKI_B.
+
+* A) 帳票出力用情報取得ＴＢＬ-Ａ型
+TYPES: BEGIN OF TYP_VBPA_KD,
+PERNR   TYPE VBPA-PERNR,                            "従業員No.
+ADRNR   TYPE VBPA-ADRNR,                                 "住所
+BSTDK_E TYPE VBKD-BSTDK_E,             "出荷先の得意先発注番号
+* 2002/01/30 PSD k.igarashi  ADD  ↓
+KURSK   TYPE VBKD-KURSK,            "換算レート－価格設定/統計
+* 2002/01/30 PSD k.igarashi  ADD  ↑
+END OF TYP_VBPA_KD.
+
+* B) 帳票出力用情報取得ＴＢＬ-Ｂ型
+TYPES: BEGIN OF TYP_VBAK_AP,
+VDATU  TYPE VBAK-VDATU,                          "指定納入期日
+WAERK  TYPE VBAK-WAERK,                                  "通貨
+AUART  TYPE VBAK-AUART,                        "販売伝表タイプ
+BSTDK  TYPE VBAK-BSTDK,                        "得意先発注日付
+* 2002/01/23  PSD k.igarashi  ADD ↓
+AUDAT  TYPE VBAK-AUDAT,                              "伝票日付
+* 2002/01/23  PSD k.igarashi  ADD ↑
+PSTYV  TYPE VBAP-PSTYV,                          "明細カテゴリ
+* UNDELETE PSD K.ARAI 2002/05/24
+* 2002/01/30  PSD k.igarashi  DEL ↓
+STCUR  TYPE VBAP-STCUR,                      "統計用換算レート
+* 2002/01/30  PSD k.igarashi  DEL ↑
+* UNDELETE END
+NETPR  TYPE VBAP-NETPR,                              "販売単価
+MATNR  TYPE VBAP-MATNR,                            "品目コード
+KDMAT  TYPE VBAP-KDMAT,                      "得意先品目コード
+NETWR  TYPE VBAP-NETWR,            "伝表通貨での受注明細正味額
+KBMENG TYPE VBAP-KBMENG,                         "累積確認数値
+WAVWR  TYPE VBAP-WAVWR,                                  "原価
+* 2002/02/01  PSD k.igarashi  ADD ↓
+KPEIN  TYPE VBAP-KPEIN,                           "価格条件単位
+* 2002/02/01  PSD k.igarashi  DEL ↑
+END OF TYP_VBAK_AP.
+
+* 2002/01/09  PSD k.igarashi  MOD ↓
+** C) 帳票出力用情報取得ＴＢＬ-Ｃ型
+*TYPES: BEGIN OF TYP_VBEP_EKPO,
+*         EBELN TYPE EKPO-EBELN,                           "購買発注伝票
+*         EBELP TYPE EKPO-EBELP,                           "購買発注明細
+*         MENGE TYPE EKPO-MENGE,                               "発注数量
+*         LLIEF TYPE EKKO-LLIEF,                             "共通仕入先
+*         EVERS TYPE EKPO-EVERS,                               "出荷指示
+*       END OF TYP_VBEP_EKPO.
+
+* C) 帳票出力用情報取得ＴＢＬ-Ｃ型
+TYPES: BEGIN OF TYP_VBEP_EKPO,
+EBELN TYPE EKPO-EBELN,                           "購買発注伝票
+EBELP TYPE EKPO-EBELP,                           "購買発注明細
+MENGE TYPE EKPO-MENGE,                               "発注数量
+LIFNR TYPE EKKO-LIFNR,                           "仕入先コード
+EVERS TYPE EKPO-EVERS,                               "出荷指示
+END OF TYP_VBEP_EKPO.
+* 2002/01/09  PSD k.igarashi  MOD ↑
+
+* 2002/01/23  PSD k.igarashi  ADD ↓
+* A) 帳票出力用情報取得ＴＢＬ-Ｄ型
+TYPES: BEGIN OF TYP_VBPA,
+PERNR   TYPE VBPA-PERNR,                            "従業員No.
+END OF TYP_VBPA.
+* 2002/01/23  PSD k.igarashi  ADD ↑
+
+************************************************************************
+* DATA
+************************************************************************
+
+*--- 内部テーブル
+* ①営業所内部ＴＢＬ
+DATA: GF_EIGYOUSHO TYPE TYP_EIGYOUSHO,
+GT_EIGYOUSHO LIKE TABLE OF GF_EIGYOUSHO.
+
+* ②営業グループ内部ＴＢＬ
+DATA: GF_EIGYOUGRP TYPE TYP_EIGYOUGRP,
+GT_EIGYOUGRP LIKE TABLE OF GF_EIGYOUGRP.
+
+* ③個人情報内部ＴＢＬ
+DATA: GF_KOJIN_INFO TYPE TYP_KOJIN_INFO,
+GT_KOJIN_INFO LIKE TABLE OF GF_KOJIN_INFO.
+
+* ④分析(受注残)内部ＴＢＬ
+DATA: GF_BUNSEKI_A TYPE TYP_BUNSEKI_A,
+GT_BUNSEKI_A LIKE TABLE OF GF_BUNSEKI_A.
+
+* ⑤分析(全社･営業所)内部ＴＢＬ
+DATA: GF_BUNSEKI_B TYPE TYP_BUNSEKI_B,
+GT_BUNSEKI_B LIKE TABLE OF GF_BUNSEKI_B.
+
+* ⑥帳票出力用(詳細)内部ＴＢＬ
+* 20030529 MODIFY-S 小数点4桁の構造に変更
+DATA: GF_WRITE_A LIKE ZSLIST_V08_05,
+*DATA: GF_WRITE_A LIKE ZSLIST_V08_01,
+GT_WRITE_A LIKE TABLE OF GF_WRITE_A.
+
+* ⑦帳票出力用(全社･営業所)内部ＴＢＬ
+DATA: GF_WRITE_B LIKE ZSLIST_V08_06,
+*DATA: GF_WRITE_B LIKE ZSLIST_V08_02,
+GT_WRITE_B LIKE TABLE OF GF_WRITE_B.
+
+*--- 構造
+DATA : GF_VBPA_KD TYPE TYP_VBPA_KD,    "テーブル読み込み条件⑩情報格納用
+GF_VBAK_AP TYPE TYP_VBAK_AP,    "テーブル読み込み条件⑥情報格納用
+GF_VBEP_EKPO TYPE TYP_VBEP_EKPO,
+" テーブル読み込み条件⑦情報格納用
+GF_VBPA TYPE TYP_VBPA.     "テーブル読み込み条件⑦情報格納用
+
+*--- DATA
+DATA: VKBUR LIKE TVKBT-VKBUR,                        "select-option用
+VKGRP LIKE TVGRT-VKGRP,                        "select-option用
+PERNR LIKE PA0002-PERNR,                       "select-option用
+KUNNR LIKE YS0011-KUNNR.                       "select-option用
+
+DATA: KAKO_BSTDK_E LIKE GF_WRITE_A-ZKKAITOU,      "得意先回答納期加工用
+KAKO_VDATU   LIKE GF_WRITE_A-ZLKAITOU,      "仕入先回答納期加工用
+KAKO_BSTDK   LIKE GF_WRITE_A-ZJUDAY,              "受注日付加工用
+*--- MODIFY PSD K.ARAI 2002/05/20                   " バイト数変更
+HTANKA(20)    TYPE C, "TYP_WRITE_A-JTANKA,     "販売単価価格変換用
+*      HTANKA(8)    TYPE C, "TYP_WRITE_A-JTANKA,     "販売単価価格変換用
+*--- MODIFY END
+NYUKOSU      LIKE GF_WRITE_A-ZHWEMNG,                     "入庫数
+SHIIRESAKI   LIKE LFA1-NAME1,                           "仕入先名
+KIBOHNOUKI   TYPE TYP_BUNSEKI_A-NOUKI.                  "希望納期
+
+DATA: JZANKINGAKU       LIKE YS0011-KINGAKU1,     "受注残金額価格変換用
+I_JZANKINGAKU(15) TYPE C,                   "受注残金額価格変換用
+
+* 20030529 MODIFY-S 小数点4桁表示.
+H_JZANKINGAKU(10) TYPE P DECIMALS 4.        "受注残金額邦貨換算用
+*      H_JZANKINGAKU(10) TYPE P DECIMALS 3.        "受注残金額邦貨換算用
+
+DATA: YEARS   TYPE D,                               "納入期日変換処理用
+YEARS_1 TYPE D,                               "納入期日変処理換用
+YEARS_2 TYPE D,                               "納入期日変換処理用
+YEARS_3 TYPE D.                               "納入期日変換処理用
+
+DATA: LM_ZANKIN TYPE P DECIMALS 4,                "受注残金額(前月以前)
+TM_ZANKIN TYPE P DECIMALS 4,                    "受注残金額(当月)
+N1M_ZANKIN TYPE P DECIMALS 4,                   "受注残金額(翌月)
+N2M_ZANKIN TYPE P DECIMALS 4,                 "受注残金額(翌々月)
+N3M_ZANKIN TYPE P DECIMALS 4,               "受注残金額(翌々翌月)
+N4M_ZANKIN TYPE P DECIMALS 4.           "受注残金額(翌々翌月以降)
+
+*DATA: LM_ZANKIN TYPE P DECIMALS 3,                "受注残金額(前月以前)
+*      TM_ZANKIN TYPE P DECIMALS 3,                    "受注残金額(当月)
+*      N1M_ZANKIN TYPE P DECIMALS 3,                   "受注残金額(翌月)
+*      N2M_ZANKIN TYPE P DECIMALS 3,                 "受注残金額(翌々月)
+*      N3M_ZANKIN TYPE P DECIMALS 3,               "受注残金額(翌々翌月)
+*      N4M_ZANKIN TYPE P DECIMALS 3.           "受注残金額(翌々翌月以降)
+* 20030529 MODIFY-E.
+
+* 2002/01/09  PSD k.igarashi  ADD ↓
+DATA: EN_JKINGAKU(24) TYPE C,                               "価格変換用
+EN_GENKA(24)    TYPE C.                               "価格変換用
+* 2002/01/09  PSD k.igarashi  ADD ↑
+
+*--- リストビューア関連
+DATA: GF_REPID     LIKE SY-REPID,                         "レポートＩＤ
+GF_LAYOUT   TYPE SLIS_LAYOUT_ALV,                 "レイアウト構造
+GF_VARIANT   TYPE DISVARIANT.               "バリアント保存設定用
+
+* REUSE_ALV_COMMENTARY_WRITE
+DATA: GF_HEAD_ALV   TYPE SLIS_LISTHEADER,                   "ヘッダ構造
+GT_T_HEAD_ALV TYPE SLIS_T_LISTHEADER.            "ヘッダ用内部TBL
+
+* ABAPリストビューアヘッダデータ保持
+DATA: GF_HEADER_A LIKE GF_WRITE_A,                      "ヘッダ表示情報
+GF_HEADER_B LIKE GF_WRITE_B.
+
+* REUSE_ALV_LIST_DISPLAY
+DATA: TOP_OF_PAGE TYPE SLIS_FORMNAME VALUE 'TOP_OF_PAGE'.
+
+* REUSE_ALV_EVENT
+DATA: GT_EVENT TYPE SLIS_T_EVENT,                  "イベント情報内部TBL
+GF_EVENT LIKE LINE OF GT_EVENT.                 "イベント情報構造
+
+* 2002/01/10  PSD k.igarashi  ADD ↓
+DATA: GT_ALV_A     TYPE TABLE OF ZSLIST_V08_05        "20030528 構造変更
+*DATA: GT_ALV_A     TYPE TABLE OF ZSLIST_V08_01
+WITH HEADER LINE.
+DATA: GT_ALV_B     TYPE TABLE OF ZSLIST_V08_06        "20030528 構造変更
+*DATA: GT_ALV_B     TYPE TABLE OF ZSLIST_V08_02
+WITH HEADER LINE.
+* 2002/01/10  PSD k.igarashi  ADD ↑
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定----*
+DATA: GF_PRINT      TYPE SLIS_PRINT_ALV.
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+************************************************************************
+* CONSTANTS
+************************************************************************
+CONSTANTS: CNS_JA(2)      TYPE C VALUE 'JA',
+CNS_0001(4)    TYPE C VALUE '0001',
+CNS_READTXT(9) TYPE C VALUE 'READ_TEXT',
+CNS_X(1)       TYPE C VALUE    'X',
+CNS_AG(2)      TYPE C VALUE 'AG',
+* 2002/01/23  PSD k.igarashi  ADD ↓
+CNS_VE(2)      TYPE C VALUE 'VE',
+CNS_ZSEO(4)    TYPE C VALUE 'ZSEO',
+CNS_ZSEK(4)    TYPE C VALUE 'ZSEK'.
+* APPEND PSD K.ARAI 2002/05/24
+CONSTANTS: CNS_RE(2)      TYPE C VALUE 'RE',
+CNS_KR(2)      TYPE C VALUE 'KR',
+CNS_ZRE(3)     TYPE C VALUE 'ZRE'.
+* APPEND END
+* 2002/01/23  PSD k.igarashi  ADD ↑
+CONSTANTS: CNS_TVKBT(5)      TYPE C VALUE 'TVKBT',
+CNS_TVGRT(5)      TYPE C VALUE 'TVGRT',
+CNS_PA0002(6)     TYPE C VALUE 'PA0002',
+CNS_LFA1(4)       TYPE C VALUE 'LFA1',
+CNS_YS0011(6)     TYPE C VALUE 'YS0011',
+CNS_YS0011_VBAP_VBEP(16) TYPE C VALUE 'YS0011 VBAP VBEP',
+CNS_VBPA_VBKD(9)  TYPE C VALUE 'VBPA VBKD',
+CNS_VBAK_VBAP(9)  TYPE C VALUE 'VBAK VBAP',
+CNS_VBEP_EKPO_EKKO(14) TYPE C VALUE 'VBEP EKPO EKKO',
+CNS_EKET(4)       TYPE C VALUE 'EKET'.
+CONSTANTS: CNS_TOP(11)       TYPE C VALUE 'TOP_OF_PAGE',
+CNS_FTOP(15)      TYPE C VALUE 'FRM_TOP_OF_PAGE'.
+************************************************************************
+* 選択画面
+************************************************************************
+* 営業所コード
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS R_BALANC RADIOBUTTON GROUP RD_1 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 2(10) TEXT-007  FOR FIELD R_BALANC.
+SELECTION-SCREEN COMMENT 17(12) TEXT-018 FOR FIELD P_VKBUR.
+SELECTION-SCREEN POSITION 32.
+PARAMETERS P_VKBUR LIKE VKBUR.
+SELECTION-SCREEN END OF LINE.
+
+* 営業グループ
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN POSITION 14.
+PARAMETERS R_EIGYOG RADIOBUTTON GROUP RD_2 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 17(12) TEXT-010 FOR FIELD S_VKGRP.
+SELECTION-SCREEN POSITION 29.
+SELECT-OPTIONS S_VKGRP FOR VKGRP.
+SELECTION-SCREEN END OF LINE.
+
+* 営業員コード
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN POSITION 14.
+PARAMETERS R_EIGYOI RADIOBUTTON GROUP RD_2.
+SELECTION-SCREEN COMMENT 17(12) TEXT-011 FOR FIELD S_PERNR.
+SELECTION-SCREEN POSITION 29.
+SELECT-OPTIONS S_PERNR FOR PERNR.
+SELECTION-SCREEN END OF LINE.
+
+* 得意先コード
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 17(12) TEXT-012 FOR FIELD S_KUNNR.
+SELECTION-SCREEN POSITION 29.
+SELECT-OPTIONS S_KUNNR FOR KUNNR.
+SELECTION-SCREEN END OF LINE.
+
+* 日付
+SELECTION-SCREEN BEGIN OF LINE.
+*--- MODIFY PSD K.ARAI 2002/05/20   " 日付→希望納期
+SELECTION-SCREEN COMMENT 17(12) TEXT-032 FOR FIELD S_DATUM.
+*  SELECTION-SCREEN COMMENT 17(12) TEXT-013 FOR FIELD S_DATUM.
+*--- MODIFY END
+SELECTION-SCREEN POSITION 29.
+*---MODIFY START PSD T.SAITOH 2002/06/06 ---------------------------*
+*  SELECT-OPTIONS S_DATUM FOR SY-DATUM DEFAULT SY-DATUM.
+SELECT-OPTIONS S_DATUM FOR SY-DATUM.
+*---MODIFY END   PSD T.SAITOH 2002/06/06 ---------------------------*
+SELECTION-SCREEN END OF LINE.
+
+* 全社(受注残金一覧表)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS R_ZENSHA  RADIOBUTTON GROUP RD_1.
+SELECTION-SCREEN COMMENT 2(20) TEXT-014 FOR FIELD R_ZENSHA.
+SELECTION-SCREEN END OF LINE.
+
+* 営業所(受注残金一覧表)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS R_EIGYOS RADIOBUTTON GROUP RD_1.
+SELECTION-SCREEN COMMENT 2(22) TEXT-015 FOR FIELD R_EIGYOS.
+SELECTION-SCREEN POSITION 29.
+SELECT-OPTIONS S_VKBUR FOR VKBUR.
+SELECTION-SCREEN END OF LINE.
+
+************************************************************************
+* AT SELECTION-SCREEN                                                  *
+************************************************************************
+* 2-1 入力チェック処理
+AT SELECTION-SCREEN.
+
+CASE CNS_X.
+WHEN R_BALANC.
+PERFORM FRM_CHECK_ZANDAKA.
+WHEN R_EIGYOS.
+PERFORM FRM_CHECK_EIGYOUSHO.
+ENDCASE.
+************************************************************************
+* START-OF-SELECTION
+************************************************************************
+START-OF-SELECTION.
+
+* 2-2 対象データ抽出処理
+CASE CNS_X.
+* 受注残一覧表を選択
+WHEN R_BALANC.
+PERFORM FRM_SEL_JUCHUZANICHIRAN.                    "対象データ抽出
+PERFORM FRM_MAKE_ZANDAKA.                    "帳票(詳細)内部TBL作成
+PERFORM FRM_WRITE_ICHIRAN_A.                    "帳票(詳細)出力処理
+* 全社・営業所(受注残金額一覧表)を選択
+WHEN OTHERS.
+PERFORM FRM_SEL_KINGAKUICHIRAN.                     "対象データ抽出
+PERFORM FRM_MAKE_KINGAKUICHIRAN.     "帳票(会社・営業所)内部TBL作成
+PERFORM FRM_WRITE_ICHIRAN_B.            "帳票(会社・営業所)出力処理
+ENDCASE.
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_zandaka
+*&---------------------------------------------------------------------*
+*       2-1-① ラジオボタン：受注残一覧選択時
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_ZANDAKA.
+
+* a) 営業所コード入力チェック
+IF P_VKBUR = ' '.
+MESSAGE E006(Z1) WITH TEXT-019.
+ENDIF.
+
+* b) システム日付必須チェック
+*---DELETE START PSD T.SAITOH 2002/06/06 ---------------------------*
+*  IF S_DATUM-LOW = '00000000'.
+*    MESSAGE E006(Z1) WITH text-027.
+*  ENDIF.
+*---DELETE END   PSD T.SAITOH 2002/06/06 ---------------------------*
+
+ENDFORM.                    " frm_check_zandaka
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_eigyousho
+*&---------------------------------------------------------------------*
+*       2-1-② ラジオボタン：営業所選択時
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_EIGYOUSHO.
+
+* 営業所コード入力チェック
+IF S_VKBUR-LOW = ' '.
+MESSAGE E006(Z1) WITH TEXT-018.
+ENDIF.
+
+ENDFORM.                    " frm_check_zensha
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_juchuzanichiran
+*&---------------------------------------------------------------------*
+*       2-2-① 受注残一覧選択時
+*----------------------------------------------------------------------*
+FORM FRM_SEL_JUCHUZANICHIRAN.
+
+* 営業所グループ、営業員コード重複チェック
+PERFORM FRM_CHECK_ZANDAKA.
+
+* a) 営業所抽出処理
+PERFORM FRM_SEL_EIGYOUSHO_A.
+
+* b) 営業グループ抽出処理
+PERFORM FRM_SEL_EIGYOUGRP_A.
+
+* c) 営業員抽出処理
+PERFORM FRM_SEL_EIGYOUIN.
+
+* e) 受注残分析情報抽出処理
+PERFORM FRM_SEL_BUNSEKI_A.
+
+ENDFORM.                    " frm_sel_juchuzanichiran
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_kingakuichiran
+*&---------------------------------------------------------------------*
+*       2-2-②・③ 全社・営業所選択時
+*----------------------------------------------------------------------*
+FORM FRM_SEL_KINGAKUICHIRAN.
+
+* 営業所コード必須チェック(営業所選択時)
+CASE CNS_X.
+WHEN R_EIGYOS.
+PERFORM FRM_CHECK_EIGYOUSHO.
+ENDCASE.
+
+* 初期処理(全社選択時－営業所パラメータブランク設定)
+CASE CNS_X.
+WHEN R_ZENSHA.
+FREE S_VKBUR.
+ENDCASE.
+
+* a)営業所抽出処理
+PERFORM FRM_SEL_EIGYOUSHO_B.
+
+* b)営業グループ選択処理(営業所選択時)
+CASE CNS_X.
+WHEN R_EIGYOS.
+PERFORM FRM_SEL_EIGYOUGRP_B.
+ENDCASE.
+
+* c)受注残分析情報抽出処理
+PERFORM FRM_SEL_BUNSEKI_B.
+
+ENDFORM.                    " frm_sel_kingakuichiran
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_eigyousho_a
+*&---------------------------------------------------------------------*
+*       2-2-①-a 営業所抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_EIGYOUSHO_A.
+
+SELECT * FROM TVKBT
+INTO CORRESPONDING FIELDS OF TABLE GT_EIGYOUSHO
+WHERE SPRAS = CNS_JA
+AND   VKBUR = P_VKBUR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-019.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_TVKBT SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_eigyousho_a
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_eigyougrp_a
+*&---------------------------------------------------------------------*
+*       2-2-①-b 営業グループ抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_EIGYOUGRP_A.
+
+SELECT * FROM TVGRT
+INTO CORRESPONDING FIELDS OF TABLE GT_EIGYOUGRP
+WHERE SPRAS = CNS_JA
+AND   VKGRP IN S_VKGRP.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-020.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_TVGRT SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_eigyougrp_a
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_eigyouin
+*&---------------------------------------------------------------------*
+*       2-2-①-c 営業員抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_EIGYOUIN.
+
+SELECT * FROM PA0002
+INTO CORRESPONDING FIELDS OF TABLE GT_KOJIN_INFO
+WHERE PERNR IN S_PERNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+* ↓ DELETE 2002.03.18 PSD M.ARAI 営業員取得エラー削除
+*      MESSAGE S600(Z1) WITH text-021.
+*      STOP.
+* ↑
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_PA0002 SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_eigyouin
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_bunseki_a
+*&---------------------------------------------------------------------*
+*       2-2-①-e 受注残分析情報抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_BUNSEKI_A.
+
+SELECT * FROM YS0011
+INTO CORRESPONDING FIELDS OF TABLE GT_BUNSEKI_A
+WHERE VKBUR = P_VKBUR
+AND  VKGRP IN S_VKGRP
+AND  KUNNR IN S_KUNNR
+*--- MODIFY PSD K.ARAI 2002/05/20  " 抽出条件変更
+AND  NOUKI IN S_DATUM.
+*     AND  NOUKI <= S_DATUM.
+*--- MODIFY END
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-023.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_YS0011 SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_bunseki_a
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_eigyousho_b
+*&---------------------------------------------------------------------*
+*       2-2-②・③-a 全社・営業所抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_EIGYOUSHO_B.
+
+SELECT * FROM TVKBT
+INTO CORRESPONDING FIELDS OF TABLE GT_EIGYOUSHO
+WHERE SPRAS = CNS_JA
+AND  VKBUR IN S_VKBUR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-019.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_TVKBT SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_eigyousho_b
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_bunseki_b
+*&---------------------------------------------------------------------*
+*       2-2-②・③ 受注残分析情報抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_BUNSEKI_B.
+* Add 2008.12.24 --->
+Data: L_BSTDK_E TYPE VBKD-BSTDK_E .
+* Add 2008.12.24 <---
+
+
+*---MODIFY START PSD T.SAITOH 2002/05/22 ---------------------------*
+*  SELECT
+*    a~VBELN a~POSNR a~KINGAKU1 a~KINGAKU5 a~VKBUR a~VKGRP a~WAERK
+*    b~STCUR
+*    c~EDATU
+*   INTO CORRESPONDING FIELDS OF TABLE GT_BUNSEKI_B
+*   FROM YS0011 AS a INNER JOIN VBAP      AS b
+*    ON a~VBELN = b~VBELN AND
+*       a~POSNR = b~POSNR INNER JOIN VBEP AS c
+*    ON a~VBELN = c~VBELN AND
+*       a~POSNR = c~POSNR
+*   WHERE a~VKBUR IN S_VKBUR
+*    AND  c~ETENR = CNS_0001.
+SELECT
+*--- APPEND PSD K.ARAI 2002/05/24
+A~JUCHU A~MSHUKKO A~SEIKYU
+B~NETPR B~KPEIN
+*--- APPEN END
+A~VBELN A~POSNR A~KINGAKU1 A~KINGAKU5 A~VKBUR A~VKGRP A~WAERK
+B~STCUR
+C~EDATU
+INTO CORRESPONDING FIELDS OF GF_BUNSEKI_B
+FROM YS0011 AS A INNER JOIN VBAP      AS B
+ON A~VBELN = B~VBELN AND
+A~POSNR = B~POSNR INNER JOIN VBEP AS C
+ON A~VBELN = C~VBELN AND
+A~POSNR = C~POSNR
+WHERE A~VKBUR IN S_VKBUR
+AND  C~ETENR = CNS_0001.
+
+SELECT SINGLE
+KURSK
+FROM VBKD
+INTO GF_BUNSEKI_B-STCUR
+WHERE VBELN = GF_BUNSEKI_B-VBELN.
+
+* APPEND PSD K.ARAI 2002/05/24
+SELECT SINGLE
+WAERK
+AUART
+FROM VBAK
+INTO (GF_BUNSEKI_B-WAERK,
+GF_BUNSEKI_B-AUART)
+WHERE VBELN = GF_BUNSEKI_B-VBELN.
+* APPEND END
+* Add 2008.12.24 --->
+CLEAR : L_BSTDK_E .
+SELECT SINGLE BSTDK_E
+FROM VBKD
+INTO L_BSTDK_E
+WHERE VBELN = GF_BUNSEKI_B-VBELN
+AND  POSNR = GF_BUNSEKI_B-POSNR
+.
+IF NOT L_BSTDK_E IS INITIAL .
+GF_BUNSEKI_B-EDATU = L_BSTDK_E .
+* Add 2009.06.12 --->
+ELSE.
+SELECT SINGLE BSTDK_E
+FROM VBKD
+INTO L_BSTDK_E
+WHERE VBELN = GF_BUNSEKI_B-VBELN
+AND  POSNR = '000000'
+.
+IF NOT L_BSTDK_E IS INITIAL .
+GF_BUNSEKI_B-EDATU = L_BSTDK_E .
+ENDIF .
+* Add 2009.06.12 <---
+ENDIF .
+* Add 2008.12.24 <---
+
+
+
+APPEND GF_BUNSEKI_B TO GT_BUNSEKI_B.
+
+ENDSELECT.
+CLEAR GF_BUNSEKI_B.
+*---MODIFY END   PSD T.SAITOH 2002/05/22 ---------------------------*
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-023.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_YS0011_VBAP_VBEP SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_bunseki_b
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_eigyougrp_b
+*&---------------------------------------------------------------------*
+*       2-2-③-b 営業グループ抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_EIGYOUGRP_B.
+
+SELECT * FROM TVGRT
+INTO CORRESPONDING FIELDS OF TABLE GT_EIGYOUGRP
+WHERE SPRAS = CNS_JA.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-020.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_TVGRT SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_eigyougrp_b
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_zandaka
+*&---------------------------------------------------------------------*
+*       2-3-①受注残金額選択時
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_ZANDAKA.
+
+*--- ループ処理開始
+LOOP AT GT_BUNSEKI_A INTO GF_BUNSEKI_A.
+
+* 2002/01/17  PSD k.igarashi  ADD ↓
+* 初期化処理
+CLEAR: GF_VBEP_EKPO,
+SHIIRESAKI,
+GF_WRITE_A.
+* 2002/01/17  PSD k.igarashi  ADD ↑
+
+
+* 2002/01/30  PSD k.igarashi  DEL ↓
+* a) 帳票IDの設定
+*    GF_WRITE_A-ZLISTID = '1'.
+* 2002/01/30  PSD k.igarashi  DEL ↑
+
+* b) 分析(受注残)内部TBL非加工項目の帳票出力用(詳細)内部TBLへの設定
+PERFORM FRM_SET_INFO_1B.
+* c) 営業所テキストの設定
+PERFORM FRM_SET_INFO_1C.
+* d) 営業グループ名の設定
+PERFORM FRM_SET_INFO_1D.
+* e) 営業員名の設定
+PERFORM FRM_SET_INFO_1E_STEP1.
+
+CASE SY-SUBRC.
+WHEN 0.
+*          GF_WRITE_A-PERNR = GF_VBPA_KD-PERNR.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-024.
+CONTINUE.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_VBPA_VBKD SY-SUBRC.
+ENDCASE.
+
+* 2002/01/23  PSD k.igarashi  ADD ↓
+*- 2002/01/25  PSD k.igarashi  DEL ↓
+*    IF R_EIGYOI = CNS_X.
+*- 2002/01/25  PSD k.igarashi  DEL ↑
+PERFORM FRM_WHEN_EIGYOIN_CHECK.
+
+CASE SY-SUBRC.
+WHEN 0.
+*          CLEAR GF_WRITE_A-PERNR.
+GF_WRITE_A-PERNR = GF_VBPA-PERNR.
+WHEN 4.
+*- 2002/01/25  PSD k.igarashi  DEL ↓
+*          MESSAGE S600(Z1) WITH text-024.
+*          CONTINUE.
+*- 2002/01/25  PSD k.igarashi  DEL ↑
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_VBPA_VBKD SY-SUBRC.
+ENDCASE.
+*- 2002/01/25  PSD k.igarashi  DEL ↓
+*    ENDIF.
+*- 2002/01/25  PSD k.igarashi  DEL ↑
+* 2002/01/23  PSD k.igarashi  ADD ↑
+
+PERFORM FRM_SET_INFO_1E_STEP2.
+*---APPEND START PSD T.SAITOH 2002/08/14 ---------------------------*
+*   営業員指定時　かつ　営業員指定がブランクでない　かつ
+*   営業員名がない場合対象外とする
+IF R_EIGYOI = CNS_X AND NOT S_PERNR IS INITIAL
+AND SY-SUBRC <> 0.
+CONTINUE.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/08/14 ---------------------------*
+
+* f) 得意先名の設定
+PERFORM FRM_SET_INFO_1F.
+* g) 得意先回答納期の設定
+PERFORM FRM_SET_INFO_1G.
+
+* h) 未出荷数量の設定
+* 2002/02/01  PSD k.igarashi  MOD ↓
+*    GF_WRITE_A-MSHUKKO = GF_BUNSEKI_A-JUCHU - GF_BUNSEKI_A-MSHUKKO.
+GF_WRITE_A-MSHUKKO = GF_BUNSEKI_A-JUCHU - GF_BUNSEKI_A-MSHUKKO
+- GF_BUNSEKI_A-SEIKYU.
+* 2002/02/01  PSD k.igarashi  MOD ↑
+
+* i) 出荷可能数量の設定
+* 2002/02/01  PSD k.igarashi  MOD ↓
+*    GF_WRITE_A-ZKANOU = GF_BUNSEKI_A-PICKUP - GF_BUNSEKI_A-MSHUKKO.
+GF_WRITE_A-ZKANOU = GF_BUNSEKI_A-JUCHU - GF_BUNSEKI_A-MSHUKKO
+- GF_BUNSEKI_A-SEIKYU - GF_BUNSEKI_A-BACKODR.
+* 2002/02/01  PSD k.igarashi  MOD ↑
+
+* j) 区、受注単価、受注残金額、仕入先回答納期、
+*                        受注日付、各非表示項目の設定
+PERFORM FRM_SET_INFO_1J.
+* k) 発注番号、発注明細、発注残数、仕入先名の設定
+PERFORM FRM_SET_INFO_1K.
+* l) 希望納期の設定
+PERFORM FRM_SET_INFO_1L.
+* m) 出荷指示備考の設定
+PERFORM FRM_SET_INFO_1M.
+
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+* 追加) 受注残金額の設定
+PERFORM FRM_SET_ORDER_ACOUNT.
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+
+* n) 帳票出力用(詳細)内部TBLレコード追加処理
+APPEND GF_WRITE_A TO GT_WRITE_A.
+
+*--- ループ処理終了
+ENDLOOP.
+
+ENDFORM.                    " frm_make_zandaka
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_kingakuichiran
+*&---------------------------------------------------------------------*
+*       2-3-②全社選択時
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_KINGAKUICHIRAN.
+
+* ループ処理開始
+LOOP AT GT_BUNSEKI_B INTO GF_BUNSEKI_B.
+
+* 初期化処理
+*--- 帳票用構造
+CLEAR: GF_WRITE_B-ZZENIZEN,
+GF_WRITE_B-ZTOUGETU,
+GF_WRITE_B-ZYOKGETU,
+GF_WRITE_B-ZYYKGETU,
+GF_WRITE_B-ZYYYGETU,
+GF_WRITE_B-ZYYYIKOU.
+*--- 受注残金比較用オブジェクト
+CLEAR: LM_ZANKIN,
+TM_ZANKIN,
+N1M_ZANKIN,
+N2M_ZANKIN,
+N3M_ZANKIN,
+N4M_ZANKIN.
+
+* a) 帳票ＩＤの設定
+PERFORM FRM_SET_INFO_2A.
+* b) 営業所コード、営業所名の設定
+PERFORM FRM_SET_INFO_2B.
+* c) 営業グループ名の設定
+CASE CNS_X.
+WHEN R_EIGYOS.
+PERFORM FRM_SET_INFO_2C.
+ENDCASE.
+* d) 受注残金額の設定
+PERFORM FRM_SET_INFO_2D.
+* e) 帳票出力用(会社・営業所)内部ＴＢＬの設定
+PERFORM FRM_SET_INFO_2E.
+
+ENDLOOP.
+
+ENDFORM.                    " frm_make_kingakuichiran
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1b
+*&---------------------------------------------------------------------*
+*       2-3-①-(b)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1B.
+
+GF_WRITE_A-VKBUR = GF_BUNSEKI_A-VKBUR. "営業所コード←営業所
+GF_WRITE_A-VKGRP = GF_BUNSEKI_A-VKGRP. "営業グループ←営業グループ
+GF_WRITE_A-KUNNR = GF_BUNSEKI_A-KUNNR. "得意先コード←得意先コード
+GF_WRITE_A-BSTNK = GF_BUNSEKI_A-BSTNK. "得意先発注番号←得意先発注番号
+GF_WRITE_A-MAKTX = GF_BUNSEKI_A-MAKTX. "品目←品目テキスト
+GF_WRITE_A-JUCHU = GF_BUNSEKI_A-JUCHU. "受注数←受注数量
+GF_WRITE_A-VBELN = GF_BUNSEKI_A-VBELN. "受注番号←販売伝票番号
+GF_WRITE_A-POSNR = GF_BUNSEKI_A-POSNR. "受注明細←販売伝票明細
+* Add 2006.06.16 --->
+GF_WRITE_A-yusoutou = GF_BUNSEKI_A-yusoutou. "受注明細←販売伝票明細
+* Add2006.06.16 <---
+* Add 2010.04.26 --->
+GF_WRITE_A-VRKME    = GF_BUNSEKI_A-VRKME   .
+* Add 2010.04.26 <---
+
+
+ENDFORM.                    " frm_set_info_1b
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1c
+*&---------------------------------------------------------------------*
+*       2-3-①-(c)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1C.
+
+READ TABLE GT_EIGYOUSHO WITH KEY VKBUR = GF_BUNSEKI_A-VKBUR
+INTO GF_EIGYOUSHO.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE_A-BUBZI = GF_EIGYOUSHO-BEZEI.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-019.
+STOP.
+ENDCASE.
+
+ENDFORM.                    " frm_set_info_1c
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1d
+*&---------------------------------------------------------------------*
+*       2-3-①-(d)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1D.
+
+READ TABLE GT_EIGYOUGRP WITH KEY VKGRP = GF_BUNSEKI_A-VKGRP
+INTO GF_EIGYOUGRP.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE_A-GRBZI = GF_EIGYOUGRP-BEZEI.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-020.
+STOP.
+ENDCASE.
+
+ENDFORM.                    " frm_set_info_1d
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1e_step1
+*&---------------------------------------------------------------------*
+*       2-3-①-(e)-(ア)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1E_STEP1.
+
+* 2001/12/14  PSD k.igarashi  MOD ↓
+*--- ア) 従業員No.の取得
+*  SELECT SINGLE *
+*   INTO CORRESPONDING FIELDS OF GF_VBPA_KD
+*   FROM VBPA AS a INNER JOIN VBKD AS b
+*    ON a~VBELN = b~VBELN AND
+*       a~POSNR = b~POSNR
+*   WHERE a~VBELN = GF_BUNSEKI_A-VBELN
+*    AND  a~POSNR = GF_BUNSEKI_A-POSNR.
+
+SELECT SINGLE *
+INTO CORRESPONDING FIELDS OF GF_VBPA_KD
+FROM VBPA AS A INNER JOIN VBKD AS B
+ON A~VBELN = B~VBELN AND
+A~POSNR = B~POSNR
+WHERE A~VBELN = GF_BUNSEKI_A-VBELN
+AND  A~PARVW = CNS_AG.                         "01/12/14条件追加
+*    AND  a~POSNR = GF_BUNSEKI_A-POSNR.             "一時的措置
+* 2001/12/14  PSD k.igarashi  MOD ↑
+
+ENDFORM.                    " frm_set_info_1e_step1
+*&---------------------------------------------------------------------*
+*&      Form  frm_when_eigyoin_check
+*&---------------------------------------------------------------------*
+*       営業員選択時の処理
+*----------------------------------------------------------------------*
+FORM FRM_WHEN_EIGYOIN_CHECK.
+
+SELECT SINGLE *
+INTO CORRESPONDING FIELDS OF GF_VBPA
+FROM VBPA AS A INNER JOIN VBKD AS B
+ON A~VBELN = B~VBELN AND
+A~POSNR = B~POSNR
+WHERE A~VBELN = GF_BUNSEKI_A-VBELN
+AND  A~PARVW = CNS_VE.
+
+ENDFORM.                    " frm_when_eigyoin_check
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1e_step2
+*&---------------------------------------------------------------------*
+*       2-3-①-(e)-(イ)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1E_STEP2.
+
+*--- イ) 営業員名の取得
+READ TABLE GT_KOJIN_INFO WITH KEY PERNR = GF_WRITE_A-PERNR
+INTO GF_KOJIN_INFO.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE_A-NACHN = GF_KOJIN_INFO-NACHN.
+WHEN 4.
+GF_WRITE_A-NACHN = ' '.
+ENDCASE.
+
+ENDFORM.                    " frm_set_info_1e_step2
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1f
+*&---------------------------------------------------------------------*
+*       2-3-①-(f)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1F.
+
+* 汎用モジュール'ADDR_GET'用構造
+DATA: ADDRESS  LIKE ADDR1_SEL.         "アドレス番号設定用
+DATA: LF_TNAME LIKE SADR.              "得意先名取得用
+
+* 初期処理(アドレス番号の設定)
+ADDRESS-ADDRNUMBER = GF_VBPA_KD-ADRNR.
+
+* 得意先名取得(汎用モジュール呼び出し)
+CALL FUNCTION 'ADDR_GET'
+EXPORTING
+ADDRESS_SELECTION             = ADDRESS
+IMPORTING
+SADR                          = LF_TNAME
+EXCEPTIONS
+PARAMETER_ERROR               = 1
+ADDRESS_NOT_EXIST             = 2
+VERSION_NOT_EXIST             = 3
+INTERNAL_ERROR                = 4
+OTHERS                        = 5.
+
+IF SY-SUBRC = 0.
+GF_WRITE_A-ZKNAME = LF_TNAME-NAME1.
+ELSEIF ( SY-SUBRC = 1 ) OR ( SY-SUBRC = 2 ) OR ( SY-SUBRC = 3 ) OR
+( SY-SUBRC = 4 ) OR ( SY-SUBRC = 5 ).
+GF_WRITE_A-ZKNAME = ' '.
+ENDIF.
+
+ENDFORM.                    " frm_set_info_1f
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1g
+*&---------------------------------------------------------------------*
+*       2-3-①-(g)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1G.
+
+CONCATENATE GF_VBPA_KD-BSTDK_E+4(2)
+'/'
+GF_VBPA_KD-BSTDK_E+6(2)
+INTO KAKO_BSTDK_E.
+GF_WRITE_A-ZKKAITOU = KAKO_BSTDK_E.
+*---APPEND START PSD T.SAITOH 2002/09/12 ---------------------------*
+* 得意先回答納期フル桁対応
+GF_WRITE_A-ZZKKAITOU = GF_VBPA_KD-BSTDK_E.
+*---APPEND END   PSD T.SAITOH 2002/09/12 ---------------------------*
+
+ENDFORM.                    " frm_set_info_1g
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1j
+*&---------------------------------------------------------------------*
+*       2-3-①-(j)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1J.
+
+* 2002/01/23  PSD k.igarashi  MOD ↓
+*  SELECT SINGLE
+*      a~VDATU a~WAERK a~AUART a~BSTDK
+*      b~PSTYV b~STCUR b~NETPR b~MATNR b~KDMAT b~NETWR b~KBMENG b~WAVWR
+*     INTO CORRESPONDING FIELDS OF GF_VBAK_AP
+*     FROM VBAK AS a INNER JOIN VBAP AS b
+*      ON a~VBELN = b~VBELN
+*     WHERE b~VBELN = GF_BUNSEKI_A-VBELN.
+**      AND  b~POSNR = GF_BUNSEKI_A-POSNR.
+
+* 2002/02/01  PSD k.igarashi  MOD ↓
+*  SELECT SINGLE
+*      a~VDATU a~WAERK a~AUART a~BSTDK a~AUDAT
+*      b~PSTYV b~STCUR b~NETPR b~MATNR b~KDMAT b~NETWR b~KBMENG b~WAVWR
+*     INTO CORRESPONDING FIELDS OF GF_VBAK_AP
+*     FROM VBAK AS a INNER JOIN VBAP AS b
+*      ON a~VBELN = b~VBELN
+*     WHERE b~VBELN = GF_BUNSEKI_A-VBELN
+*      AND  b~POSNR = GF_BUNSEKI_A-POSNR.
+* 2002/01/23  PSD k.igarashi  MOD ↑
+
+SELECT SINGLE
+A~VDATU A~WAERK A~AUART A~BSTDK A~AUDAT
+B~PSTYV B~STCUR B~NETPR B~MATNR B~KDMAT
+B~NETWR B~KBMENG B~WAVWR B~KPEIN
+INTO CORRESPONDING FIELDS OF GF_VBAK_AP
+FROM VBAK AS A INNER JOIN VBAP AS B
+ON A~VBELN = B~VBELN
+WHERE B~VBELN = GF_BUNSEKI_A-VBELN
+AND  B~POSNR = GF_BUNSEKI_A-POSNR.
+* 2002/02/01  PSD k.igarashi  MOD ↑
+
+CASE SY-SUBRC.
+WHEN 0.
+*--- APPEND PSD K.ARAI 2002/05/24
+PERFORM FRM_GET_VBKD_KURSK.
+*--- APPEND END
+
+
+* 2002/01/23  PSD k.igarashi  MOD ↓
+*--- ア) 区の設定
+*        GF_WRITE_A-PSTYV = GF_VBAK_AP-PSTYV.
+
+IF GF_VBAK_AP-PSTYV = CNS_ZSEO.             "ZSEO
+GF_WRITE_A-PSTYV = TEXT-030.
+ELSEIF GF_VBAK_AP-PSTYV = CNS_ZSEK.         "ZSEK
+GF_WRITE_A-PSTYV = TEXT-031.
+ELSE.
+GF_WRITE_A-PSTYV = '　'.
+ENDIF.
+* 2002/01/23  PSD k.igarashi  MOD ↑
+
+*--- イ) 受注単価の設定
+*   (ⅰ) 販売単価の価格変換
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY          = GF_VBAK_AP-WAERK
+SAP_AMOUNT        = GF_VBAK_AP-NETPR
+IMPORTING
+IDOC_AMOUNT       = HTANKA.
+
+
+* 2002/02/01  PSD k.igarashi  ADD ↓
+*- 2002/01/09  PSD k.igarashi  ADD ↓
+*    GF_WRITE_A-NETPR = HTANKA.
+* ↓APPEND 2002/02/08 PSD M.Arai 0除算ﾁｪｯｸ追加
+*    GF_WRITE_A-NETPR = HTANKA / GF_VBAK_AP-KPEIN.
+IF GF_VBAK_AP-KPEIN = 0.
+GF_WRITE_A-NETPR = 0.
+ELSE.
+GF_WRITE_A-NETPR = HTANKA / GF_VBAK_AP-KPEIN.
+ENDIF.
+* ↑
+*- 2002/01/09  PSD k.igarashi  ADD ↑
+* 2002/02/01  PSD k.igarashi  ADD ↑
+
+*   (ⅱ)受注単価取得
+* 2002/02/01  PSD k.igarashi  ADD ↓
+*- 2002/01/30  PSD k.igarashi  ADD ↓
+*    GF_WRITE_A-ZJNETPR = HTANKA * GF_VBAK_AP-STCUR.
+*    GF_WRITE_A-ZJNETPR = HTANKA * GF_VBPA_KD-KURSK.
+* ↓APPEND 2002/02/08 PSD M.Arai 0除算ﾁｪｯｸ追加
+*    GF_WRITE_A-ZJNETPR = HTANKA / GF_VBAK_AP-KPEIN * GF_VBPA_KD-KURSK.
+IF GF_VBAK_AP-KPEIN = 0 OR
+GF_VBPA_KD-KURSK = 0.
+GF_WRITE_A-ZJNETPR = 0.
+ELSE.
+GF_WRITE_A-ZJNETPR = HTANKA / GF_VBAK_AP-KPEIN * GF_VBPA_KD-KURSK.
+ENDIF.
+* ↑
+*- 2002/01/30  PSD k.igarashi  ADD ↑
+* 2002/02/01  PSD k.igarashi  ADD ↑
+
+*--- ウ) 受注残金額(未出荷金額)の設定
+GF_WRITE_A-ZMISHUKKA = GF_WRITE_A-MSHUKKO * GF_WRITE_A-ZJNETPR.
+
+*--- APPEND PSD K.ARAI 2002/05/24
+* 伝票タイプが'RE''ZRE''KR'の時はマイナス１をかける
+IF  ( GF_VBAK_AP-AUART = CNS_RE
+OR GF_VBAK_AP-AUART = CNS_KR
+OR GF_VBAK_AP-AUART = CNS_ZRE ).
+GF_WRITE_A-ZMISHUKKA = GF_WRITE_A-ZMISHUKKA * -1 .
+ENDIF.
+*--- APPEND END.
+
+*--- エ) 仕入先回答納期の設定
+* 2009/10/20 DEL START
+*-- 発注明細テキストからセットするので、この処理は廃棄
+*    CONCATENATE GF_VBAK_AP-VDATU+4(2)
+*                '/'
+*                GF_VBAK_AP-VDATU+6(2)
+*                INTO KAKO_VDATU.
+*
+*    GF_WRITE_A-ZLKAITOU = KAKO_VDATU.
+* 2009/10/20 DEL END
+
+* 2002/01/23  PSD k.igarashi  ADD ↓
+*--- オ) 受注日付の設定
+*    CONCATENATE GF_VBAK_AP-BSTDK+4(2)
+*                '/'
+*                GF_VBAK_AP-BSTDK+6(2)
+*                INTO KAKO_BSTDK.
+*    GF_WRITE_A-ZJUDAY = KAKO_BSTDK.
+
+CONCATENATE GF_VBAK_AP-AUDAT+4(2)
+'/'
+GF_VBAK_AP-AUDAT+6(2)
+INTO KAKO_BSTDK.
+GF_WRITE_A-ZJUDAY = KAKO_BSTDK.
+*---APPEND START PSD T.SAITOH 2002/09/12 ---------------------------*
+* 受注日フル桁対応
+GF_WRITE_A-ZZJUDAY = GF_VBAK_AP-AUDAT.
+*---APPEND END   PSD T.SAITOH 2002/09/12 ---------------------------*
+* 2002/01/23  PSD k.igarashi  ADD ↑
+
+*--- カ) 非表示用項目の設定
+* (ⅰ) 非加工項目の設定
+GF_WRITE_A-MATNR  = GF_VBAK_AP-MATNR.
+GF_WRITE_A-KDMAT  = GF_VBAK_AP-KDMAT.
+GF_WRITE_A-NETWR  = GF_VBAK_AP-NETWR.
+GF_WRITE_A-WAERS  = GF_VBAK_AP-WAERK.
+GF_WRITE_A-AUART  = GF_VBAK_AP-AUART.
+* 2002/01/30  PSD k.igarashi  ADD ↓
+*    GF_WRITE_A-STCUR  = GF_VBAK_AP-STCUR.
+GF_WRITE_A-STCUR  = GF_VBPA_KD-KURSK.
+* 2002/01/30  PSD k.igarashi  ADD ↑
+GF_WRITE_A-KBMENG = GF_VBAK_AP-KBMENG.
+
+* 2002/01/09  PSD k.igarashi  ADD ↓
+** (ⅱ) 受注金額(円建て)の設定
+*    GF_WRITE_A-ZNETWR = GF_WRITE_A-NETWR * GF_WRITE_A-STCUR.
+
+** (ⅲ) 原価(円建て)の設定
+*    GF_WRITE_A-ZGYEN = GF_VBAK_AP-WAVWR * GF_WRITE_A-STCUR.
+*      WHEN 4.
+*        MESSAGE S600(Z1) WITH text-024.
+*        STOP.
+*      WHEN 8.
+*        MESSAGE A603(Z1) WITH SY-REPID CNS_VBAK_VBAP SY-SUBRC.
+*    ENDCASE.
+
+* (ⅱ) 受注金額(円建て)の設定
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY          = GF_VBAK_AP-WAERK
+SAP_AMOUNT        = GF_VBAK_AP-NETWR
+IMPORTING
+IDOC_AMOUNT       = EN_JKINGAKU.
+
+GF_WRITE_A-ZNETWR = EN_JKINGAKU * GF_WRITE_A-STCUR.
+
+* (ⅲ) 原価(円建て)の設定
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY          = GF_VBAK_AP-WAERK
+SAP_AMOUNT        = GF_VBAK_AP-WAVWR
+IMPORTING
+IDOC_AMOUNT       = EN_GENKA.
+* 2002/02/01  PSD k.igarashi  ADD ↓
+*    GF_WRITE_A-ZGYEN = EN_GENKA * GF_WRITE_A-STCUR.
+* ↓APPEND 2002/02/08 PSD M.Arai 0除算ﾁｪｯｸ追加
+*    GF_WRITE_A-ZGYEN = EN_GENKA / GF_VBAK_AP-KBMENG * GF_WRITE_A-STCUR.
+IF GF_VBAK_AP-KBMENG = 0 OR
+GF_WRITE_A-STCUR  = 0.
+GF_WRITE_A-ZGYEN = 0.
+ELSE.
+GF_WRITE_A-ZGYEN = EN_GENKA / GF_VBAK_AP-KBMENG
+* GF_WRITE_A-STCUR.
+ENDIF.
+* 2002/02/01  PSD k.igarashi  ADD ↑
+
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-024.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_VBAK_VBAP SY-SUBRC.
+ENDCASE.
+* 2002/01/09  PSD k.igarashi  ADD ↑
+
+ENDFORM.                    " frm_set_info_1j
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1k
+*&---------------------------------------------------------------------*
+*       2-3-①-(k)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1K.
+
+* 2002/01/14  PSD k.igarashi  ADD ↓
+*    SELECT SINGLE
+*      b~EBELN b~EBELP b~MENGE c~LLIEF
+*     INTO CORRESPONDING FIELDS OF GF_VBEP_EKPO
+*     FROM VBEP AS a INNER JOIN EKPO        AS b
+*      ON a~BANFN = b~EBELN AND
+*         a~BNFPO = b~EBELP INNER JOIN EKKO AS c
+*      ON b~EBELN = c~EBELN
+*     WHERE a~VBELN = GF_BUNSEKI_A-VBELN
+*     AND   a~POSNR = GF_BUNSEKI_A-POSNR
+*     AND   a~ETENR = '0001'.
+
+*    SELECT SINGLE
+*      b~EBELN b~EBELP b~MENGE b~EVERS c~LLIEF
+*     INTO CORRESPONDING FIELDS OF GF_VBEP_EKPO
+*     FROM VBEP AS a INNER JOIN EKPO        AS b
+*      ON a~BANFN = b~BANFN AND
+*         a~BNFPO = b~BNFPO INNER JOIN EKKO AS c
+*      ON b~EBELN = c~EBELN
+*     WHERE a~VBELN = GF_BUNSEKI_A-VBELN
+*     AND   a~POSNR = GF_BUNSEKI_A-POSNR
+*     AND   a~ETENR = '0001'.
+* 2002/01/14  PSD k.igarashi  ADD ↑
+
+* 2002/12/26  PSD k.igarashi  ADD ↓
+*    SELECT SINGLE
+*      b~EBELN b~EBELP b~MENGE b~EVERS c~LLIEF
+*     INTO CORRESPONDING FIELDS OF GF_VBEP_EKPO
+*     FROM VBEP AS a INNER JOIN EKPO        AS b
+*      ON a~BANFN = b~BANFN AND
+*         a~BNFPO = b~BNFPO INNER JOIN EKKO AS c
+*      ON b~EBELN = c~EBELN
+*     WHERE a~VBELN = GF_BUNSEKI_A-VBELN
+*     AND   a~POSNR = GF_BUNSEKI_A-POSNR
+*     AND   a~ETENR = '0001'.
+
+*    SELECT SINGLE
+*      c~EBELN c~EBELP c~MENGE c~EVERS d~LLIEF
+*     INTO CORRESPONDING FIELDS OF GF_VBEP_EKPO
+*     FROM VBEP AS a INNER JOIN EKET        AS b
+*      ON a~BANFN = b~BANFN AND
+*         a~BNFPO = b~BNFPO INNER JOIN EKPO AS c
+*      ON b~EBELN = c~EBELN AND
+*         b~EBELP = c~EBELP INNER JOIN EKKO AS d
+*      ON c~EBELN = d~EBELN
+*     WHERE a~VBELN = GF_BUNSEKI_A-VBELN
+*     AND   a~POSNR = GF_BUNSEKI_A-POSNR
+*     AND   a~ETENR = '0001'
+*     AND   b~ETENR = '0001'
+*     AND   a~BANFN <> ' '.
+* 2002/12/26  PSD k.igarashi  ADD ↑
+
+* 2002/01/09  PSD k.igarashi  ADD ↓
+*    SELECT SINGLE
+*      c~EBELN c~EBELP c~MENGE c~EVERS d~LLIEF
+*     INTO CORRESPONDING FIELDS OF GF_VBEP_EKPO
+*     FROM VBEP AS a INNER JOIN EKET        AS b
+*      ON a~BANFN = b~BANFN AND
+*         a~BNFPO = b~BNFPO INNER JOIN EKPO AS c
+*      ON b~EBELN = c~EBELN AND
+*         b~EBELP = c~EBELP INNER JOIN EKKO AS d
+*      ON c~EBELN = d~EBELN
+*     WHERE a~VBELN = GF_BUNSEKI_A-VBELN
+*     AND   a~POSNR = GF_BUNSEKI_A-POSNR
+*     AND   a~ETENR = '0001'
+*     AND   b~ETENR = '0001'
+*     AND   a~BANFN <> ' '.
+
+
+SELECT SINGLE
+C~EBELN C~EBELP C~MENGE C~EVERS D~LIFNR
+INTO CORRESPONDING FIELDS OF GF_VBEP_EKPO
+FROM VBEP AS A INNER JOIN EKET        AS B
+ON A~BANFN = B~BANFN AND
+A~BNFPO = B~BNFPO INNER JOIN EKPO AS C
+ON B~EBELN = C~EBELN AND
+B~EBELP = C~EBELP INNER JOIN EKKO AS D
+ON C~EBELN = D~EBELN
+WHERE A~VBELN = GF_BUNSEKI_A-VBELN
+AND   A~POSNR = GF_BUNSEKI_A-POSNR
+AND   A~ETENR = '0001'
+AND   B~ETENR = '0001'
+AND   A~BANFN <> ' '.
+* 2002/01/09  PSD k.igarashi  ADD ↑
+
+CASE SY-SUBRC.
+WHEN 0.
+PERFORM FRM_SET_INFO_1K_STEP1.
+WHEN 4.
+GF_VBEP_EKPO-EBELN = ' '.    "購買発注伝票
+GF_VBEP_EKPO-EBELP = ' '.    "購買発注明細
+GF_VBEP_EKPO-MENGE = ' '.    "発注数量
+PERFORM FRM_SET_INFO_1K_STEP1.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_VBEP_EKPO_EKKO SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_set_info_1k
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1k_step1
+*&---------------------------------------------------------------------*
+*       2-3-①-(k)-(ア)(イ)(ウ)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1K_STEP1.
+
+*--- ア) 発注番号、発注明細の設定
+GF_WRITE_A-EBELN = GF_VBEP_EKPO-EBELN.
+GF_WRITE_A-EBELP = GF_VBEP_EKPO-EBELP.
+GF_WRITE_A-EVERS = GF_VBEP_EKPO-EVERS.
+
+* 2009/10/20 ADD START
+*-- 発注明細テキストから、仕入先回答納期を取得
+PERFORM GET_ZLKAITOU.
+* 2009/10/20 ADD END
+
+*--- イ) 発注残数、発注数量(非表示)、入庫在庫(非表示)の設定
+SELECT SUM( WEMNG )
+INTO NYUKOSU
+FROM EKET
+WHERE EBELN = GF_WRITE_A-EBELN
+AND   EBELP = GF_WRITE_A-EBELP.
+
+CASE SY-SUBRC.
+WHEN 0.
+PERFORM FRM_SET_INFO_1K_STEP2.
+WHEN 4.
+NYUKOSU = 0.
+PERFORM FRM_SET_INFO_1K_STEP2.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_EKET SY-SUBRC.
+ENDCASE.
+
+* 2002/01/09  PSD k.igarashi  ADD ↓
+** (ウ) 仕入先の設定
+*  SELECT SINGLE NAME1 FROM LFA1
+*    INTO SHIIRESAKI
+*    WHERE LIFNR = GF_VBEP_EKPO-LLIEF.
+*
+*  CASE SY-SUBRC.
+*    WHEN 0.
+*      GF_WRITE_A-ZLNAME = SHIIRESAKI.
+*    WHEN 4.
+**      MESSAGE S600(Z1) WITH text-022.    "暫定的コメント
+*    WHEN 8.
+*      MESSAGE A603(Z1) WITH SY-REPID CNS_LFA1 SY-SUBRC.
+*  ENDCASE.
+
+* (ウ) 仕入先の設定
+SELECT SINGLE NAME1 FROM LFA1
+INTO SHIIRESAKI
+WHERE LIFNR = GF_VBEP_EKPO-LIFNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE_A-ZLNAME = SHIIRESAKI.
+WHEN 4.
+*      MESSAGE S600(Z1) WITH text-022.    "暫定的コメント
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_LFA1 SY-SUBRC.
+ENDCASE.
+* 2002/01/09  PSD k.igarashi  ADD ↑
+
+ENDFORM.                    " frm_set_info_1kstep1
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1k_step2
+*&---------------------------------------------------------------------*
+*       2-3-①-(k)-(イ) 発注残数、発注数量、入庫数量の設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1K_STEP2.
+
+* (ⅰ) 発注残数
+GF_WRITE_A-HZNUM = GF_VBEP_EKPO-MENGE - NYUKOSU.
+* (ⅱ) 発注数量
+GF_WRITE_A-ZHMENGE = GF_VBEP_EKPO-MENGE.
+* (ⅲ) 入庫数量
+GF_WRITE_A-ZHWEMNG = NYUKOSU.
+* (ⅳ) 発注先コード
+GF_WRITE_A-LIFNR = GF_VBEP_EKPO-LIFNR.
+
+ENDFORM.                    " frm_set_info_1k_step2
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1l
+*&---------------------------------------------------------------------*
+*       2-3-①-(l)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1L.
+
+CONCATENATE GF_BUNSEKI_A-NOUKI+4(2)
+'/'
+GF_BUNSEKI_A-NOUKI+6(2)
+INTO KIBOHNOUKI.
+GF_WRITE_A-ZKIBOU = KIBOHNOUKI.
+*---APPEND START PSD T.SAITOH 2002/09/12 ---------------------------*
+* 希望納期フル桁設定
+GF_WRITE_A-ZZKIBOU = GF_BUNSEKI_A-NOUKI.
+*---APPEND END   PSD T.SAITOH 2002/09/12 ---------------------------*
+
+ENDFORM.                    " frm_set_info_1l
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_1m
+*&---------------------------------------------------------------------*
+*       2-3-①-(m)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_1M.
+
+* 出荷指示備考のテキスト格納用内部ＴＢＬ
+DATA: LF_TEXT LIKE TLINE,
+LT_TEXT LIKE TABLE OF LF_TEXT.
+DATA: NAME  LIKE THEAD-TDNAME.
+
+CONCATENATE GF_BUNSEKI_A-VBELN
+GF_BUNSEKI_A-POSNR
+INTO NAME.
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID                      = '9001'
+LANGUAGE                = 'J'
+NAME                    = NAME
+OBJECT                  = 'VBBP'
+TABLES
+LINES                   = LT_TEXT
+EXCEPTIONS
+ID                       = 1
+LANGUAGE                 = 2
+NAME                     = 3
+NOT_FOUND                = 4
+OBJECT                   = 5
+REFERENCE_CHECK          = 6
+WRONG_ACCESS_TO_ARCHIVE  = 7
+OTHERS                   = 8.
+
+CASE SY-SUBRC.
+WHEN 0.
+READ TABLE LT_TEXT INTO LF_TEXT INDEX 1.
+GF_WRITE_A-ZSETC = LF_TEXT-TDLINE+0(40).
+WHEN 4.
+WHEN OTHERS.
+MESSAGE E001(Z1) WITH CNS_READTXT SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_set_info_1m
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_2a
+*&---------------------------------------------------------------------*
+*       2-3-②･③-(a)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_2A.
+
+CASE CNS_X.
+WHEN R_ZENSHA.
+GF_WRITE_B-ZLISTID = '2'.                            "帳票ＩＤ
+WHEN R_EIGYOS.
+GF_WRITE_B-ZLISTID = '3'.                            "帳票ＩＤ
+ENDCASE.
+
+ENDFORM.                    " frm_set_info_2a
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_2b
+*&---------------------------------------------------------------------*
+*       2-3-②･③-(b)(営業所コード・営業所名の設定)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_2B.
+
+READ TABLE GT_EIGYOUSHO WITH KEY VKBUR = GF_BUNSEKI_B-VKBUR
+INTO GF_EIGYOUSHO.
+
+GF_WRITE_B-VKBUR = GF_EIGYOUSHO-VKBUR.          "営業所コード
+GF_WRITE_B-BUBZI = GF_EIGYOUSHO-BEZEI.         "営業所名
+
+ENDFORM.                    " frm_set_info_2b
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_2c
+*&---------------------------------------------------------------------*
+*       2-3-③-(c)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_2C.
+
+READ TABLE GT_EIGYOUGRP WITH KEY VKGRP = GF_BUNSEKI_B-VKGRP
+INTO GF_EIGYOUGRP.
+*   営業グループ
+GF_WRITE_B-VKGRP = GF_EIGYOUGRP-VKGRP.
+*   営業グループテキスト
+GF_WRITE_B-GRBZI = GF_EIGYOUGRP-BEZEI.
+
+ENDFORM.                    " frm_set_info_2c
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_2d
+*&---------------------------------------------------------------------*
+*       2-3-②･③-(d)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_2D.
+
+DATA: LOOP_CNT TYPE P VALUE 1.
+*--- APPEND PSD K.ARAI 2002/05/24
+DATA: L_NETIMP  LIKE WMTO_S-AMOUNT, " 受注単価
+L_NETINT  LIKE WMTO_S-AMOUNT.
+*--- APPEND END
+
+*--- MODIFY PSD K.ARAI 2002/05/24
+L_NETINT = GF_BUNSEKI_B-NETPR.
+*--- 受注単価の取得
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+EXPORTING
+CURRENCY              = GF_BUNSEKI_B-WAERK
+AMOUNT_INTERNAL       = L_NETINT
+IMPORTING
+AMOUNT_DISPLAY         = L_NETIMP
+EXCEPTIONS
+INTERNAL_ERROR        = 1
+OTHERS                = 2
+.
+IF SY-SUBRC <> 0.
+MESSAGE A502(Z1) WITH 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+SY-SUBRC.
+ENDIF.
+
+L_NETIMP = L_NETIMP / GF_BUNSEKI_B-KPEIN .
+
+*--- (ア) 受注残金額の取得
+*---MODIFY START PSD T.SAITOH 2002/08/30 ---------------------------*
+* 受注残金額 = (受注数量 - 出荷済数量 - 売上済数量) × 受注単価(外貨)
+*                                                   × 換算レート
+*  H_JZANKINGAKU = ( GF_BUNSEKI_B-JUCHU - GF_BUNSEKI_B-MSHUKKO
+*                   - GF_BUNSEKI_B-SEIKYU ) * L_NETIMP
+*                   * GF_BUNSEKI_B-STCUR.
+
+* 受注残金額 = (受注数量 - 売上済数量) × 受注単価(外貨)
+*                                    × 換算レート
+H_JZANKINGAKU = ( GF_BUNSEKI_B-JUCHU
+-   GF_BUNSEKI_B-SEIKYU ) * L_NETIMP
+*   GF_BUNSEKI_B-STCUR.
+
+*---MODIFY END   PSD T.SAITOH 2002/08/30 ---------------------------*
+
+* 伝票タイプが'RE''ZRE''KR'のときはマイナス１をかける
+IF  ( GF_BUNSEKI_B-AUART = CNS_RE
+OR GF_BUNSEKI_B-AUART = CNS_KR
+OR GF_BUNSEKI_B-AUART = CNS_ZRE ).
+H_JZANKINGAKU = H_JZANKINGAKU * -1 .
+ENDIF.
+*  JZANKINGAKU = GF_BUNSEKI_B-KINGAKU1 - GF_BUNSEKI_B-KINGAKU5.
+*--- MODIFY END
+
+*--- DELETE PSD K.ARAI 2002/05/24
+**--- (イ) 受注残金額の価格変換
+*CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+*  EXPORTING
+*    CURRENCY          = GF_BUNSEKI_B-WAERK
+*    SAP_AMOUNT        = JZANKINGAKU
+* IMPORTING
+*   IDOC_AMOUNT       = I_JZANKINGAKU.
+**--- (ウ) 邦貨換算
+*    H_JZANKINGAKU = I_JZANKINGAKU * GF_BUNSEKI_B-STCUR.
+*--- DELETE END
+
+*--- (エ) 受注残金額対象月の設定
+* 対象月の設定(１)
+YEARS = SY-DATUM.  "GF_BUNSEKI_B-EDATU."+6(2).
+
+DO.
+CASE LOOP_CNT.
+WHEN 1.
+YEARS+6(2) = 1.
+YEARS_1 = YEARS + 31.
+WHEN 2.
+YEARS_1+6(2) = 1.
+YEARS_2 = YEARS_1 + 31.
+WHEN 3.
+YEARS_2+6(2) = 1.
+YEARS_3 = YEARS_2 + 31.
+ENDCASE.
+
+LOOP_CNT = LOOP_CNT + 1.
+
+IF LOOP_CNT = 4.
+EXIT.
+ENDIF.
+
+ENDDO.
+***********************************************************************
+* 受注残金額(邦貨)の設定
+IF GF_BUNSEKI_B-EDATU+0(6) < SY-DATUM+0(6).                  "前月以前
+LM_ZANKIN = H_JZANKINGAKU.
+ELSEIF GF_BUNSEKI_B-EDATU+0(6) = SY-DATUM+0(6).                  "当月
+TM_ZANKIN = H_JZANKINGAKU.
+ELSEIF GF_BUNSEKI_B-EDATU+0(6) = YEARS_1+0(6).                   "翌月
+N1M_ZANKIN = H_JZANKINGAKU.
+ELSEIF GF_BUNSEKI_B-EDATU+0(6) = YEARS_2+0(6).                 "翌々月
+N2M_ZANKIN = H_JZANKINGAKU.
+ELSEIF GF_BUNSEKI_B-EDATU+0(6) = YEARS_3+0(6).               "翌々翌月
+N3M_ZANKIN = H_JZANKINGAKU.
+ELSEIF GF_BUNSEKI_B-EDATU+0(6) > YEARS_3+0(6).           "翌々翌月以降
+N4M_ZANKIN = H_JZANKINGAKU.
+ENDIF.
+
+************************************************************************
+** 翌月の設定
+*  YEARS = GF_BUNSEKI_B-EDATU."+6(2).
+*
+*  DO.
+*    CASE LOOP_CNT.
+*      WHEN 1.
+*        YEARS+6(2) = 1.
+*        YEARS_1 = YEARS + 31.
+*      WHEN 2.
+*        YEARS_1+6(2) = 1.
+*        YEARS_2 = YEARS_1 + 31.
+*      WHEN 3.
+*        YEARS_2+6(2) = 1.
+*        YEARS_3 = YEARS_2 + 31.
+*    ENDCASE.
+*
+*    LOOP_CNT = LOOP_CNT + 1.
+*
+*    IF LOOP_CNT = 4.
+*      EXIT.
+*    ENDIF.
+*
+*  ENDDO.
+*
+* 受注残金額(邦貨)の設定
+*  IF GF_BUNSEKI_B-EDATU+0(6) < SY-DATUM+0(6).       "前月以前
+*      LM_ZANKIN = H_JZANKINGAKU.
+*  ELSEIF GF_BUNSEKI_B-EDATU+0(6) = SY-DATUM+0(6).   "当月
+*      TM_ZANKIN = H_JZANKINGAKU.
+*  ELSEIF YEARS_1+0(6) = SY-DATUM+0(6).              "翌月
+*      N1M_ZANKIN = H_JZANKINGAKU.
+*  ELSEIF YEARS_2+0(6) = SY-DATUM+0(6).              "翌々月
+*      N2M_ZANKIN = H_JZANKINGAKU.
+*  ELSEIF YEARS_3+0(6) = SY-DATUM+0(6).              "翌々翌月
+*      N3M_ZANKIN = H_JZANKINGAKU.
+*  ELSEIF YEARS_3+0(6) > SY-DATUM+0(6).              "翌々翌月以降
+*      N4M_ZANKIN = H_JZANKINGAKU.
+*  ENDIF.
+
+*--- (オ) 合計の設計
+GF_WRITE_B-ZGOUKEI = H_JZANKINGAKU.               "合計
+
+ENDFORM.                    " frm_set_info_2d
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_info_2e
+*&---------------------------------------------------------------------*
+*       2-3-②･③-(e)
+*----------------------------------------------------------------------*
+FORM FRM_SET_INFO_2E.
+
+* 帳票(会社・営業所)データ格納用ローカルオブジェクト
+DATA: LF_WRITE_B LIKE GF_WRITE_B.
+
+* 初期化処理
+CLEAR: LF_WRITE_B-ZZENIZEN,
+LF_WRITE_B-ZTOUGETU,
+LF_WRITE_B-ZYOKGETU,
+LF_WRITE_B-ZYYKGETU,
+LF_WRITE_B-ZYYYGETU,
+LF_WRITE_B-ZYYYIKOU.
+
+CASE CNS_X.
+WHEN R_ZENSHA.      "全社選択時
+READ TABLE GT_WRITE_B WITH KEY VKBUR = GF_BUNSEKI_B-VKBUR
+INTO LF_WRITE_B.
+WHEN R_EIGYOS.      "営業所選択時
+READ TABLE GT_WRITE_B WITH KEY
+VKBUR = GF_BUNSEKI_B-VKBUR
+VKGRP = GF_BUNSEKI_B-VKGRP INTO LF_WRITE_B.
+ENDCASE.
+
+CASE SY-SUBRC.
+*--- (イ) データあり
+
+WHEN 0.
+GF_WRITE_B-ZZENIZEN  = LM_ZANKIN + LF_WRITE_B-ZZENIZEN.
+GF_WRITE_B-ZTOUGETU  = TM_ZANKIN + LF_WRITE_B-ZTOUGETU.
+GF_WRITE_B-ZYOKGETU = N1M_ZANKIN + LF_WRITE_B-ZYOKGETU.
+GF_WRITE_B-ZYYKGETU = N2M_ZANKIN + LF_WRITE_B-ZYYKGETU.
+GF_WRITE_B-ZYYYGETU = N3M_ZANKIN + LF_WRITE_B-ZYYYGETU.
+GF_WRITE_B-ZYYYIKOU = N4M_ZANKIN + LF_WRITE_B-ZYYYIKOU.
+GF_WRITE_B-ZGOUKEI  = GF_WRITE_B-ZGOUKEI + LF_WRITE_B-ZGOUKEI.
+
+MODIFY TABLE GT_WRITE_B FROM GF_WRITE_B.
+*--- (ア) データ無し
+WHEN 4.
+GF_WRITE_B-ZZENIZEN  = LM_ZANKIN.
+GF_WRITE_B-ZTOUGETU  = TM_ZANKIN.
+GF_WRITE_B-ZYOKGETU = N1M_ZANKIN.
+GF_WRITE_B-ZYYKGETU = N2M_ZANKIN.
+GF_WRITE_B-ZYYYGETU = N3M_ZANKIN.
+GF_WRITE_B-ZYYYIKOU = N4M_ZANKIN.
+
+APPEND GF_WRITE_B TO GT_WRITE_B.
+ENDCASE.
+
+ENDFORM.                    " frm_set_info_2e
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_ichiran_a
+*&---------------------------------------------------------------------*
+*       2-4-① 帳票出力処理
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_ICHIRAN_A.
+
+* ＡＬＶ改ページ関連処理
+PERFORM FRM_ALV_PAGE_NEXT.
+
+* 初期設定
+GF_REPID = SY-REPID.
+
+* ページ切り替え設定
+GF_LAYOUT-GROUP_CHANGE_EDIT = CNS_JA.
+
+CASE CNS_X.
+WHEN R_EIGYOG.
+GF_VARIANT-VARIANT = '/ZS010800_01'.           "営業グループ選択時
+WHEN R_EIGYOI.
+GF_VARIANT-VARIANT = '/ZS010800_02'.                 "営業員選択時
+ENDCASE.
+
+* 2002/01/23  PSD k.igarashi  ADD ↓
+*--- 内部テーブル変換処理
+GT_ALV_A[] = GT_WRITE_A[].
+* 2002/01/23  PSD k.igarashi  ADD ↑
+
+* 2002/01/17  PSD k.igarashi  ADD ↓
+GF_LAYOUT-TOTALS_TEXT = '合計'.
+* 2002/01/17  PSD k.igarashi  ADD ↑
+
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定---*
+GF_PRINT-NO_PRINT_LISTINFOS = CNS_X.
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+
+* 帳票の出力
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM             = GF_REPID              "レポートID
+*      I_CALLBACK_TOP_OF_PAGE         = TOP_OF_PAGE          "G_HEAD_FRM
+I_STRUCTURE_NAME               = 'ZSLIST_V08_05'   "030528 変更
+*     I_STRUCTURE_NAME               = 'ZSLIST_V08_01'   "構造
+IS_LAYOUT                      = GF_LAYOUT         "レイアウト設定
+*      IT_FIELDCAT                    = GT_FIELDCAT[]      "カタログ設定
+I_SAVE                         = 'A'               "レイアウト保存
+IS_VARIANT                     = GF_VARIANT
+IT_EVENTS                      = GT_EVENT[]          "イベント設定
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定----*
+IS_PRINT                       = GF_PRINT      "印刷設定
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+TABLES
+* 2002/01/10  PSD k.igarashi  ADD ↓
+*      T_OUTTAB                       = GT_WRITE_A          "TABLE_TYPE
+T_OUTTAB                       = GT_ALV_A            "TABLE_TYPE
+* 2002/01/10  PSD k.igarashi  ADD ↑
+EXCEPTIONS
+PROGRAM_ERROR                  = 1
+OTHERS                         = 2.
+
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " frm_write_ichiran_a
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_ichiran_b
+*&---------------------------------------------------------------------*
+*       2-4-② 帳票出力処理
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_ICHIRAN_B.
+
+* ＡＬＶ改ページ関連処理
+PERFORM FRM_ALV_PAGE_NEXT.
+
+* 初期設定
+GF_REPID = SY-REPID.
+
+* ページ切り替え設定
+GF_LAYOUT-GROUP_CHANGE_EDIT = CNS_JA.
+
+* 2002/01/23  PSD k.igarashi  ADD ↓
+* レイアウト設定
+*  CASE CNS_X.
+*    WHEN R_ZENSHA.
+*      GF_VARIANT-VARIANT = '/ZS010800_03'.             "全社選択時
+*    WHEN R_EIGYOS.
+*      GF_VARIANT-VARIANT = '/ZS010800_04'.           "営業所選択時
+*  ENDCASE.
+
+IF R_ZENSHA = CNS_X.
+GF_VARIANT-VARIANT = '/ZS010800_03'.             "全社選択時
+ELSEIF R_EIGYOS = CNS_X.
+GF_VARIANT-VARIANT = '/ZS010800_04'.           "営業所選択時
+ENDIF.
+* 2002/01/23  PSD k.igarashi  ADD ↑
+
+
+* 2002/01/10  PSD k.igarashi  ADD ↓
+*--- 内部テーブル変換処理
+GT_ALV_B[] = GT_WRITE_B[].
+* 2002/01/10  PSD k.igarashi  ADD ↑
+
+* 2002/01/17  PSD k.igarashi  ADD ↓
+GF_LAYOUT-TOTALS_TEXT = '合計'.
+* 2002/01/17  PSD k.igarashi  ADD ↑
+
+* 帳票の出力
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM             = GF_REPID              "レポートID
+*      I_CALLBACK_TOP_OF_PAGE         = TOP_OF_PAGE           G_HEAD_FRM
+"030528 変更
+I_STRUCTURE_NAME               = 'ZSLIST_V08_06'   "030528 変更
+*      I_STRUCTURE_NAME               = 'ZSLIST_V08_02'      "構造
+IS_LAYOUT                      = GF_LAYOUT         "レイアウト設定
+*      IT_FIELDCAT                    = GT_FIELDCAT[]      "カタログ設定
+I_SAVE                         = 'A'               "レイアウト保存
+IS_VARIANT                     = GF_VARIANT
+IT_EVENTS                      = GT_EVENT[]        "イベント設定
+TABLES
+* 2002/01/10  PSD k.igarashi  ADD ↓
+*      T_OUTTAB                       = GT_WRITE_B         "TABLE_TYPE
+T_OUTTAB                       = GT_ALV_B          "TABLE_TYPE
+* 2002/01/10  PSD k.igarashi  ADD ↑
+EXCEPTIONS
+PROGRAM_ERROR                  = 1
+OTHERS                         = 2.
+
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " frm_write_ichiran_b
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ALV_PAGE_NEXT
+*&---------------------------------------------------------------------*
+*       4-① 改ページ関連処理
+*----------------------------------------------------------------------*
+FORM FRM_ALV_PAGE_NEXT.
+
+* 使用可能イベントのチェック
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE           = 0
+IMPORTING
+ET_EVENTS             = GT_EVENT  "使用可能なイベント取得
+EXCEPTIONS
+LIST_TYPE_WRONG       = 1
+OTHERS                = 2.
+
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+* 2002/01/10  PSD k.igarashi  ADD ↓
+** 使用イベントに実行するサブルーチン名を設定
+*  LOOP AT GT_EVENT INTO GS_EVENT WHERE NAME = CNS_TOP.
+*      GS_EVENT-FORM = CNS_FTOP.  "FRM_TOP_OF_PAGE
+*      MODIFY GT_EVENT FROM GS_EVENT.
+*  ENDLOOP.
+
+* 使用イベントに実行するサブルーチン名を設定
+LOOP AT GT_EVENT INTO GF_EVENT.
+CASE GF_EVENT-NAME.
+WHEN 'TOP_OF_PAGE'.
+GF_EVENT-FORM = 'FRM_TOP_OF_PAGE'.
+MODIFY GT_EVENT FROM GF_EVENT.
+WHEN 'CALLER_EXIT'.
+GF_EVENT-FORM = 'FRM_CALLER_EXIT'.
+MODIFY GT_EVENT FROM GF_EVENT.
+ENDCASE.
+ENDLOOP.
+* 2002/01/10  PSD k.igarashi  ADD ↑
+
+ENDFORM.                    " FRM_ALV_PAGE_NEXT
+*&---------------------------------------------------------------------*
+*&      Form  TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+*       帳票ヘッダ書き出し処理
+*----------------------------------------------------------------------*
+FORM FRM_TOP_OF_PAGE.
+
+DATA: L_SY-TABIX TYPE P.
+
+L_SY-TABIX = SY-TABIX.
+
+* 2002/01/10  PSD k.igarashi  ADD ↓
+** 帳票出力マスタからヘッダ情報取得
+*IF R_BALANC = CNS_X AND R_EIGYOG = CNS_X.
+** 1ページ目
+*  IF SY-PAGNO = 1.
+*    READ TABLE GT_WRITE_A INTO GF_HEADER_A INDEX 1.
+*    WRITE: 42 text-026.
+*    SKIP.
+*    WRITE: / text-019,':',GF_HEADER_A-VKBUR,'/',GF_HEADER_A-BUBZI,
+*             text-020,':',GF_HEADER_A-VKGRP,'/',GF_HEADER_A-GRBZI.
+* 2ページ目以降
+*  ELSEIF SY-PAGNO >= 2.
+*    READ TABLE GT_WRITE_A INTO GF_HEADER_A INDEX L_SY-TABIX.
+*    WRITE: 42 text-026.
+*    SKIP.
+*    WRITE: / text-019,':',GF_HEADER_A-VKBUR,'/',GF_HEADER_A-BUBZI,
+*             text-020,':',GF_HEADER_A-VKGRP,'/',GF_HEADER_A-GRBZI.
+*  ENDIF.
+*ELSEIF R_BALANC = CNS_X AND R_EIGYOI = CNS_X.
+** 1ページ目
+*  IF SY-PAGNO = 1.
+*    READ TABLE GT_WRITE_A INTO GF_HEADER_A INDEX 1.
+*    WRITE: 42 text-026.
+*    SKIP.
+*    WRITE: / text-019,':',GF_HEADER_A-VKBUR,'/',GF_HEADER_A-BUBZI,
+*             text-021,':',GF_HEADER_A-PERNR,'/',GF_HEADER_A-NACHN.
+** 2ページ目以降
+*  ELSEIF SY-PAGNO >= 2.
+*    READ TABLE GT_WRITE_A INTO GF_HEADER_A INDEX L_SY-TABIX.
+*    WRITE: 42 text-026.
+*    SKIP.
+*    WRITE: / text-019,':',GF_HEADER_A-VKBUR,'/',GF_HEADER_A-BUBZI,
+*             text-021,':',GF_HEADER_A-PERNR,'/',GF_HEADER_A-NACHN.
+*  ENDIF.
+*
+*ELSEIF R_ZENSHA = CNS_X.
+*  WRITE: 42 text-028.
+*  SKIP.
+*
+*ELSEIF R_EIGYOS = CNS_X.
+** 1ページ目
+*  IF SY-PAGNO = 1.
+*    READ TABLE GT_WRITE_B INTO GF_HEADER_B INDEX 1.
+*    WRITE :42 text-029.
+*    SKIP.
+*    WRITE: / text-019,':',GF_HEADER_B-VKBUR,'/',GF_HEADER_B-BUBZI.
+** 2ページ目以降
+*  ELSEIF SY-PAGNO >= 2.
+*    READ TABLE GT_WRITE_B INTO GF_HEADER_B INDEX L_SY-TABIX.
+*    WRITE :42 text-029.
+*    SKIP.
+*    WRITE: / text-019,':',GF_HEADER_B-VKBUR,'/',GF_HEADER_B-BUBZI.
+*  ENDIF.
+*
+*ENDIF.
+
+* 帳票出力マスタからヘッダ情報取得
+IF R_BALANC = CNS_X AND R_EIGYOG = CNS_X.
+* 1ページ目
+IF SY-PAGNO = 1.
+READ TABLE GT_ALV_A INTO GF_HEADER_A INDEX 1.
+WRITE: 42 TEXT-026.
+SKIP.
+WRITE: / TEXT-019,':',GT_ALV_A-VKBUR,'/',GT_ALV_A-BUBZI,
+TEXT-020,':',GT_ALV_A-VKGRP,'/',GT_ALV_A-GRBZI.
+
+* 2ページ目以降
+ELSEIF SY-PAGNO >= 2.
+READ TABLE GT_ALV_A INTO GF_HEADER_A INDEX L_SY-TABIX.
+WRITE: 42 TEXT-026.
+SKIP.
+WRITE: / TEXT-019,':',GT_ALV_A-VKBUR,'/',GT_ALV_A-BUBZI,
+TEXT-020,':',GT_ALV_A-VKGRP,'/',GT_ALV_A-GRBZI.
+ENDIF.
+
+ELSEIF R_BALANC = CNS_X AND R_EIGYOI = CNS_X.
+* 1ページ目
+IF SY-PAGNO = 1.
+READ TABLE GT_ALV_A INTO GF_HEADER_A INDEX 1.
+WRITE: 42 TEXT-026.
+SKIP.
+WRITE: / TEXT-019,':',GT_ALV_A-VKBUR,'/',GT_ALV_A-BUBZI,
+TEXT-021,':',GT_ALV_A-PERNR,'/',GT_ALV_A-NACHN.
+* 2ページ目以降
+ELSEIF SY-PAGNO >= 2.
+READ TABLE GT_ALV_A INTO GF_HEADER_A INDEX L_SY-TABIX.
+WRITE: 42 TEXT-026.
+SKIP.
+WRITE: / TEXT-019,':',GT_ALV_A-VKBUR,'/',GT_ALV_A-BUBZI,
+TEXT-021,':',GT_ALV_A-PERNR,'/',GT_ALV_A-NACHN.
+ENDIF.
+
+ELSEIF R_ZENSHA = CNS_X.
+WRITE: 42 TEXT-028.
+SKIP.
+
+ELSEIF R_EIGYOS = CNS_X.
+* 1ページ目
+IF SY-PAGNO = 1.
+READ TABLE GT_ALV_B INTO GF_HEADER_B INDEX 1.
+WRITE :42 TEXT-029.
+SKIP.
+WRITE: / TEXT-019,':',GT_ALV_B-VKBUR,'/',GT_ALV_B-BUBZI.
+* 2ページ目以降
+ELSEIF SY-PAGNO >= 2.
+
+*- 2002/01/23  PSD k.igarashi  ADD ↓
+*    READ TABLE GT_ALV_B INTO GT_ALV_B INDEX L_SY-TABIX.
+READ TABLE GT_ALV_B INTO GF_HEADER_B INDEX L_SY-TABIX.
+*- 2002/01/23  PSD k.igarashi  ADD ↑
+
+WRITE :42 TEXT-029.
+SKIP.
+WRITE: / TEXT-019,':',GT_ALV_B-VKBUR,'/',GT_ALV_B-BUBZI.
+ENDIF.
+
+ENDIF.
+* 2002/01/10  PSD k.igarashi  ADD ↑
+
+*---APPEND START PSD T.SAITOH 2002/08/08 ---------------------------*
+*   ページ番号付加
+WRITE: 120 'PAGE:',SY-PAGNO."<<< 2002/08/15 修正
+*---APPEND END   PSD T.SAITOH 2002/08/08 ---------------------------*
+
+ENDFORM.
+
+************************************************************************
+* ALV CALLER_EXIT（ 2002/01/10 PSD K.IGARASHI 追加 START ）
+***********************************************************************
+FORM FRM_CALLER_EXIT USING RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+RS_DATA-CALLBACK_HEADER_TRANSPORT = 'FILITEXTS_TEXT_TRANSPORT'.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_VBKD_KURSK
+*&---------------------------------------------------------------------*
+*       換算レートの取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_VBKD_KURSK.
+SELECT SINGLE KURSK
+FROM VBKD
+INTO GF_VBAK_AP-STCUR
+WHERE VBELN = GF_BUNSEKI_A-VBELN.
+
+ENDFORM.                    " FRM_GET_VBKD_KURSK
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_ORDER_ACOUNT
+*&---------------------------------------------------------------------*
+*       追加：受注残金額の設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_ORDER_ACOUNT.
+
+DATA:L_KINGAKU1(9) TYPE P,"受注金額
+L_KINGAKU5(9) TYPE P."売上済み金額
+
+* 各金額を価格変換
+PERFORM FRM_KINGAKU_HENKAN USING    GF_BUNSEKI_A-WAERK
+GF_BUNSEKI_A-KINGAKU1
+CHANGING L_KINGAKU1.
+PERFORM FRM_KINGAKU_HENKAN USING    GF_BUNSEKI_A-WAERK
+GF_BUNSEKI_A-KINGAKU5
+CHANGING L_KINGAKU5.
+
+*--- (ア) 受注残金額の計算
+H_JZANKINGAKU = L_KINGAKU1 "受注金額
+- L_KINGAKU5."売上済金額
+
+* 伝票タイプが'RE''ZRE''KR'のときはマイナス１をかける
+IF  ( GF_BUNSEKI_A-AUART = CNS_RE
+OR GF_BUNSEKI_A-AUART = CNS_KR
+OR GF_BUNSEKI_A-AUART = CNS_ZRE ).
+H_JZANKINGAKU = H_JZANKINGAKU * -1 .
+ENDIF.
+
+*--- 受注残金額の設定
+GF_WRITE_A-ZGOUKEI = H_JZANKINGAKU.
+
+ENDFORM.                    " frm_set_info_2dのコピー
+*&---------------------------------------------------------------------*
+*&      Form  FRM_KINGAKU_HENKAN
+*&---------------------------------------------------------------------*
+*       金額変換処理
+*----------------------------------------------------------------------*
+*      -->P_TSUKACD  通貨コード
+*      -->P_KINGAKU  変換前金額
+*      <--P_HENKAN   変換後金額
+*----------------------------------------------------------------------*
+FORM FRM_KINGAKU_HENKAN USING    P_TSUKACD
+P_KINGAKU
+CHANGING P_HENKAN.
+DATA : L_AMOUNT_DIS TYPE WMTO_S-AMOUNT,
+L_AMOUNT_INT TYPE WMTO_S-AMOUNT.
+L_AMOUNT_INT = P_KINGAKU.
+*--- 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+EXPORTING
+CURRENCY        = P_TSUKACD
+AMOUNT_INTERNAL = L_AMOUNT_INT
+IMPORTING
+AMOUNT_DISPLAY  = L_AMOUNT_DIS
+EXCEPTIONS
+INTERNAL_ERROR  = 1
+OTHERS          = 2.
+IF SY-SUBRC <> 1.
+P_HENKAN = L_AMOUNT_DIS.
+ENDIF.
+
+ENDFORM.                    " FRM_KINGAKU_HENKAN
+
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+* 2009/10/20 ADD START
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZLKAITOU
+*&---------------------------------------------------------------------*
+*       仕入先回答納期取得
+*----------------------------------------------------------------------*
+FORM GET_ZLKAITOU.
+***ローカルＤＡＴＡ
+DATA: L_EBEELNEBELP1   LIKE  THEAD-TDNAME,
+LT_TLINE         LIKE  TABLE  OF  TLINE WITH HEADER LINE.
+
+CLEAR:L_EBEELNEBELP1.
+REFRESH: LT_TLINE.
+
+CONCATENATE GF_WRITE_A-EBELN GF_WRITE_A-EBELP
+INTO L_EBEELNEBELP1.
+
+***汎用モジュール
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID               = 'F04'
+LANGUAGE         = 'J'
+NAME             = L_EBEELNEBELP1
+OBJECT           = 'EKPO'
+TABLES
+LINES            = LT_TLINE
+EXCEPTIONS
+OTHERS           = 1.
+IF SY-SUBRC = 0.
+READ TABLE LT_TLINE INDEX 1.
+GF_WRITE_A-ZLKAITOU =  LT_TLINE-TDLINE.
+ENDIF.
+
+
+ENDFORM.                    " GET_ZLKAITOU
+* 2009/10/20 ADD END

@@ -1,0 +1,271 @@
+*&---------------------------------------------------------------------*
+*& Report  YTEST_ISID1001
+*&
+*&---------------------------------------------------------------------*
+*&
+*&
+*&---------------------------------------------------------------------*
+
+REPORT  YTEST_ISID1001.
+
+DATA: variant TYPE rsvar-variant.
+DATA : lv_rc TYPE i.
+DATA:
+lf_profilname TYPE shp_vl10_list_profilname
+, lf_progname         TYPE syrepid
+, lf_subrc            TYPE sysubrc
+, lx_list_profil      TYPE shp_vl10_list_profil
+, ls_t186v            TYPE t186v.     "Verkn#pfung Szenario-Listprofil
+
+INITIALIZATION.
+
+*CALL FUNCTION 'SHP_VL10_PRESTEP'
+*       EXPORTING IF_SZENARIO = '0103'.
+
+
+* Get List-Profil-data if given or from default values
+PERFORM profil_data_complete USING    '0103'
+lf_profilname
+CHANGING ls_t186v
+lx_list_profil.
+* Save Listprofil due to submit
+CALL FUNCTION 'SHP_LIST_PROFIL_SET'
+EXPORTING ix_list_profil = lx_list_profil.
+
+
+variant = 'CUS&0001'.
+SUBMIT  RVV50R10C USING SELECTION-SET variant
+WITH p_szena  = '0103'
+VIA SELECTION-SCREEN.
+
+
+*----------------------------------------------------------------------*
+***INCLUDE LV50R_PREF04 .
+*----------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  PROFIL_DATA_COMPLETE
+*&---------------------------------------------------------------------*
+FORM profil_data_complete
+USING    if_szenario    TYPE shp_vl10_szenario
+if_profilname  TYPE shp_vl10_list_profilname
+CHANGING cs_t186v       TYPE t186v
+cx_list_profil TYPE shp_vl10_list_profil.
+
+DATA:
+lf_subrc                   TYPE sysubrc
+, lf_user_variant            TYPE variant
+, lf_parameter_name(20)                 "f#r user-variant
+, ls_t186c                   TYPE t186c "Steuerparameter aus szenario
+.
+
+* Determine szenario name
+PERFORM szenario_determine USING    if_szenario
+CHANGING cx_list_profil-szenario.
+* Determine szenario data
+PERFORM szenario_data_get USING    cx_list_profil-szenario
+CHANGING cs_t186v
+lf_subrc.
+IF lf_subrc = 1.
+*   Liefreszenario &1 fehlt (siehe Langtext)
+MESSAGE i011(v50r) WITH cx_list_profil-szenario
+RAISING no_szenario_no_default.
+EXIT.
+ENDIF.
+
+* add szenario-data to list_profil
+cx_list_profil-sel_screen      = cs_t186v-sel_screen.
+cx_list_profil-allow_user_role = cs_t186v-allow_user_role.
+cx_list_profil-create_profil   = cs_t186v-profil_create.
+
+* Determine user-role
+PERFORM user_role_determine USING    cx_list_profil-szenario
+if_profilname
+cs_t186v-allow_user_role
+CHANGING cs_t186v-profilname.
+
+IF NOT cs_t186v-profilname IS INITIAL.
+
+*   Determine user-role-data and delivery creation profil
+*   from given user role...
+CALL FUNCTION 'SHP_T186_SELECT_01'
+EXPORTING
+if_profilname   = cs_t186v-profilname
+CHANGING
+cs_t186         = cx_list_profil
+ct_fcodes       = cx_list_profil-fcodes
+ct_fcodes_allow = cx_list_profil-fcodes_allow.
+
+ELSEIF NOT cs_t186v-profilname IS INITIAL.
+
+*   if no user-role is given, take create profil from scenario
+*   e.g. szenario 2000, change delivery in picking update
+CALL FUNCTION 'SHP_T186C_SELECT_01'
+EXPORTING
+if_profilname    = cs_t186v-profil_create
+CHANGING
+cs_t186c         = ls_t186c
+EXCEPTIONS
+OTHERS           = 1.
+IF sy-subrc = 0.
+MOVE-CORRESPONDING ls_t186c TO cx_list_profil.
+ENDIF.
+
+ENDIF.
+
+* use default-selection-variant for VL10, if existant
+CONCATENATE 'LE_'
+cx_list_profil-szenario
+'_USER_VARIANT'
+INTO lf_parameter_name.
+
+GET PARAMETER ID lf_parameter_name FIELD lf_user_variant.
+
+IF NOT lf_user_variant IS INITIAL.
+cx_list_profil-user_variant = lf_user_variant.
+ENDIF.
+
+ENDFORM.                               " PROFIL_DATA_COMPLETE
+
+FORM szenario_determine
+USING    if_szenario                 TYPE shp_vl10_szenario
+CHANGING cf_szenario                 TYPE shp_vl10_szenario.
+
+DATA:
+lf_set_get_szenario TYPE shp_vl10_szenario
+, lf_parametername(20)
+.
+
+cf_szenario = if_szenario.
+
+
+CONCATENATE 'LE_' if_szenario '_SZENARIO'
+INTO  lf_parametername.
+
+* restriction to allowed szenario-redirections by Workbench through
+* definition of parameter ID's.
+* They are allowed only for standard szenarios VL10
+* see Workbench, function WB_OTHER_OBJECT
+* se80, other objects, tabstrip others/weitere SET/GET parameter id
+* LE_*_SZENARIO and press F4
+
+* Redirection of szenario doen't make much sense anymore, but in release
+* 4.6B and before it did, because there only scenario VL10 was
+* user-specific.
+* now all standard dialog scenarios for delivery creation
+* are user-specific on all three levels:
+* scenario, user-role, user-variant.
+
+GET PARAMETER ID    lf_parametername
+FIELD lf_set_get_szenario.
+
+IF NOT lf_set_get_szenario IS INITIAL.
+*   user spezific szenario, if maintained in parameter for this szenario
+cf_szenario = lf_set_get_szenario.
+ENDIF.
+
+ENDFORM.                               " SZENARIO_DETERMINE
+
+
+*&---------------------------------------------------------------------*
+*&      Form  User_role_DETERMINE
+*&---------------------------------------------------------------------*
+FORM user_role_determine
+USING    if_szenario                 TYPE shp_vl10_szenario
+if_user_role                TYPE shp_vl10_list_profilname
+if_allow_user_role
+CHANGING cf_user_role                TYPE shp_vl10_list_profilname.
+
+DATA:
+lf_set_get_user_role TYPE shp_vl10_list_profilname
+, lf_parametername(20)
+.
+
+
+* user-role as parameter has higher prioritiy than user-role from
+* szenario or profil, but user-specific redirection (parameter) has
+* highest priority, if allowed
+
+if not if_user_role is initial.
+
+cf_user_role = if_user_role.
+
+endif.
+
+* Allow user specific redirection of used user role only,
+* if allowed for this szenario
+IF NOT if_allow_user_role IS INITIAL.
+
+IF  NOT if_szenario IS INITIAL.
+
+CONCATENATE 'LE_'
+if_szenario
+'_PROFIL'
+INTO lf_parametername.
+
+GET PARAMETER ID    lf_parametername
+FIELD lf_set_get_user_role.
+ENDIF.
+
+
+*   restriction to allowed szenario-redirections by Workbench through
+*   definition of parameter ID's.
+*   They are allowed only for standard szenarios 0001, 0002, 0003, 0101,
+*   0102, 0103, 0201, 0202, 0203, VL10. (4.6C)
+*   see Workbench, function WB_OTHER_OBJECT
+*   se80, other objects, tabstrip others/weitere SET/GET parameter id
+*   LE_*_PROFIL and press F4
+
+IF NOT lf_set_get_user_role IS INITIAL.
+
+cf_user_role =  lf_set_get_user_role.
+
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                               " USER_ROLE_DETERMINE
+
+
+*----------------------------------------------------------------------*
+***INCLUDE LV50R_PREF03 .
+*----------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  SZENARIO_DATA_GET
+*&---------------------------------------------------------------------*
+FORM szenario_data_get USING    if_szenario TYPE shp_vl10_szenario
+CHANGING cs_t186v    TYPE t186v
+cf_subrc    TYPE sysubrc.
+
+CLEAR cf_subrc.
+
+* Determine Listprofil-Name for given Szenario
+CALL FUNCTION 'SHP_T186V_SELECT_01'
+EXPORTING
+if_szenario = if_szenario
+CHANGING
+cs_t186v    = cs_t186v
+EXCEPTIONS
+OTHERS      = 1.
+
+IF  sy-subrc            <> 0
+and cs_t186v-profilname IS INITIAL.
+
+*   Requested Listprofil for given Szenario not customized
+*   use hardcoded attributes
+CASE if_szenario.
+
+WHEN 'VL04'.           "upgrade-compatibility VL04
+
+cs_t186v-mandt      = sy-mandt.
+cs_t186v-szenario   = 'VL04'.
+cs_t186v-profilname = space.
+*        cs_t186v-sel_screen = gc_sel_screen_vl04.
+
+WHEN OTHERS.
+
+cf_subrc = 1.
+
+ENDCASE.
+ENDIF.
+
+ENDFORM.                               " SZENARIO_DATA_GET

@@ -1,0 +1,734 @@
+*&---------------------------------------------------------------------*
+*&  REPORT YN010200
+*&         自社データ取込
+*&---------------------------------------------------------------------*
+*&  機能     ： 自社データ取込
+*&  作成日   ： 2006/06/08
+*&  作成者   ： NDSC
+*&  変更履歴 ： 2007/02/28 Version2
+*&  変更内容 ： Version2 (2007/02/28 R.Tomoeda)
+*&           ：  ・支払基準日更新のデフォルトチェックをはずす
+*&           ：  ・大量データ対応
+*&           ：  ・マイナス単価対応
+*&           ：  ・得意先/仕入先品目コードを一覧表示項目へ変更
+*&  変更履歴 ： 2007/12/03
+*&  変更内容 ： 機能改善No.187対応 (2007/12/03 NEGISHI)
+*&           ：・バックグラウンド実行時のスプール出力幅を255バイトに変更
+*&  変更履歴 ： 2007/12/14
+*&  変更内容 ： 機能改善No.214対応 (2007/12/14 r.tomoeda)
+*&           ：・請求書伝票のソート条件に年度を加える
+*&  変更履歴 ： 2009/01/13
+*&  変更内容 ： テンプレート改善ＰＪ (2009/01/13 OODUCHI)
+*&           ：・パフォーマンス改善
+*&  変更履歴 ： conversion 対応
+*&  変更内容 ： ECC6.0→4.6C (2010/12/13 K.Onoda)
+*&           ： ・コンバージョン作業
+*&  変更履歴 ： 2011/12/08
+*&  変更内容 ： elematec様用仕様対応(仕入）
+*&  変更履歴 ： 2012/01/16
+*&  変更内容 ： elematec様用仕様対応(売上）
+*&  変更履歴 ： 2012/05/25
+*&  変更内容 ： 請求書取消(MR8M)用に、自社データテーブル内の
+*&              計上締日を自動計算する
+*&              MR8Mを実行すると、支払基準日が取消元と連動し、
+*&              転記日付より連動しない。
+*&  変更履歴 ： 2012/05/29
+*&  変更内容 ： 単価を発注伝票でなく、請求書伝票の金額と価格単位より
+*&              PGで計算する。
+*&              単価を受注伝票でなく、請求伝票の金額と価格単位より
+*&              PGで計算する。
+*&  変更履歴 ： 2012/05/30
+*&  変更内容 ： デビメモ・クレメモ　値引き・値増し時にも数量を０としない
+*&  変更履歴 ： 2012/05/31
+*&  変更内容 ： 仕入：明細税額合計と伝票税額を合わせる
+*&  変更履歴 ： 2013/11/12
+*&  変更内容 ： 単価(売上)の金額を価格条件の条件レートより計算する。
+*&              DMW5885
+*&---------------------------------------------------------------------*
+*>>>2007/12/03 バックグラウンド実行時のスプール出力幅を255バイトに変更
+*REPORT  YN010200 MESSAGE-ID   YN01.
+REPORT  YN010200_TEST LINE-SIZE 225 MESSAGE-ID   YN01.
+*<<<2007/12/03 バックグラウンド実行時のスプール出力幅を255バイトに変更
+
+TYPES: TYP_T_DFIES TYPE STANDARD TABLE OF DFIES.
+DATA: T_DFIES_YN110 TYPE TYP_T_DFIES,
+T_DFIES_YN120 TYPE TYP_T_DFIES,
+T_DFIES_YN210 TYPE TYP_T_DFIES,
+T_DFIES_YN220 TYPE TYP_T_DFIES.
+
+TABLES: YN120.
+DATA: P_MODE TYPE C.
+*** 2012/05/25 INSERT START ***
+CONSTANTS C_CANCEL(4) TYPE C VALUE 'MR8M'.
+*** 2012/05/25 INSERT END ***
+*&---------------------------------------------------------------------*
+*&   画面項目定義
+*&---------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK BK1 WITH FRAME TITLE TEXT-S01.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: P_SALES RADIOBUTTON GROUP RAD1 DEFAULT 'X'
+USER-COMMAND RADIO.
+SELECTION-SCREEN COMMENT 4(18) TEXT-S02.                " 売上照合
+PARAMETERS: P_PRCHS RADIOBUTTON GROUP RAD1.
+SELECTION-SCREEN COMMENT 26(18) TEXT-S03.               " 仕入照合
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK BK1.
+SELECTION-SCREEN BEGIN OF BLOCK BK2 WITH FRAME TITLE TEXT-S04.
+SELECT-OPTIONS:
+P_VRFCT1 FOR YN120-VRFCTON MODIF ID 020,   " 取引先コード
+P_BUKRS1 FOR YN120-BUKRS   MODIF ID 020
+MEMORY ID BUK,   " 会社コード
+*elematec 対応 2011/12/08 INSERT START
+P_DVSON3 FOR YN120-DVSON   MODIF ID 020 NO INTERVALS,
+"営業所/プラント
+P_LIST23 FOR YN120-LIST2   MODIF ID 020,
+"得意先発注番号/発注番号
+P_LIST33 FOR YN120-LIST3   MODIF ID 020,
+"受注番号/発注明細番号
+*elematec 対応 2011/12/08 INSERT END
+P_CPUDT  FOR SY-DATUM.                     " 会計伝票登録日
+SELECTION-SCREEN END OF BLOCK BK2.
+
+SELECTION-SCREEN BEGIN OF BLOCK BK3 WITH FRAME TITLE TEXT-S05.
+*&Ver2 対応 2007/02/28 >>>
+PARAMETERS: P_OVWRT AS CHECKBOX. "DEFAULT 'X'.
+*&Ver2 対応 2007/02/28 <<<
+SELECTION-SCREEN END OF BLOCK BK3.
+*elematec 対応 INSERT START 2011/12/08
+SELECTION-SCREEN BEGIN OF BLOCK BK4 WITH FRAME TITLE TEXT-S07.
+PARAMETERS:P_EKORG TYPE LFM1-EKORG OBLIGATORY, "購買組織
+P_PARVW TYPE WYT3-PARVW OBLIGATORY. "取引先機能(請求先)
+SELECTION-SCREEN END OF BLOCK BK4.
+*elematec 対応 INSERT END 2011/12/08
+*
+*elematec 対応 INSERT START 2012/01/16
+SELECTION-SCREEN BEGIN OF BLOCK BK5 WITH FRAME TITLE TEXT-S08.
+PARAMETERS:P_VKORG  TYPE KNVV-VKORG OBLIGATORY, "販売組織
+P_VTWEG  TYPE KNVV-VTWEG OBLIGATORY, "流通チャネル
+P_SPART  TYPE KNVV-SPART OBLIGATORY, "製品部門
+P_PARVWK TYPE KNVP-PARVW OBLIGATORY. "取引先機能(支払人)
+SELECTION-SCREEN END OF BLOCK BK5.
+*elematec 対応 INSERT END   2012/01/16
+
+INCLUDE YN01_YN010200_TEST01.
+*INSERT START 2012/01/06
+TYPE-POOLS:SSCR.
+*INSERT END 2012/01/06
+
+*&---------------------------------------------------------------------*
+*&   Event LOAD-Of-PROGRAM
+*&---------------------------------------------------------------------*
+LOAD-OF-PROGRAM.
+* 項目テキスト取得
+PERFORM GET_DDIF_FIELDINFO.
+
+*INSERT START 2012/01/06
+*&---------------------------------------------------------------------*
+*&   Event INITIALIZATION
+*&---------------------------------------------------------------------*
+INITIALIZATION.
+*---選択画面の複数入力ボタン制御
+PERFORM BUTTON_CONTROL.
+*INSERT END 2012/01/06
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VRFCT1-LOW.
+PERFORM F4_INPUT USING 'P_VRFCT1-LOW'.
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VRFCT1-HIGH.
+PERFORM F4_INPUT USING 'P_VRFCT1-HIGH'.
+*INSERT START 2011/12/08
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_DVSON3-LOW.
+PERFORM F4_INPUT USING 'P_DVSON3-LOW'.
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_DVSON3-HIGH.
+PERFORM F4_INPUT USING 'P_DVSON3-HIGH'.
+*INSERT END 2011/12/08
+*ISNERT STRAT 2012/01/16
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LIST33-LOW.
+PERFORM F4_INPUT_LIST33 USING 'P_LIST33-LOW'.
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LIST33-HIGH.
+PERFORM F4_INPUT_LIST33 USING 'P_LIST33-HIGH'.
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LIST23-LOW.
+PERFORM F4_INPUT_LIST23 USING 'P_LIST23-LOW'.
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LIST23-HIGH.
+PERFORM F4_INPUT_LIST23 USING 'P_LIST23-HIGH'.
+
+*ISNERT END    2012/01/16
+
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN OUTPUT
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN OUTPUT.
+
+IF P_SALES = 'X'.
+P_MODE = '1'.
+ELSEIF P_PRCHS = 'X'.
+P_MODE = '2'.
+ENDIF.
+PERFORM SET_DYNPRO_TEXT.
+
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+
+CASE SY-UCOMM.
+WHEN 'RADIO'.
+WHEN OTHERS.
+* 会社コードの存在チェック
+PERFORM CHECK_BUKRS.
+* 会社コード権限チェック
+PERFORM AUTHOR_CHECK.
+* 取引先コードの存在チェック
+PERFORM CHECK_VRFCT.
+* 営業所・プラントの存在チェック
+PERFORM CHECK_DVSON.
+ENDCASE.
+
+*&---------------------------------------------------------------------*
+*&   Event START-OF-SELECTION
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* YN010200起動
+PERFORM YN010200_MAIN.
+
+*&---------------------------------------------------------------------*
+*&      Form  AUTHOR_CHECK
+*&---------------------------------------------------------------------*
+*       権限チェック
+*----------------------------------------------------------------------*
+FORM AUTHOR_CHECK .
+
+SELECT
+BUKRS            " 会社コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_BUKRS
+FROM T001
+WHERE BUKRS IN P_BUKRS1.
+IF SY-SUBRC <> 0.
+* 対象データがありません
+MESSAGE E762.
+ENDIF.
+* [売上照合]が選択された場合
+IF P_SALES = 'X'.
+LOOP AT TBL_BUKRS.
+AUTHORITY-CHECK OBJECT 'F_KNA1_BUK'
+ID 'BUKRS' FIELD TBL_BUKRS-BUKRS
+ID 'ACTVT' DUMMY.
+IF SY-SUBRC <> 0.
+MESSAGE E751 WITH TBL_BUKRS-BUKRS.
+ENDIF.
+ENDLOOP.
+ENDIF.
+* [仕入照合]が選択された場合
+IF P_PRCHS = 'X'.
+LOOP AT TBL_BUKRS.
+AUTHORITY-CHECK OBJECT 'F_LFA1_BUK'
+ID 'BUKRS' FIELD TBL_BUKRS-BUKRS
+ID 'ACTVT' DUMMY.
+IF SY-SUBRC <> 0.
+MESSAGE E751 WITH TBL_BUKRS-BUKRS.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " AUTHOR_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BUKRS
+*&---------------------------------------------------------------------*
+*       会社コードのチェック
+*----------------------------------------------------------------------*
+FORM CHECK_BUKRS .
+
+IF P_BUKRS1-LOW <> SPACE.
+SELECT
+BUKRS            " 会社コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_BUKRS
+FROM T001
+WHERE BUKRS = P_BUKRS1-LOW.
+IF SY-SUBRC <> 0.
+MESSAGE E750 WITH P_BUKRS1-LOW.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_BUKRS
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_VRFCT
+*&---------------------------------------------------------------------*
+*       取引先コードのチェック
+*----------------------------------------------------------------------*
+FORM CHECK_VRFCT .
+
+DATA: L_VRFCT LIKE KNB1-KUNNR.         " 取引先コード
+
+PERFORM CHECK_VRFCTON_RANGE TABLES   P_VRFCT1
+CHANGING L_VRFCT.
+IF NOT L_VRFCT IS INITIAL.
+IF P_SALES = 'X'.
+MESSAGE E752 WITH L_VRFCT.
+ENDIF.
+IF P_PRCHS = 'X'.
+MESSAGE E753 WITH L_VRFCT.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_VRFCT
+
+*&---------------------------------------------------------------------*
+*       項目テキスト取得
+*----------------------------------------------------------------------*
+FORM GET_DDIF_FIELDINFO .
+
+PERFORM CALL_FUNC_DDIF_FIELDINFO_GET TABLES T_DFIES_YN110
+USING  'YN110'.
+PERFORM CALL_FUNC_DDIF_FIELDINFO_GET TABLES T_DFIES_YN120
+USING  'YN120'.
+PERFORM CALL_FUNC_DDIF_FIELDINFO_GET TABLES T_DFIES_YN210
+USING  'YN210'.
+PERFORM CALL_FUNC_DDIF_FIELDINFO_GET TABLES T_DFIES_YN220
+USING  'YN220'.
+
+ENDFORM.                    " GET_DDIF_FIELDINFO
+
+*&---------------------------------------------------------------------*
+*&      Form  CALL_FUNC_DDIF_FIELDINFO_GET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_T_DFIES  text
+*      -->P_TABNAME   text
+*----------------------------------------------------------------------*
+FORM CALL_FUNC_DDIF_FIELDINFO_GET  TABLES   P_T_DFIES STRUCTURE DFIES
+USING    P_TABNAME
+.
+
+CALL FUNCTION 'DDIF_FIELDINFO_GET'
+EXPORTING
+TABNAME        = P_TABNAME
+TABLES
+DFIES_TAB      = P_T_DFIES
+EXCEPTIONS
+NOT_FOUND      = 1
+INTERNAL_ERROR = 2
+OTHERS         = 3.
+
+ENDFORM.                    " CALL_FUNC_DDIF_FIELDINFO_GET
+
+*&---------------------------------------------------------------------*
+*&      Form  SET_DYNPRO_TEXT
+*&---------------------------------------------------------------------*
+*       選択画面テキスト動的に設定
+*----------------------------------------------------------------------*
+FORM SET_DYNPRO_TEXT .
+
+DATA: L_HELP_ID(20) TYPE C,
+L_SNAME TYPE STRING,
+L_FNAME TYPE STRING,
+L_SCR_NAME TYPE STRING,
+L_TEXT TYPE STRING.
+
+FIELD-SYMBOLS: <FS> TYPE ANY.
+
+FIELD-SYMBOLS: <FS_T_DFIES> TYPE TYP_T_DFIES.
+DATA: L_H_DFIES LIKE LINE OF <FS_T_DFIES>.
+
+CHECK SY-DYNNR = '1000'.
+LOOP AT SCREEN.
+IF SCREEN-GROUP1 = '020' OR SCREEN-GROUP1 = '010'.
+CASE SCREEN-GROUP3.
+WHEN 'TXT'.
+L_SCR_NAME = SCREEN-NAME.
+WHEN 'PAR' OR 'LOW'.
+ASSIGN (SCREEN-NAME) TO <FS>.
+DESCRIBE FIELD <FS> HELP-ID L_HELP_ID.
+SPLIT L_HELP_ID AT '-' INTO L_SNAME L_FNAME.
+CONCATENATE 'T_DFIES_YN' P_MODE SCREEN-GROUP1+1(2)
+INTO L_SNAME.
+ASSIGN (L_SNAME) TO <FS_T_DFIES>.
+READ TABLE <FS_T_DFIES> INTO L_H_DFIES
+WITH KEY FIELDNAME = L_FNAME.
+IF SY-SUBRC = 0.
+ASSIGN (L_SCR_NAME) TO <FS>.
+<FS> = L_H_DFIES-FIELDTEXT.
+IF L_H_DFIES-FIELDTEXT =
+'仕入先コード(請求先)'.
+<FS> =  '仕入先コード(発注先)'.
+ENDIF.
+IF L_H_DFIES-FIELDTEXT =
+'得意先コード(支払人)'.
+<FS> =  '得意先コード(受注先)'.
+ENDIF.
+ELSE.
+MESSAGE E754 WITH TEXT-M30.
+ENDIF.
+ENDCASE.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_DYNPRO_TEXT
+
+*&---------------------------------------------------------------------*
+*&      Form  F4IF_FIELD_VALUE_REQUEST
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_1481   text
+*      -->P_1482   text
+*----------------------------------------------------------------------*
+FORM F4IF_FIELD_VALUE_REQUEST  USING    P_TNAME
+P_FNAME
+P_DFNAME
+CHANGING P_VALUE.
+
+DATA: L_TNAME TYPE DFIES-TABNAME,
+L_FNAME TYPE DFIES-FIELDNAME,
+L_DFNAME TYPE HELP_INFO-DYNPROFLD,
+L_REPID LIKE SY-REPID,
+L_DYNNR LIKE SY-DYNNR.
+DATA: L_T_RET TYPE STANDARD TABLE OF DDSHRETVAL,
+L_H_RET LIKE LINE OF L_T_RET.
+
+L_TNAME = P_TNAME.
+L_FNAME = P_FNAME.
+L_REPID = SY-REPID.
+L_DYNNR = SY-DYNNR.
+L_DFNAME = P_DFNAME.
+CLEAR P_VALUE.
+CALL FUNCTION 'F4IF_FIELD_VALUE_REQUEST'
+EXPORTING
+TABNAME                   = L_TNAME
+FIELDNAME                 = L_FNAME
+DYNPPROG                  = L_REPID
+DYNPNR                    = L_DYNNR
+DYNPROFIELD               = L_DFNAME
+TABLES
+RETURN_TAB                = L_T_RET
+EXCEPTIONS
+FIELD_NOT_FOUND           = 1
+NO_HELP_FOR_FIELD         = 2
+INCONSISTENT_HELP         = 3
+NO_VALUES_FOUND           = 4
+OTHERS                    = 5
+.
+IF SY-SUBRC = 0.
+READ TABLE L_T_RET INTO L_H_RET INDEX 1.
+P_VALUE = L_H_RET-FIELDVAL.
+ENDIF.
+
+ENDFORM.                    " F4IF_FIELD_VALUE_REQUEST
+*&---------------------------------------------------------------------*
+*&      Form  F4_INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_1481   text
+*----------------------------------------------------------------------*
+FORM F4_INPUT  USING    P_DYN_FNAME.
+
+DATA: L_HELP_ID(20) TYPE C,
+L_SNAME TYPE STRING,
+L_FNAME TYPE STRING,
+L_VALUE TYPE STRING.
+
+FIELD-SYMBOLS: <FS> TYPE ANY.
+
+ASSIGN (P_DYN_FNAME) TO <FS>.
+DESCRIBE FIELD <FS> HELP-ID L_HELP_ID.
+SPLIT L_HELP_ID AT '-' INTO L_SNAME L_FNAME.
+IF NOT L_FNAME IS INITIAL.
+CONCATENATE 'YN' P_MODE L_SNAME+3(2) INTO L_SNAME.
+PERFORM F4IF_FIELD_VALUE_REQUEST USING    L_SNAME
+L_FNAME
+P_DYN_FNAME
+CHANGING L_VALUE.
+
+ENDIF.
+
+ENDFORM.                    " F4_INPUT
+*&---------------------------------------------------------------------*
+*&      Form  DYNP_VALUES_UPDATE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_P_DYN_FNAME  text
+*      -->P_L_VALUE  text
+*----------------------------------------------------------------------*
+FORM DYNP_VALUES_UPDATE  USING    P_DYN_FNAME
+P_VALUE.
+
+DATA: L_T_DYFIELDS TYPE STANDARD TABLE OF DYNPREAD,
+L_H_DYFIELDS TYPE DYNPREAD.
+DATA: L_REPID LIKE SY-REPID.
+
+L_H_DYFIELDS-FIELDNAME = P_DYN_FNAME.
+L_H_DYFIELDS-FIELDVALUE = P_VALUE.
+APPEND L_H_DYFIELDS TO L_T_DYFIELDS.
+
+L_REPID = SY-REPID.
+CALL FUNCTION 'DYNP_VALUES_UPDATE'
+EXPORTING
+DYNAME                     = L_REPID
+DYNUMB                     = SY-DYNNR
+TABLES
+DYNPFIELDS                 = L_T_DYFIELDS
+EXCEPTIONS
+OTHERS                     = 0
+.
+ENDFORM.                    " DYNP_VALUES_UPDATE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_VRFCTON_RANGE
+*&---------------------------------------------------------------------*
+*       取引先コード存在チェック
+*----------------------------------------------------------------------*
+*      -->PT_VRFCTON  取引先コード
+*      <--P_EVAL  text
+*----------------------------------------------------------------------*
+FORM CHECK_VRFCTON_RANGE  TABLES   PT_VRFCTON
+CHANGING P_EVAL.
+
+FIELD-SYMBOLS: <FS1>, <FS2>, <FS3>.
+
+CLEAR: P_EVAL.
+LOOP AT PT_VRFCTON.
+ASSIGN COMPONENT 1 OF STRUCTURE PT_VRFCTON TO <FS1>.
+ASSIGN COMPONENT 2 OF STRUCTURE PT_VRFCTON TO <FS2>.
+CHECK <FS1> = 'I' AND <FS2> = 'EQ'.
+ASSIGN COMPONENT 3 OF STRUCTURE PT_VRFCTON TO <FS3>.
+* [売上照合]が選択された場合
+IF P_SALES = 'X'.
+SELECT COUNT(*) FROM KNB1
+WHERE BUKRS IN P_BUKRS1 AND KUNNR = <FS3>.
+ENDIF.
+* [仕入照合]が選択された場合
+IF P_PRCHS = 'X'.
+SELECT COUNT(*) FROM LFB1
+WHERE BUKRS IN P_BUKRS1 AND LIFNR = <FS3>.
+ENDIF.
+IF SY-SUBRC <> 0.
+P_EVAL = <FS3>.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_VRFCTON_RANGE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DVSON
+*&---------------------------------------------------------------------*
+*       営業所・プラントの存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_DVSON.
+*
+IF P_SALES = 'X'.
+*営業所
+SELECT VKBUR
+INTO TABLE TBL_TVBUR
+FROM TVBUR
+WHERE VKBUR IN P_DVSON3.
+IF SY-SUBRC <> 0.
+*営業所 & はありません
+MESSAGE E800 WITH P_DVSON3-LOW.
+ENDIF.
+ENDIF.
+IF P_PRCHS = 'X'.
+*プラント
+SELECT WERKS
+INTO TABLE TBL_T001W
+FROM T001W
+WHERE WERKS IN P_DVSON3.
+*プラント & はありません
+IF SY-SUBRC <> 0.
+MESSAGE E801 WITH P_DVSON3-LOW.
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " CHECK_DVSON
+*&---------------------------------------------------------------------*
+*&      Form  BUTTON_CONTROL
+*&---------------------------------------------------------------------*
+*       選択画面の複数ボタン制御
+*----------------------------------------------------------------------*
+FORM BUTTON_CONTROL.
+DATA:L_WA_RES        TYPE SSCR_RESTRICT,
+L_WA_OPT_LIST   TYPE SSCR_OPT_LIST,
+L_WA_ASS        TYPE SSCR_ASS.
+DATA:OPTL TYPE SSCR_OPT_LIST.
+
+*-- 項目別設定
+* 共通設定
+CLEAR:L_WA_OPT_LIST.
+L_WA_OPT_LIST-NAME       = 'JUST_EQ2'.
+L_WA_OPT_LIST-OPTIONS-EQ = 'X'.
+L_WA_OPT_LIST-OPTIONS-CP = 'X'.
+APPEND L_WA_OPT_LIST TO L_WA_RES-OPT_LIST_TAB.
+
+L_WA_ASS-KIND    = 'S'.
+L_WA_ASS-NAME    = 'P_DVSON3'.
+L_WA_ASS-SG_MAIN = 'I'.
+L_WA_ASS-OP_MAIN = 'JUST_EQ2'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+
+* 実行
+CALL FUNCTION 'SELECT_OPTIONS_RESTRICT'
+EXPORTING
+RESTRICTION = L_WA_RES.
+
+
+ENDFORM.                    " BUTTON_CONTROL
+*&---------------------------------------------------------------------*
+*&      Form  F4_INPUT_LIST33
+*&---------------------------------------------------------------------*
+*       受注番号
+*----------------------------------------------------------------------*
+FORM F4_INPUT_LIST33 USING   P_DYN_FNAME.
+
+DATA: L_TNAME TYPE DFIES-TABNAME,
+L_FNAME TYPE DFIES-FIELDNAME,
+L_DFNAME TYPE HELP_INFO-DYNPROFLD,
+L_REPID LIKE SY-REPID,
+L_DYNNR LIKE SY-DYNNR.
+DATA: L_T_RET TYPE STANDARD TABLE OF DDSHRETVAL,
+L_H_RET LIKE LINE OF L_T_RET.
+DATA:L_VALUE TYPE STRING.
+*受注伝票のみ
+CHECK P_MODE = '1'.
+*
+L_TNAME = 'VBAK'.
+L_FNAME = 'VBELN'.
+L_REPID = SY-REPID.
+L_DYNNR = SY-DYNNR.
+L_DFNAME = P_DYN_FNAME.
+CLEAR L_VALUE.
+CALL FUNCTION 'F4IF_FIELD_VALUE_REQUEST'
+EXPORTING
+TABNAME                   = L_TNAME
+FIELDNAME                 = L_FNAME
+SEARCHHELP                = 'VMVA'
+DYNPPROG                  = L_REPID
+DYNPNR                    = L_DYNNR
+DYNPROFIELD               = L_DFNAME
+TABLES
+RETURN_TAB                = L_T_RET
+EXCEPTIONS
+FIELD_NOT_FOUND           = 1
+NO_HELP_FOR_FIELD         = 2
+INCONSISTENT_HELP         = 3
+NO_VALUES_FOUND           = 4
+OTHERS                    = 5
+.
+IF SY-SUBRC = 0.
+READ TABLE L_T_RET INTO L_H_RET INDEX 1.
+L_VALUE = L_H_RET-FIELDVAL.
+ENDIF.
+
+ENDFORM.                    " F4_INPUT_LIST33
+*&---------------------------------------------------------------------*
+*&      Form  F4_INPUT_LIST23
+*&---------------------------------------------------------------------*
+*       発注番号
+*----------------------------------------------------------------------*
+FORM F4_INPUT_LIST23 USING    P_DYN_FNAME.
+
+DATA: L_TNAME TYPE DFIES-TABNAME,
+L_FNAME TYPE DFIES-FIELDNAME,
+L_DFNAME TYPE HELP_INFO-DYNPROFLD,
+L_REPID LIKE SY-REPID,
+L_DYNNR LIKE SY-DYNNR.
+DATA: L_T_RET TYPE STANDARD TABLE OF DDSHRETVAL,
+L_H_RET LIKE LINE OF L_T_RET.
+DATA:L_VALUE TYPE STRING.
+*発注番号のみ
+CHECK P_MODE = '2'.
+*
+L_TNAME = 'EKKO'.
+L_FNAME = 'EBELN'.
+L_REPID = SY-REPID.
+L_DYNNR = SY-DYNNR.
+L_DFNAME = P_DYN_FNAME.
+CLEAR L_VALUE.
+CALL FUNCTION 'F4IF_FIELD_VALUE_REQUEST'
+EXPORTING
+TABNAME                   = L_TNAME
+FIELDNAME                 = L_FNAME
+SEARCHHELP                = 'MEKK'
+DYNPPROG                  = L_REPID
+DYNPNR                    = L_DYNNR
+DYNPROFIELD               = L_DFNAME
+TABLES
+RETURN_TAB                = L_T_RET
+EXCEPTIONS
+FIELD_NOT_FOUND           = 1
+NO_HELP_FOR_FIELD         = 2
+INCONSISTENT_HELP         = 3
+NO_VALUES_FOUND           = 4
+OTHERS                    = 5
+.
+IF SY-SUBRC = 0.
+READ TABLE L_T_RET INTO L_H_RET INDEX 1.
+L_VALUE = L_H_RET-FIELDVAL.
+ENDIF.
+
+ENDFORM.                    " F4_INPUT_LIST23
+*Text symbol text・
+*M01:Customer Code
+*M02:Vender Code
+*M03:BSID
+*M04:BKPF
+*M05:VBRK
+*M06:VBRP
+*M07:RBKP
+*M08:RSEG
+*M09:VBPA
+*M10:VBAK
+*M11:VBKD
+*M12:YN120
+*M13:Consumption Tax
+*M14:EKKO
+*M15:EKPO
+*M16:YN220
+*M17:Partner
+*M18:Company
+*M19:Fisc. Yr
+*M20:Doc. No.
+*M21:Item No.
+*M22:Error Text
+*M23:Process Table:
+*M24:Read:
+*M25:Created:
+*M26:Updated:
+*M27:Out Object:
+*M28:Errors:
+*M29:
+*M30:Field text at selection screen
+*M31:VBAP
+*M32:BSIK
+*S01:Sales/Purchase
+*S02:Sales Checking
+*S03:Purchase Checking
+*S04:Data Selection
+*S05:Process Option
+*S06:Updata of Payment Baseline Data
+*Selection text・
+*P_CPUDT:        Accounting Doc. Entry Date
+*P_OVWRT:        Updata of PaymentBaseline Date
+*P_SALES:

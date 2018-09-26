@@ -1,0 +1,865 @@
+REPORT YI021400 MESSAGE-ID Y1.
+************************************************************************
+***  REPROT     YI021400
+***  PROGRAM    購買発注バッチインプット（移行用）
+***  MAKE DATE  1998.12.16
+***  CODE BY    S.AOYAGI(PSS)
+***  変更履歴   1999.01.11 発注残送付先を読込む（追加処理）
+*** 2001.06.15 仕入先部門追加(明細レベル) Takzawa(NDSC)
+*** 2002.04.19 明細テキストセット kajisa(NDSC)
+*** 2002.05.08 登録通貨変更機能の追加
+*** 2002/07/22 保管場所、プラントの設定追加
+***            テキスト出力ロジックの修正
+***            複数明細対応
+*** 2009.07.06 納入先住所を追加 Kodama（NDSC）
+*** 2009.07.06 別伝票とするキーに移行元明細を追加 KODAMA(NDSC)
+*** 2009.07.06 明細テキスト「注文書備考」の1行目に KODAMA(NDSC)
+***            「移行元伝票番号-移行元明細番号」を、2行目に
+***            入力ファイルの「注文書備考」の項目をセットするよう変更
+*** 2009.07.06 購買情報に価格が登録されている場合　KODAMA(NDSC)
+***　　　　　　入力ファイルの価格で上書きできるように変更
+************************************************************************
+PARAMETERS:P_IFILE(60) LOWER CASE OBLIGATORY
+*           DEFAULT '\\STTE001\EDI\MST\ORIG\IRE_HACHU.DAT'.
+DEFAULT '\\PCX31756\IKOU\YI021400.DAT'.
+*2002/05/08 ADD START
+PARAMETERS: P_JPY  RADIOBUTTON GROUP GR01 DEFAULT 'X'."通貨JPY
+PARAMETERS: P_USD  RADIOBUTTON GROUP GR01.
+*2002/05/08 ADD END
+************************************************************************
+*INCLUDE YI02HACH.                      "データ宣言
+DATA:BEGIN OF TAB OCCURS 1,
+LIFNR(10),                  "仕入先
+BSART(4),                   "発注タイプ
+EKORG(4),                   "購買組織
+EKGRP(3),                   "購買グループ
+BEDAT(8),                   "購買発注日
+EEIND(8),                   "納入期日
+WERKS(4),                   "プラント
+LGORT(4),                   "保管場所
+LTSNR(6),                   "仕入先部門
+*     MATNR(10),                  "品目コード
+MATNR(18),                  "品目コード
+SURYO TYPE P,               "数量
+TANKA TYPE P,               "単価
+LTEXT1(50),                 "ヘッダテキスト１
+LTEXT2(50),                 "ヘッダテキスト１
+HACHUNO(10),                "発注番号(移行時）
+KYOTEN(10),                  "拠点コード
+PEINH(5),                   "価格単位
+***   MEISAINO(10),               "明細番号(移行時）
+EBELN(20),                  "発注番号
+EBELP(6) TYPE N,            "明細番号
+TOROKUF,                    "登録ﾌﾗｸﾞ (SPACE:登録しない,X:する)
+*** このフラグは、以下の項目を登録するかしないかを決める ***
+*      NAME1(48),                  "送付先名称（漢字）
+*      ADDR1(34),                  "送付先住所（漢字）
+*      ADDR2(34),                  "送付先住所（漢字）
+*      NAME2(36),                  "送付先名称（カナ）
+NAME1(40),                  "名称1
+*2009.07.06 APPEND START
+NAME2(40)    TYPE C,      "名称2
+NAME3(40)    TYPE C,      "名称3
+NAME4(40)    TYPE C,      "名称4
+SORT1(20)    TYPE C,      "検索用語1
+*2009.07.06 APPEND END
+POSTCODE(10),               "郵便番号
+CITY2(40),                  "都道府県
+CITY1(40),                  "市区町村名
+*2009.07.06 APPEND START
+COUNTRY(3),                 "国
+REGION(3),                  "地域
+LANGU(2),                   "言語
+TEL_NUMBER(30),             "電話番号
+FAX_NUMBER(30),             "ファックス
+*2009.07.06 APPEND END
+STREET(40),                 "番地
+HOUSENUM(10),               "部屋番号
+ZEICODE(02),
+* 追加項目
+REPOS(1)     TYPE C,      "請求書受領
+WEBRE(1)     TYPE C,      "入庫基準INV
+XERSY(1)     TYPE C,      "ERS
+MWSKZ(2)     TYPE C,      "税コード
+EVERS(2)     TYPE C,      "出荷指示
+TEXT1(50)    TYPE C,
+TEXT2(50)    TYPE C,
+BSTAE(4)     TYPE C,      "確認管理
+END OF TAB.
+DATA  I_TLINE LIKE STANDARD TABLE OF TLINE WITH HEADER LINE.
+DATA:BEGIN OF I_TXT OCCURS 1,   "2002/04/19 ADD
+*       EBELN(10)    TYPE C,
+EBELP(5)     TYPE N,
+TEXT1(50)    TYPE C,
+TEXT2(50)    TYPE C,
+*2009.07.06 APPEND START
+TEXT3(50)    TYPE C,
+*2009.07.06 APPEND END
+END OF I_TXT.
+************************************************************************
+DATA:BEGIN OF BDC OCCURS 1.
+INCLUDE STRUCTURE BDCDATA.
+DATA:END OF BDC.
+* 読み込みファイル
+DATA:BEGIN OF LC_FILE OCCURS 0,
+RECORD(100)     TYPE C,      "RECORD
+END OF LC_FILE.
+
+DATA:BEGIN OF IN_FILE OCCURS 0,
+KYOTEN(10)   TYPE C,      "拠点コード
+MOTODEN(20)  TYPE C,      "移行元伝票番号
+MOTOMEI(6)   TYPE C,      "移行元伝票番号明細
+LIFNR(10)    TYPE C,      "仕入先コード
+BEDAT(8)     TYPE C,      "購買発注日
+EKORG(4)     TYPE C,      "購買組織
+EKGRP(3)     TYPE C,      "購買グループ
+WERKS(4)     TYPE C,      "プラント
+LGORT(4)     TYPE C,      "保管場所
+EMATN(18)    TYPE C,      "品目コード
+*      LTSNR(06)    TYPE C,      "仕入先部門 2002/05/17 DEL
+MENGE(13)    TYPE C,      "購買発注数量
+NETPR(11)    TYPE C,      "正味価格
+PEINH(5)     TYPE C,      "価格単位
+EEIND(8)     TYPE C,      "納入期日
+LTEXT1(40)   TYPE C,      "明細テキスト１
+NAME1(40)    TYPE C,      "名称1
+*2009.07.06 APPEND START
+NAME2(40)    TYPE C,      "名称2
+NAME3(40)    TYPE C,      "名称3
+NAME4(40)    TYPE C,      "名称4
+SORT1(20)    TYPE C,      "検索用語1
+*2009.07.06 APPEND END
+POSTCODE(10)  TYPE C,      "郵便番号
+CITY2(10)    TYPE C,      "都道府県
+CITY1(40)    TYPE C,      "市区町村名
+*2009.07.06 APPEND START
+COUNTRY(3)   TYPE C,        "国
+REGION(3)    TYPE C,        "地域
+LANGU(2)     TYPE C,        "言語
+TEL_NUMBER(30) TYPE C,      "電話番号
+FAX_NUMBER(30) TYPE C,      "ファックス
+*2009.07.06 APPEND END
+STREET(40)   TYPE C,      "番地
+HOUSENUM(10) TYPE C,      "部屋番号
+ZEICODE(02)  TYPE C,      "税コード
+* 追加項目
+REPOS(1)     TYPE C,      "請求書受領
+WEBRE(1)     TYPE C,      "入庫基準INV
+XERSY(1)     TYPE C,      "ERS
+MWSKZ(2)     TYPE C,      "税コード
+EVERS(2)     TYPE C,      "出荷指示
+TEXT1(50)    TYPE C,
+TEXT2(50)    TYPE C,
+BSTAE(4)     TYPE C,      "確認管理
+END OF IN_FILE.
+
+
+DATA MSG(120).
+DATA:TOTAL TYPE I,
+OKCNT TYPE I,
+LINE  TYPE I.
+DATA MSG1 LIKE MESSAGE .
+DATA:SURYO(12),TANKA(12).
+DATA HACHU_NO(10).
+Data:WK_EBELN(10),
+WK_EBELP(5).
+DATA:W_TUKA(3)      TYPE C.    "2002/05/08 ADD
+*2002/05/16 ADD START
+DATA:BEGIN OF DUMMY,
+DAT(1500),
+END OF DUMMY.
+DATA W_MODE TYPE C VALUE 'N'.
+*2002/05/16 ADD END
+************************************************************************
+START-OF-SELECTION.
+*  PERFORM OPEN_FILE.              "OPEN FILE
+*  PERFORM READ_FILE.              "ｲﾝﾀﾌｪｰｽﾌｧｲﾙREAD
+perform open_local.
+PERFORM EDIT.                   "データ編集
+PERFORM MAKE_BDC.               "BDCDATA 作成
+*  PERFORM INFOMATION.             "結果出力
+END-OF-SELECTION.
+************************************************************************
+***  ファイルオープン
+************************************************************************
+FORM OPEN_FILE.
+OPEN DATASET P_IFILE FOR INPUT IN TEXT MODE.
+IF SY-SUBRC <> 0.
+*    MESSAGE I402 WITH '発注データファイルオープンエラー'
+*                       P_IFILE. STOP.
+ENDIF.
+ENDFORM.
+************************************************************************
+***  ファイルの読込み
+************************************************************************
+FORM READ_FILE.
+CLEAR TOTAL.
+REFRESH IN_FILE.
+DO.                                  "発注データ読込み
+*2002/05/16 MOD START
+*    READ DATASET P_IFILE INTO IN_FILE.
+*    IF SY-SUBRC <> 0. EXIT. ENDIF.
+CLEAR:DUMMY,IN_FILE.
+*     READ DATASET P_IFILE INTO DUMMY.
+*     IF SY-SUBRC <> 0. EXIT. ENDIF.
+*     PERFORM SPLIT_FILE.
+*2002/05/16 MOD END
+*     APPEND IN_FILE.
+*     TOTAL = TOTAL + 1.
+ENDDO.
+*  CLOSE DATASET P_IFILE.
+*  DESCRIBE TABLE IN_FILE LINES LINE.
+*  IF LINE < 1.
+*    MESSAGE I400 WITH '発注データはありません'.STOP.
+*  ENDIF.
+ENDFORM.
+************************************************************************
+***  データ編集
+************************************************************************
+FORM EDIT.
+DATA:W_LIFNR(10).
+DATA:P1 TYPE P,P2 TYPE P.
+DATA:W_HACHU(6),W_GYO,W_KYO(3).
+*2002/05/08 ADD START
+IF P_JPY = 'X'.
+W_TUKA = 'JPY'.
+ELSE.
+W_TUKA = 'USD'.
+ENDIF.
+*2002/05/08 ADD END
+*  SORT IN_FILE BY KYOTEN MOTODEN LIFNR MOTOMEI.
+REFRESH TAB.
+LOOP AT IN_FILE.
+CLEAR TAB.
+TAB-WERKS = IN_FILE-WERKS.      "プラント
+TAB-LGORT = IN_FILE-LGORT.      "保管場所
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT   = IN_FILE-LIFNR
+IMPORTING
+OUTPUT  = TAB-LIFNR
+EXCEPTIONS
+OTHERS  = 1.
+*   TAB-LTSNR = IN_FILE-LTSNR.      "仕入先部門  2001.06.15 DEL05/16
+TAB-BSART = 'NB'.               "発注タイプ
+TAB-EKORG = IN_FILE-EKORG.             "購買組織
+TAB-EKGRP = IN_FILE-EKGRP.             "購買グループ
+TAB-BEDAT = IN_FILE-BEDAT.       "購買発注日
+TAB-EEIND = IN_FILE-EEIND.       "納期
+***
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT              = IN_FILE-EMATN
+IMPORTING
+OUTPUT             = TAB-MATNR
+*     EXCEPTIONS
+*       LENGTH_ERROR       = 1
+*       OTHERS             =
+.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+*   TAB-MATNR = IN_FILE-EMATN.       "品目コード
+***
+TAB-SURYO = IN_FILE-MENGE.       "数量
+P1 = IN_FILE-NETPR.              "単価
+TAB-TANKA = P1.
+TAB-LTEXT1 = IN_FILE-LTEXT1.       "明細テキスト（備考Ａ）
+*2009.07.06 MODIFY START
+CONCATENATE  IN_FILE-MOTODEN '-' IN_FILE-MOTOMEI
+INTO TAB-LTEXT2.    "明細テキスト（発注Ｎｏ）
+*    CONCATENATE  IN_FILE-KYOTEN IN_FILE-MOTODEN IN_FILE-MOTOMEI
+*                 INTO TAB-LTEXT2.    "明細テキスト（発注Ｎｏ）
+*2009.07.06 MODIFY END
+TAB-HACHUNO = IN_FILE-MOTODEN+0(10).
+TAB-EBELN = IN_FILE-MOTODEN.   "発注番号(移行時）
+TAB-EBELP = IN_FILE-MOTOMEI. "明細番号(移行時）
+TAB-KYOTEN = IN_FILE-KYOTEN.      "拠点コード
+IF IN_FILE-NAME1(10) = '　　　　　' OR
+IN_FILE-CITY1(10) = '　　　　　' OR
+IN_FILE-CITY1(10) IS INITIAL  OR
+IN_FILE-NAME1(10) IS INITIAL.
+ELSE.
+TAB-TOROKUF = 'X'.           "登録する
+TAB-NAME1 = IN_FILE-NAME1.        "名称1
+*2009.07.06 APPEND START
+TAB-NAME2 = IN_FILE-NAME2.        "名称2
+TAB-NAME3 = IN_FILE-NAME3.        "名称3
+TAB-NAME4 = IN_FILE-NAME4.        "名称4
+TAB-SORT1 = IN_FILE-SORT1.        "検索用語1
+*2009.07.06 APPEND END
+TAB-POSTCODE = IN_FILE-POSTCODE.  "郵便番号
+TAB-CITY1 = IN_FILE-CITY1.        "市区町村名
+TAB-CITY2 = IN_FILE-CITY2.        "都道府県
+*2009.07.06 APPEND START
+TAB-COUNTRY = IN_FILE-COUNTRY.       "国
+TAB-REGION = IN_FILE-REGION.         "地域
+TAB-LANGU = IN_FILE-LANGU.           "言語
+TAB-TEL_NUMBER = IN_FILE-TEL_NUMBER. "電話番号
+TAB-FAX_NUMBER = IN_FILE-FAX_NUMBER. "fax
+*2009.07.06 APPEND END
+TAB-STREET = IN_FILE-STREET.      "番地
+TAB-HOUSENUM = IN_FILE-HOUSENUM.  "部屋番号
+ENDIF.
+TAB-PEINH = IN_FILE-PEINH.
+TAB-ZEICODE = IN_FILE-ZEICODE.
+TAB-REPOS = IN_FILE-REPOS.
+TAB-WEBRE = IN_FILE-WEBRE.
+TAB-XERSY = IN_FILE-XERSY.
+TAB-MWSKZ = IN_FILE-MWSKZ.
+TAB-EVERS = IN_FILE-EVERS.
+TAB-TEXT1 = IN_FILE-TEXT1.
+TAB-TEXT2 = IN_FILE-TEXT2.
+TAB-BSTAE = IN_FILE-BSTAE.
+APPEND TAB.
+ENDLOOP.
+ENDFORM.
+************************************************************************
+***  ＢＤＣデータ作成
+************************************************************************
+FORM MAKE_BDC.
+DATA:W_HACHU LIKE TAB-EBELN,W_KYO LIKE TAB-KYOTEN,
+W_LIFNR LIKE TAB-LIFNR.
+*2009.07.06 APPEND START
+DATA W_MEISAI LIKE TAB-EBELP.
+*2009.07.06 APPEND END
+SORT TAB BY KYOTEN EBELN LIFNR EBELP.
+CLEAR:LINE,OKCNT.
+CLEAR:WK_EBELN,WK_EBELP.                    "2002/07/22 ADD
+REFRESH I_TXT.                              "2002/04/19 ADD
+LOOP AT TAB.
+IF W_HACHU <> TAB-EBELN OR W_KYO <> TAB-KYOTEN
+OR W_LIFNR <> TAB-LIFNR
+*2009.07.06 APPEND START
+OR W_MEISAI <> TAB-EBELP.
+*2009.07.06 APPEND END
+*      IF NOT LINE IS INITIAL.
+PERFORM SET4.                       "CALL TRANSACTION
+REFRESH BDC. CLEAR LINE.
+CLEAR:W_HACHU,W_KYO.
+*2009.07.06 APPEND START
+CLEAR W_MEISAI.
+*2009.07.06 APPEND END
+*      ENDIF.
+PERFORM SET1.                         "第１画面のセット
+PERFORM SET2.                         "第２画面のセット
+PERFORM SET_LTSNR.
+PERFORM MTEXT USING 1.                "明細テキスト
+IF TAB-TOROKUF = 'X'.
+PERFORM SET11 USING 1.              "納入先住所
+ENDIF.
+W_HACHU = TAB-EBELN.
+W_KYO   = TAB-KYOTEN.
+W_LIFNR = TAB-LIFNR.
+HACHU_NO = TAB-HACHUNO.
+*2009.07.06 APPEND START
+W_MEISAI = TAB-EBELP.
+*2009.07.06 APPEND END
+LINE = LINE + 1.
+PERFORM GET_TXT.                     "2002/04/19 ADD
+ELSE.
+PERFORM SET3.                         "２行目以降の明細
+PERFORM SET_LTSNR.
+PERFORM MTEXT USING 2.                "明細テキスト
+IF TAB-TOROKUF = 'X'.
+PERFORM SET11 USING 2.              "納入先住所
+ENDIF.
+LINE = LINE + 1.
+PERFORM GET_TXT.                     "2002/04/19 ADD
+ENDIF.
+ENDLOOP.
+*  IF NOT LINE IS INITIAL.
+PERFORM SET4.                       "CALL TRANSACTION
+REFRESH BDC. CLEAR LINE.
+*  ENDIF.
+ENDFORM.
+************************************************************************
+***  第１画面のセット
+************************************************************************
+FORM SET1.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0100'.       "第１画面
+PERFORM DATA_SET USING 'EKKO-LIFNR' TAB-LIFNR.    "仕入先
+PERFORM DATA_SET USING 'RM06E-BSART' TAB-BSART.   "発注タイプ
+PERFORM DATA_SET USING 'RM06E-BEDAT' TAB-BEDAT.   "購買発注日
+PERFORM DATA_SET USING 'EKKO-EKORG' TAB-EKORG.    "購買組織
+PERFORM DATA_SET USING 'EKKO-EKGRP' TAB-EKGRP.    "購買Ｇ
+*2002/07/22 ADD START
+PERFORM DATA_SET USING 'RM06E-WERKS' TAB-WERKS.   "プラント
+PERFORM DATA_SET USING 'RM06E-LGORT' TAB-LGORT.   "補完場所
+*2002/07/22 ADD END
+PERFORM DATA_SET USING 'BDC_OKCODE' '/00'.        "ENTER
+ENDFORM.
+************************************************************************
+***  第２画面のセット
+************************************************************************
+FORM SET2.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "第２画面
+PERFORM DATA_SET USING 'EKPO-EMATN(1)' TAB-MATNR. "品目コード
+SURYO = TAB-SURYO.
+TANKA = TAB-TANKA.
+PERFORM DATA_SET USING 'EKPO-MENGE(1)' SURYO.     "数量
+PERFORM DATA_SET USING 'RM06E-EEIND(1)' TAB-EEIND."納入期日
+PERFORM DATA_SET USING 'EKPO-NETPR(1)' TANKA.     "正味価格
+PERFORM DATA_SET USING 'EKPO-PEINH(1)' TAB-PEINH. "価格単位
+PERFORM DATA_SET USING 'EKPO-WERKS(1)' TAB-WERKS. "プラント
+PERFORM DATA_SET USING 'EKPO-LGORT(1)' TAB-LGORT. "保管場所
+PERFORM DATA_SET USING 'BDC_OKCODE' '/00'.        "ENTER
+*    PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "ADD 05/16
+PERFORM DATA_SET USING 'BDC_CURSOR' 'EKPO-LGORT(1)'.
+PERFORM DATA_SET USING 'BDC_OKCODE' 'DETA'.
+PERFORM SET_ZEI.
+ENDFORM.
+************************************************************************
+* 1999.01.25 ADD 明細テキスト START
+************************************************************************
+FORM MTEXT USING NN.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "第２画面
+IF NN = 1.
+PERFORM DATA_SET USING 'BDC_CURSOR' 'RM06E-BSTPO(01)'.
+PERFORM DATA_SET USING 'RM06E-TCSELFLAG(01)' 'X'.
+ELSE.
+PERFORM DATA_SET USING 'BDC_CURSOR' 'RM06E-BSTPO(02)'.
+PERFORM DATA_SET USING 'RM06E-TCSELFLAG(02)' 'X'.
+ENDIF.
+*2002/07/22 DEL START
+PERFORM DATA_SET USING 'BDC_OKCODE' 'TXP'.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0106'.         "テキスト画面
+* PERFORM DATA_SET USING 'RM06E-LTEX1(1)' TAB-LTEXT1. "備考Ａ
+* PERFORM DATA_SET USING 'RM06E-LTEX2(1)' TAB-LTEXT2. "発注ＮＯ
+IF TAB-TOROKUF IS INITIAL.
+PERFORM DATA_SET USING 'BDC_OKCODE' 'BACK'.       "前画面
+ELSE.
+PERFORM DATA_SET USING 'BDC_OKCODE' 'DETD'.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.
+*2002/07/22 DEL END
+PERFORM DATA_SET USING 'BDC_OKCODE' 'DETD'.
+ENDIF.
+ENDFORM.
+************************************************************************
+*** 仕入先部門セット  2001.06.15 ADD
+************************************************************************
+FORM SET_LTSNR.
+*  PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "住所画面
+*  PERFORM DATA_SET USING 'BDC_OKCODE' '=DETZ'.
+**追加データ画面
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0112'.       "住所画面
+PERFORM DATA_SET USING 'EKPO-LTSNR' TAB-LTSNR.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=BACK'.
+ENDFORM.
+************************************************************************
+***税コードセット 2001.08.01 ADD
+************************************************************************
+FORM SET_ZEI.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0111'.       "明細詳細
+PERFORM DATA_SET USING 'EKPO-MWSKZ' TAB-MWSKZ.    "税コード
+PERFORM DATA_SET USING 'EKPO-REPOS' TAB-REPOS.    "請求書受領領域
+PERFORM DATA_SET USING 'EKPO-WEBRE' TAB-WEBRE.    "入庫基準INV
+PERFORM DATA_SET USING 'EKPO-XERSY' TAB-XERSY.    "ERS
+PERFORM DATA_SET USING 'EKPO-NETPR' TANKA.     "正味価格
+PERFORM DATA_SET USING 'EKPO-PEINH' TAB-PEINH. "価格単位
+*2002/07/22 ADD(IF分) START
+IF TAB-EVERS <> '/' AND  TAB-EVERS <> SPACE.
+PERFORM DATA_SET USING 'EKPO-EVERS' TAB-EVERS.    "出荷指示
+ENDIF.
+IF TAB-BSTAE <> '/' AND  TAB-BSTAE <> SPACE.
+PERFORM DATA_SET USING 'EKPO-BSTAE' TAB-BSTAE.    "確認管理
+ENDIF.
+*2002/07/22 ADD(IF分) END
+*  PERFORM DATA_SET USING 'BDC_OKCODE' 'BACK'.       "前画面 MOD 05/16
+PERFORM DATA_SET USING 'BDC_OKCODE' '=DETZ'.       "前画面 MOD 05/16
+
+ENDFORM.
+************************************************************************
+***  納入先住所をセットする 1999.01.12 ADD
+************************************************************************
+FORM SET11 USING NN.
+PERFORM DYNPRO_SET USING 'SAPLMMDA' '0100'.       "住所画面
+*2009.07.06 APPEND START
+PERFORM DATA_SET USING 'ADDR1_DATA-NAME1' TAB-NAME1.
+PERFORM DATA_SET USING 'ADDR1_DATA-NAME2' TAB-NAME2.
+PERFORM DATA_SET USING 'ADDR1_DATA-NAME3' TAB-NAME3.
+PERFORM DATA_SET USING 'ADDR1_DATA-NAME4' TAB-NAME4.
+PERFORM DATA_SET USING 'ADDR1_DATA-SORT1' TAB-SORT1.
+PERFORM DATA_SET USING 'ADDR1_DATA-POST_CODE1' TAB-POSTCODE.
+PERFORM DATA_SET USING 'ADDR1_DATA-STREET' TAB-CITY2.
+PERFORM DATA_SET USING 'ADDR1_DATA-CITY1' TAB-CITY1.
+PERFORM DATA_SET USING 'ADDR1_DATA-COUNTRY' TAB-COUNTRY.
+PERFORM DATA_SET USING 'ADDR1_DATA-REGION' TAB-REGION.
+PERFORM DATA_SET USING 'ADDR1_DATA-LANGU' TAB-LANGU.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=$MTE'.
+PERFORM DYNPRO_SET USING 'SAPLSZA6' '0200'.
+PERFORM DATA_SET USING 'BDC_CURSOR' 'ADTEL-COUNTRY(01)'.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=DELL'.
+PERFORM DATA_SET USING 'G_SELECTED(01)' 'X'.
+PERFORM DYNPRO_SET USING 'SAPLSZA6' '0200'.
+PERFORM DATA_SET USING 'BDC_CURSOR' 'ADTEL-TEL_NUMBER(01)'.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=CONT'.
+PERFORM DYNPRO_SET USING 'SAPLMMDA' '0100'.       "住所画面
+PERFORM DATA_SET USING 'BDC_OKCODE' '=$MFA'.
+PERFORM DYNPRO_SET USING 'SAPLSZA6' '0300'.
+PERFORM DATA_SET USING 'BDC_CURSOR' 'ADFAX-COUNTRY(01)'.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=DELL'.
+PERFORM DATA_SET USING 'G_SELECTED(01)' 'X'.
+PERFORM DYNPRO_SET USING 'SAPLSZA6' '0300'.
+PERFORM DATA_SET USING 'BDC_CURSOR' 'ADFAX-FAX_NUMBER(01)'.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=CONT'.
+PERFORM DYNPRO_SET USING 'SAPLMMDA' '0100'.       "住所画面
+PERFORM DATA_SET USING 'BDC_OKCODE' '=$INT'.
+PERFORM DYNPRO_SET USING 'SAPLSZA6' '0600'.
+PERFORM DATA_SET USING 'BDC_CURSOR' 'ADSMTP-SMTP_ADDR(01)'.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=DELL'.
+PERFORM DATA_SET USING 'G_SELECTED(01)' 'X'.
+PERFORM DYNPRO_SET USING 'SAPLSZA6' '0600'.
+PERFORM DATA_SET USING 'BDC_OKCODE' '=CONT'.
+PERFORM DYNPRO_SET USING 'SAPLMMDA' '0100'.       "住所画面
+PERFORM DATA_SET USING 'SZA1_D0100-TEL_NUMBER' TAB-TEL_NUMBER.
+PERFORM DATA_SET USING 'SZA1_D0100-FAX_NUMBER' TAB-FAX_NUMBER.
+*2009.07.06 APPEND END
+*    PERFORM DATA_SET USING 'ADDR1_DATA-NAME1' TAB-NAME1.2002/07/22 DEL
+*    PERFORM DATA_SET USING 'ADDR1_DATA-STREET' TAB-STREET.07/22 DEL
+*    PERFORM DATA_SET USING 'ADDR1_DATA-HOUSE_NUM1' TAB-HOUSENUM.07/22 D
+*    PERFORM DATA_SET USING 'ADDR1_DATA-POST_CODE1' TAB-POSTCODE.07/22DE
+*    PERFORM DATA_SET USING 'ADDR1_DATA-CITY1' TAB-CITY1.07/22 DEL
+*    PERFORM DATA_SET USING 'ADDR1_DATA-CITY2' TAB-CITY2.07/22 DEL
+PERFORM DATA_SET USING 'BDC_OKCODE' '/08'.
+ENDFORM.
+************************************************************************
+***  ２行目の明細をセットする
+************************************************************************
+FORM SET3.
+*2002/0722 ADD START
+WK_EBELP = wk_ebelp + 10.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "第２画面
+PERFORM DATA_SET USING 'RM06E-EBELP' wk_ebelp.    "明細
+PERFORM DATA_SET USING 'BDC_OKCODE' '/00'.        "ENTER
+*2002/0722 ADD END
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "第２画面
+PERFORM DATA_SET USING 'EKPO-EMATN(2)' TAB-MATNR. "品目コード
+SURYO = TAB-SURYO.
+TANKA = TAB-TANKA.
+PERFORM DATA_SET USING 'EKPO-MENGE(2)' SURYO.     "数量
+PERFORM DATA_SET USING 'RM06E-EEIND(2)' TAB-EEIND."納入期日
+PERFORM DATA_SET USING 'EKPO-NETPR(2)' TANKA.     "正味価格
+PERFORM DATA_SET USING 'EKPO-PEINH(2)' TAB-PEINH. "価格単位
+PERFORM DATA_SET USING 'EKPO-WERKS(2)' TAB-WERKS. "プラント
+PERFORM DATA_SET USING 'EKPO-LGORT(2)' TAB-LGORT. "保管場所
+PERFORM DATA_SET USING 'BDC_OKCODE' '/00'.        "ENTER
+*   PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "第２画面 ADD 5/16
+PERFORM DATA_SET USING 'BDC_CURSOR' 'EKPO-LGORT(2)'.
+PERFORM DATA_SET USING 'BDC_OKCODE' 'DETA'.
+PERFORM SET_ZEI.
+ENDFORM.
+************************************************************************
+***  価格設定
+************************************************************************
+FORM KAKAKU.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0121'.
+PERFORM DATA_SET USING 'BDC_OKCODE' 'K0'.         "価格設定
+PERFORM DATA_SET USING 'BDC_OKCODE' '/00'.        "ENTER
+PERFORM DYNPRO_SET USING 'SAPMV61A' '0620'.       "価格設定画面
+PERFORM DATA_SET USING 'BDC_OKCODE' 'KOAN'.       "新値登録
+PERFORM DATA_SET USING 'KOMV-KSCHL' 'PBXX'.       "条件タイプ
+PERFORM DATA_SET USING 'KOMV-KBETR' TANKA.        "正味価格
+*  PERFORM DATA_SET USING 'RV61A-KOEIN' 'JPY'. "2002/05/08 MOD
+*  PERFORM DATA_SET USING 'RV61A-KOEIN' W_TUKA. "2002/05/08 MOD 07/22 DE
+PERFORM DATA_SET USING 'KOMV-KPEIN'  '100'.
+PERFORM DATA_SET USING 'BDC_OKCODE' '/00'.        "ENTER
+* PERFORM DYNPRO_SET USING 'SAPMV61A' '0620'.       "価格設定画面ADD5/16
+PERFORM DATA_SET USING 'BDC_OKCODE' 'BACK'.
+ENDFORM.
+************************************************************************
+***  最終処理
+************************************************************************
+FORM SET4.
+PERFORM DYNPRO_SET USING 'SAPMM06E' '0120'.       "第２画面
+PERFORM DATA_SET USING 'BDC_OKCODE' 'BU'.         "保存
+PERFORM CALL_TRAN.
+ENDFORM.
+************************************************************************
+***  バッチインプット実行
+************************************************************************
+FORM CALL_TRAN.                                    "TESTは 'A' にする
+*  CLEAR:WK_EBELN,WK_EBELP. "DEL 2002/07/22
+CALL TRANSACTION 'ME21' USING BDC MODE 'A'       "本番は 'N' にする
+* CALL TRANSACTION 'ME21' USING BDC MODE 'N'       "本番は 'N' にする
+* CALL TRANSACTION 'ME21' USING BDC MODE W_MODE    "本番は 'N' にする
+UPDATE 'S'.
+IF SY-SUBRC = 0.
+CLEAR:WK_EBELN,WK_EBELP. "ADD 2002/07/22
+OKCNT = OKCNT + 1.
+***2002.04.16 add >>>
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID   = SY-MSGID
+MSGNO   = SY-MSGNO
+MSGTY   = SY-MSGTY
+MSGV1   = SY-MSGV1
+MSGV2   = SY-MSGV2
+MSGV3   = SY-MSGV3
+MSGV4   = SY-MSGV4
+MSGV5   = SY-MSGV4
+IMPORTING
+MESSG   = MSG1
+EXCEPTIONS
+OTHERS  = 1.
+WK_EBELN = SY-MSGV2.
+PERFORM WRITE_TEXT.
+***2002.04.16 add <<<
+ELSE.
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID   = SY-MSGID
+MSGNO   = SY-MSGNO
+MSGTY   = SY-MSGTY
+MSGV1   = SY-MSGV1
+MSGV2   = SY-MSGV2
+MSGV3   = SY-MSGV3
+MSGV4   = SY-MSGV4
+MSGV5   = SY-MSGV4
+IMPORTING
+MESSG   = MSG1
+EXCEPTIONS
+OTHERS  = 1.
+*2002/05/16 MOD START
+*    MESSAGE I400 WITH MSG1-MSGTX(100).
+*    MESSAGE I402 WITH '発注NO=' HACHU_NO.
+*    MESSAGE I402 WITH '登録件数=' OKCNT '件(伝票単位)'.
+*    MESSAGE E400 WITH '発注バッチインプット強制終了'.
+WRITE:/1 MSG1-MSGTX(150),
+/1 '発注NO=',
+8 HACHU_NO.
+*2002/05/16 MOD END
+ENDIF.
+ENDFORM.
+************************************************************************
+***  プログラムＩＤとＤＹＮＰＲＯ番号をセット
+************************************************************************
+FORM DYNPRO_SET USING VALUE(PROGNAME) VALUE(DYNPRONR).
+CLEAR BDC.
+BDC-PROGRAM = PROGNAME.
+BDC-DYNPRO  = DYNPRONR.
+BDC-DYNBEGIN   = 'X'.
+APPEND BDC.
+ENDFORM.
+************************************************************************
+***  項目名と値をセット
+************************************************************************
+FORM DATA_SET USING VALUE(FELDNAME) VALUE(FELDINHALT).
+check FELDINHALT <> '/'."スラッシュでないやつだけ必要
+CLEAR BDC.
+BDC-FNAM = FELDNAME.
+BDC-FVAL = FELDINHALT.
+APPEND  BDC.
+ENDFORM.
+***********************************************************************
+***  結果出力
+***********************************************************************
+FORM INFOMATION.
+*2002/07/22 MOD START
+*  MESSAGE I402 WITH '読込件数=' TOTAL '件'.
+*  MESSAGE I402 WITH '登録件数=' OKCNT '件(伝票単位)'.
+ULINE.
+WRITE:/1 '読込件数=', TOTAL, '件'.
+WRITE:/1 '登録件数=', OKCNT ,'件(伝票単位)'.
+*2002/07/22 MOD END
+ENDFORM.
+*** END OF PROGRAM ***
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_TEXT
+*&---------------------------------------------------------------------*
+*       明細テキストの追加
+*----------------------------------------------------------------------*
+FORM WRITE_TEXT.
+LOOP AT I_TXT.
+I_TXT-EBELP =  I_TXT-EBELP * 10. "2002/07/22 ADD(明細は10番単位)
+*2009.07.06 MODIFY START
+PERFORM SET_TXT USING 'F02' I_TXT-TEXT3 I_TXT-TEXT1.
+PERFORM SET_TXT USING 'F04' I_TXT-TEXT2 SPACE.
+*    PERFORM SET_TXT USING 'F02' I_TXT-TEXT1.
+*    PERFORM SET_TXT USING 'F04' I_TXT-TEXT2.
+*2009.07.06 MODIFY END
+ENDLOOP.
+REFRESH I_TXT.
+CLEAR I_TXT.
+ENDFORM.                    " WRITE_TEXT
+
+*&---------------------------------------------------------------------*
+*&      Form  SET_TXT
+*&---------------------------------------------------------------------*
+*       汎用モジュール機動
+*----------------------------------------------------------------------*
+*2009.07.06 MODIFY START
+FORM SET_TXT USING    P_ID
+P_TXT
+P_TXT2.
+*FORM SET_TXT USING    P_ID
+*                      P_TXT.
+*2009.07.06 MODIFY END
+DATA: W_TDNAME LIKE THEAD-TDNAME,
+W_FID LIKE THEAD-TDID.
+*2002/07/22 ADD START
+IF P_TXT = '/' or P_TXT = SPACE.
+EXIT.
+ENDiF.
+*2002/07/22 ADD END
+CLEAR: I_TLINE,W_TDNAME.
+REFRESH I_TLINE.
+CONCATENATE WK_EBELN I_TXT-EBELP INTO W_TDNAME.
+
+I_TLINE-TDFORMAT = '*'.
+I_TLINE-TDLINE   = P_TXT.
+APPEND  I_TLINE.
+*2009.07.06 APPEND START
+IF P_TXT2 <> SPACE.
+I_TLINE-TDFORMAT = '*'.
+I_TLINE-TDLINE   = P_TXT2.
+APPEND  I_TLINE.
+ENDIF.
+*2009.07.06 APPEND END
+W_FID =  P_ID.
+CALL FUNCTION 'CREATE_TEXT'
+EXPORTING
+FID         = W_FID
+FLANGUAGE   = 'J'
+FNAME       = W_TDNAME
+FOBJECT     = 'EKPO'
+SAVE_DIRECT = 'X'
+FFORMAT     = '*'
+TABLES
+FLINES      = I_TLINE
+EXCEPTIONS
+NO_INIT     = 1
+NO_SAVE     = 2
+OTHERS      = 3.
+
+ENDFORM.                    " SET_TXT
+*&---------------------------------------------------------------------*
+*&      Form  GET_TXT
+*&---------------------------------------------------------------------*
+*       テキスト登録用データ格納
+*----------------------------------------------------------------------*
+FORM GET_TXT.
+I_TXT-EBELP = I_TXT-EBELP + 1.
+I_TXT-TEXT1 = TAB-TEXT1.
+I_TXT-TEXT2 = TAB-TEXT2.
+*2009.07.06 APPEND START
+I_TXT-TEXT3 = TAB-LTEXT2.
+*2009.07.06 APPEND END
+APPEND I_TXT.
+ENDFORM.                    " GET_TXT
+*&---------------------------------------------------------------------*
+*&      Form  SPLIT_FILE
+*&---------------------------------------------------------------------*
+*       タブ区切り 2002/05/16
+*----------------------------------------------------------------------*
+FORM SPLIT_FILE.
+DATA W_TAB TYPE X VALUE '09'.
+CLEAR IN_FILE.
+SPLIT DUMMY-DAT AT W_TAB INTO
+IN_FILE-KYOTEN
+IN_FILE-MOTODEN
+IN_FILE-MOTOMEI
+IN_FILE-LIFNR
+IN_FILE-BEDAT
+IN_FILE-EKORG
+IN_FILE-EKGRP
+IN_FILE-WERKS
+IN_FILE-LGORT
+IN_FILE-EMATN
+*   IN_FILE-LTSNR DEL 2002/05/17
+IN_FILE-MENGE
+IN_FILE-NETPR
+IN_FILE-PEINH
+IN_FILE-EEIND
+IN_FILE-LTEXT1
+IN_FILE-NAME1
+*2009.07.06 APPEND START
+IN_FILE-NAME2
+IN_FILE-NAME3
+IN_FILE-NAME4
+IN_FILE-SORT1
+*2009.07.06 APPEND END
+IN_FILE-POSTCODE
+IN_FILE-CITY2
+IN_FILE-CITY1
+*2009.07.06 APPEND START
+IN_FILE-COUNTRY
+IN_FILE-REGION
+IN_FILE-LANGU
+IN_FILE-TEL_NUMBER
+IN_FILE-FAX_NUMBER
+*2009.07.06 APPEND END
+IN_FILE-STREET
+IN_FILE-HOUSENUM
+IN_FILE-ZEICODE
+IN_FILE-REPOS
+IN_FILE-WEBRE
+IN_FILE-XERSY
+IN_FILE-MWSKZ
+IN_FILE-EVERS
+IN_FILE-TEXT1
+IN_FILE-TEXT2
+IN_FILE-BSTAE.
+*2002/05/16 ADD START
+IF IN_FILE-KYOTEN    = '/'. CLEAR IN_FILE-KYOTEN. ENDIF.
+IF IN_FILE-MOTODEN = '/'. CLEAR IN_FILE-MOTODEN. ENDIF.
+IF IN_FILE-MOTOMEI = '/'. CLEAR IN_FILE-MOTOMEI. ENDIF.
+IF IN_FILE-LIFNR = '/'. CLEAR IN_FILE-LIFNR. ENDIF.
+IF IN_FILE-BEDAT = '/'. CLEAR IN_FILE-BEDAT. ENDIF.
+IF IN_FILE-EKORG = '/'. CLEAR IN_FILE-EKORG. ENDIF.
+IF IN_FILE-EKGRP = '/'. CLEAR IN_FILE-EKGRP. ENDIF.
+IF IN_FILE-WERKS = '/'. CLEAR IN_FILE-WERKS. ENDIF.
+IF IN_FILE-LGORT = '/'. CLEAR IN_FILE-LGORT. ENDIF.
+IF IN_FILE-EMATN = '/'. CLEAR IN_FILE-EMATN. ENDIF.
+IF IN_FILE-MENGE = '/'. CLEAR IN_FILE-MENGE. ENDIF.
+IF IN_FILE-NETPR = '/'. CLEAR IN_FILE-NETPR. ENDIF.
+IF IN_FILE-PEINH = '/'. CLEAR IN_FILE-PEINH. ENDIF.
+IF IN_FILE-EEIND = '/'. CLEAR IN_FILE-EEIND. ENDIF.
+IF IN_FILE-LTEXT1 = '/'. CLEAR IN_FILE-LTEXT1. ENDIF.
+IF IN_FILE-NAME1 = '/'. CLEAR IN_FILE-NAME1. ENDIF.
+IF IN_FILE-POSTCODE = '/'. CLEAR IN_FILE-POSTCODE. ENDIF.
+IF IN_FILE-CITY2 = '/'. CLEAR IN_FILE-CITY2. ENDIF.
+IF IN_FILE-CITY1 = '/'. CLEAR IN_FILE-CITY1. ENDIF.
+IF IN_FILE-STREET = '/'. CLEAR IN_FILE-STREET. ENDIF.
+IF IN_FILE-HOUSENUM = '/'. CLEAR IN_FILE-HOUSENUM. ENDIF.
+IF IN_FILE-ZEICODE = '/'. CLEAR IN_FILE-ZEICODE. ENDIF.
+IF IN_FILE-REPOS = '/'. CLEAR IN_FILE-REPOS. ENDIF.
+IF IN_FILE-WEBRE = '/'. CLEAR IN_FILE-WEBRE. ENDIF.
+IF IN_FILE-XERSY = '/'. CLEAR IN_FILE-XERSY. ENDIF.
+IF IN_FILE-MWSKZ = '/'. CLEAR IN_FILE-MWSKZ. ENDIF.
+IF IN_FILE-EVERS = '/'. CLEAR IN_FILE-EVERS. ENDIF.
+IF IN_FILE-TEXT1 = '/'. CLEAR IN_FILE-TEXT1. ENDIF.
+IF IN_FILE-TEXT2 = '/'. CLEAR IN_FILE-TEXT2. ENDIF.
+IF IN_FILE-BSTAE = '/'. CLEAR IN_FILE-BSTAE. ENDIF.
+*2002/05/16 ADD END
+ENDFORM.                    " SPLIT_FILE
+**************************************************************
+form open_local.
+
+call function 'UPLOAD'
+exporting
+filename                = p_ifile
+filetype                = 'DAT'
+tables
+data_tab                = LC_file
+exceptions
+conversion_error        = 1
+invalid_table_width     = 2
+invalid_type            = 3
+no_batch                = 4
+unknown_error           = 5
+others                  = 6 .
+*- エラー確認
+if sy-subrc <> 0 .
+*    message s638 .  stop .
+endif .
+* データ件数チェック
+describe table in_file lines total .
+if total = 0 .
+*    message s639 .  stop .
+endif .
+
+
+endform.

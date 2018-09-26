@@ -1,0 +1,3383 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN011000                                                    *
+*&         月締請求書IF（売上）                                        *
+*&---------------------------------------------------------------------*
+*&  機能     :①月締請求書用のIFデータを出力する。                     *
+*&              IFファイルは当月売上高と鑑繰越情報の出力となる。       *
+*&            ②出力履歴をアドオンテーブルに保持する。                 *
+*&            ③出力済の情報を自社データに保持する。                   *
+*&            ④出力済の自社データに対し,照合済の外部データを登録する。*
+*&	                                                            　
+*
+*&  作成日   : 2012/01/06                                              *
+*&  作成者   : H.KOMIYAMA(SOLFIS)                                      *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/02/28 H.KOMIYAMA(SOLFIS)                           *
+*&  変更内容 : アドレス情報関連項目が全て初期値となる不具合修正        *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/03/27  K.KAJISA(SOLFIS)                            *
+*&  変更内容 : インデックス対応                                        *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/04/06  K.KAJISA(SOLFIS)                            *
+*&  変更内容 : 不具合対応（YN110更新項目漏れ対応)                      *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/04/13  K.KAJISA(SOLFIS)                            *
+*&  変更内容 : 仕様変更対応                                            *
+*&             QA286 伝票タイプ指定の廃止                              *
+*&             QA287 締日にあう得意先存在無しのエラーメッセージ修正    *
+*&             QA288 照合済みの自社データを更新しないように修正        *
+*&                └ 新規作成する外部データの外部番号採番処理追加      *
+*&             QA289 削除対象データの判別方法変更（外部AUTOあり限定）  *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/04/18  K.KAJISA(SOLFIS)                            *
+*&  変更内容 : 仕様変更対応                                            *
+*&             QA308 数量 単価の位置調整用乗算                         *
+*&             QA309 ソート順                                          *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/05/21  K.FURUYA(SOLFIS)                            *
+*&  変更内容 : マイナス未検収／部分照合残は出力対象外                  *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/07/26  K.FURUYA(SOLFIS)                            *
+*&  変更内容 : マイナス数値出力の編集                                  *
+*&---------------------------------------------------------------------*
+*& YYYY/MM/DD  Programar         Description
+*& 2012/10/16  ISID              ES-UP
+*&---------------------------------------------------------------------*
+REPORT ZN011000
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT  58
+MESSAGE-ID  YN01.
+
+*----------------------------------------------------------------------*
+*   宣言部
+*----------------------------------------------------------------------*
+*** 参照テーブル
+TABLES: KNB1.
+
+*** 構造
+*-- 仕入先コード取得用
+DATA: BEGIN OF W_KNXX,
+KUNNR LIKE KNA1-KUNNR,              " 得意先コード
+ADRNR LIKE KNA1-ADRNR,              " 住所
+WAERS LIKE KNVV-WAERS,              " 通貨コード
+ZTERM LIKE KNVV-ZTERM,              " 支払条件キー
+VKGRP LIKE KNVV-VKGRP,              " 営業グループ
+VKBUR LIKE KNVV-VKBUR,              " 営業所
+TLINE TYPE XFELD,                   " 照合対象フラグ
+END   OF W_KNXX,
+*-- 支払条件取得用
+BEGIN OF W_T052,
+ZTERM LIKE T052-ZTERM,              " 支払条件キー
+ZTAGG LIKE T052-ZTAGG,              " 期限
+END   OF W_T052,
+*-- ロック/アンロック用内部テーブル定義
+BEGIN OF W_ENQ_KEY,
+BUKRS TYPE BUKRS,                   " 会社コード
+KUNNR TYPE YNKUNNR,                 " 得意先コード(発注先)
+KUNN2 TYPE YNKUNNR,                 " 得意先コード(支払人)
+END   OF W_ENQ_KEY,
+*-- ロック対象得意先コード取得用
+BEGIN OF W_KNVP,
+KUNNR LIKE KNVP-KUNNR,              " 得意先コード(発注先)
+KUNN2 LIKE KNVP-KUNN2,              " 得意先コード(支払人)
+END   OF W_KNVP,
+*-- 出力済得意先コード取得用
+BEGIN OF W_ZN006,
+KUNNR LIKE ZN006-KUNNR,             " 得意先コード(支払人)
+END   OF W_ZN006,
+*-- エラーログ出力用
+BEGIN OF TBL_ERRLOG OCCURS 0,
+LIFNR(10) TYPE C,                   " 得意先コード
+ERR(128)  TYPE C,                   " ERR
+END OF TBL_ERRLOG,
+*-- 出力対象データ取得
+BEGIN OF W_YN120,
+* 2012/04/18 QA309 ADD START
+*-    ソート順制御
+SORT1    TYPE AD_SORT1,                "検索条件 1
+* 2012/04/18 QA309 ADD END
+VRFCTON  LIKE YN120-VRFCTON,        " 得意先コード（支払人）
+GJAHR    LIKE YN120-GJAHR,          " 伝票会計年度
+SLPDOC   LIKE YN120-SLPDOC,         " 伝票番号
+DTLDOC   LIKE YN120-DTLDOC,         " 伝票明細番号
+BUKRS    LIKE YN120-BUKRS,          " 会社コード
+ZFBDT    LIKE YN120-ZFBDT,          " 計上締日
+KNQUAN   LIKE YN120-KNQUAN,         " 数量
+KNUNIT   LIKE YN120-KNUNIT,         " 単位
+KNUNTPRC LIKE YN120-KNUNTPRC,       " 単価
+KNITXAMT LIKE YN120-KNITXAMT,       " 税抜金額
+KNTAXAMT LIKE YN120-KNTAXAMT,       " 消費税額
+KNETXAMT LIKE YN120-KNETXAMT,       " 税込金額
+WAERS    LIKE YN120-WAERS,          " 通貨コード
+LIST2    LIKE YN120-LIST2,          " 得意先発注番号
+LIST5    LIKE YN120-LIST5,          " 品目コード
+LIST6    LIKE YN120-LIST6,          " 品目テキスト
+LIST7    LIKE YN120-LIST7,          " 得意先品目
+LDATE1   LIKE YN120-LDATE1,         " 請求日
+DVSON    LIKE YN120-DVSON,          " 営業所
+LIST4    LIKE YN120-LIST4,          " 営業グループ
+* 2012/04/06 ADD START
+* 更新漏れ項目追加
+PRCTR    TYPE YN120-PRCTR,          " 利益センタ
+PERNR    TYPE YN120-PERNR,          " 担当者
+TGTFLG   TYPE YN120-TGTFLG,         " 照合対象フラグ
+COMMT    TYPE YN120-COMMT,          " コメント
+CKEY1    TYPE YN120-CKEY1,          " 照合キー1：得意先発注番号
+CKEY2    TYPE YN120-CKEY2,          " 照合キー2：インボイスNo
+CKEY3    TYPE YN120-CKEY3,          " 照合キー3
+CKEY4    TYPE YN120-CKEY4,          " 照合キー4
+CKEY5    TYPE YN120-CKEY5,          " 照合キー5
+CKEY6    TYPE YN120-CKEY6,          " 照合キー6
+CKEY7    TYPE YN120-CKEY7,          " 照合キー7
+CKEY8    TYPE YN120-CKEY8,          " 照合キー8
+LIST1    TYPE YN120-LIST1,          " 得意先コード(受注先)
+LIST3    TYPE YN120-LIST3,          " 受注伝票
+LIST8    TYPE YN120-LIST8,          " インボイス№
+LIST9    TYPE YN120-LIST9,          " 一覧表示項目９
+LIST10   TYPE YN120-LIST10,         " 一覧表示項目１０
+* 2012/04/06 ADD END
+* 2012/04/13 QA288 ADD START
+CSTS     TYPE YN120-CSTS,           "照合ステータス
+* 2012/04/13 QA288 ADD END
+END   OF W_YN120,
+*-- 営業所テキスト一括取得用
+BEGIN OF W_TVKBT,
+VKBUR    LIKE TVKBT-VKBUR,          " 営業所
+BEZEI    LIKE TVKBT-BEZEI,          " 内容説明
+END   OF W_TVKBT,
+*-- 営業グループテキスト一括取得用
+BEGIN OF W_TVGRT,
+VKGRP    LIKE TVGRT-VKGRP,          " 営業グループ
+BEZEI    LIKE TVGRT-BEZEI,          " 内容説明
+END   OF W_TVGRT,
+*-- 請求額取得用
+BEGIN OF W_BSXX,
+KUNNR    LIKE BSID-KUNNR,           " 得意先コード
+WAERS    LIKE BSID-WAERS,           " 通貨コード
+SHKZG    LIKE BSID-SHKZG,           " 借方/貸方フラグ
+WRBTR    LIKE BSID-WRBTR,           " 伝票通貨額
+ZUONR    LIKE BSID-ZUONR,           " ソートキー
+GJAHR    LIKE BSID-GJAHR,           " 会計年度
+BELNR    LIKE BSID-BELNR,           " 会計伝票番号
+BUZEI    LIKE BSID-BUZEI,           " 会計伝票内の明細番号
+END   OF W_BSXX,
+*-- アドレス情報一括取得用
+BEGIN OF W_ADRC,
+ADDRNUMBER LIKE ADRC-ADDRNUMBER,    " アドレス番号
+DATE_FROM  LIKE ADRC-DATE_FROM,     " 有効開始日付
+NATION     LIKE ADRC-NATION,        " 国際アドレスバージョン ID
+NAME2      LIKE ADRC-NAME2,         " 名前 2
+NAME3      LIKE ADRC-NAME3,         " 名前 3
+CITY1      LIKE ADRC-CITY1,         " 市区町村
+POST_CODE1 LIKE ADRC-POST_CODE1,    " 市区町村の郵便番号
+STREET     LIKE ADRC-STREET,        " 都道府県名
+STR_SUPPL1 LIKE ADRC-STR_SUPPL1,    " 地名 2
+STR_SUPPL2 LIKE ADRC-STR_SUPPL2,    " 地名 3
+*** 2012/02/28 INS START ***
+REGION     LIKE ADRC-REGION,        " 地域
+*** 2012/02/28 INS END   ***
+BEZEI      LIKE T005U-BEZEI,        " 地域 (都道府県）
+END   OF W_ADRC,
+*** 2012/02/28 INS START ***
+*-- 地域コード: テキスト取得用
+BEGIN OF W_T005U,
+BLAND    TYPE T005U-BLAND,          " 地域
+BEZEI    TYPE T005U-BEZEI,          " 内容説明
+END   OF W_T005U,
+*** 2012/02/28 INS END   ***
+*-- 品目テキスト一括取得用
+BEGIN OF W_MAKT,
+MATNR      LIKE MAKT-MATNR,         " 品目コード
+MAKTX      LIKE MAKT-MAKTX,         " 品目テキスト
+END   OF W_MAKT,
+*-- IFファイル編集用
+BEGIN OF W_DATA,
+PNAME         TYPE STRING,          " プリンタ/トレイ
+TITLE         TYPE STRING,          " 帳票名
+PRINTDT       TYPE STRING,          " 出力年月日
+BUKRS         TYPE STRING,          " 会社コード
+KUNNR         TYPE STRING,          " 得意先コード(支払人)
+VKORG         TYPE STRING,          " 販売組織
+VTWEG         TYPE STRING,          " 流通チャネル
+SPART         TYPE STRING,          " 製品部門
+ZFBDT         TYPE STRING,          " 計上締日
+WAERS         TYPE STRING,          " 通貨コード
+LBLAMT        TYPE STRING,          " 前月御請求額
+CICAMT        TYPE STRING,          " 当月御入金額
+CSLAMT        TYPE STRING,          " 当月御買上額
+CTXAMT        TYPE STRING,          " 当月消費税額
+CSTAMT        TYPE STRING,          " 当月消費税込御買上額
+CBLAMT        TYPE STRING,          " 当月御請求額
+POST_CODE     TYPE STRING,          " 市区町村の郵便番号
+BEZEIA        TYPE STRING,          " 内容説明
+ADDRESS       TYPE STRING,          " 月締請求書住所
+CITY1         TYPE STRING,          " 市区町村
+STR_SUPPL1    TYPE STRING,          " 地名 2
+STR_SUPPL2    TYPE STRING,          " 地名 3
+NAME1         TYPE STRING,          " 正式名称
+NAME2         TYPE STRING,          " 正式名称２
+VKGRP         TYPE STRING,          " 営業グループ
+LDATE1        TYPE STRING,          " 請求日
+VBELN         TYPE STRING,          " 請求伝票
+POSNR         TYPE STRING,          " 請求明細
+BSTKD         TYPE STRING,          " ご注文番号
+KDMAT         TYPE STRING,          " 月締請求書図番
+TXZ01         TYPE STRING,          " テキスト (短)
+KNQUAN        TYPE STRING,          " 数量
+KNUNIT        TYPE STRING,          " 単位
+KNUNTPRC      TYPE STRING,          " 単価
+KNITXAMT      TYPE STRING,          " 税抜金額
+KNTAXAMT      TYPE STRING,          " 消費税額
+KNETXAMT      TYPE STRING,          " 税込金額
+MEMO          TYPE STRING,          " 備考
+VKBUR         TYPE STRING,          " 営業所
+BEZEIB        TYPE STRING,          " 内容説明
+BEZEIG        TYPE STRING,          " 内容説明
+END   OF W_DATA,
+*-- 照合締日取得用
+BEGIN OF W_CZFBDT,
+SLPDOC  LIKE YN120-SLPDOC,          " 伝票番号
+GJAHR   LIKE YN120-GJAHR,           " 伝票会計年度
+DTLDOC  LIKE YN120-DTLDOC,          " 伝票明細番号
+BUKRS   LIKE YN120-BUKRS,           " 会社コード
+VRFCTON LIKE YN120-VRFCTON,         " 得意先コード
+CZFBDT  LIKE YN120-CZFBDT,          " 照合締日
+END   OF W_CZFBDT,
+*-- 照合終了日取得用
+BEGIN OF W_ZN004,
+KUNNR LIKE ZN004-KUNNR,             " 得意先コード
+EDATE LIKE ZN004-EDATE,             " 照合終了日
+END   OF W_ZN004,
+*-- 出力履歴テーブル登録用
+W_ZN006_UP      LIKE ZN006,           " 月締請求書履歴(売上)
+*-- 外部データ登録用
+W_YN110_UP      LIKE YN110,           " 外部データ(仕入)
+*-- 再出力データ取得用
+* 2012/04/18 QA309 DEL START
+*      W_ZN006_RE LIKE ZN006,                " 月締請求書履歴(売上)
+* 2012/04/18 QA309 DEL END
+*-- 外部データ削除用
+W_YN110_DE      LIKE YN110.           " 外部データ(仕入)
+
+* 2012/04/18 QA309 ADD START
+*- 再出力データ取得用データにソート用項目追加
+TYPES:BEGIN OF TYP_ZN006.
+INCLUDE STRUCTURE ZN006.
+TYPES:      SORT1    TYPE AD_SORT1,                "検索条件 1
+END OF TYP_ZN006.
+DATA:W_ZN006_RE TYPE TYP_ZN006.
+* 2012/04/18 QA309 ADD END
+
+* 2012/04/13 ADD START
+* BSID/BSAD読み込み対策
+TYPES:BEGIN OF T_KEY_KUNNR,
+VRFCTON LIKE YN120-VRFCTON,
+END OF T_KEY_KUNNR.
+DATA:T_KEY_KUNNR TYPE STANDARD TABLE OF T_KEY_KUNNR,
+W_KEY_KUNNR TYPE T_KEY_KUNNR.
+* 2012/04/13 ADD END
+
+*** 内部テーブル
+DATA: I_KNXX     LIKE STANDARD TABLE OF W_KNXX,
+I_T052     LIKE SORTED   TABLE OF W_T052
+WITH UNIQUE KEY ZTERM ZTAGG,
+I_ENQ_KEY  LIKE STANDARD TABLE OF W_ENQ_KEY,
+I_KNVP     LIKE STANDARD TABLE OF W_KNVP,
+I_ZN006    LIKE STANDARD TABLE OF W_ZN006,
+I_YN120    LIKE STANDARD TABLE OF W_YN120,
+I_TVKBT    LIKE STANDARD TABLE OF W_TVKBT,
+I_TVGRT    LIKE STANDARD TABLE OF W_TVGRT,
+I_BSXX     LIKE SORTED   TABLE OF W_BSXX
+WITH NON-UNIQUE KEY KUNNR,
+I_BSXX_OLD LIKE SORTED   TABLE OF W_BSXX
+WITH NON-UNIQUE KEY KUNNR,
+I_ADRC     LIKE SORTED   TABLE OF W_ADRC
+WITH NON-UNIQUE KEY ADDRNUMBER,
+*** 2012/02/28 INS START ***
+I_T005U    LIKE SORTED TABLE OF W_T005U
+WITH NON-UNIQUE KEY BLAND,
+*** 2012/02/28 INS END   ***
+I_MAKT     LIKE STANDARD TABLE OF W_MAKT,
+I_DATA     LIKE STANDARD TABLE OF W_DATA,
+I_ZN006_UP LIKE STANDARD TABLE OF W_ZN006_UP,
+I_YK015300 LIKE STANDARD TABLE OF YK01530020 WITH HEADER LINE,
+I_ZN006_RE LIKE STANDARD TABLE OF W_ZN006_RE,
+I_CZFBDT   LIKE HASHED   TABLE OF W_CZFBDT
+WITH UNIQUE KEY GJAHR SLPDOC DTLDOC VRFCTON,
+I_ZN004    LIKE HASHED   TABLE OF W_ZN004
+WITH UNIQUE KEY KUNNR,
+I_YN110_UP LIKE STANDARD TABLE OF W_YN110_UP,
+I_YN110_DE LIKE STANDARD TABLE OF W_YN110_DE.
+
+*** グローバル変数
+DATA: RC_CODE_LOCK TYPE SY-SUBRC,
+G_CNT_SEQ    TYPE I,               " SEQ
+G_CNT_UPD    TYPE I,               " 更新件数
+G_CNT_OUT    TYPE I,               " 出力件数
+G_CNT_NUT    TYPE I,               " 出力対象外件数
+G_CNT_ERR    TYPE I,               " エラー件数
+G_ZFBDT_P    TYPE DATUM,           " 画面締日
+G_ZFBDT      TYPE DATUM,           " 当月締日
+G_ZFBDT_OLD  TYPE DATUM,           " 前回締日
+G_FNAME      TYPE RLGRAP-FILENAME, " 出力先パス
+G_SUM_CICAMT TYPE YN120-KNITXAMT,  " 当月御入金額計算用
+G_SUM_ITXAMT TYPE YN120-KNITXAMT,  " 当月御買上額計算用
+G_SUM_TAXAMT TYPE YN120-KNTAXAMT,  " 当月消費税額計算用
+G_SUM_ETXAMT TYPE YN120-KNETXAMT.  " 当月消費税込御買上額計算用
+
+*** 定数
+CONSTANTS: C_MARK1(1)      TYPE C VALUE 'Y',
+C_MARK2(1)      TYPE C VALUE 'Z',
+C_MAIN_KUNNR(1) TYPE C VALUE '+',
+C_FLG_ON(1)     TYPE C VALUE 'X',
+C_TEXT(4)       TYPE C VALUE '.txt'.
+* Add ES-UP 2012/10/16 -->
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/10/16 <--
+*&---------------------------------------------------------------------*
+*&   画面項目定義
+*&---------------------------------------------------------------------*
+*-- データ選択
+SELECTION-SCREEN BEGIN OF BLOCK BK1 WITH FRAME TITLE TEXT-S01.
+*-- 会社コード
+PARAMETERS: P_BUKRS LIKE T001-BUKRS OBLIGATORY MEMORY ID BUK,
+*-- 販売組織
+P_VKORG LIKE KNVV-VKORG OBLIGATORY MEMORY ID VKO,
+*-- 流通チャネル
+P_VTWEG LIKE KNVV-VTWEG OBLIGATORY MEMORY ID VTW,
+*-- 製品部門
+P_SPART LIKE KNVV-SPART OBLIGATORY MEMORY ID SPA,
+*-- 出力年月
+P_YEARS(6) TYPE N,
+*-- 出力締日
+P_CDATE(2) TYPE N OBLIGATORY.
+*-- 得意先コード(支払人)
+SELECT-OPTIONS S_KUNNR FOR KNB1-KUNNR.
+SELECTION-SCREEN END   OF BLOCK BK1.
+
+*-- 出力オプション
+SELECTION-SCREEN BEGIN OF BLOCK BK2 WITH FRAME TITLE TEXT-S02.
+SELECTION-SCREEN BEGIN OF LINE.
+*-- 出力
+PARAMETERS: R_OUTPUT RADIOBUTTON GROUP RA02 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 04(10) TEXT-S03.
+*-- 再出力
+PARAMETERS: R_REPRIN RADIOBUTTON GROUP RA02.
+SELECTION-SCREEN COMMENT 18(10) TEXT-S04.
+*-- 取消
+PARAMETERS: R_CANCEL RADIOBUTTON GROUP RA02.
+SELECTION-SCREEN COMMENT 32(10) TEXT-S05.
+SELECTION-SCREEN END OF LINE.
+*-- ディレクトリ名
+PARAMETERS: P_DNAME LIKE RLGRAP-FILENAME MEMORY ID ZSVF,
+*-- ファイル名
+P_FNAME LIKE RLGRAP-FILENAME,
+*-- スプール: 出力デバイス
+P_SPLD  LIKE USR01-SPLD,
+*-- プリンタ名／トレイ
+P_PNAME LIKE TSP03D-PAPROSNAME,
+*-- 出力帳票名
+P_RNAME(12) TYPE C DEFAULT TEXT-S06 OBLIGATORY.
+SKIP 1.
+
+*-- 取引先機能
+PARAMETERS: P_PARVW LIKE KNVP-PARVW        OBLIGATORY.
+*-- 伝票タイプ
+* 2012/04/13 QA286 DEL START
+*              P_BLART LIKE BSID-BLART        OBLIGATORY.
+* 2012/04/13 QA286 DEL END
+SELECTION-SCREEN END   OF BLOCK BK2.
+************************************************************************
+INITIALIZATION.
+************************************************************************
+
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_DNAME.
+************************************************************************
+*-- ディレクトリ名の検索ヘルプ
+PERFORM F_F4HELP_P_DNAME.
+
+************************************************************************
+AT SELECTION-SCREEN.
+************************************************************************
+*-- 選択画面処理
+PERFORM F_SELECTION_SCREEN_PROC.
+
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+PERFORM F_INIT_SEC.                       " 初期処理
+PERFORM F_MAIN_SEC.                       " メイン処理
+
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+
+*&---------------------------------------------------------------------*
+*&      Form F_F4HELP_P_DNAME
+*&---------------------------------------------------------------------*
+*       ディレクトリ名のヘルプ出力
+*----------------------------------------------------------------------*
+FORM F_F4HELP_P_DNAME.
+
+DATA: L_PATH          LIKE DXFIELDS-LONGPATH,
+L_ABEND_FLG     LIKE DXFIELDS-ABENDFLAG,
+L_STRIPPED_NAME LIKE RLGRAP-FILENAME.
+
+*-- ファイルパスの取得
+CALL FUNCTION 'F4_DXFILENAME_TOPRECURSION'
+EXPORTING
+I_LOCATION_FLAG = 'A'
+I_SERVER        = ''
+I_PATH          = ''
+FILEMASK        = '*.*'
+FILEOPERATION   = 'R'
+IMPORTING
+O_PATH          = L_PATH
+ABEND_FLAG      = L_ABEND_FLG
+EXCEPTIONS
+OTHERS          = 0.
+
+IF L_ABEND_FLG <> C_FLG_ON.
+P_DNAME = L_PATH.
+*-- ディレクトリ名とファイル名の分割
+CALL FUNCTION 'SO_SPLIT_FILE_AND_PATH'
+EXPORTING
+FULL_NAME     = P_DNAME
+IMPORTING
+STRIPPED_NAME = L_STRIPPED_NAME
+FILE_PATH     = P_DNAME
+EXCEPTIONS
+OTHERS        = 0.
+ENDIF.
+
+ENDFORM.                    " F_F4HELP_P_DNAME
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECTION_SCREEN_PROC
+*&---------------------------------------------------------------------*
+*       選択画面処理
+*----------------------------------------------------------------------*
+FORM F_SELECTION_SCREEN_PROC.
+
+*-- 会社コードと販売組織、流通チャネル、製品部門の存在チェック
+PERFORM F_CHECK_BUK_VKO_VTW_SPA.
+
+*-- 出力締日チェック
+PERFORM F_CHECK_P_CDATE.
+
+*-- 出力年月初期値設定
+IF P_YEARS IS INITIAL.
+PERFORM F_SET_P_YEARS.
+ENDIF.
+
+*-- 出力年月チェック
+PERFORM F_CHECK_P_YEARS.
+
+*-- ファイル名初期値設定
+IF P_FNAME IS INITIAL.
+PERFORM F_SET_P_FNAME.
+ENDIF.
+
+*-- 出力デバイス名初期値設定
+IF P_SPLD IS INITIAL.
+PERFORM F_SET_P_DNAME.
+ENDIF.
+
+*-- プリンタ名初期値設定&デバイス存在チェック
+IF P_PNAME IS INITIAL.
+PERFORM F_SET_P_PNAME.
+ENDIF.
+
+*-- 照合締日の取得
+PERFORM F_GET_ZFBDT.
+
+*-- 必須入力項目チェック
+PERFORM F_CHECK_OUTPUT_ENTRY.
+
+ENDFORM.                    " F_SELECTION_SCREEN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_BUK_VKO_VTW_SPA
+*&---------------------------------------------------------------------*
+*       会社コードと販売組織、流通チャネル、製品部門の存在チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_BUK_VKO_VTW_SPA.
+
+DATA: L_VKORG LIKE TVTA-VKORG.
+
+SELECT SINGLE TVKO~VKORG        " 販売組織
+FROM TVKO INNER JOIN TVTA
+ON TVKO~VKORG = TVTA~VKORG
+INTO L_VKORG
+WHERE TVKO~BUKRS = P_BUKRS     " 会社コード
+AND TVTA~VKORG = P_VKORG     " 販売組織
+AND TVTA~VTWEG = P_VTWEG     " 流通チャネル
+AND TVTA~SPART = P_SPART.    " 製品部門
+
+IF SY-SUBRC <> 0.
+*-- 対象データがありません
+MESSAGE E762.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_BUK_VKO_VTW_SPA
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_P_CDATE
+*&---------------------------------------------------------------------*
+*       出力締日チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_P_CDATE.
+
+IF NOT (  P_CDATE =  5
+OR P_CDATE = 10
+OR P_CDATE = 15
+OR P_CDATE = 20
+OR P_CDATE = 25
+OR P_CDATE = 31 ).
+*-- 入力された締日が適切ではありません
+MESSAGE E913.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_P_CDATE
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_P_YEARS
+*&---------------------------------------------------------------------*
+*       出力年月チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_P_YEARS.
+
+IF P_YEARS+4(2) < 01
+OR P_YEARS+4(2) > 12.
+*-- 入力された出力年月が不正です。
+MESSAGE E914.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_P_YEARS
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_P_YEARS
+*&---------------------------------------------------------------------*
+*       出力年月初期値設定
+*----------------------------------------------------------------------*
+FORM F_SET_P_YEARS.
+
+DATA: L_ENDDA LIKE PSKEY-ENDDA.
+
+IF P_CDATE =  5
+OR P_CDATE = 10
+OR P_CDATE = 15
+OR P_CDATE = 20
+OR P_CDATE = 25.
+
+*-- システム日付の先頭６桁を設定
+P_YEARS = SY-DATUM(6).
+
+ELSE.
+
+*-- システム日付の前月を取得する
+CALL FUNCTION 'HRWPC_BL_DATES_MONTH_INTERVAL'
+EXPORTING
+DATUM          = SY-DATUM
+MONTH_PST      = 1
+MONTH_FTR      = -1
+IMPORTING
+ENDDA          = L_ENDDA
+EXCEPTIONS
+OTHERS         = 0.
+
+*-- システム日付の前月の先頭６桁を設定
+P_YEARS = L_ENDDA(6).
+
+ENDIF.
+
+ENDFORM.                    " F_SET_P_YEARS
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_P_FNAME
+*&---------------------------------------------------------------------*
+*       ファイル名初期値設定
+*----------------------------------------------------------------------*
+FORM F_SET_P_FNAME.
+
+CONCATENATE SY-REPID       " プログラムID
+SY-UNAME       " ユーザID
+SY-UZEIT       " システム時刻
+C_TEXT         " テキスト拡張子
+INTO  P_FNAME.
+
+ENDFORM.                    " F_SET_P_FNAME
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_P_DNAME
+*&---------------------------------------------------------------------*
+*       出力デバイス名初期値設定
+*----------------------------------------------------------------------*
+FORM F_SET_P_DNAME.
+
+SELECT SINGLE SPLD              " スプール: 出力デバイス
+FROM USR01
+INTO P_SPLD
+WHERE BNAME = SY-UNAME.        " ユーザID
+
+ENDFORM.                    " F_SET_P_DNAME
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_P_PNAME
+*&---------------------------------------------------------------------*
+*       プリンタ名初期値設定
+*----------------------------------------------------------------------*
+FORM F_SET_P_PNAME.
+
+SELECT SINGLE PAPROSNAME          " ホストスプーラ用プリンタの正式名
+FROM TSP03D
+INTO P_PNAME
+WHERE PADEST = P_SPLD.           " 出力デバイス
+
+ENDFORM.                    " F_SET_P_PNAME
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_ZFBDT
+*&---------------------------------------------------------------------*
+*       照合締日の算出
+*----------------------------------------------------------------------*
+FORM F_GET_ZFBDT.
+
+CLEAR: G_ZFBDT_P.
+
+IF P_CDATE =  5
+OR P_CDATE = 10
+OR P_CDATE = 15
+OR P_CDATE = 20
+OR P_CDATE = 25.
+
+*-- 出力年月(YYYYMM)＋出力締日(DD)
+CONCATENATE P_YEARS
+P_CDATE
+INTO G_ZFBDT_P.
+
+ELSE.
+
+*-- 出力年月(YYYYMM)＋[01]
+CONCATENATE P_YEARS
+'01'
+INTO G_ZFBDT_P.
+
+*-- 月末日へ変換
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN                  = G_ZFBDT_P
+IMPORTING
+LAST_DAY_OF_MONTH       = G_ZFBDT_P
+EXCEPTIONS
+OTHERS                  = 0.
+
+ENDIF.
+
+ENDFORM.                    " F_GET_ZFBDT
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_OUTPUT_ENTRY
+*&---------------------------------------------------------------------*
+*       必須入力項目チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_OUTPUT_ENTRY.
+
+IF R_OUTPUT = C_FLG_ON               " 出力
+OR R_REPRIN = C_FLG_ON.              " 再出力
+IF P_DNAME IS INITIAL.
+*-- ディレクトリ名を入力してください
+SET CURSOR FIELD 'P_DNAME'.
+MESSAGE E901 WITH TEXT-M09.
+ENDIF.
+IF P_FNAME IS INITIAL.
+*-- ファイル名を入力してください
+SET CURSOR FIELD 'P_FNAME'.
+MESSAGE E901 WITH TEXT-M10.
+ENDIF.
+ENDIF.
+
+IF R_OUTPUT = C_FLG_ON.              " 出力
+IF P_SPLD IS INITIAL.
+*-- スプール: 出力デバイスを入力してください
+SET CURSOR FIELD 'P_SPLD'.
+MESSAGE E901 WITH TEXT-M11.
+ENDIF.
+IF P_PNAME IS INITIAL.
+*-- プリンタ名／トレイを入力してください
+SET CURSOR FIELD 'P_PNAME'.
+MESSAGE E901 WITH TEXT-M12.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_OUTPUT_ENTRY
+*&---------------------------------------------------------------------*
+*&      Form  F_INIT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM F_INIT_SEC.
+
+*-- 変数の初期化
+CLEAR: W_KNXX,
+W_T052,
+W_ENQ_KEY,
+W_KNVP,
+W_ZN006,
+W_YN120,
+W_TVKBT,
+W_TVGRT,
+W_BSXX,
+W_ADRC,
+W_MAKT,
+W_DATA,
+W_ZN006_UP,
+W_ZN006_RE,
+W_CZFBDT,
+W_ZN004,
+W_YN110_DE,
+RC_CODE_LOCK,
+G_CNT_SEQ,
+G_CNT_UPD,
+G_CNT_OUT,
+G_CNT_NUT,
+G_CNT_ERR,
+G_ZFBDT,
+G_ZFBDT_OLD,
+G_FNAME,
+G_SUM_CICAMT,
+G_SUM_ITXAMT,
+G_SUM_TAXAMT,
+G_SUM_ETXAMT.
+
+REFRESH: I_KNXX,
+I_T052,
+I_ENQ_KEY,
+I_KNVP,
+I_ZN006,
+I_YN120,
+I_TVKBT,
+I_TVGRT,
+I_BSXX,
+I_BSXX_OLD,
+I_ADRC,
+I_MAKT,
+I_DATA,
+I_ZN006_UP,
+I_YK015300,
+I_ZN006_RE,
+I_CZFBDT,
+I_ZN004,
+I_YN110_UP,
+I_YN110_DE.
+
+* 2012/04/13 ADD START
+REFRESH:T_KEY_KUNNR.
+CLEAR:  W_KEY_KUNNR.
+* 2012/04/13 ADD END
+
+
+ENDFORM.                    " F_INIT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_MAIN_SEC
+*&---------------------------------------------------------------------*
+*       メイン処理
+*----------------------------------------------------------------------*
+FORM F_MAIN_SEC.
+
+*-- 「出力」選択時
+IF R_OUTPUT = C_FLG_ON.
+*-- 対象得意先取得
+PERFORM F_GET_TARGET_CUSTOMER.
+*-- テーブルロック設定(出力時)
+PERFORM F_SET_TABLE_LOCK_O.
+*-- 出力済チェック
+PERFORM F_CHECK_OUTPUT_ALREADY.
+*-- 出力対象データの取得
+PERFORM F_GET_OUTPUT_DATA.
+*-- 補足情報取得
+PERFORM F_GET_SUPPLEMENT_DATA.
+*-- ファイル＆テーブル編集処理
+PERFORM F_EDIT_FILE_AND_TABLE_DATA.
+*-- 出力履歴テーブルの更新
+PERFORM F_INSERT_ZN006.
+*-- 自社データ（YN120）/外部データ(YN110)の更新
+PERFORM F_UPDATE_YN1X0.
+*-- ファイル出力
+PERFORM F_OUTPUT_FILE.
+*-- テーブルロック解除(出力時)
+PERFORM F_RELEASE_TABLE_LOCK_O.
+*-- コミット処理
+COMMIT WORK.
+*-- 出力ログ表示
+PERFORM F_DISPLAY_OUTPUT_LOG.
+ENDIF.
+
+*-- 「再出力」選択時
+IF R_REPRIN = C_FLG_ON.
+*-- 再出力データの取得
+PERFORM F_GET_OUTPUT_AGAIN_DATA.
+*-- ファイル再出力
+PERFORM F_OUTPUT_AGAIN_FILE.
+*-- コミット処理
+COMMIT WORK.
+*-- 出力ログ表示
+PERFORM F_DISPLAY_OUTPUT_LOG.
+ENDIF.
+
+*-- 「取消」選択時
+IF R_CANCEL = C_FLG_ON.
+*-- 出力済データ確認
+PERFORM F_CONFIRM_OUTPUT_AGAIN_DATA.
+*-- 実行確認ポップアップ出力
+PERFORM F_OUTPUT_POPUP.
+*-- テーブルロック設定(取消時)
+PERFORM F_SET_TABLE_LOCK_C.
+*-- 取消実行
+PERFORM F_CLEAR_TABLE_DATA.
+*-- テーブルロック解除(取消時)
+PERFORM F_RELEASE_TABLE_LOCK_C.
+*-- コミット処理
+COMMIT WORK.
+*-- 出力ログ表示
+PERFORM F_DISPLAY_OUTPUT_LOG.
+ENDIF.
+
+ENDFORM.                    " F_MAIN_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_TARGET_CUSTOMER
+*&---------------------------------------------------------------------*
+*       対象得意先取得
+*----------------------------------------------------------------------*
+FORM F_GET_TARGET_CUSTOMER.
+
+*-- 対象の得意先コード取得
+PERFORM F_SELECT_KNA1_KNVV.
+
+*-- 購買データの支払条件を一括取得
+PERFORM F_SELECT_T052.
+
+*-- 得意先データ絞込み
+PERFORM F_REFINE_KNXX.
+
+ENDFORM.                    " F_GET_TARGET_CUSTOMER
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_KNA1_KNVV
+*&---------------------------------------------------------------------*
+*       対象の得意先コード
+*----------------------------------------------------------------------*
+FORM F_SELECT_KNA1_KNVV.
+
+REFRESH: I_KNXX.
+
+SELECT KNA1~KUNNR                    " 得意先コード
+KNA1~ADRNR                    " 住所
+KNVV~WAERS                    " 通貨コード
+KNVV~ZTERM                    " 支払条件キー
+KNVV~VKGRP                    " 営業グループ
+KNVV~VKBUR                    " 営業所
+FROM KNA1 INNER JOIN KNVV
+ON KNA1~KUNNR = KNVV~KUNNR
+INTO CORRESPONDING FIELDS OF TABLE I_KNXX
+WHERE KNA1~KUNNR IN S_KUNNR         " 得意先コード
+AND KNVV~VKORG  = P_VKORG         " 販売組織
+AND KNVV~VTWEG  = P_VTWEG         " 流通チャネル
+AND KNVV~SPART  = P_SPART.        " 製品部門
+
+SORT I_KNXX[].
+
+ENDFORM.                    " F_SELECT_KNA1_KNVV
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_T052
+*&---------------------------------------------------------------------*
+*       購買データの支払条件を一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_T052.
+
+DATA: LI_KNXX LIKE STANDARD TABLE OF W_KNXX.
+
+*-- 支払条件キーをユニークにする
+LI_KNXX = I_KNXX.
+SORT LI_KNXX ASCENDING BY ZTERM.     " 支払条件
+DELETE ADJACENT  DUPLICATES FROM LI_KNXX
+COMPARING ZTERM.
+
+CHECK NOT LI_KNXX[] IS INITIAL.
+
+REFRESH: I_T052.
+*-- 支払条件取得
+SELECT ZTERM                              " 支払条件キー
+ZTAGG                              " 期限
+FROM T052
+INTO CORRESPONDING FIELDS OF TABLE I_T052
+FOR ALL ENTRIES IN LI_KNXX
+WHERE ZTERM = LI_KNXX-ZTERM.             " 支払条件キー
+
+*-- 期日を若番に絞り込む
+DELETE ADJACENT  DUPLICATES FROM I_T052
+COMPARING ZTERM.                   " 支払条件キー
+
+ENDFORM.                    " F_SELECT_T052
+*&---------------------------------------------------------------------*
+*&      Form  F_REFINE_KNxx
+*&---------------------------------------------------------------------*
+*       得意先データ絞込み
+*----------------------------------------------------------------------*
+FORM F_REFINE_KNXX.
+
+DATA: L_NAME   TYPE THEAD-TDNAME,
+LW_TLINE TYPE TLINE,
+LI_TLINE LIKE STANDARD TABLE OF LW_TLINE.
+
+LOOP AT I_KNXX INTO W_KNXX.
+
+*-- 支払条件の読込み
+CLEAR: W_T052.
+READ TABLE I_T052 INTO W_T052
+WITH KEY ZTERM = W_KNXX-ZTERM   " 支払条件キー
+BINARY SEARCH.
+
+*-- 締日<>期日の場合、処理対象外とする
+IF W_T052-ZTAGG <> P_CDATE.
+DELETE I_KNXX.
+CONTINUE.
+ENDIF.
+
+*-- READ_TEXT用NAMEの作成 (得意先コード＋会社コード)
+CLEAR: L_NAME.
+CONCATENATE W_KNXX-KUNNR                " 得意先コード
+P_BUKRS                     " 会社コード
+INTO L_NAME.
+
+*-- 得意先マスタテキストの読込み
+REFRESH: LI_TLINE.
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+CLIENT                        = SY-MANDT
+ID                            = 'YN01'
+LANGUAGE                      = 'J'
+NAME                          = L_NAME
+OBJECT                        = 'KNB1'
+TABLES
+LINES                         = LI_TLINE
+EXCEPTIONS
+OTHERS                        = 0.
+
+CLEAR: LW_TLINE.
+READ TABLE LI_TLINE INTO LW_TLINE INDEX 1.
+IF LW_TLINE-TDLINE = C_MARK1
+OR LW_TLINE-TDLINE = C_MARK2.
+W_KNXX-TLINE = LW_TLINE-TDLINE.
+MODIFY I_KNXX FROM W_KNXX.
+ELSE.
+*-- 「Y」「Z」以外の場合、処理対象外とする
+DELETE I_KNXX.
+CONTINUE.
+ENDIF.
+
+ENDLOOP.
+
+*-- 該当得意先が0件の場合、メッセージを出力して終了
+IF I_KNXX[] IS INITIAL.
+* 2012/04/13 QA287 MOD START
+*    MESSAGE S915 WITH P_CDATE.
+*   &1 日締に該当する得意先が存在しません
+MESSAGE S925 WITH P_CDATE.
+* 2012/04/13 QA287 MOD END
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+FREE: I_T052.
+
+ENDFORM.                    " F_REFINE_KNxx
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_TABLE_LOCK_O
+*&---------------------------------------------------------------------*
+*       テーブルロック設定(出力時)
+*----------------------------------------------------------------------*
+FORM F_SET_TABLE_LOCK_O.
+
+DATA: L_USER TYPE SY-MSGV1.
+
+*-- ロックエントリ作成(出力時)
+PERFORM F_MAKE_LOCK_ENTRIES_O.
+
+*-- 自社/外部データ（売上）ロック
+PERFORM F_TABLE_LOCK_902.
+
+L_USER = SY-MSGV1.
+IF RC_CODE_LOCK <> 0.
+*-- エラーメッセージ出力
+MESSAGE I756 WITH TEXT-M01 L_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+*-- 月締請求書履歴（売上）ロック
+PERFORM F_TABLE_LOCK_ZN006.
+
+L_USER = SY-MSGV1.
+IF RC_CODE_LOCK <> 0.
+*-- エラーメッセージ出力
+MESSAGE I756 WITH TEXT-M02 L_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_SET_TABLE_LOCK_O
+*&---------------------------------------------------------------------*
+*&      Form  F_MAKE_LOCK_ENTRIES_O
+*&---------------------------------------------------------------------*
+*     自社/外部データロックエントリ作成(出力時)
+*----------------------------------------------------------------------*
+FORM F_MAKE_LOCK_ENTRIES_O.
+
+REFRESH: I_ENQ_KEY.
+
+IF S_KUNNR IS INITIAL
+OR S_KUNNR-LOW = '*'.
+*-- 会社コードのみ設定
+CLEAR: W_ENQ_KEY.
+W_ENQ_KEY-BUKRS = P_BUKRS.
+APPEND W_ENQ_KEY TO I_ENQ_KEY.
+ELSE.
+*-- 得意先コード(支払人)⇒仕入先コード(受注先)の取得
+PERFORM F_SELECT_KNVP_O.
+LOOP AT I_KNVP INTO W_KNVP.
+CLEAR: W_ENQ_KEY.
+W_ENQ_KEY-BUKRS = P_BUKRS.
+W_ENQ_KEY-KUNNR = W_KNVP-KUNNR.
+W_ENQ_KEY-KUNN2 = W_KNVP-KUNN2.
+APPEND W_ENQ_KEY TO I_ENQ_KEY.
+ENDLOOP.
+FREE: I_KNVP.
+ENDIF.
+
+ENDFORM.                    " F_MAKE_LOCK_ENTRIES_O
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_KNVP_O
+*&---------------------------------------------------------------------*
+*       得意先コード(支払人)⇒仕入先コード(受注先)の取得(出力時)
+*----------------------------------------------------------------------*
+FORM F_SELECT_KNVP_O.
+
+REFRESH: I_KNVP.
+
+CHECK NOT I_KNXX[] IS INITIAL.
+
+SELECT KUNNR                         " 得意先コード（受注先）
+KUNN2                         " 得意先コード（支払人）
+FROM KNVP
+INTO TABLE I_KNVP
+FOR ALL ENTRIES IN I_KNXX
+WHERE VKORG = P_VKORG               " 販売組織
+AND VTWEG = P_VTWEG               " 流通チャネル
+AND SPART = P_SPART               " 製品部門
+AND PARVW = P_PARVW               " 取引先機能
+AND PARZA = SPACE                 " 取引先カウンタ
+AND KUNN2 = I_KNXX-KUNNR.         " 得意先コード（支払人）
+
+ENDFORM.                    " F_SELECT_KNVP_O
+*&---------------------------------------------------------------------*
+*&      Form  F_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*       自社/外部データ（売上）ロック
+*----------------------------------------------------------------------*
+FORM F_TABLE_LOCK_902.
+
+LOOP AT I_ENQ_KEY INTO W_ENQ_KEY.
+CALL FUNCTION 'ENQUEUE_EZN902'
+EXPORTING
+MODE_ZN902     = 'E'
+MANDT          = SY-MANDT
+BUKRS          = W_ENQ_KEY-BUKRS
+KUNNR          = W_ENQ_KEY-KUNNR
+VKBUR          = SPACE
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+
+IF SY-SUBRC <> 0.
+RC_CODE_LOCK = '1'.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " F_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*&      Form  F_TABLE_LOCK_ZN006
+*&---------------------------------------------------------------------*
+*       月締請求書履歴（売上）ロック
+*----------------------------------------------------------------------*
+FORM F_TABLE_LOCK_ZN006.
+
+LOOP AT I_ENQ_KEY INTO W_ENQ_KEY.
+CALL FUNCTION 'ENQUEUE_EZN006'
+EXPORTING
+MODE_ZN006           = 'E'
+MANDT                = SY-MANDT
+OUTMNTH              = P_YEARS
+KUNNR                = W_ENQ_KEY-KUNN2
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+RC_CODE_LOCK = '1'.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " F_TABLE_LOCK_ZN006
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_OUTPUT_ALREADY
+*&---------------------------------------------------------------------*
+*       出力済チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_OUTPUT_ALREADY.
+
+*-- 月締請求書履歴（売上）の取得
+PERFORM F_SELECT_ZN006.
+
+*-- 出力済の得意先を処理対象外とする
+LOOP AT I_ZN006 INTO W_ZN006.
+LOOP AT I_KNXX INTO W_KNXX WHERE KUNNR = W_ZN006-KUNNR.
+*-- 出力済の得意先をエラーログに設定する
+PERFORM F_SET_ERRLOG USING W_ZN006-KUNNR
+TEXT-E01.
+DELETE I_KNXX.
+ENDLOOP.
+ENDLOOP.
+
+*-- 出力対象が無い場合はエラーログを出力して終了
+IF I_KNXX[] IS INITIAL.
+PERFORM F_DISPLAY_OUTPUT_LOG.
+STOP.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_OUTPUT_ALREADY
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_ZN006
+*&---------------------------------------------------------------------*
+*       月締請求書履歴（売上）
+*----------------------------------------------------------------------*
+FORM F_SELECT_ZN006.
+
+CHECK NOT I_KNXX[] IS INITIAL.
+
+REFRESH: I_ZN006.
+
+SELECT KUNNR                         " 得意先コード（支払人）
+FROM ZN006
+INTO TABLE I_ZN006
+FOR ALL ENTRIES IN I_KNXX
+WHERE OUTMNTH = P_YEARS             " 年月
+AND KUNNR   = I_KNXX-KUNNR.       " 得意先コード（受注先）
+
+ENDFORM.                    " F_SELECT_ZN006
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_ERRLOG
+*&---------------------------------------------------------------------*
+*       エラーログ設定
+*----------------------------------------------------------------------*
+*      -->AI_LIFNR  仕入先コード
+*      -->AI_ERR    エラーテキスト
+*----------------------------------------------------------------------*
+FORM F_SET_ERRLOG USING VALUE(AI_LIFNR) TYPE ANY
+VALUE(AI_ERR)   TYPE ANY.
+
+DATA: LW_ERRLOG LIKE TBL_ERRLOG.
+
+LW_ERRLOG-LIFNR   = AI_LIFNR.
+LW_ERRLOG-ERR     = AI_ERR.
+
+APPEND LW_ERRLOG TO TBL_ERRLOG.
+*-- エラー件数カウント
+G_CNT_ERR = G_CNT_ERR + 1.
+
+ENDFORM.                    " F_SET_ERRLOG
+*&---------------------------------------------------------------------*
+*&      Form  F_DISPLAY_OUTPUT_LOG
+*&---------------------------------------------------------------------*
+*       出力ログ表示
+*----------------------------------------------------------------------*
+FORM F_DISPLAY_OUTPUT_LOG.
+
+DATA: L_LINE TYPE I.
+
+WRITE: / TEXT-L01.
+ULINE.
+
+IF G_CNT_ERR > 0.
+*-- 仕入先コード/エラー内容
+WRITE: 04(012) TEXT-L02,
+26(128) TEXT-L03.
+ULINE.
+ENDIF.
+
+LOOP AT TBL_ERRLOG.
+WRITE:/04(012) TBL_ERRLOG-LIFNR,
+26(128) TBL_ERRLOG-ERR.
+L_LINE = SY-TABIX MOD 36.
+IF L_LINE = 0 AND SY-TABIX >= 36.
+NEW-PAGE.
+ENDIF.
+ENDLOOP.
+
+IF G_CNT_ERR > 0.
+SKIP.
+SKIP.
+ENDIF.
+SKIP.
+
+*-- 更新件数:  件
+WRITE: /04    TEXT-L04,
+29(8) G_CNT_UPD,
+TEXT-L05.
+*-- 出力件数:  件
+WRITE: /04    TEXT-L06,
+29(8) G_CNT_OUT,
+TEXT-L05.
+*-- 出力対象外件数:  件
+WRITE: /04    TEXT-L08,
+29(8) G_CNT_NUT,
+TEXT-L05.
+*-- エラー件数:  件
+WRITE: /04    TEXT-L07,
+29(8) G_CNT_ERR,
+TEXT-L05.
+
+IF G_CNT_ERR > 0.
+*-- エラーがあります。
+MESSAGE I759.
+ENDIF.
+
+ENDFORM.                    " F_DISPLAY_OUTPUT_LOG
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       出力対象データの取得
+*----------------------------------------------------------------------*
+FORM F_GET_OUTPUT_DATA.
+
+*-- 当月締日と前回締日の取得
+PERFORM F_GET_ZFBDT_ZFBDT_OLD.
+
+*-- 自社データ(売上)の取得
+PERFORM F_SELECT_YN120.
+
+ENDFORM.                    " F_GET_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_ZFBDT_ZFBDT_OLD
+*&---------------------------------------------------------------------*
+*       当月締日と前回締日の取得
+*----------------------------------------------------------------------*
+FORM F_GET_ZFBDT_ZFBDT_OLD.
+
+DATA: L_DAY TYPE DATUM.
+
+*-- 代表得意先コード読込
+CLEAR: W_KNXX.
+READ TABLE I_KNXX INTO W_KNXX INDEX 1.
+
+*-- 出力年月＋'01'
+CONCATENATE P_YEARS
+'01'
+INTO L_DAY.
+
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD               = W_KNXX-KUNNR  " 得意先コード(支払人)
+I_VKORG              = P_VKORG       " 販売組織
+I_VTWEG              = P_VTWEG       " 流通チャネル
+I_SPART              = P_SPART       " 製品部門
+I_DAY                = L_DAY         " 出力年月+'01'
+IMPORTING
+E_ZFBDT               = G_ZFBDT       " 当月締日
+E_ZFBDT_OLD           = G_ZFBDT_OLD   " 前回締日
+EXCEPTIONS
+OTHERS                = 0.
+
+ENDFORM.                    " F_GET_ZFBDT_ZFBDT_OLD
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_YN120
+*&---------------------------------------------------------------------*
+*       出力対象データの取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_YN120.
+* 2012/04/18 QA309 ADD START
+DATA:L_ADRNR        TYPE KNA1-ADRNR,
+L_W_ADDR1_SEL  TYPE ADDR1_SEL,
+L_W_ADDR1_VAL  TYPE ADDR1_VAL,
+L_W_ADDR1_TEXT TYPE ADDR1_TEXT,
+L_W_SADR       TYPE SADR.
+* 2012/04/18 QA309 ADD END
+
+
+CHECK NOT I_KNXX[] IS INITIAL.
+
+REFRESH: I_YN120.
+
+SELECT GJAHR                         " 伝票会計年度
+SLPDOC                        " 伝票番号
+DTLDOC                        " 伝票明細番号
+VRFCTON                       " 得意先コード（支払人）
+BUKRS                         " 会社コード
+ZFBDT                         " 計上締日
+KNQUAN                        " 数量
+KNUNIT                        " 単位
+KNUNTPRC                      " 単価
+KNTAXAMT                      " 消費税額
+KNITXAMT                      " 税抜金額
+KNETXAMT                      " 税込金額
+WAERS                         " 通貨コード
+LIST2                         " 得意先発注番号
+LIST5                         " 品目コード
+LIST6                         " 品目テキスト
+LIST7                         " 得意先品目
+LDATE1                        " 請求日
+DVSON                         " 営業所
+LIST4                         " 営業グループ
+* 2012/04/06 ADD START
+* 更新漏れ項目追加
+PRCTR                          " 利益センタ
+PERNR                          " 担当者
+TGTFLG                         " 照合対象フラグ
+COMMT                          " コメント
+CKEY1                          " 照合キー1：得意先発注番号
+CKEY2                          " 照合キー2：インボイスNo
+CKEY3                          " 照合キー3
+CKEY4                          " 照合キー4
+CKEY5                          " 照合キー5
+CKEY6                          " 照合キー6
+CKEY7                          " 照合キー7
+CKEY8                          " 照合キー8
+LIST1                          " 得意先コード(受注先)
+LIST3                          " 受注伝票
+LIST8                          " インボイス№
+LIST9                          " 一覧表示項目９
+LIST10                         " 一覧表示項目１０
+* 2012/04/06 ADD END
+* 2012/04/13 QA288 ADD START
+CSTS
+* 2012/04/13 QA288 ADD END
+FROM YN120
+INTO CORRESPONDING FIELDS OF TABLE I_YN120
+FOR ALL ENTRIES IN I_KNXX
+* 2012/03/27 MOD インデックス対応 START
+*  WHERE VRFCTON =  I_KNxx-KUNNR       " 得意先
+*    AND BUKRS   =  P_BUKRS            " 会社コード
+WHERE BUKRS   =  P_BUKRS            " 会社コード
+AND VRFCTON =  I_KNXX-KUNNR       " 得意先
+* 2012/03/27 MOD インデックス対応 END
+AND ZFBDT   >  G_ZFBDT_OLD        " 前回締日
+AND ZFBDT   =< G_ZFBDT            " 当月締日
+*2012/05/21 ADD START
+AND AUTOFLG  = SPACE              "自動生成明細（部分照合）
+AND OUTMNTH3 = '000000'.          "請求書未出力
+*2012/05/21 ADD END
+
+* 2012/04/13 ADD START
+* 対象得意先まとめテーブル作成
+SORT I_YN120 BY VRFCTON.
+LOOP AT I_YN120 INTO W_YN120.
+AT NEW VRFCTON.
+CLEAR:W_KEY_KUNNR-VRFCTON.
+W_KEY_KUNNR-VRFCTON = W_YN120-VRFCTON.
+APPEND W_KEY_KUNNR TO T_KEY_KUNNR.
+* 2012/04/18 QA309 ADD START
+*-    ソート用の検索条件取得
+CLEAR:L_W_ADDR1_SEL,
+L_W_ADDR1_VAL,
+L_W_ADDR1_TEXT,
+L_W_SADR,
+L_ADRNR.
+
+SELECT SINGLE ADRNR FROM KNA1
+INTO L_ADRNR
+WHERE KUNNR EQ W_YN120-VRFCTON.
+
+L_W_ADDR1_SEL-ADDRNUMBER = L_ADRNR.
+CALL FUNCTION 'ADDR_GET'
+EXPORTING
+ADDRESS_SELECTION = L_W_ADDR1_SEL
+READ_TEXTS        = 'X'
+IMPORTING
+ADDRESS_VALUE     = L_W_ADDR1_VAL
+ADDRESS_TEXT      = L_W_ADDR1_TEXT
+SADR              = L_W_SADR      "住所情報
+EXCEPTIONS
+PARAMETER_ERROR   = 1
+ADDRESS_NOT_EXIST = 2
+VERSION_NOT_EXIST = 3
+INTERNAL_ERROR    = 4
+OTHERS            = 5.
+IF SY-SUBRC = 0.
+L_W_ADDR1_VAL-SORT1 = L_W_SADR-SORTL.
+ENDIF.
+* 2012/04/18 QA309 ADD END
+ENDAT.
+* 2012/04/18 QA309 ADD START
+*-  検索番号格納
+W_YN120-SORT1 = L_W_ADDR1_VAL-SORT1.
+MODIFY I_YN120 FROM W_YN120 TRANSPORTING SORT1 .
+* 2012/04/18 QA309 ADD END
+ENDLOOP.
+CHECK NOT T_KEY_KUNNR[] IS INITIAL.
+SORT T_KEY_KUNNR BY VRFCTON.
+DELETE ADJACENT DUPLICATES FROM T_KEY_KUNNR.
+* 2012/04/13 ADD END
+
+ENDFORM.                    " F_SELECT_YN120
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_SUPPLEMENT_DATA
+*&---------------------------------------------------------------------*
+*       補足情報取得
+*----------------------------------------------------------------------*
+FORM F_GET_SUPPLEMENT_DATA.
+
+*-- 営業所テキスト（TVKBT）の一括取得
+PERFORM F_SELECT_TVKBT.
+
+*-- 営業グループテキスト（TVGRT）の一括取得
+PERFORM F_SELECT_TVGRT.
+
+*-- 前月請求額（BSAD,BSID）の一括取得
+PERFORM F_SELECT_BSAD_BSID_OLD.
+
+*-- 当月請求額（BSAD,BSID）の一括取得
+PERFORM F_SELECT_BSAD_BSID.
+
+*-- 住所情報（ADRC,T005U）の一括取得
+PERFORM F_SELECT_ADRC_T005U.
+
+*-- 品目テキスト（MAKT）の一括取得
+PERFORM F_SELECT_MAKT.
+
+ENDFORM.                    " F_GET_SUPPLEMENT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_TVKBT
+*&---------------------------------------------------------------------*
+*       営業所テキスト（TVKBT）の一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_TVKBT.
+
+CHECK NOT I_YN120 IS INITIAL.
+
+REFRESH: I_TVKBT.
+
+SELECT VKBUR                         " 営業所
+BEZEI                         " 内容説明
+FROM TVKBT
+INTO CORRESPONDING FIELDS OF TABLE I_TVKBT
+FOR ALL ENTRIES IN I_YN120
+WHERE SPRAS = 'JA'                  " 言語
+AND VKBUR = I_YN120-DVSON.        " 営業所
+
+ENDFORM.                    " F_SELECT_TVKBT
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_TVGRT
+*&---------------------------------------------------------------------*
+*       営業グループテキスト（TVGRT）の一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_TVGRT.
+
+CHECK NOT I_YN120 IS INITIAL.
+
+REFRESH: I_TVGRT.
+
+SELECT VKGRP                         " 営業グループ
+BEZEI                         " 内容説明
+FROM TVGRT
+INTO CORRESPONDING FIELDS OF TABLE I_TVGRT
+FOR ALL ENTRIES IN I_YN120
+WHERE SPRAS = 'JA'                  " 言語
+AND VKGRP = I_YN120-LIST4+0(3).   " 営業グループ
+
+ENDFORM.                    " F_SELECT_TVGRT
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_BSAD_BSID_OLD
+*&---------------------------------------------------------------------*
+*       前月請求額（BSAD,BSID）の一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_BSAD_BSID_OLD.
+
+CHECK NOT I_YN120 IS INITIAL.
+
+* 2012/04/13 ADD START
+CHECK NOT T_KEY_KUNNR IS INITIAL.
+* 2012/04/13 ADD END
+
+REFRESH: I_BSXX_OLD.
+
+SELECT KUNNR                         " 得意先コード
+WAERS                         " 通貨コード
+SHKZG                         " 借方/貸方フラグ
+WRBTR                         " 伝票通貨額
+ZUONR                         " ソートキー
+GJAHR                         " 会計年度
+BELNR                         " 会計伝票番号
+BUZEI                         " 会計伝票内の明細番号
+FROM BSID
+INTO CORRESPONDING FIELDS OF TABLE I_BSXX_OLD
+* 2012/04/13 MOD START
+*         FOR ALL ENTRIES IN I_YN120
+*   WHERE BUKRS  = P_BUKRS              " 会社コード
+*     AND KUNNR  = I_YN120-VRFCTON      " 得意先コード
+*-- 得意先はまとめテーブルで指定
+FOR ALL ENTRIES IN T_KEY_KUNNR
+WHERE BUKRS  = P_BUKRS              " 会社コード
+AND KUNNR  = T_KEY_KUNNR-VRFCTON      " 得意先コード
+* 2012/04/13 MOD END
+AND UMSKS  = SPACE                " 特殊仕訳取引タイプ
+AND UMSKZ  = SPACE                " 特殊仕訳コード
+AND AUGDT  = '00000000'           " 決済日付
+AND AUGBL  = SPACE                " 決済伝票番号
+AND BUDAT <= G_ZFBDT_OLD.         " 転記日付
+* 2012/04/13 QA286 DEL START
+*     AND BLART  = P_BLART.             " 伝票タイプ
+* 2012/04/13 QA286 DEL END
+SELECT KUNNR                         " 得意先コード
+WAERS                         " 通貨コード
+SHKZG                         " 借方/貸方フラグ
+WRBTR                         " 伝票通貨額
+ZUONR                         " ソートキー
+GJAHR                         " 会計年度
+BELNR                         " 会計伝票番号
+BUZEI                         " 会計伝票内の明細番号
+FROM BSAD
+APPENDING CORRESPONDING FIELDS OF TABLE I_BSXX_OLD
+* 2012/04/13 MOD START
+*         FOR ALL ENTRIES IN I_YN120
+*   WHERE BUKRS  = P_BUKRS              " 会社コード
+*     AND KUNNR  = I_YN120-VRFCTON      " 得意先コード
+*-- 得意先はまとめテーブルで指定
+FOR ALL ENTRIES IN T_KEY_KUNNR
+WHERE BUKRS  = P_BUKRS              " 会社コード
+AND KUNNR  = T_KEY_KUNNR-VRFCTON      " 得意先コード
+* 2012/04/13 MOD END
+AND UMSKS  = SPACE                " 特殊仕訳取引タイプ
+AND UMSKZ  = SPACE                " 特殊仕訳コード
+AND BUDAT <= G_ZFBDT_OLD          " 転記日付
+AND AUGDT  > G_ZFBDT_OLD.         " 決済日付
+* 2012/04/13 QA286 DEL START
+*     AND BLART  = P_BLART.             " 伝票タイプ
+* 2012/04/13 QA286 DEL END
+ENDFORM.                    " F_SELECT_BSAD_BSID_OLD
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_BSAD_BSID
+*&---------------------------------------------------------------------*
+*       当月請求額（BSAD,BSID）の一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_BSAD_BSID.
+
+CHECK NOT I_YN120 IS INITIAL.
+* 2012/04/13 ADD START
+CHECK NOT T_KEY_KUNNR IS INITIAL.
+* 2012/04/13 ADD END
+
+REFRESH: I_BSXX.
+
+SELECT KUNNR                         " 得意先コード
+WAERS                         " 通貨コード
+SHKZG                         " 借方/貸方フラグ
+WRBTR                         " 伝票通貨額
+ZUONR                         " ソートキー
+GJAHR                         " 会計年度
+BELNR                         " 会計伝票番号
+BUZEI                         " 会計伝票内の明細番号
+FROM BSID
+INTO CORRESPONDING FIELDS OF TABLE I_BSXX
+* 2012/04/13 MOD START
+*         FOR ALL ENTRIES IN I_YN120
+*   WHERE BUKRS  = P_BUKRS              " 会社コード
+*     AND KUNNR  = I_YN120-VRFCTON      " 得意先コード
+*-- 得意先はまとめテーブルで指定
+FOR ALL ENTRIES IN T_KEY_KUNNR
+WHERE BUKRS  = P_BUKRS              " 会社コード
+AND KUNNR  = T_KEY_KUNNR-VRFCTON      " 得意先コード
+* 2012/04/13 MOD END
+AND UMSKS  = SPACE                " 特殊仕訳取引タイプ
+AND UMSKZ  = SPACE                " 特殊仕訳コード
+AND AUGDT  = '00000000'           " 決済日付
+AND AUGBL  = SPACE                " 決済伝票番号
+* 2012/04/13 DEL START
+*     AND BUDAT  > G_ZFBDT_OLD          " 転記日付
+* 2012/04/13 DEL END
+AND BUDAT <= G_ZFBDT.             " 転記日付
+* 2012/04/13 QA286 DEL START
+*     AND BLART  = P_BLART.             " 伝票タイプ
+* 2012/04/13 QA286 DEL END
+SELECT KUNNR                         " 得意先コード
+WAERS                         " 通貨コード
+SHKZG                         " 借方/貸方フラグ
+WRBTR                         " 伝票通貨額
+ZUONR                         " ソートキー
+GJAHR                         " 会計年度
+BELNR                         " 会計伝票番号
+BUZEI                         " 会計伝票内の明細番号
+FROM BSAD
+APPENDING CORRESPONDING FIELDS OF TABLE I_BSXX
+* 2012/04/13 MOD START
+*         FOR ALL ENTRIES IN I_YN120
+*   WHERE BUKRS  = P_BUKRS              " 会社コード
+*     AND KUNNR  = I_YN120-VRFCTON      " 得意先コード
+*-- 得意先はまとめテーブルで指定
+FOR ALL ENTRIES IN T_KEY_KUNNR
+WHERE BUKRS  = P_BUKRS              " 会社コード
+AND KUNNR  = T_KEY_KUNNR-VRFCTON      " 得意先コード
+* 2012/04/13 MOD END
+AND UMSKS  = SPACE                " 特殊仕訳取引タイプ
+AND UMSKZ  = SPACE                " 特殊仕訳コード
+AND AUGDT  > G_ZFBDT              " 決済日付
+* 2012/04/13 DEL START
+*     AND BUDAT  > G_ZFBDT_OLD          " 転記日付
+* 2012/04/13 DEL END
+AND BUDAT <= G_ZFBDT.             " 転記日付
+* 2012/04/13 QA286 DEL START
+*     AND BLART  = P_BLART.             " 伝票タイプ
+* 2012/04/13 QA286 DEL END
+ENDFORM.                    " F_SELECT_BSAD_BSID
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_ADRC_T005U
+*&---------------------------------------------------------------------*
+*       住所情報（ADRC,T005U）の一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_ADRC_T005U.
+
+CHECK NOT I_KNXX[] IS INITIAL.
+
+*** 2012/02/28 MOD START ***
+*  REFRESH: I_ADRC.
+*  SELECT ADRC~ADDRNUMBER               " アドレス番号
+*         ADRC~DATE_FROM                " 有効開始日付
+*         ADRC~NATION                   " 国際アドレスバージョン ID
+*         ADRC~NAME2                    " 名前 2
+*         ADRC~NAME3                    " 名前 3
+*         ADRC~CITY1                    " 市区町村
+*         ADRC~POST_CODE1               " 市区町村の郵便番号
+*         ADRC~STREET                   " 都道府県名
+*         ADRC~STR_SUPPL1               " 地名 2
+*         ADRC~STR_SUPPL2               " 地名 3
+*         T005U~BEZEI                   " 地域 (都道府県）
+*    FROM ADRC INNER JOIN T005U
+*      ON ADRC~REGION = T005U~BLAND
+*    INTO CORRESPONDING FIELDS OF TABLE I_ADRC
+*         FOR ALL ENTRIES IN I_KNxx
+*   WHERE ADDRNUMBER = I_KNxx-ADRNR     " 住所
+*     AND SPRAS      = 'JA'             " 言語
+*     AND LAND1      = 'JP'.            " 国
+
+REFRESH: I_ADRC,
+I_T005U.
+
+SELECT ADDRNUMBER                    " アドレス番号
+DATE_FROM                     " 有効開始日付
+NATION                        " 国際アドレスバージョン ID
+NAME2                         " 名前 2
+NAME3                         " 名前 3
+CITY1                         " 市区町村
+POST_CODE1                    " 市区町村の郵便番号
+STREET                        " 都道府県名
+STR_SUPPL1                    " 地名 2
+STR_SUPPL2                    " 地名 3
+REGION                        " 地域
+FROM ADRC
+INTO CORRESPONDING FIELDS OF TABLE I_ADRC
+FOR ALL ENTRIES IN I_KNXX
+WHERE ADDRNUMBER = I_KNXX-ADRNR.    " 住所
+
+SELECT BLAND                              " 地域
+BEZEI                              " 内容説明
+FROM T005U
+INTO CORRESPONDING FIELDS OF TABLE I_T005U
+FOR ALL ENTRIES IN I_ADRC
+WHERE SPRAS = 'JA'                       " 言語
+AND LAND1 = 'JP'                       " 国
+AND BLAND = I_ADRC-REGION.             " 地域
+
+*-- アドレス情報(ADRC)に地域名称(T005U)を付与
+LOOP AT I_ADRC INTO W_ADRC.
+CLEAR: W_T005U.
+READ TABLE I_T005U INTO W_T005U
+WITH KEY BLAND = W_ADRC-REGION      " 地域
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+W_ADRC-BEZEI = W_T005U-BEZEI.         " 内容説明
+MODIFY I_ADRC FROM W_ADRC.
+ENDIF.
+ENDLOOP.
+*** 2012/02/28 MOD END   ***
+
+ENDFORM.                    " F_SELECT_ADRC_T005U
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_MAKT
+*&---------------------------------------------------------------------*
+*       品目テキスト（MAKT）の一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_MAKT.
+
+CHECK NOT I_YN120[] IS INITIAL.
+
+REFRESH: I_MAKT.
+
+SELECT MATNR                         " 品目コード
+MAKTX                         " 品目テキスト
+FROM MAKT
+INTO CORRESPONDING FIELDS OF TABLE I_MAKT
+FOR ALL ENTRIES IN I_YN120
+WHERE MATNR = I_YN120-LIST5+0(18)   " 品目コード
+AND SPRAS = 'JA'.                 " 言語
+
+ENDFORM.                    " F_SELECT_MAKT
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_FILE_AND_TABLE_DATA
+*&---------------------------------------------------------------------*
+*       ファイル&テーブル編集処理
+*----------------------------------------------------------------------*
+FORM F_EDIT_FILE_AND_TABLE_DATA.
+
+DATA: L_FLG_BREAK_VRFCTON TYPE XFELD.
+
+* 2012/04/18 QA309 MOD START
+**-- ソート(会社コード/得意先コード/締日/請求番号/明細)
+*   SORT I_YN120 ASCENDING BY BUKRS
+*                            VRFCTON
+*                            ZFBDT
+*                            SLPDOC
+*                            DTLDOC.
+*- ソート順変更 (検索番号1/得意先コード/請求日/請求番号/明細)
+SORT I_YN120 ASCENDING BY SORT1
+VRFCTON
+LDATE1
+SLPDOC
+DTLDOC.
+* 2012/04/18 QA309 MOD END
+LOOP AT I_YN120 INTO W_YN120.
+
+AT NEW VRFCTON.
+L_FLG_BREAK_VRFCTON = C_FLG_ON.
+ENDAT.
+
+IF L_FLG_BREAK_VRFCTON = C_FLG_ON.
+CLEAR: L_FLG_BREAK_VRFCTON.
+*-- ヘッダデータ(得意先)の編集
+PERFORM F_EDIT_HEADER_DATA_KUNNR.
+ENDIF.
+
+*-- 明細データの編集
+PERFORM F_EDIT_DETAIL_DATA.
+
+*-- その他個別編集
+PERFORM F_EDIT_OTHERS.
+
+*-- テーブル更新データ作成
+APPEND W_ZN006_UP TO I_ZN006_UP.
+*-- 更新件数のカウント(LINES命令使用不可のため)
+G_CNT_UPD = G_CNT_UPD + 1.
+
+IF W_KNXX-TLINE = C_MARK1.
+*-- ファイル出力用データ作成
+PERFORM F_MAKE_FILE_DATA.
+ELSE.
+*-- ファイル出力対象外件数のカウント(LINES命令使用不可のため)
+G_CNT_NUT = G_CNT_NUT + 1.
+ENDIF.
+
+AT END OF VRFCTON.
+L_FLG_BREAK_VRFCTON = C_FLG_ON.
+ENDAT.
+
+IF L_FLG_BREAK_VRFCTON = C_FLG_ON.
+CLEAR: L_FLG_BREAK_VRFCTON.
+*-- 金額の更新
+PERFORM F_MODIFY_SUM_WRBTR.
+ENDIF.
+
+ENDLOOP.
+
+FREE: I_TVKBT,
+I_TVGRT,
+I_BSXX,
+I_BSXX_OLD,
+I_ADRC,
+I_MAKT.
+
+ENDFORM.                    " F_EDIT_FILE_AND_TABLE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_HEADER_DATA_KUNNR
+*&---------------------------------------------------------------------*
+*       ヘッダデータ(得意先)の編集
+*----------------------------------------------------------------------*
+FORM F_EDIT_HEADER_DATA_KUNNR.
+
+DATA: L_LBLAMT  TYPE ZN006-LBLAMT,
+L_CBLAMT  TYPE ZN006-CBLAMT.
+
+CLEAR: W_KNXX,
+W_ADRC,
+G_CNT_SEQ,
+G_SUM_CICAMT,
+G_SUM_ITXAMT,
+G_SUM_TAXAMT,
+G_SUM_ETXAMT.
+
+*-- 得意先マスタデータ読込
+READ TABLE I_KNXX INTO W_KNXX
+WITH KEY KUNNR = W_YN120-VRFCTON
+BINARY SEARCH.
+*-- 住所情報読込
+READ TABLE I_ADRC INTO W_ADRC
+WITH KEY ADDRNUMBER = W_KNXX-ADRNR
+BINARY SEARCH.
+*-- プリンタ/トレイ
+W_ZN006_UP-PNAME      = P_PNAME.
+*-- 帳票名
+W_ZN006_UP-TITLE      = P_RNAME.
+*-- 出力日
+W_ZN006_UP-PRINTDT    = SY-DATUM.
+*-- 会社コード
+W_ZN006_UP-BUKRS      = P_BUKRS.
+*-- 得意先コード
+W_ZN006_UP-KUNNR      = W_KNXX-KUNNR.
+*-- 販売組織
+W_ZN006_UP-VKORG      = P_VKORG.
+*-- 流通チャネル
+W_ZN006_UP-VTWEG      = P_VTWEG.
+*-- 製品部門
+W_ZN006_UP-SPART      = P_SPART.
+*-- 締日
+W_ZN006_UP-ZFBDT      = G_ZFBDT_P.
+*-- 通貨コード
+W_ZN006_UP-WAERS      = W_KNXX-WAERS.
+*-- 郵便番号
+W_ZN006_UP-POST_CODE  = W_ADRC-POST_CODE1.
+*-- 地域
+W_ZN006_UP-BEZEIA     = W_ADRC-BEZEI.
+*-- 市区町村
+W_ZN006_UP-CITY1      = W_ADRC-CITY1.
+*-- 地名２
+W_ZN006_UP-STR_SUPPL1 = W_ADRC-STR_SUPPL1.
+*-- 地名３
+W_ZN006_UP-STR_SUPPL2 = W_ADRC-STR_SUPPL2.
+*-- 正式名称
+W_ZN006_UP-NAME1      = W_ADRC-NAME2.
+*-- 正式名称２
+W_ZN006_UP-NAME2      = W_ADRC-NAME3.
+*-- 都道府県 ( 地域 + 都道府県 + 市区町村番地 )
+CONCATENATE W_ADRC-BEZEI
+W_ADRC-STREET
+W_ADRC-CITY1
+INTO W_ZN006_UP-ADDRESS.
+*-- 前月御請求額
+LOOP AT I_BSXX_OLD INTO W_BSXX WHERE KUNNR = W_KNXX-KUNNR.
+IF W_BSXX-SHKZG = 'S'.             " 借方
+L_LBLAMT = L_LBLAMT + W_BSXX-WRBTR.
+ELSE.                              " 貸方
+L_LBLAMT = L_LBLAMT - W_BSXX-WRBTR.
+ENDIF.
+ENDLOOP.
+W_ZN006_UP-LBLAMT     = L_LBLAMT.
+*-- 当月御請求額
+LOOP AT I_BSXX INTO W_BSXX WHERE KUNNR = W_KNXX-KUNNR.
+IF W_BSXX-SHKZG = 'S'.             " 借方
+L_CBLAMT = L_CBLAMT + W_BSXX-WRBTR.
+ELSE.                              " 貸方
+L_CBLAMT = L_CBLAMT - W_BSXX-WRBTR.
+ENDIF.
+ENDLOOP.
+W_ZN006_UP-CBLAMT     = L_CBLAMT.
+*-- 当月御入金額( 前月御請求額 + [当月消費税込御買上額] - 当月御請求額 )
+G_SUM_CICAMT = L_LBLAMT - L_CBLAMT.
+
+ENDFORM.                    " F_EDIT_HEADER_Y
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_DETAIL_DATA
+*&---------------------------------------------------------------------*
+*       明細データの編集
+*----------------------------------------------------------------------*
+FORM F_EDIT_DETAIL_DATA.
+
+CLEAR: W_TVKBT,
+W_TVGRT.
+
+*-- 営業所テキスト読込
+READ TABLE I_TVKBT INTO W_TVKBT
+WITH KEY VKBUR = W_YN120-DVSON.      " 営業所
+*-- 営業グループテキスト読込
+READ TABLE I_TVGRT INTO W_TVGRT
+WITH KEY VKGRP = W_YN120-LIST4+0(3). " 営業グループ
+*-- 品目テキスト読込
+READ TABLE I_MAKT  INTO W_MAKT
+WITH KEY MATNR = W_YN120-LIST5+0(18)." 品目コード
+
+*-- 営業グループ
+W_ZN006_UP-VKGRP    = W_YN120-LIST4.
+*-- 請求日
+W_ZN006_UP-LDATE1   = W_YN120-LDATE1.
+*-- 請求伝票
+W_ZN006_UP-VBELN    = W_YN120-SLPDOC.
+*-- 請求明細
+W_ZN006_UP-POSNR    = W_YN120-DTLDOC.
+*-- ご注文番号
+W_ZN006_UP-BSTKD    = W_YN120-LIST2.
+*-- 図番
+W_ZN006_UP-KDMAT    = W_YN120-LIST7.
+*-- 品名
+W_ZN006_UP-TXZ01    = W_MAKT-MAKTX.
+*-- 数量
+W_ZN006_UP-KNQUAN   = W_YN120-KNQUAN.
+*-- 単位
+W_ZN006_UP-KNUNIT   = W_YN120-KNUNIT.
+*-- 単価
+W_ZN006_UP-KNUNTPRC = W_YN120-KNUNTPRC.
+*-- 金額
+W_ZN006_UP-KNITXAMT = W_YN120-KNITXAMT.
+*-- 消費税
+W_ZN006_UP-KNTAXAMT = W_YN120-KNTAXAMT.
+*-- 税込金額
+W_ZN006_UP-KNETXAMT = W_YN120-KNETXAMT.
+*-- 摘要
+W_ZN006_UP-MEMO     = W_YN120-LIST6.
+*-- 営業所
+W_ZN006_UP-VKBUR    = W_YN120-DVSON.
+*-- 営業所名
+W_ZN006_UP-BEZEIB   = W_TVKBT-BEZEI.
+*-- 営業グループ名
+W_ZN006_UP-BEZEIG   = W_TVGRT-BEZEI.
+
+ENDFORM.                    " F_EDIT_DETAIL_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_CONV_EXIT_CUNIT_OUTPUT
+*&---------------------------------------------------------------------*
+*       内部⇒外部形式変換（単位）
+*----------------------------------------------------------------------*
+*       --> AI_CUNIT 単位(内部形式)
+*       <-- AO_CUNIT 単位(外部形式)
+*----------------------------------------------------------------------*
+FORM F_CONV_EXIT_CUNIT_OUTPUT USING VALUE(AI_CUNIT) TYPE ANY
+CHANGING VALUE(AO_CUNIT) TYPE ANY.
+
+CLEAR: AO_CUNIT.
+
+CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+EXPORTING
+INPUT                = AI_CUNIT
+LANGUAGE             = SY-LANGU
+IMPORTING
+OUTPUT               = AO_CUNIT
+EXCEPTIONS
+OTHERS                = 0.
+
+ENDFORM.                    " F_CONV_EXIT_CUNIT_OUTPUT
+*&---------------------------------------------------------------------*
+*&      Form  F_CURRENCY_CONV_TO_EXTERNAL
+*&---------------------------------------------------------------------*
+*       内部⇒外部書式変換 (金額)
+*----------------------------------------------------------------------*
+*      -->AI_WEARS  通貨コード
+*      -->AI_WRBTR  内部書式金額
+*      <--AO_WRBTR  外部書式金額
+*----------------------------------------------------------------------*
+FORM F_CURRENCY_CONV_TO_EXTERNAL USING VALUE(AI_WAERS) TYPE ANY
+VALUE(AI_WRBTR) TYPE ANY
+CHANGING VALUE(AO_WRBTR) TYPE ANY.
+
+DATA: L_WRBTR TYPE BAPICURR-BAPICURR.
+DATA: L_VALUE_C(20)  TYPE C.    "数値格納用エリア 2012/07/26 ADD
+
+CLEAR: AO_WRBTR,L_VALUE_C. "2012/07/26 MOD
+
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_EXTERNAL'
+EXPORTING
+CURRENCY              = AI_WAERS
+AMOUNT_INTERNAL       = AI_WRBTR
+IMPORTING
+AMOUNT_EXTERNAL       = L_WRBTR.
+
+*2012/07/26 MOD START "前マイナス編集
+IF ( L_WRBTR < 0 ).
+L_WRBTR = L_WRBTR * -1.
+WRITE L_WRBTR TO L_VALUE_C LEFT-JUSTIFIED NO-GROUPING.
+CONCATENATE  '-' L_VALUE_C INTO L_VALUE_C.
+ELSE.
+WRITE L_WRBTR TO L_VALUE_C LEFT-JUSTIFIED NO-GROUPING.
+ENDIF.
+AO_WRBTR = L_VALUE_C.
+
+*  AO_WRBTR = L_WRBTR..
+*2012/07/26 MOD END
+
+
+
+ENDFORM.                    " F_CURRENCY_CONV_TO_EXTERNAL
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_OTHERS
+*&---------------------------------------------------------------------*
+*       その他個別編集(金額計算)
+*----------------------------------------------------------------------*
+FORM F_EDIT_OTHERS.
+
+*-- 当月御入金額計算
+G_SUM_CICAMT = G_SUM_CICAMT + W_YN120-KNETXAMT.
+*-- 当月御買上額計算
+G_SUM_ITXAMT = G_SUM_ITXAMT + W_YN120-KNITXAMT.
+*-- 当月消費税額計算
+G_SUM_TAXAMT = G_SUM_TAXAMT + W_YN120-KNTAXAMT.
+*-- 当月消費税込御買上額計算
+G_SUM_ETXAMT = G_SUM_ETXAMT + W_YN120-KNETXAMT.
+
+*-- 年月(履歴テーブル用)
+W_ZN006_UP-OUTMNTH       = P_YEARS.
+*-- SEQ(履歴テーブル用)
+G_CNT_SEQ = G_CNT_SEQ + 1.
+W_ZN006_UP-SEQ           = G_CNT_SEQ.
+*-- 得意先コード(履歴テーブル用)
+W_ZN006_UP-KUNNR2        = W_KNXX-KUNNR.
+*-- 会計年度(履歴テーブル用)
+W_ZN006_UP-GJAHR         = W_YN120-GJAHR.
+*-- ファイル出力対象外フラグ（月締）(履歴テーブル用)
+IF W_KNXX-TLINE = C_MARK1.
+W_ZN006_UP-FILENONOUTFLG = SPACE.
+ELSE.
+W_ZN006_UP-FILENONOUTFLG = C_FLG_ON.
+ENDIF.
+*-- 登録日(履歴テーブル用)
+W_ZN006_UP-INSDT    = SY-DATUM.
+*-- 登録時刻(履歴テーブル用)
+W_ZN006_UP-INSTM    = SY-UZEIT.
+*-- 登録ユーザ(履歴テーブル用)
+W_ZN006_UP-INSUSR   = SY-UNAME.
+
+ENDFORM.                    " F_EDIT_OTHER
+*&---------------------------------------------------------------------*
+*&      Form  F_MAKE_FILE_DATA
+*&---------------------------------------------------------------------*
+*       ファイル出力用データ作成
+*----------------------------------------------------------------------*
+FORM F_MAKE_FILE_DATA.
+
+* 2012/04/18 QA308 ADD START
+*- 単価と数量の位置整用乗算
+DATA W_DECIMAL2(10) TYPE P DECIMALS 2. "2012/07/26 MOD
+*DATA W_DECIMAL2 TYPE P DECIMALS 2.
+* 2012/04/18 QA308 ADD END
+* 2012/07/26 ADD START
+DATA: L_KNQUAN_C(20)    TYPE C.    "数値格納用エリア
+DATA: L_KNUNTPRC_C(20)  TYPE C.    "数値格納用エリア
+DATA: L_KNQUAN(10)       TYPE P DECIMALS 3. "数量
+DATA: L_KNUNTPRC(10)     TYPE P DECIMALS 5. "単価
+* 2012/07/26 ADD END
+
+MOVE-CORRESPONDING W_ZN006_UP TO W_DATA.
+
+* 2012/07/26 MOD START
+*-- 数量の印字位置調整
+CLEAR:L_KNQUAN,L_KNQUAN_C.
+IF ( W_ZN006_UP-KNQUAN < 0 ).
+L_KNQUAN = W_ZN006_UP-KNQUAN * 1000 * -1.
+WRITE L_KNQUAN TO L_KNQUAN_C LEFT-JUSTIFIED NO-GROUPING.
+CONCATENATE  '-' L_KNQUAN_C INTO L_KNQUAN_C.
+ELSE.
+L_KNQUAN = W_ZN006_UP-KNQUAN * 1000.
+WRITE L_KNQUAN TO L_KNQUAN_C LEFT-JUSTIFIED NO-GROUPING.
+ENDIF.
+W_DATA-KNQUAN = L_KNQUAN_C.
+
+*-- 単価の印字位置調整
+CLEAR:W_DECIMAL2,L_KNUNTPRC,L_KNUNTPRC_C.
+W_DECIMAL2 = W_ZN006_UP-KNUNTPRC.     "少数３位で四捨五入して
+
+IF ( W_ZN006_UP-KNUNTPRC < 0 ).
+L_KNUNTPRC =  W_DECIMAL2 * 100 * -1.     "１００倍
+WRITE L_KNUNTPRC TO L_KNUNTPRC_C LEFT-JUSTIFIED NO-GROUPING.
+CONCATENATE  '-' L_KNUNTPRC_C INTO L_KNUNTPRC_C .
+ELSE.
+L_KNUNTPRC =  W_DECIMAL2 * 100.     "１００倍
+WRITE L_KNUNTPRC TO L_KNUNTPRC_C LEFT-JUSTIFIED NO-GROUPING.
+ENDIF.
+W_DATA-KNUNTPRC = L_KNUNTPRC_C.
+
+** 2012/04/18 QA308 ADD START
+**- 数量の位置整用乗算
+*   W_DATA-KNQUAN = W_ZN006_UP-KNQUAN * 1000. "三桁ずらす
+**- 単価の位置整用乗算
+*   CLEAR:W_DECIMAL2 .
+*   W_DECIMAL2 = W_ZN006_UP-KNUNTPRC.        "少数３位で四捨五入して
+*   W_DATA-KNUNTPRC =  W_DECIMAL2 * 100.     "１００倍
+** 2012/04/18 QA308 ADD END
+* 2012/07/26 MOD END
+
+*-- 前月御請求額 ( 内部⇒外部形式変換 )
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+W_ZN006_UP-LBLAMT
+CHANGING W_DATA-LBLAMT.
+*-- 当月御請求額 ( 内部⇒外部形式変換 )
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+W_ZN006_UP-CBLAMT
+CHANGING W_DATA-CBLAMT.
+*-- 単位 ( 内部⇒外部形式変換 )
+PERFORM F_CONV_EXIT_CUNIT_OUTPUT USING W_ZN006_UP-KNUNIT
+CHANGING W_DATA-KNUNIT.
+*-- 金額 ( 内部⇒外部形式変換 )
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+W_ZN006_UP-KNITXAMT
+CHANGING W_DATA-KNITXAMT.
+*-- 消費税 ( 内部⇒外部形式変換 )
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+W_ZN006_UP-KNTAXAMT
+CHANGING W_DATA-KNTAXAMT.
+*-- 税込金額 ( 内部⇒外部形式変換 )
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+W_ZN006_UP-KNETXAMT
+CHANGING W_DATA-KNETXAMT.
+APPEND W_DATA TO I_DATA.
+
+ENDFORM.                    " F_MAKE_FILE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_MODIFY_SUM_WRBTR
+*&---------------------------------------------------------------------*
+*       金額の更新
+*----------------------------------------------------------------------*
+FORM F_MODIFY_SUM_WRBTR.
+
+*-- 当月御入金額
+W_ZN006_UP-CICAMT = G_SUM_CICAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+G_SUM_CICAMT
+CHANGING W_DATA-CICAMT.
+*-- 当月御買上額
+W_ZN006_UP-CSLAMT = G_SUM_ITXAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+G_SUM_ITXAMT
+CHANGING W_DATA-CSLAMT.
+*-- 当月消費税額
+W_ZN006_UP-CTXAMT = G_SUM_TAXAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+G_SUM_TAXAMT
+CHANGING W_DATA-CTXAMT.
+*-- 当月消費税込御買計算
+W_ZN006_UP-CSTAMT = G_SUM_ETXAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_KNXX-WAERS
+G_SUM_ETXAMT
+CHANGING W_DATA-CSTAMT.
+
+*-- テーブルデータ更新
+MODIFY I_ZN006_UP FROM W_ZN006_UP
+TRANSPORTING CICAMT CSLAMT CTXAMT CSTAMT
+WHERE KUNNR = W_YN120-VRFCTON.
+
+IF W_KNXX-TLINE = C_MARK1.
+*-- ファイルデータ更新
+MODIFY I_DATA FROM W_DATA
+TRANSPORTING CICAMT CSLAMT CTXAMT CSTAMT
+WHERE KUNNR = W_YN120-VRFCTON.
+ENDIF.
+
+ENDFORM.                    " F_MODIFY_SUM_WRBTR
+*&---------------------------------------------------------------------*
+*&      Form  F_INSERT_ZN006
+*&---------------------------------------------------------------------*
+*       出力履歴テーブルの更新
+*----------------------------------------------------------------------*
+FORM F_INSERT_ZN006.
+
+INSERT ZN006 FROM TABLE I_ZN006_UP.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ZN006 更新エラー
+MESSAGE I758 WITH TEXT-M02.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+FREE: I_ZN006_UP.
+
+ENDFORM.                    " F_INSERT_ZN006
+*&---------------------------------------------------------------------*
+*&      Form  F_UPDATE_YN1x0
+*&---------------------------------------------------------------------*
+*       自社データ（YN120）/外部データ（YN110)の更新
+*----------------------------------------------------------------------*
+FORM F_UPDATE_YN1X0.
+
+DATA: L_CHKDOC LIKE YN120-CHKDOC.
+
+REFRESH: I_YN110_UP.
+
+LOOP AT I_YN120 INTO W_YN120.
+* 2012/04/13 QA288 ADD START
+IF W_YN120-CSTS = '7'
+OR W_YN120-CSTS = '8'.
+CONTINUE.               "照合済みは処理不要
+ENDIF.
+* 2012/04/13 QA288 ADD END
+*-- 照合番号取得
+CLEAR: L_CHKDOC.
+PERFORM F_GET_CHKDOC CHANGING L_CHKDOC.
+*-- 自社データ更新
+UPDATE YN120 SET CSTS     = '7'              " 照合ステータス
+CHKDOC   = L_CHKDOC         " 照合番号
+CHKDAT   = SY-DATUM         " 照合日
+CHKUSR   = SY-UNAME         " 照合ユーザ
+UPDDAT   = SY-DATUM         " 更新日
+UPDTIM   = SY-UZEIT          " 更新時刻
+UPDUSR   = SY-UNAME         " 更新ユーザ
+UPDPRG   = SY-REPID         " 更新プログラム
+CZFBDT   = G_ZFBDT          " 照合締日
+OUTMNTH3 = P_YEARS          " 月締請求書出力月
+PRINTDT3 = SY-DATUM         " 月締請求書出力日
+WHERE GJAHR   = W_YN120-GJAHR     " 会計年度
+AND SLPDOC  = W_YN120-SLPDOC    " 会計伝票番号
+AND DTLDOC  = W_YN120-DTLDOC    " 会計伝票明細
+AND VRFCTON = W_YN120-VRFCTON   " 得意先コード
+AND BUKRS   = P_BUKRS.          " 会社コード
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- YN120 更新エラー
+MESSAGE I758 WITH TEXT-M04.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*-- 外部データ更新レコード作成
+CLEAR: W_YN110_UP.
+MOVE-CORRESPONDING W_YN120 TO W_YN110_UP.
+* 2012/04/13 QA288 ADD START
+*   外部番号採取
+PERFORM GET_NUMBER_YN110.
+* 2012/04/13 QA288 ADD END
+W_YN110_UP-CSTS      = '7'.              " 照合ステータス
+W_YN110_UP-CHKDOC    = L_CHKDOC.         " 照合番号
+W_YN110_UP-CHKDAT    = SY-DATUM.         " 照合日
+W_YN110_UP-CHKUSR    = SY-UNAME.         " 照合ユーザ
+W_YN110_UP-UPDDAT    = SY-DATUM.         " 更新日
+W_YN110_UP-UPDTIM    = SY-UZEIT.          " 更新時刻
+W_YN110_UP-UPDUSR    = SY-UNAME.         " 更新ユーザ
+W_YN110_UP-UPDPRG    = SY-REPID.         " 更新プログラム
+W_YN110_UP-INSDT     = SY-DATUM.         " 登録日
+W_YN110_UP-CZFBDT    = G_ZFBDT.          " 照合締日
+W_YN110_UP-AUTOFLG_S = C_FLG_ON.         " 自動生成明細（支払通知）
+APPEND W_YN110_UP TO I_YN110_UP.
+ENDLOOP.
+
+*-- 外部データ一括更新
+INSERT YN110 FROM TABLE I_YN110_UP.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- YN110 更新エラー
+MESSAGE I758 WITH TEXT-M05.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+FREE: I_YN120.
+
+ENDFORM.                    " F_UPDATE_YN1x0
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_CHKDOC
+*&---------------------------------------------------------------------*
+*       照合番号取得
+*----------------------------------------------------------------------*
+*       <--AO_CHKDOC 照合番号
+*----------------------------------------------------------------------*
+FORM F_GET_CHKDOC CHANGING VALUE(AO_CHKDOC) TYPE ANY.
+
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+NR_RANGE_NR             = '10'
+OBJECT                  = 'YNCHKDOC1'
+QUANTITY                = '1'
+SUBOBJECT               = P_BUKRS
+IMPORTING
+NUMBER                  = AO_CHKDOC
+EXCEPTIONS
+INTERVAL_NOT_FOUND      = 1
+NUMBER_RANGE_NOT_INTERN = 2
+OBJECT_NOT_FOUND        = 3
+QUANTITY_IS_0           = 5
+QUANTITY_IS_NOT_1       = 5
+INTERVAL_OVERFLOW       = 6
+OTHERS                  = 7.
+
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- 照合番号取得エラー
+MESSAGE I754 WITH TEXT-M03.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_GET_CHKDOC
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_FILE
+*&---------------------------------------------------------------------*
+*       ファイル出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_FILE.
+
+DATA: L_DATA  TYPE STRING,
+L_TAB   TYPE X VALUE '09'.
+* Add ES-UP 2012/10/16 -->
+data: l_conv type ref to zcl_conv_to_sjis,
+l_errfile type string,
+l_message type string,
+l_openflg type abap_bool.
+* Add ES-UP 2012/10/16 <--
+CHECK NOT I_DATA[] IS INITIAL.
+
+CONCATENATE P_DNAME
+P_FNAME
+INTO G_FNAME.
+* Mod ES-UP 2012/10/16 -->
+*  OPEN DATASET G_FNAME FOR OUTPUT IN TEXT MODE.
+create object l_conv.
+l_errfile = l_conv->get_error_filename( filename = G_FNAME
+foldnum  = 0 ).
+if l_errfile is initial.
+message e001(z2).
+endif.
+OPEN DATASET G_FNAME FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE l_conv->codepage
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/10/16 <--
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ファイルオープンエラー
+MESSAGE I766 WITH TEXT-M07.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+*-- ヘッダデータ出力
+PERFORM F_OUTPUT_FILE_HEADER.
+
+*-- タイトル行出力
+PERFORM F_OUTPUT_FILE_TITLE.
+* Add ES-UP 2012/12/03 -->
+l_openflg = abap_false.
+* Add ES-UP 2012/12/03 <--
+LOOP AT I_DATA INTO W_DATA.
+CLEAR: L_DATA.
+*-- TAB区切りファイル出力データ作成
+CONCATENATE W_DATA-PNAME           " プリンタ/トレイ
+W_DATA-TITLE           " 帳票名
+W_DATA-PRINTDT         " 出力年月日
+W_DATA-BUKRS           " 会社コード
+W_DATA-KUNNR           " 得意先コード(支払人)
+W_DATA-VKORG           " 販売組織
+W_DATA-VTWEG           " 流通チャネル
+W_DATA-SPART           " 製品部門
+W_DATA-ZFBDT           " 計上締日
+W_DATA-WAERS           " 通貨コード
+W_DATA-LBLAMT          " 前月御請求額
+W_DATA-CICAMT          " 当月御入金額
+W_DATA-CSLAMT          " 当月御買上額
+W_DATA-CTXAMT          " 当月消費税額
+W_DATA-CSTAMT          " 当月消費税込御買上額
+W_DATA-CBLAMT          " 当月御請求額
+W_DATA-POST_CODE       " 市区町村の郵便番号
+W_DATA-BEZEIA          " 内容説明
+W_DATA-ADDRESS         " 月締請求書住所
+W_DATA-CITY1           " 市区町村
+W_DATA-STR_SUPPL1      " 地名 2
+W_DATA-STR_SUPPL2      " 地名 3
+W_DATA-NAME1           " 正式名称
+W_DATA-NAME2           " 正式名称２
+W_DATA-VKGRP           " 営業グループ
+W_DATA-LDATE1          " 請求日
+W_DATA-VBELN           " 請求伝票
+W_DATA-POSNR           " 請求明細
+W_DATA-BSTKD           " ご注文番号
+W_DATA-KDMAT           " 月締請求書図番
+W_DATA-TXZ01           " テキスト (短)
+W_DATA-KNQUAN          " 数量
+W_DATA-KNUNIT          " 単位
+W_DATA-KNUNTPRC        " 単価
+W_DATA-KNITXAMT        " 税抜金額
+W_DATA-KNTAXAMT        " 消費税額
+W_DATA-KNETXAMT        " 税込金額
+W_DATA-MEMO            " 備考
+W_DATA-VKBUR           " 営業所
+W_DATA-BEZEIB          " 内容説明
+W_DATA-BEZEIG          " 内容説明
+INTO L_DATA
+* Mod ES-UP 2012/10/16 -->
+*      SEPARATED BY L_TAB.
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/10/16 <--
+
+* Mod ES-UP 2012/10/24 -->
+TRANSFER L_DATA TO G_FNAME.
+if l_conv->convert_check( L_DATA ) = abap_true.
+else.
+if l_openflg = abap_false.
+l_openflg = abap_true.
+open dataset l_errfile for output
+in legacy text mode code page l_conv->codepage
+message l_message
+ignoring conversion errors.
+if sy-subrc <> 0.
+message l_message type 'E'.
+endif.
+endif.
+transfer L_DATA to l_errfile.
+endif.
+* Mod ES-UP 2012/10/24 -->
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ファイル出力エラー
+MESSAGE I789 WITH TEXT-M07.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*-- 出力件数カウント
+G_CNT_OUT = G_CNT_OUT + 1.
+ENDLOOP.
+
+CLOSE DATASET G_FNAME.
+
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ファイル出力エラー
+MESSAGE I789 WITH TEXT-M07.
+LEAVE LIST-PROCESSING.
+ENDIF.
+* Add ES-UP 2012/10/24 -->
+if l_openflg = abap_true.
+close dataset l_errfile.
+message s002(z2).
+endif.
+* Add ES-UP 2012/10/24 <--
+
+FREE: I_DATA.
+
+ENDFORM.                    " F_OUTPUT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_FILE_HEADER
+*&---------------------------------------------------------------------*
+*       ヘッダデータ出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_FILE_HEADER.
+
+DATA: L_DATA TYPE STRING.
+
+*-- 1行目 <start>
+CLEAR: L_DATA.
+L_DATA = '<start>'.
+TRANSFER L_DATA TO G_FNAME.
+
+*-- 2行目 VrSetDocName2="sy-title(sy-uname)"
+CLEAR: L_DATA.
+CONCATENATE 'VrSetDocName2="'
+SY-TITLE
+'('
+SY-UNAME
+')"'
+INTO L_DATA.
+TRANSFER L_DATA TO G_FNAME.
+
+*-- 3行目 <end>
+CLEAR: L_DATA.
+L_DATA = '<end>'.
+TRANSFER L_DATA TO G_FNAME.
+
+ENDFORM.                    " F_OUTPUT_FILE_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_FILE_TITLE
+*&---------------------------------------------------------------------*
+*       タイトル行出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_FILE_TITLE.
+
+DATA: L_DATA      TYPE STRING,
+L_FLG_FIRST TYPE XFELD,
+L_TAB       TYPE X VALUE '09'.
+
+*-- タイトル情報取得
+PERFORM F_GET_OUTPUT_FILE_TITLE.
+
+LOOP AT I_YK015300.
+
+AT FIRST.
+L_FLG_FIRST = C_FLG_ON.
+ENDAT.
+
+IF L_FLG_FIRST = C_FLG_ON.
+CLEAR: L_FLG_FIRST.
+L_DATA = I_YK015300-DDTEXT.
+CONTINUE.
+ENDIF.
+CONCATENATE L_DATA
+I_YK015300-DDTEXT
+INTO L_DATA
+* Mod ES-UP 2012/10/16 -->
+*      SEPARATED BY L_TAB.
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/10/16 <--
+CONDENSE L_DATA.
+
+ENDLOOP.
+
+TRANSFER L_DATA TO G_FNAME.
+
+ENDFORM.                    " F_OUTPUT_FILE_TITLE
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_OUTPUT_FILE_TITLE
+*&---------------------------------------------------------------------*
+*       タイトル情報取得
+*----------------------------------------------------------------------*
+FORM F_GET_OUTPUT_FILE_TITLE.
+
+REFRESH: I_YK015300.
+
+SELECT *
+FROM YK01530020
+INTO TABLE I_YK015300
+WHERE TABNAME    = 'YK01530010'
+AND DDLANGUAGE = SY-LANGU
+ORDER BY POSITION.
+
+ENDFORM.                    " F_GET_OUTPUT_FILE_TITLE
+*&---------------------------------------------------------------------*
+*&      Form  F_RELEASE_TABLE_LOCK_O
+*&---------------------------------------------------------------------*
+*       テーブルロック解除(出力時)
+*----------------------------------------------------------------------*
+FORM F_RELEASE_TABLE_LOCK_O.
+
+*-- 自社/外部データ（売上）ロック解除
+PERFORM F_TABLE_UNLOCK_902.
+
+*-- 月締請求書履歴（売上）ロック解除
+PERFORM F_TABLE_UNLOCK_ZN006.
+
+FREE: I_KNXX,
+I_ENQ_KEY.
+
+ENDFORM.                    " F_RELEASE_TABLE_LOCK_O
+*&---------------------------------------------------------------------*
+*&      Form  F_TABLE_UNLOCK_902
+*&---------------------------------------------------------------------*
+*       自社/外部データ（売上）テーブルロック解除
+*----------------------------------------------------------------------*
+FORM F_TABLE_UNLOCK_902.
+
+LOOP AT I_ENQ_KEY INTO W_ENQ_KEY.
+CALL FUNCTION 'DEQUEUE_EZN902'
+EXPORTING
+MODE_ZN902     = 'E'
+MANDT          = SY-MANDT
+BUKRS          = W_ENQ_KEY-BUKRS
+KUNNR          = W_ENQ_KEY-KUNNR
+VKBUR          = SPACE.
+ENDLOOP.
+
+ENDFORM.                    " F_TABLE_UNLOCK_901
+*&---------------------------------------------------------------------*
+*&      Form  F_TABLE_UNLOCK_ZN006
+*&---------------------------------------------------------------------*
+*       月締請求書履歴（売上）ロック解除
+*----------------------------------------------------------------------*
+FORM F_TABLE_UNLOCK_ZN006.
+
+LOOP AT I_ENQ_KEY INTO W_ENQ_KEY.
+CALL FUNCTION 'DEQUEUE_EZN006'
+EXPORTING
+MODE_ZN006           = 'E'
+MANDT                = SY-MANDT
+OUTMNTH              = P_YEARS
+KUNNR                = W_ENQ_KEY-KUNN2.
+ENDLOOP.
+
+ENDFORM.                    " F_TABLE_UNLOCK_ZN006
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_OUTPUT_AGAIN_DATA
+*&---------------------------------------------------------------------*
+*       再出力データの取得
+*----------------------------------------------------------------------*
+FORM F_GET_OUTPUT_AGAIN_DATA.
+* 2012/04/18 QA309 ADD START
+DATA:L_KUNNR        TYPE ZN006-KUNNR,
+L_ADRNR        TYPE KNA1-ADRNR,
+L_W_ADDR1_SEL  TYPE ADDR1_SEL,
+L_W_ADDR1_VAL  TYPE ADDR1_VAL,
+L_W_ADDR1_TEXT TYPE ADDR1_TEXT,
+L_W_SADR       TYPE SADR.
+* 2012/04/18 QA309 ADD END
+REFRESH: I_ZN006_RE.
+
+SELECT *
+FROM ZN006
+INTO CORRESPONDING FIELDS OF TABLE I_ZN006_RE
+WHERE OUTMNTH        = P_YEARS                " 年月
+AND KUNNR         IN S_KUNNR                " 得意先コード
+AND FILENONOUTFLG  = SPACE.                 " FILE出力対象外フラグ
+
+IF I_ZN006_RE[] IS INITIAL.
+*-- 選択条件に該当する出力履歴がありません
+MESSAGE S917 WITH TEXT-M06.
+LEAVE LIST-PROCESSING.
+ENDIF.
+* 2012/04/18 QA309 ADD START
+* 検索条件付与
+SORT I_ZN006_RE BY KUNNR.
+CLEAR:L_KUNNR.
+LOOP AT I_ZN006_RE INTO W_ZN006_RE.
+IF L_KUNNR <> W_ZN006_RE-KUNNR.
+L_KUNNR = W_ZN006_RE-KUNNR.
+*-    ソート用の検索条件取得
+CLEAR:L_W_ADDR1_SEL,
+L_W_ADDR1_VAL,
+L_W_ADDR1_TEXT,
+L_W_SADR,
+L_ADRNR.
+
+SELECT SINGLE ADRNR FROM KNA1
+INTO L_ADRNR
+WHERE KUNNR EQ W_ZN006_RE-KUNNR.
+
+L_W_ADDR1_SEL-ADDRNUMBER = L_ADRNR.
+CALL FUNCTION 'ADDR_GET'
+EXPORTING
+ADDRESS_SELECTION = L_W_ADDR1_SEL
+READ_TEXTS        = 'X'
+IMPORTING
+ADDRESS_VALUE     = L_W_ADDR1_VAL
+ADDRESS_TEXT      = L_W_ADDR1_TEXT
+SADR              = L_W_SADR      "住所情報
+EXCEPTIONS
+PARAMETER_ERROR   = 1
+ADDRESS_NOT_EXIST = 2
+VERSION_NOT_EXIST = 3
+INTERNAL_ERROR    = 4
+OTHERS            = 5.
+IF SY-SUBRC = 0.
+L_W_ADDR1_VAL-SORT1 = L_W_SADR-SORTL.
+ENDIF.
+ENDIF.
+*-  検索番号格納
+W_ZN006_RE-SORT1 = L_W_ADDR1_VAL-SORT1.
+MODIFY I_ZN006_RE FROM W_ZN006_RE TRANSPORTING SORT1 .
+ENDLOOP.
+* 出力データ並べ替え(検索番号/得意先/請求日/請求伝票/明細)
+SORT I_ZN006_RE BY   SORT1
+KUNNR
+LDATE1
+VBELN
+POSNR.
+
+* 2012/04/18 QA309 ADD END
+
+
+ENDFORM.                    " F_GET_OUTPUT_AGAIN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_AGAIN_FILE
+*&---------------------------------------------------------------------*
+*       ファイル再出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_AGAIN_FILE.
+* 2012/04/18 QA308 ADD START
+*- 単価と数量の位置整用乗算
+DATA W_DECIMAL2(10) TYPE P DECIMALS 2.
+*DATA W_DECIMAL2 TYPE P DECIMALS 2.
+* 2012/04/18 QA308 ADD END
+* 2012/07/26 ADD START
+DATA: L_KNQUAN_C(20)    TYPE C.    "数値格納用エリア
+DATA: L_KNUNTPRC_C(20)  TYPE C.    "数値格納用エリア
+DATA: L_KNQUAN_P(10)     TYPE P DECIMALS 3. "数量
+DATA: L_KNUNTPRC_P(10)   TYPE P DECIMALS 5. "単価
+* 2012/07/26 ADD END
+
+DATA: L_TAB      TYPE X       VALUE '09', " TAB
+L_DATA     TYPE STRING,
+L_LBLAMT   TYPE STRING,             " 前月御請求額
+L_CICAMT   TYPE STRING,             " 当月御入金額
+L_CSLAMT   TYPE STRING,             " 当月御買上額
+L_CTXAMT   TYPE STRING,             " 当月消費税額
+L_CSTAMT   TYPE STRING,             " 当月消費税込御買上額
+L_CBLAMT   TYPE STRING,             " 当月御請求額
+L_KNITXAMT TYPE STRING,             " 税抜金額
+L_KNTAXAMT TYPE STRING,             " 消費税額
+L_KNETXAMT TYPE STRING,             " 税込金額
+L_KNQUAN   TYPE STRING,             " 数量
+L_KNUNIT   TYPE STRING,             " 単位
+L_KNUNTPRC TYPE STRING.             " 単価
+* Add ES-UP 2012/10/16 -->
+data: l_conv type ref to zcl_conv_to_sjis,
+l_errfile type string,
+l_message type string,
+l_openflg type abap_bool.
+* Add ES-UP 2012/10/16 <--
+CONCATENATE P_DNAME
+P_FNAME
+INTO G_FNAME.
+* Mod ES-UP 2012/10/16 -->
+create object l_conv.
+l_errfile = l_conv->get_error_filename( filename = G_FNAME
+foldnum  = 0 ).
+if l_errfile is initial.
+message e001(z2).
+endif.
+*  OPEN DATASET G_FNAME FOR OUTPUT IN TEXT MODE.
+OPEN DATASET G_FNAME FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE l_conv->codepage
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/10/16 <--
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ファイルオープンエラー
+MESSAGE I766 WITH TEXT-M07.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+*-- ヘッダデータ出力
+PERFORM F_OUTPUT_FILE_HEADER.
+
+*-- タイトル行出力
+PERFORM F_OUTPUT_FILE_TITLE.
+* Add ES-UP 2012/12/03 -->
+l_openflg = abap_false.
+* Add ES-UP 2012/12/03 <--
+LOOP AT I_ZN006_RE INTO W_ZN006_RE.
+CLEAR: L_DATA.
+
+*-- 内部形式⇒外部形式(+CHAR型)への変換
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-LBLAMT
+CHANGING L_LBLAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-CICAMT
+CHANGING L_CICAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-CSLAMT
+CHANGING L_CSLAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-CTXAMT
+CHANGING L_CTXAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-CSTAMT
+CHANGING L_CSTAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-CBLAMT
+CHANGING L_CBLAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-KNITXAMT
+CHANGING L_KNITXAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-KNTAXAMT
+CHANGING L_KNTAXAMT.
+PERFORM F_CURRENCY_CONV_TO_EXTERNAL USING W_ZN006_RE-WAERS
+W_ZN006_RE-KNETXAMT
+CHANGING L_KNETXAMT.
+PERFORM F_CONV_EXIT_CUNIT_OUTPUT USING W_ZN006_RE-KNUNIT
+CHANGING L_KNUNIT.
+L_KNQUAN   = W_ZN006_RE-KNQUAN.
+L_KNUNTPRC = W_ZN006_RE-KNUNTPRC.
+
+* 2012/07/26 MOD START
+*-- 数量の印字位置調整
+CLEAR:L_KNQUAN_P,L_KNQUAN_C.
+IF ( W_ZN006_RE-KNQUAN < 0 ).
+L_KNQUAN_P = W_ZN006_RE-KNQUAN * 1000 * -1.
+WRITE L_KNQUAN_P TO L_KNQUAN_C LEFT-JUSTIFIED NO-GROUPING.
+CONCATENATE  '-' L_KNQUAN_C INTO L_KNQUAN_C. "前マイナス
+ELSE.
+L_KNQUAN_P = W_ZN006_RE-KNQUAN * 1000.
+WRITE L_KNQUAN_P TO L_KNQUAN_C LEFT-JUSTIFIED NO-GROUPING.
+ENDIF.
+L_KNQUAN = L_KNQUAN_C.
+
+*-- 単価の印字位置調整
+CLEAR:W_DECIMAL2,L_KNUNTPRC_P,L_KNUNTPRC_C.
+W_DECIMAL2 = W_ZN006_RE-KNUNTPRC.     "少数３位で四捨五入して
+
+IF ( W_ZN006_RE-KNUNTPRC < 0 ).
+L_KNUNTPRC_P =  W_DECIMAL2 * 100 * -1.     "１００倍
+WRITE L_KNUNTPRC_P TO L_KNUNTPRC_C LEFT-JUSTIFIED NO-GROUPING.
+CONCATENATE  '-' L_KNUNTPRC_C INTO L_KNUNTPRC_C.
+ELSE.
+L_KNUNTPRC_P =  W_DECIMAL2 * 100.     "１００倍
+WRITE L_KNUNTPRC_P TO L_KNUNTPRC_C LEFT-JUSTIFIED NO-GROUPING.
+ENDIF.
+L_KNUNTPRC = L_KNUNTPRC_C.
+
+** 2012/04/18 QA308 ADD START
+**- 数量の位置整用乗算
+*   L_KNQUAN = W_ZN006_RE-KNQUAN * 1000.     "三桁ずらす
+**- 単価の位置整用乗算
+*   CLEAR:W_DECIMAL2 .
+*   W_DECIMAL2 = W_ZN006_RE-KNUNTPRC.        "少数３位で四捨五入して
+*   L_KNUNTPRC =  W_DECIMAL2 * 100.          "１００倍
+** 2012/04/18 QA308 ADD END
+* 2012/07/26 MOD END
+
+*-- TAB区切りファイル出力データ作成
+CONCATENATE W_ZN006_RE-PNAME           " プリンタ/トレイ
+W_ZN006_RE-TITLE           " 帳票名
+W_ZN006_RE-PRINTDT         " 出力年月日
+W_ZN006_RE-BUKRS           " 会社コード
+W_ZN006_RE-KUNNR2          " 得意先コード(支払人)
+W_ZN006_RE-VKORG           " 販売組織
+W_ZN006_RE-VTWEG           " 流通チャネル
+W_ZN006_RE-SPART           " 製品部門
+W_ZN006_RE-ZFBDT           " 計上締日
+W_ZN006_RE-WAERS           " 通貨コード
+L_LBLAMT                   " 前月御請求額
+L_CICAMT                   " 当月御入金額
+L_CSLAMT                   " 当月御買上額
+L_CTXAMT                   " 当月消費税額
+L_CSTAMT                   " 当月消費税込御買上額
+L_CBLAMT                   " 当月御請求額
+W_ZN006_RE-POST_CODE       " 市区町村の郵便番号
+W_ZN006_RE-BEZEIA          " 内容説明
+W_ZN006_RE-ADDRESS         " 月締請求書住所
+W_ZN006_RE-CITY1           " 市区町村
+W_ZN006_RE-STR_SUPPL1      " 地名 2
+W_ZN006_RE-STR_SUPPL2      " 地名 3
+W_ZN006_RE-NAME1           " 正式名称
+W_ZN006_RE-NAME2           " 正式名称２
+W_ZN006_RE-VKGRP           " 営業グループ
+W_ZN006_RE-LDATE1          " 請求日
+W_ZN006_RE-VBELN           " 請求伝票
+W_ZN006_RE-POSNR           " 請求明細
+W_ZN006_RE-BSTKD           " ご注文番号
+W_ZN006_RE-KDMAT           " 月締請求書図番
+W_ZN006_RE-TXZ01           " テキスト (短)
+L_KNQUAN                   " 数量
+L_KNUNIT                   " 単位
+L_KNUNTPRC                 " 単価
+L_KNITXAMT                 " 税抜金額
+L_KNTAXAMT                 " 消費税額
+L_KNETXAMT                 " 税込金額
+W_ZN006_RE-MEMO            " 備考
+W_ZN006_RE-VKBUR           " 営業所
+W_ZN006_RE-BEZEIB          " 内容説明
+W_ZN006_RE-BEZEIG          " 内容説明
+INTO L_DATA
+* Mod ES-UP 2012/10/16 -->
+*      SEPARATED BY L_TAB.
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/10/16 <--
+TRANSFER L_DATA TO G_FNAME.
+* Add ES-UP 2012/12/03 -->
+if l_conv->convert_check( L_DATA ) = abap_true.
+else.
+if l_openflg = abap_false.
+l_openflg = abap_true.
+open dataset l_errfile for output
+in legacy text mode code page l_conv->codepage
+message l_message
+ignoring conversion errors.
+if sy-subrc <> 0.
+message l_message type 'E'.
+endif.
+endif.
+transfer L_DATA to l_errfile.
+endif.
+* Add ES-UP 2012/12/03 <--
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ファイル出力エラー
+MESSAGE I789 WITH TEXT-M07.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*-- 出力件数カウント
+G_CNT_OUT = G_CNT_OUT + 1.
+ENDLOOP.
+
+CLOSE DATASET G_FNAME.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ファイル出力エラー
+MESSAGE I789 WITH TEXT-M07.
+LEAVE LIST-PROCESSING.
+ENDIF.
+* Add ES-UP 2012/12/03 -->
+if l_openflg = abap_true.
+close dataset l_errfile.
+message s002(z2).
+endif.
+* Add ES-UP 2012/12/03 <--
+FREE: I_ZN006_RE[].
+
+ENDFORM.                    " F_OUTPUT_AGAIN_FILE
+*&---------------------------------------------------------------------*
+*&      Form  F_CONFIRM_OUTPUT_AGAIN_DATA
+*&---------------------------------------------------------------------*
+*       出力済データ確認
+*----------------------------------------------------------------------*
+FORM F_CONFIRM_OUTPUT_AGAIN_DATA.
+
+*-- 取消対象データの取得
+PERFORM F_GET_OUTPUT_AGAIN_DATA_ALL.
+*-- 照合締日の取得
+PERFORM F_GET_CZFBDT.
+*-- 照合終了日の取得
+PERFORM F_SELECT_ZN004.
+*-- 照合期間(売上)マスタと取消対象データの整合性チェック
+PERFORM F_CHECK_CONSISTENCY.
+
+ENDFORM.                    " F_CONFIRM_OUTPUT_AGAIN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_OUTPUT_AGAIN_DATA_ALL
+*&---------------------------------------------------------------------*
+*       出力済データの取得
+*----------------------------------------------------------------------*
+FORM F_GET_OUTPUT_AGAIN_DATA_ALL.
+
+REFRESH: I_ZN006_RE.
+
+SELECT *
+FROM ZN006
+INTO CORRESPONDING FIELDS OF TABLE I_ZN006_RE
+WHERE OUTMNTH = P_YEARS                       " 年月
+AND KUNNR  IN S_KUNNR.                      " 得意先コード
+
+IF I_ZN006_RE[] IS INITIAL.
+*-- 選択条件に該当する出力履歴がありません
+MESSAGE S917 WITH TEXT-M06.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_GET_OUTPUT_AGAIN_DATA_ALL
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_CZFBDT
+*&---------------------------------------------------------------------*
+*       照合締日の取得
+*----------------------------------------------------------------------*
+FORM F_GET_CZFBDT.
+
+SELECT GJAHR                           " 伝票会計年度
+SLPDOC                          " 伝票番号
+DTLDOC                          " 伝票明細番号
+VRFCTON                         " 仕入先コード(請求先)
+CZFBDT                          " 照合締日
+FROM YN120
+INTO CORRESPONDING FIELDS OF TABLE I_CZFBDT
+FOR ALL ENTRIES IN I_ZN006_RE
+WHERE GJAHR   = I_ZN006_RE-GJAHR      " 会計年度
+AND SLPDOC  = I_ZN006_RE-VBELN      " 請求書照合番号
+AND DTLDOC  = I_ZN006_RE-POSNR      " 明細
+AND VRFCTON = I_ZN006_RE-KUNNR      " 得意先コード(請求先)
+AND BUKRS   = P_BUKRS.              " 会社コード
+
+ENDFORM.                    " F_GET_CZFBDT
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_ZN004
+*&---------------------------------------------------------------------*
+*       照合終了日の取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_ZN004.
+
+SELECT KUNNR                         " 得意先コード
+EDATE                         " 照合終了日
+FROM ZN004
+INTO CORRESPONDING FIELDS OF TABLE I_ZN004
+WHERE BUKRS = P_BUKRS               " 会社コード
+AND (   KUNNR  = C_MAIN_KUNNR     " 得意先コード
+OR KUNNR IN S_KUNNR ).
+
+ENDFORM.                    " F_SELECT_ZN004
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_CONSISTENCY
+*&---------------------------------------------------------------------*
+*       照合期間(売上)マスタと取消対象データの整合性チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_CONSISTENCY.
+
+LOOP AT I_ZN006_RE INTO W_ZN006_RE.
+CLEAR: W_ZN004,
+W_CZFBDT.
+*-- 照合終了日読込み
+READ TABLE I_ZN004 INTO W_ZN004
+WITH TABLE KEY KUNNR = W_ZN006_RE-KUNNR.
+IF SY-SUBRC <> 0.
+READ TABLE I_ZN004 INTO W_ZN004
+WITH TABLE KEY KUNNR = C_MAIN_KUNNR.
+ENDIF.
+*-- 照合締日読込み
+READ TABLE I_CZFBDT INTO W_CZFBDT
+WITH TABLE KEY GJAHR   = W_ZN006_RE-GJAHR
+SLPDOC  = W_ZN006_RE-VBELN
+DTLDOC  = W_ZN006_RE-POSNR
+VRFCTON = W_ZN006_RE-KUNNR.
+*-- 比較チェック
+IF W_ZN004-EDATE => W_CZFBDT-CZFBDT.
+*-- 照合期間(ZN004)との整合性がとれなくなるため、取消が許可されません
+MESSAGE I920 WITH TEXT-M08.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " F_CHECK_CONSISTENCY
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_POPUP
+*&---------------------------------------------------------------------*
+*       実行確認ポップアップ出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_POPUP.
+
+DATA: L_TEXT      TYPE STRING,
+L_ANSWER(1) TYPE C.
+
+*-- 年月：&1 締日：&2 に紐づく照合データを取消します。
+CONCATENATE TEXT-P01
+P_YEARS
+TEXT-P02
+P_CDATE
+TEXT-P03
+INTO L_TEXT
+SEPARATED BY SPACE.
+
+*-- ポップアップ出力
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+TITLEBAR                    = TEXT-P04      " 実行確認
+TEXT_QUESTION               = L_TEXT
+TEXT_BUTTON_1               = TEXT-P06      " 続行
+TEXT_BUTTON_2               = TEXT-P05      " キャンセル
+DEFAULT_BUTTON              = '2'
+DISPLAY_CANCEL_BUTTON       = SPACE
+POPUP_TYPE                  = 'NO_ICON'
+IMPORTING
+ANSWER                      = L_ANSWER
+EXCEPTIONS
+OTHERS                      = 0.
+
+IF L_ANSWER = 2.
+*-- 取消実行がキャンセルされました
+MESSAGE I918.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_OUTPUT_POPUP
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_TABLE_LOCK_C
+*&---------------------------------------------------------------------*
+*       テーブルロック設定(取消時)
+*----------------------------------------------------------------------*
+FORM F_SET_TABLE_LOCK_C.
+
+DATA: L_USER TYPE SY-MSGV1.
+
+*-- ロックエントリ作成(出力時)
+PERFORM F_MAKE_LOCK_ENTRIES_C.
+
+*-- 自社/外部データ（売上）ロック
+PERFORM F_TABLE_LOCK_902.
+
+L_USER = SY-MSGV1.
+IF RC_CODE_LOCK <> 0.
+*-- エラーメッセージ出力
+MESSAGE I756 WITH TEXT-M01 L_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+*-- 月締請求書履歴（売上）ロック
+PERFORM F_TABLE_LOCK_ZN006.
+
+L_USER = SY-MSGV1.
+IF RC_CODE_LOCK <> 0.
+*-- エラーメッセージ出力
+MESSAGE I756 WITH TEXT-M02 L_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_SET_TABLE_LOCK_C
+*&---------------------------------------------------------------------*
+*&      Form  F_MAKE_LOCK_ENTRIES_C
+*&---------------------------------------------------------------------*
+*       自社/外部データ（売上）ロック
+*----------------------------------------------------------------------*
+FORM F_MAKE_LOCK_ENTRIES_C.
+
+REFRESH: I_ENQ_KEY.
+
+IF S_KUNNR IS INITIAL
+OR S_KUNNR-LOW = '*'.
+*-- 会社コードのみ設定
+CLEAR: W_ENQ_KEY.
+W_ENQ_KEY-BUKRS = P_BUKRS.
+APPEND W_ENQ_KEY TO I_ENQ_KEY.
+ELSE.
+*-- 得意先コード(支払人)⇒仕入先コード(受注先)の取得
+PERFORM F_SELECT_KNVP_C.
+LOOP AT I_KNVP INTO W_KNVP.
+CLEAR: W_ENQ_KEY.
+W_ENQ_KEY-BUKRS = P_BUKRS.
+W_ENQ_KEY-KUNNR = W_KNVP-KUNNR.
+W_ENQ_KEY-KUNN2 = W_KNVP-KUNN2.
+APPEND W_ENQ_KEY TO I_ENQ_KEY.
+ENDLOOP.
+FREE: I_KNVP.
+ENDIF.
+
+ENDFORM.                    " F_MAKE_LOCK_ENTRIES_C
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_KNVP_C
+*&---------------------------------------------------------------------*
+*       得意先コード(支払人)⇒仕入先コード(受注先)の取得(取消時)
+*----------------------------------------------------------------------*
+FORM F_SELECT_KNVP_C.
+
+REFRESH: I_KNVP.
+
+CHECK NOT I_ZN006_RE[] IS INITIAL.
+
+SELECT KUNNR                         " 得意先コード（受注先）
+KUNN2                         " 得意先コード（支払人）
+FROM KNVP
+INTO TABLE I_KNVP
+FOR ALL ENTRIES IN I_ZN006_RE
+WHERE VKORG = P_VKORG               " 販売組織
+AND VTWEG = P_VTWEG               " 流通チャネル
+AND SPART = P_SPART               " 製品部門
+AND PARVW = P_PARVW               " 取引先機能
+AND PARZA = SPACE                 " 取引先カウンタ
+AND KUNN2 = I_ZN006_RE-KUNNR.     " 得意先コード（支払人）
+
+ENDFORM.                    " F_SELECT_KNVP_C
+*&---------------------------------------------------------------------*
+*&      Form  F_CLEAR_TABLE_DATA
+*&---------------------------------------------------------------------*
+*       取消実行
+*----------------------------------------------------------------------*
+FORM F_CLEAR_TABLE_DATA.
+
+*-- 自社/外部データ(売上)クリア
+PERFORM F_CLEAR_YN1X0.
+
+*-- 支払通知書履歴データ削除
+DELETE ZN006 FROM TABLE I_ZN006_RE.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- ZN006 削除エラー
+MESSAGE I793 WITH TEXT-M02.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+FREE: I_ZN006_RE.
+
+ENDFORM.                    " F_CLEAR_TABLE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_CLEAR_YN1x0
+*&---------------------------------------------------------------------*
+*       自社/外部データ(売上)クリア
+*----------------------------------------------------------------------*
+FORM F_CLEAR_YN1X0.
+* 2012/04/13 QA289 ADD START
+TYPES:BEGIN OF L_TYP_YN120,
+GJAHR   TYPE YN120-GJAHR,
+SLPDOC  TYPE YN120-SLPDOC,
+DTLDOC  TYPE YN120-DTLDOC,
+VRFCTON TYPE YN120-VRFCTON,
+BUKRS   TYPE YN120-BUKRS,
+CSTS    TYPE YN120-CSTS,
+CHKDOC  TYPE YN120-CHKDOC,
+END OF  L_TYP_YN120.
+DATA:L_W_YN120_DEL TYPE L_TYP_YN120.
+
+TYPES:BEGIN OF L_TYP_YN110,
+GJAHR   TYPE YN110-GJAHR,
+SLPDOC  TYPE YN110-SLPDOC,
+DTLDOC  TYPE YN110-DTLDOC,
+VRFCTON TYPE YN110-VRFCTON,
+BUKRS   TYPE YN110-BUKRS,
+END OF L_TYP_YN110.
+
+DATA:L_W_YN110_DEL TYPE L_TYP_YN110,
+L_T_YN110_DEL TYPE STANDARD TABLE OF L_TYP_YN110.
+* 2012/04/13 QA289 ADD END
+
+DATA: LW_YN120 TYPE YN120.
+
+REFRESH: I_YN110_DE.
+
+LOOP AT I_ZN006_RE INTO W_ZN006_RE.
+* 2012/04/13 QA289 DEL START
+**-- 自社データ更新
+*    UPDATE YN120 SET CSTS     = '1'                 " 照合ステータス
+*                     CHKDOC   = LW_YN120-CHKDOC     " 照合番号
+*                     CHKDAT   = LW_YN120-CHKDAT     " 照合日
+*                     CHKUSR   = LW_YN120-CHKUSR     " 照合ユーザ
+*                     UPDDAT   = SY-DATUM            " 更新日
+*                     UPDTIM   = SY-UZEIT            " 更新時刻
+*                     UPDUSR   = SY-UNAME            " 更新ユーザ
+*                     UPDPRG   = SY-REPID            " 更新プログラム
+*                     CZFBDT   = LW_YN120-CZFBDT     " 照合締日
+*                     OUTMNTH3 = LW_YN120-OUTMNTH3   " 月締請求書出力月
+*                     PRINTDT3 = LW_YN120-PRINTDT3   " 月締請求書出力日
+*               WHERE GJAHR    = W_ZN006_RE-GJAHR    " 会計年度
+*                 AND SLPDOC   = W_ZN006_RE-VBELN    " 請求書照合番号
+*                 AND DTLDOC   = W_ZN006_RE-POSNR    " 明細
+*                 AND VRFCTON  = W_ZN006_RE-KUNNR    " 得意先コード
+*                 AND BUKRS    = P_BUKRS.            " 会社コード
+*    IF SY-SUBRC <> 0.
+*      ROLLBACK WORK.
+**-- YN120 更新エラー
+*      MESSAGE I758 WITH TEXT-M04.
+*      LEAVE LIST-PROCESSING.
+*    ENDIF.
+*
+**-- 外部データ削除レコード作成
+*    CLEAR: W_YN110_DE.
+*    W_YN110_DE-GJAHR   = W_ZN006_RE-GJAHR.    " 会計年度
+*    W_YN110_DE-SLPDOC  = W_ZN006_RE-VBELN.    " 請求書照合番号
+*    W_YN110_DE-DTLDOC  = W_ZN006_RE-POSNR.    " 明細
+*    W_YN110_DE-VRFCTON = W_ZN006_RE-KUNNR.    " 仕入先コード
+*    W_YN110_DE-BUKRS   = P_BUKRS.             " 会社コード
+*    APPEND W_YN110_DE TO I_YN110_DE.
+*
+**-- 更新件数のカウント(LINES命令使用不可のため)
+*    G_CNT_UPD = G_CNT_UPD + 1.
+*
+*  ENDLOOP.
+*
+**-- 外部データ一括削除
+*  DELETE YN110 FROM TABLE I_YN110_DE.
+*  IF SY-SUBRC <> 0.
+*    ROLLBACK WORK.
+**-- YN110 削除エラー
+*    MESSAGE I793 WITH TEXT-M05.
+*    LEAVE LIST-PROCESSING.
+*  ENDIF.
+* 2012/04/13 QA289 DEL END
+* 2012/04/13 QA289 ADD START
+*-- まず該当の自社データを取得
+CLEAR:L_W_YN120_DEL,L_W_YN110_DEL.
+SELECT SINGLE
+GJAHR
+SLPDOC
+DTLDOC
+VRFCTON
+BUKRS
+CSTS
+CHKDOC
+INTO L_W_YN120_DEL
+FROM YN120
+WHERE GJAHR   = W_ZN006_RE-GJAHR    " 会計年度
+AND SLPDOC  = W_ZN006_RE-VBELN    " 請求書照合番号
+AND DTLDOC  = W_ZN006_RE-POSNR    " 明細
+AND VRFCTON = W_ZN006_RE-KUNNR    " 得意先コード
+AND BUKRS   = P_BUKRS.            " 会社コード
+
+IF SY-SUBRC <> 0.                    " 自社が読めないは対象外
+CONTINUE.
+ENDIF.
+
+IF L_W_YN120_DEL-CHKDOC IS INITIAL
+OR L_W_YN120_DEL-CHKDOC = SPACE.    "照合番号が無い場合は対象外
+CONTINUE.
+ENDIF.
+
+IF L_W_YN120_DEL-CSTS = '7'
+OR L_W_YN120_DEL-CSTS = '8' .
+ELSE.
+CONTINUE.                         "照合済みで無い場合は対象外
+ENDIF.
+*-- 自社が読めたら外部を取得
+REFRESH:L_T_YN110_DEL.
+SELECT GJAHR
+SLPDOC
+DTLDOC
+VRFCTON
+BUKRS
+INTO TABLE L_T_YN110_DEL
+FROM YN110
+WHERE CHKDOC    = L_W_YN120_DEL-CHKDOC
+AND AUTOFLG_S = 'X'.
+
+IF L_T_YN110_DEL[] IS INITIAL. "自動作成データなし
+CONTINUE.
+ENDIF.
+
+*-- ここまで残ったデータのみ、取消し対象
+*-- 更新件数のカウント(LINES命令使用不可のため)
+G_CNT_UPD = G_CNT_UPD + 1.
+
+UPDATE YN120 SET CSTS     = '1'                 " 照合ステータス
+CHKDOC   = LW_YN120-CHKDOC     " 照合番号(初期値)
+CHKDAT   = LW_YN120-CHKDAT     " 照合日(初期値)
+CHKUSR   = LW_YN120-CHKUSR     " 照合ユーザ(初期値)
+UPDDAT   = SY-DATUM            " 更新日
+UPDTIM   = SY-UZEIT            " 更新時刻
+UPDUSR   = SY-UNAME            " 更新ユーザ
+UPDPRG   = SY-REPID            " 更新プログラム
+CZFBDT   = LW_YN120-CZFBDT     " 照合締日(初期値)
+OUTMNTH3 = LW_YN120-OUTMNTH3   " 月締出力月(初期値)
+PRINTDT3 = LW_YN120-PRINTDT3   " 月締出力日(初期値)
+WHERE GJAHR    = W_ZN006_RE-GJAHR    " 会計年度
+AND SLPDOC   = W_ZN006_RE-VBELN    " 請求書照合番号
+AND DTLDOC   = W_ZN006_RE-POSNR    " 明細
+AND VRFCTON  = W_ZN006_RE-KUNNR    " 得意先コード
+AND BUKRS    = P_BUKRS.            " 会社コード
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*-- YN120 更新エラー
+MESSAGE I758 WITH TEXT-M04.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+*-- 外部データ一括削除
+LOOP AT L_T_YN110_DEL INTO L_W_YN110_DEL.
+*-- 外部データ削除レコード作成
+CLEAR: W_YN110_DE.
+W_YN110_DE-GJAHR   = L_W_YN110_DEL-GJAHR.    " 会計年度
+W_YN110_DE-SLPDOC  = L_W_YN110_DEL-SLPDOC.   " 請求書照合番号
+W_YN110_DE-DTLDOC  = L_W_YN110_DEL-DTLDOC.   " 明細
+W_YN110_DE-VRFCTON = L_W_YN110_DEL-VRFCTON.  " 仕入先コード
+W_YN110_DE-BUKRS   = P_BUKRS.                " 会社コード
+APPEND W_YN110_DE TO I_YN110_DE.
+ENDLOOP.
+ENDLOOP.
+
+IF NOT I_YN110_DE[] IS INITIAL.
+DELETE YN110 FROM TABLE I_YN110_DE.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*--   YN110 削除エラー
+MESSAGE I793 WITH TEXT-M05.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+* 2012/04/13 QA289 ADD END
+
+ENDFORM.                    " F_CLEAR_YN1x0
+*&---------------------------------------------------------------------*
+*&      Form  F_RELEASE_TABLE_LOCK_C
+*&---------------------------------------------------------------------*
+*       テーブルロック解除(取消時)
+*----------------------------------------------------------------------*
+FORM F_RELEASE_TABLE_LOCK_C.
+
+*-- 自社/外部データ（売上）ロック解除
+PERFORM F_TABLE_UNLOCK_902.
+
+*-- 月締請求書履歴（売上）ロック解除
+PERFORM F_TABLE_UNLOCK_ZN006.
+
+FREE: I_KNXX,
+I_ENQ_KEY.
+
+ENDFORM.                    " F_RELEASE_TABLE_LOCK_C
+* 2012/04/13 QA288 ADD START
+*&---------------------------------------------------------------------*
+*&      Form  GET_NUMBER_YN110
+*&---------------------------------------------------------------------*
+*       外部番号の取得 （YN01_YN010100_0000-GET_NUMBER_YN110参照）
+*----------------------------------------------------------------------*
+FORM GET_NUMBER_YN110.
+CLEAR:W_YN110_UP-SLPDOC,
+W_YN110_UP-DTLDOC.
+W_YN110_UP-DTLDOC = '000001'.
+
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+NR_RANGE_NR             = '10'
+OBJECT                  = 'YNOUTDOC1'
+QUANTITY                = '1'
+SUBOBJECT               = W_YN110_UP-BUKRS
+TOYEAR                  = W_YN110_UP-GJAHR
+IMPORTING
+NUMBER                  = W_YN110_UP-SLPDOC
+EXCEPTIONS
+INTERVAL_NOT_FOUND      = 1
+NUMBER_RANGE_NOT_INTERN = 2
+OBJECT_NOT_FOUND        = 3
+QUANTITY_IS_0           = 5
+QUANTITY_IS_NOT_1       = 5
+INTERVAL_OVERFLOW       = 6
+OTHERS                  = 7.
+IF SY-SUBRC <> 0.
+* 外部番号取得エラー
+MESSAGE I754 WITH TEXT-M13.
+STOP.
+ENDIF.
+
+ENDFORM.                    " GET_NUMBER_YN110
+* 2012/04/13 QA288 ADD END

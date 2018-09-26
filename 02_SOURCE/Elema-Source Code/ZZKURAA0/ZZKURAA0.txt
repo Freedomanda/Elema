@@ -1,0 +1,290 @@
+REPORT zzkuraa0 LINE-SIZE 255
+LINE-COUNT 65.
+
+* 使用テーブル
+TABLES yk510. "一括請求書ヘッダデータ
+TABLES yk520. "一括請求書明細データ
+TABLES vbrk.  "請求書: ヘッダデータ
+TABLES knc1.  "得意先マスタ (取引金額)
+TABLES kna1.  "得意先マスタ: 一般データ
+TABLES stxh.  "STXD SAPscript テキストファイルヘッダ
+
+* グローバル変数
+DATA i_yk510 LIKE STANDARD TABLE OF yk510 WITH HEADER LINE.
+DATA i_yk520_new LIKE STANDARD TABLE OF yk520 WITH HEADER LINE.
+DATA i_yk520_old LIKE STANDARD TABLE OF yk520 WITH HEADER LINE.
+DATA w_yk510 LIKE yk510.
+DATA w_fieldname LIKE dd03l-fieldname.
+DATA w_monat LIKE bkpf-monat.
+FIELD-SYMBOLS <fs>.
+DATA w_yk520_ins LIKE sy-dbcnt.
+DATA w_yk520_del LIKE sy-dbcnt.
+DATA w_yk510_upd LIKE sy-dbcnt.
+DATA w_yk510_ins LIKE sy-dbcnt.
+DATA w_tdname LIKE stxh-tdname.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk510-bukrs DEFAULT 'C001'.
+SELECT-OPTIONS s_kunnr FOR yk510-kunnr.
+PARAMETERS p_zfbdt LIKE yk510-zfbdt DEFAULT '20020930'.
+PARAMETERS p_gjahr LIKE knc1-gjahr DEFAULT 2002.
+PARAMETERS p_monat LIKE bkpf-monat DEFAULT 06.
+PARAMETERS p_omit AS CHECKBOX DEFAULT 'X'.
+PARAMETERS p_test AS CHECKBOX DEFAULT 'X'.
+
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 請求書明細検索
+SELECT        *
+FROM   yk520
+INTO   TABLE i_yk520_old
+WHERE  bukrs  = p_bukrs
+AND    kunnr IN s_kunnr
+AND    zfbdt  = p_zfbdt.
+WRITE: / 'YK520検索件数', sy-dbcnt.
+* 明細処理
+LOOP AT i_yk520_old.
+*   請求伝票検索
+CLEAR vbrk.
+SELECT SINGLE * FROM  vbrk
+WHERE  vbeln  = i_yk520_old-vbeln.
+*   内部テーブル更新
+CLEAR i_yk520_new.
+MOVE-CORRESPONDING i_yk520_old TO i_yk520_new.
+i_yk520_new-kunnr = vbrk-kunag. "受注先で置き換え
+APPEND i_yk520_new.
+ENDLOOP.
+* 請求書ヘッダ作成
+SORT i_yk520_new BY kunnr.
+LOOP AT i_yk520_new.
+AT NEW kunnr.
+CLEAR: i_yk510, w_yk510.
+ENDAT.
+MOVE-CORRESPONDING i_yk520_new TO i_yk510.
+ADD i_yk520_new-netwr TO w_yk510-cslamt. "当月売上額
+ADD i_yk520_new-mwsbp TO w_yk510-ctxamt. "当月税額
+ADD i_yk520_new-brtwr TO w_yk510-cstamt. "当月税込額
+AT END OF kunnr.
+i_yk510-cslamt = w_yk510-cslamt.
+i_yk510-ctxamt = w_yk510-ctxamt.
+i_yk510-cstamt = w_yk510-cstamt.
+i_yk510-insdat = sy-datum.
+i_yk510-instim = sy-uzeit.
+i_yk510-insusr = sy-uname.
+CLEAR : i_yk510-upddat, i_yk510-updtim , i_yk510-updusr,
+i_yk510-outdat, i_yk510-outtim , i_yk510-outcnt,
+i_yk510-outusr, i_yk510-fiflg.
+APPEND i_yk510.
+ENDAT.
+ENDLOOP.
+* 残高取得
+LOOP AT i_yk510.
+*   残高検索
+CLEAR knc1.
+SELECT SINGLE * FROM  knc1
+WHERE  kunnr  = i_yk510-kunnr
+AND    bukrs  = p_bukrs
+AND    gjahr  = p_gjahr.
+*
+w_fieldname+0(7) = 'KNC1-UM'.
+DO p_monat TIMES.
+w_monat = sy-index.
+w_fieldname+7(2) = w_monat.
+*     当月請求額への加算
+w_fieldname+9(1) = 'S'.
+ASSIGN (w_fieldname) TO <fs>.
+i_yk510-cblamt = i_yk510-cblamt + <fs>.
+w_fieldname+9(1) = 'H'.
+ASSIGN (w_fieldname) TO <fs>.
+i_yk510-cblamt = i_yk510-cblamt - <fs>.
+*     最後のループは前月請求額へ加算しない
+IF p_monat = w_monat.
+EXIT.
+ENDIF.
+*     前月請求額への加算
+w_fieldname+9(1) = 'S'.
+ASSIGN (w_fieldname) TO <fs>.
+i_yk510-lblamt = i_yk510-lblamt + <fs>.
+w_fieldname+9(1) = 'H'.
+ASSIGN (w_fieldname) TO <fs>.
+i_yk510-lblamt = i_yk510-lblamt - <fs>.
+ENDDO.
+*   当月入金額
+i_yk510-cicamt = i_yk510-lblamt  "前月請求額
++ i_yk510-cstamt  "当月税込額
+- i_yk510-cblamt. "当月請求額
+*   内部データ更新
+MODIFY i_yk510.
+ENDLOOP.
+* 印刷
+LOOP AT i_yk510.
+*   対象チェック
+IF p_omit = 'X'.
+w_tdname+0(10) = i_yk510-kunnr.
+w_tdname+10(4) = p_bukrs.
+SELECT SINGLE * FROM  stxh
+WHERE  tdobject  = 'KNB1'
+AND    tdname    = w_tdname
+AND    tdid      = 'ZK01'
+AND    tdspras   = sy-langu.
+IF sy-subrc <> 0.
+CONTINUE.
+ENDIF.
+ENDIF.
+*   出力
+CLEAR kna1.
+SELECT SINGLE * FROM  kna1
+WHERE  kunnr  = i_yk510-kunnr.
+WRITE: / i_yk510-kunnr,kna1-name1,              "得意先
+i_yk510-zfbdt,                         "締日
+i_yk510-lblamt CURRENCY i_yk510-waers, "前月請求額
+i_yk510-cicamt CURRENCY i_yk510-waers, "当月入金額
+i_yk510-cslamt CURRENCY i_yk510-waers, "当月売上額
+i_yk510-ctxamt CURRENCY i_yk510-waers, "当月税額
+i_yk510-cstamt CURRENCY i_yk510-waers, "当月税込額
+i_yk510-cblamt CURRENCY i_yk510-waers, "当月請求額
+i_yk510-waers.                         "通貨コード
+ENDLOOP.
+
+* 明細削除
+LOOP AT i_yk520_old.
+*   ロック
+CALL FUNCTION 'ENQUEUE_EY_YK520'
+EXPORTING
+bukrs          = i_yk520_old-bukrs
+kunnr          = i_yk520_old-kunnr
+vkorg          = i_yk520_old-vkorg
+vtweg          = i_yk520_old-vtweg
+spart          = i_yk520_old-spart
+zfbdt          = i_yk520_old-zfbdt
+vbeln          = i_yk520_old-vbeln
+posnr          = i_yk520_old-posnr
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+WRITE: / 'YK520がロックできません', sy-msgv1.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+*   削除
+DELETE yk520 FROM i_yk520_old.
+IF sy-subrc <> 0.
+WRITE: / 'YK520削除エラー', i_yk520_old-vbeln, i_yk520_old-posnr.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+ADD 1 TO w_yk520_del.
+*   アンロック
+CALL FUNCTION 'DEQUEUE_EY_YK520'
+EXPORTING
+bukrs = i_yk520_old-bukrs
+kunnr = i_yk520_old-kunnr
+vkorg = i_yk520_old-vkorg
+vtweg = i_yk520_old-vtweg
+spart = i_yk520_old-spart
+zfbdt = i_yk520_old-zfbdt
+vbeln = i_yk520_old-vbeln
+posnr = i_yk520_old-posnr.
+ENDLOOP.
+* 明細登録
+LOOP AT i_yk520_new.
+*   ロック
+CALL FUNCTION 'ENQUEUE_EY_YK520'
+EXPORTING
+bukrs          = i_yk520_new-bukrs
+kunnr          = i_yk520_new-kunnr
+vkorg          = i_yk520_new-vkorg
+vtweg          = i_yk520_new-vtweg
+spart          = i_yk520_new-spart
+zfbdt          = i_yk520_new-zfbdt
+vbeln          = i_yk520_new-vbeln
+posnr          = i_yk520_new-posnr
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+WRITE: / 'YK520がロックできません', sy-msgv1.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+*   登録
+INSERT INTO yk520 VALUES i_yk520_new.
+IF sy-subrc <> 0.
+WRITE: / 'YK520登録エラー', i_yk520_new-vbeln, i_yk520_new-posnr.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+ADD 1 TO w_yk520_ins.
+*   アンロック
+CALL FUNCTION 'DEQUEUE_EY_YK520'
+EXPORTING
+bukrs = i_yk520_new-bukrs
+kunnr = i_yk520_new-kunnr
+vkorg = i_yk520_new-vkorg
+vtweg = i_yk520_new-vtweg
+spart = i_yk520_new-spart
+zfbdt = i_yk520_new-zfbdt
+vbeln = i_yk520_new-vbeln
+posnr = i_yk520_new-posnr.
+ENDLOOP.
+* ヘッダ更新
+LOOP AT i_yk510.
+*   ロック
+CALL FUNCTION 'ENQUEUE_EY_YK510'
+EXPORTING
+bukrs          = i_yk510-bukrs
+kunnr          = i_yk510-kunnr
+vkorg          = i_yk510-vkorg
+vtweg          = i_yk510-vtweg
+spart          = i_yk510-spart
+zfbdt          = i_yk510-zfbdt
+waers          = i_yk510-waers
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+WRITE: / 'YK510がロックできません', sy-msgv1.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+*   更新
+UPDATE yk510 FROM i_yk510.
+IF sy-subrc <> 0.
+INSERT INTO yk510 VALUES i_yk510.
+IF sy-subrc <> 0.
+WRITE: / 'YK510登録エラー', i_yk510-kunnr.
+ROLLBACK WORK.
+STOP.
+ELSE.
+ADD 1 TO w_yk510_ins.
+ENDIF.
+ELSE.
+ADD 1 TO w_yk510_upd.
+ENDIF.
+*   アンロック
+CALL FUNCTION 'DEQUEUE_EY_YK510'
+EXPORTING
+bukrs = i_yk510-bukrs
+kunnr = i_yk510-kunnr
+vkorg = i_yk510-vkorg
+vtweg = i_yk510-vtweg
+spart = i_yk510-spart
+zfbdt = i_yk510-zfbdt
+waers = i_yk510-waers.
+
+ENDLOOP.
+* 結果
+WRITE: / 'YK510登録件数', w_yk510_ins.
+WRITE: / 'YK510更新件数', w_yk510_upd.
+WRITE: / 'YK520削除件数', w_yk520_del.
+WRITE: / 'YK520登録件数', w_yk520_ins.
+* テスト実行
+IF p_test = 'X'.
+ROLLBACK WORK.
+WRITE: / 'テスト実行'.
+ENDIF.

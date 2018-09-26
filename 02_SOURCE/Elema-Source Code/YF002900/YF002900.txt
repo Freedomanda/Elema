@@ -1,0 +1,1518 @@
+REPORT YF002900 MESSAGE-ID Y1
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT   58(0).
+*-----------------------------------------------------------------------
+*     ﾌﾟﾛｸﾞﾗﾑID : YF002900
+*     ﾌﾟﾛｸﾞﾗﾑ名 : 部門科目別元帳
+*     処理種別  : バッチ(ABAP/4)
+*     処理概要  : 会計伝票明細ﾃｰﾌﾞﾙより、指定された年月日のﾃﾞｰﾀを抽出し
+*               : 勘定ｺｰﾄﾞ・補助ｺｰﾄ・部門ｺｰﾄﾞごとに以下の処理を行う
+*               : 随時処理
+*               : 伝票の転記日付・伝票番号順で明細を出力し
+*               : 伝票の転記日付が変ったら残高を出力する
+*     入力      : 対象年月日(FROM-TO)，会社ｺｰﾄﾞ，勘定ｺｰﾄﾞ(FROM-TO)
+*     出力      : 部門科目別元帳
+*-----------------------------------------------------------------------
+
+*テーブル定義
+TABLES:BKPF,                           "会計伝票ﾍｯﾀﾞｰ
+BSEG,                           "会計伝票明細
+T001,                           "会社コード
+TGSBT,                          "部門ﾃｰﾌﾞﾙ
+*      ZC250,                          "部門情報ﾃｰﾌﾞﾙ
+SKAT,                           "総勘定元帳ﾏｽﾀ
+SKC1A.                          "総勘定元帳残高
+
+*内部テーブル定義
+DATA: BEGIN   OF       T_BSEG OCCURS 100.       "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+DATA: HKONT(10)   TYPE C,              "勘定ｺｰﾄﾞ
+*     ZBBOOD(02)  TYPE N,              "出力順
+BUDAT(08)   TYPE C,              "年月日
+BELNR(10)   TYPE C,              "伝票番号
+ZZKANJYO(10) TYPE C,             "相手勘定ｺｰﾄﾞ
+*     TXT20(14)   TYPE C,              "相手勘定科目
+TXT50(50)   TYPE C,              "相手勘定科目
+GSBER(04)   TYPE C,              "部門ｺｰﾄﾞ
+GTEXT(30)   TYPE C,              "部門名
+SGTXT(40)   TYPE C,              "摘要
+SHKZG(01)   TYPE C,              "借方/貸方ﾌﾗｸﾞ
+DMBTR(13)   TYPE P,              "国内通貨額
+SAKNR(10)   TYPE C.              "勘定ｺｰﾄﾞ
+DATA: END     OF       T_BSEG.
+
+*内部テーブル定義（セーブ用）
+DATA: BEGIN   OF       TS_BSEG OCCURS 1.        "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+DATA: HKONT(10)   TYPE C,              "勘定ｺｰﾄﾞ
+*     ZBBOOD(02)  TYPE N,              "出力順
+BUDAT(08)   TYPE C,              "年月日
+BELNR(10)   TYPE C,              "伝票番号
+ZZKANJYO(10) TYPE C,             "相手勘定ｺｰﾄﾞ
+*     TXT20(14)   TYPE C,              "相手勘定科目
+TXT50(50)   TYPE C,              "相手勘定科目
+GSBER(04)   TYPE C,              "部門ｺｰﾄﾞ
+GTEXT(30)   TYPE C,              "部門名
+SGTXT(40)   TYPE C,              "摘要
+SHKZG(01)   TYPE C,              "借方/貸方ﾌﾗｸﾞ
+DMBTR(13)   TYPE P,              "国内通貨額
+SAKNR(10)   TYPE C.              "勘定ｺｰﾄﾞ
+DATA: END     OF       TS_BSEG.
+
+DATA: BEGIN   OF       T_SKC1A OCCURS 100.      "総勘定元帳残高ﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  SKC1A.
+DATA: END     OF       T_SKC1A.
+
+*パラメータ定義
+PARAMETERS: P_BUKRS(04),               "会社コード
+P_NEN(04),                 "会計年（暦年）
+P_TUKI(02).                "会計月
+
+SELECT-OPTIONS: S_SAKNR FOR SKAT-SAKNR,"勘定ｺｰﾄﾞFROM-TO
+S_GSBER FOR BSEG-GSBER."事業領域FROM-TO
+*作業用データ定義
+DATA: W_DATE        LIKE SY-DATUM,
+W_NEN_F(04)   TYPE N,
+W_NEN_T(04)   TYPE N,
+W_TUKI_F(02)  TYPE N,
+W_TUKI_T(02)  TYPE N,
+W_HI_F(02)    TYPE N,
+W_HI_T(02)    TYPE N,
+W_NENDO(04)    TYPE N,
+W_NENDO_F(04)  TYPE N,
+W_NENDO_T(04)  TYPE N,
+W_FLG_ZERO(01)       VALUE'0',   "データ0件のとき'0'
+W_GETSUZAN(13) TYPE P,           "前月より繰越金額
+W_NICHIZAN(13) TYPE P,           "日計残高金額
+W_KURIZAN(13) TYPE P,            "次月へ繰越残高金額
+W_KARIKATA(13) TYPE P,           "借方金額明細編集用
+W_KASHIKATA(13) TYPE P,          "貸方金額明細編集用
+W_ZANDAKA(13) TYPE P DECIMALS 2, "総勘定元帳残高ｻﾏﾘ
+W_NIKEI_OLD(08) TYPE C,          "日計日付OLD
+W_CTR_LINE      TYPE I,          "ﾗｲﾝｶｳﾝﾄ
+W_TAISHO_Y_F(04) TYPE N,         "対象年月日の年FROM
+W_TAISHO_M_F(02) TYPE N,         "対象年月日の月FROM
+W_TAISHO_D_F(02) TYPE N,         "対象年月日の日FROM
+W_TAISHO_Y_T(04) TYPE N,         "対象年月日の年TO
+W_TAISHO_M_T(02) TYPE N,         "対象年月日の月TO
+W_TAISHO_D_T(02) TYPE N,         "対象年月日の日TO
+W_TAISHO_YMD_F(08) TYPE N,       "対象年月日の年月日FROM
+W_TAISHO_YMD_T(08) TYPE N,       "対象年月日の年月日TO
+W_PAGNO(3)      TYPE N.
+
+DATA: W_SAKNR_F(10)   TYPE C,          "勘定ｺｰﾄﾞ（最初）
+W_SAKNR_T(10)   TYPE C,          "勘定ｺｰﾄﾞ（最後）
+W_GSBER_F(04)   TYPE C,          "事業領域（最初）
+W_GSBER_T(04)   TYPE C,          "事業領域（最後）
+W_AC(10)        TYPE C,          "相手勘定取得用ワーク
+W_CNT(3)        TYPE N,          "BSEG明細用カウンタ
+W_HKONT(10)     TYPE C,          "勘定ｺｰﾄﾞ（ﾌﾞﾚｲｸ用）
+*     W_ZBBOOD(02)    TYPE N,          "出力順ﾜｰｸ
+W_GSBER(04)     TYPE C,          "事業領域ワーク
+*     W_TXT20(14)     TYPE C,          "勘定科目名
+W_TXT50(50)     TYPE C,          "勘定科目名
+W_LCNT          TYPE I,          "ﾃｰﾌﾞﾙ数
+W_KANJZAN(13)   TYPE P.          "勘定ｺｰﾄﾞ別残高
+
+*共通処理用定義項目
+*  必要な定義
+DATA:   P_GJAHR(4)  TYPE N,            "会計年度
+P_PERIO(3)  TYPE N,            "会計期間
+W_EOM       TYPE D.            "月末日
+
+INCLUDE:YF01NUMC.                      "金額12桁出力用編集ｻﾌﾞ
+INCLUDE:YF01CCUT.                      "桁落ち文字列編集
+
+************************************************************************
+*  主処理                                                              *
+************************************************************************
+START-OF-SELECTION.
+PERFORM  NENGETU.                    "年月日作成
+
+W_SAKNR_F  =  S_SAKNR-LOW.           "勘定ｺｰﾄﾞ(LOW)
+W_SAKNR_T  =  S_SAKNR-HIGH.          "勘定ｺｰﾄﾞ(HIGH)
+W_GSBER_F  =  S_GSBER-LOW.           "事業領域(LOW)
+W_GSBER_T  =  S_GSBER-HIGH.          "事業領域(HIGH)
+
+*総勘定元帳残高ﾃｰﾌﾞﾙの読込み及び内部ﾃｰﾌﾞﾙの作成
+GET                 SKC1A.             "総勘定元帳→内部ﾃｰﾌﾞﾙ
+MOVE-CORRESPONDING  SKC1A TO T_SKC1A.
+APPEND                       T_SKC1A.
+
+END-OF-SELECTION.
+*内部ﾃｰﾌﾞﾙ(T_BSEG)作成
+PERFORM DENMEISAI.                   "会計伝票明細等読込み
+*ソート処理（勘定コード+事業領域＋転記日付＋伝票番号）
+SORT     T_BSEG  BY HKONT GSBER BUDAT BELNR.
+*総勘定元帳出力処理
+PERFORM  PRNT_LIST.
+
+*----------------------------------------------------------------------*
+*  年月日作成                                                          *
+*----------------------------------------------------------------------*
+FORM NENGETU.
+
+*会計年度、会計期間への変換
+MOVE: P_NEN TO W_DATE(4),
+P_TUKI TO W_DATE+4(2),
+'01' TO W_DATE+6(2).
+
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = W_DATE
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = P_GJAHR
+*         E_MONAT        =
+E_POPER        = P_PERIO
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+EXIT.
+ENDIF.
+*会社情報取得
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS       = P_BUKRS        .
+
+*月末日取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = P_GJAHR
+I_PERIV        = T001-PERIV
+I_POPER        = P_PERIO
+IMPORTING
+E_DATE         = W_EOM
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+EXIT.
+ENDIF.
+
+W_TAISHO_Y_F = P_NEN.                "対象年月日取得
+W_TAISHO_M_F = P_TUKI.
+W_TAISHO_D_F = 1.
+W_TAISHO_Y_T = P_NEN.
+W_TAISHO_M_T = P_TUKI.
+W_TAISHO_D_T = W_EOM+6(2).
+
+W_TAISHO_YMD_F+0(4) = P_NEN.
+W_TAISHO_YMD_F+4(2) = P_TUKI.
+W_TAISHO_YMD_F+6(2) = 01.
+
+W_TAISHO_YMD_T = W_EOM.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  会計伝票明細読込み（内部ﾃｰﾌﾞﾙT_BSEG作成）                           *
+*----------------------------------------------------------------------*
+FORM DENMEISAI.
+
+*会計伝票ﾍｯﾀﾞBKPF及び会計伝票明細BSEGの読込み
+SELECT  * FROM BKPF
+WHERE  BUKRS = P_BUKRS         AND       "会社ｺｰﾄﾞ
+GJAHR = P_GJAHR         AND       "会計年度
+BUDAT >= W_TAISHO_YMD_F AND       "転記日付
+BUDAT <= W_TAISHO_YMD_T AND
+BSTAT = SPACE.
+SELECT  * FROM BSEG
+WHERE  BUKRS = P_BUKRS    AND"会社ｺｰﾄﾞ
+BELNR = BKPF-BELNR AND"伝票番号
+GJAHR = P_GJAHR    AND"会計年度
+HKONT >= W_SAKNR_F AND"勘定ｺｰﾄﾞ
+HKONT <= W_SAKNR_T AND
+GSBER >= W_GSBER_F AND"事業領域
+GSBER <= W_GSBER_T.
+PERFORM DENPYO_SAKU.             "伝票ﾃﾞｰﾀ作成
+PERFORM DENPYO_TSUIKA.           "伝票ﾃﾞｰﾀ項目編集
+
+ENDSELECT.
+ENDSELECT.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  会計伝票作成処理                                                    *
+*----------------------------------------------------------------------*
+FORM DENPYO_SAKU.
+T_BSEG-HKONT    =  BSEG-HKONT.       "勘定ｺｰﾄﾞ
+T_BSEG-SAKNR    =  BSEG-HKONT.       "勘定ｺｰﾄﾞ
+IN_CHAR         =  BSEG-SGTXT.
+IN_LEN          =  16.               "桁数
+PERFORM YF01CCUT USING IN_CHAR IN_LEN. "全角文字の処理
+T_BSEG-SGTXT    =  OUT_CHAR.         "摘要
+T_BSEG-GSBER    =  BSEG-GSBER.       "部門ｺｰﾄﾞ
+*
+T_BSEG-BELNR    =  BSEG-BELNR.       "伝票番号
+T_BSEG-SHKZG    =  BSEG-SHKZG.       "借方/貸方ﾌﾗｸﾞ
+T_BSEG-DMBTR    =  BSEG-DMBTR * 100. "国内通貨額
+* T_BSEG-ZZKANJYO =  BSEG-ZZKANJYO.    "相手勘定ｺｰﾄﾞ
+PERFORM AITE_AC_GET.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  会計伝票出力用ﾃｰﾌﾞﾙ追加                                             *
+*----------------------------------------------------------------------*
+FORM DENPYO_TSUIKA.
+
+*部門ﾃｰﾌﾞﾙ読込み
+SELECT  SINGLE * FROM TGSBT
+WHERE  SPRAS = 'J'
+AND    GSBER = T_BSEG-GSBER. "事業領域
+IF  SY-SUBRC = 0.
+ELSE.
+TGSBT-GTEXT   =  ''.               "部門名称
+ENDIF.
+
+*部門情報ﾃｰﾌﾞﾙ読込み
+* SELECT  SINGLE * FROM ZC250
+*         WHERE  KOKRS = 'NTTA'
+*         AND    GSBER = T_BSEG-GSBER. "事業領域（４桁）
+* IF  SY-SUBRC = 0.
+* ELSE.
+*   ZC250-ZBBOOD   =  99.              "出力順HIGH-VALUE
+* ENDIF.
+*総勘定元帳ﾏｽﾀ読込み
+SELECT  SINGLE * FROM SKAT
+WHERE  SPRAS = 'J' AND
+KTOPL = T001-KTOPL AND
+SAKNR = T_BSEG-ZZKANJYO.       "相手勘定ｺｰﾄﾞ
+IF  SY-SUBRC = 0.
+ELSE.
+SKAT-TXT20    =  ''.
+SKAT-TXT50    =  ''.
+ENDIF.
+
+* T_BSEG-ZBBOOD   =  ZC250-ZBBOOD.     "出力順
+T_BSEG-BUDAT    =  BKPF-BUDAT.       "年月日
+T_BSEG-GTEXT    =  TGSBT-GTEXT.      "部門名
+* T_BSEG-TXT20    =  SKAT-TXT20.       "相手勘定科目
+T_BSEG-TXT50    =  SKAT-TXT50.       "相手補助科目
+
+APPEND T_BSEG.
+CLEAR  T_BSEG.
+
+W_FLG_ZERO      =  '1'.              "対象ﾃﾞｰﾀ有り
+
+ENDFORM.
+*======================================================================*
+*  総勘定元帳出力処理                                                  *
+*======================================================================*
+FORM PRNT_LIST.
+
+PERFORM EDT_HEADER.                  "見出し等編集
+
+IF  W_FLG_ZERO  =  '1'.              "対象ﾃﾞｰﾀありか？
+LOOP AT T_BSEG.
+IF  W_HKONT  =  T_BSEG-HKONT AND "勘定ｺｰﾄﾞﾌﾞﾚｲｸか？
+W_GSBER  =  T_BSEG-GSBER.
+IF W_CTR_LINE  >= 23.          "改ページ処理
+NEW-PAGE.
+PERFORM  OUT_HEADER.
+ENDIF.
+ENDIF.
+
+IF  W_HKONT  <>  T_BSEG-HKONT     OR    "勘定ｺｰﾄﾞﾌﾞﾚｲｸか？
+W_GSBER  <>  T_BSEG-GSBER.
+IF W_HKONT = '0000000000'.        "一件目か？
+W_HKONT     = T_BSEG-HKONT.  "勘定ｺｰﾄﾞｾｯﾄ
+W_GSBER     = T_BSEG-GSBER.  "事業領域セット
+W_NIKEI_OLD = T_BSEG-BUDAT.  "日付ｾｯﾄ
+PERFORM  OUT_HEADER.         "見出し出力
+ELSE.
+W_HKONT     =  T_BSEG-HKONT. "勘定ｺｰﾄﾞｾｯﾄ
+W_GSBER     =  T_BSEG-GSBER. "事業領域セット
+W_NIKEI_OLD =  T_BSEG-BUDAT. "日付ｾｯﾄ
+PERFORM OUT_DETAILZ.         "明細出力（残高）
+PERFORM OUT_R_KEI.           "累計・次月繰越出力
+NEW-PAGE.
+W_CTR_LINE =  0.
+PERFORM  OUT_HEADER.         "見出し出力
+ENDIF.
+PERFORM  EDIT_DETAIL.          "明細編集
+
+ELSE.
+
+IF  W_NIKEI_OLD <>  T_BSEG-BUDAT.  "日付ﾌﾞﾚｲｸか？
+W_NIKEI_OLD =  T_BSEG-BUDAT. "日付ｾｯﾄ
+PERFORM OUT_DETAILZ.         "明細出力（残高）
+ELSE.
+PERFORM OUT_DETAIL.          "明細出力（残高なし）
+ENDIF.
+PERFORM  EDIT_DETAIL.          "明細編集
+
+ENDIF.
+
+ENDLOOP.
+
+PERFORM OUT_DETAILZ.               "明細出力
+
+PERFORM OUT_R_KEI.                 "累計・次月繰越出力
+
+ELSE.
+
+PERFORM ZERO_HEADER.               "ゼロ件出力見出し処理
+
+ENDIF.
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し等編集処理                                                    *
+*----------------------------------------------------------------------*
+FORM EDT_HEADER.
+*                                          "対象年度年月編集
+* IF  W_TAISHO_M_F  >=  4.
+W_NENDO   =  P_GJAHR.
+* ELSE.
+*   W_NENDO   =  W_TAISHO_Y_F - 1.
+* ENDIF.
+
+W_NEN_F       =  W_TAISHO_Y_F.
+W_NEN_T       =  W_TAISHO_Y_T.
+W_TUKI_F      =  W_TAISHO_M_F.
+W_TUKI_T      =  W_TAISHO_M_T.
+W_HI_F        =  W_TAISHO_D_F.
+W_HI_T        =  W_TAISHO_D_T.
+"ワーク初期値設定
+W_PAGNO         =  1.
+W_CTR_LINE      =  0.
+W_NIKEI_OLD     =  '00000000'.
+W_HKONT         =  '0000000000'.
+* W_ZBBOOD        =  0.                "出力順初期値
+W_GSBER         =  SPACE.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  見出し出力処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_HEADER.
+
+*総勘定元帳ﾏｽﾀ読込み
+SELECT  SINGLE * FROM SKAT
+WHERE  SPRAS = 'J' AND
+KTOPL = T001-KTOPL AND
+SAKNR = T_BSEG-SAKNR. "勘定ｺｰﾄﾞ１０桁
+IF  SY-SUBRC = 0.
+ELSE.
+SKAT-TXT50    =  ''.
+ENDIF.
+
+W_TXT50 =  SKAT-TXT50.               "勘定科目名
+
+WRITE: 161 'ﾍﾟｰｼﾞ ', W_PAGNO NO-ZERO.
+WRITE: /011 W_NENDO,'年度',
+081 '部  門  科  目  別  元  帳',
+133 '作成年月日',
+SY-DATUM(4)          ,'年',
+SY-DATUM+4(2) NO-ZERO,'月',
+SY-DATUM+6(2) NO-ZERO,'日',
+164 SY-UZEIT(2)          ,':',
+SY-UZEIT+2(2).
+WRITE: /080 '============================',
+163 '単位：円'.
+WRITE: /071 '(',W_NEN_F NO-ZERO,'年',
+W_TUKI_F NO-ZERO,'月', W_HI_F NO-ZERO,'日～',
+W_NEN_T NO-ZERO,'年',
+W_TUKI_T NO-ZERO,'月',
+W_HI_T NO-ZERO,'日)'.
+WRITE: /001 '勘  定  科  目', 063 '部門'.
+
+WRITE: /001 W_HKONT, 012 W_TXT50.
+
+* IF  W_HKONT+5(2) <> '00'.
+*   WRITE: 031 W_HKONT+5(2),035 W_TXT50.
+* ENDIF.
+
+IF  T_BSEG-GSBER <> ''.
+WRITE: 063 T_BSEG-GSBER, 068 T_BSEG-GTEXT.
+ENDIF.
+
+SKIP.
+WRITE: /003 '伝票NO',
+012 '年月日',
+037 '相手勘定科目名',
+*         044 '相手補助科目名',
+070 '計上部門名',
+111 '摘  要',
+133 '借  方',
+149 '貸  方',
+165 '残  高'.
+ULINE.
+
+IF  W_TAISHO_D_F = 1  AND            "月次処理
+W_CTR_LINE  <  23.
+PERFORM EDIT_O_ZANDAKA.            "前月残高算出
+
+WRITE: /106 '前月より繰越'.
+PERFORM YF01NUMC USING W_GETSUZAN 15 0. "前月より繰越
+WRITE:  156  O_NUM USING EDIT MASK 'RR_______________'.
+
+ENDIF.
+
+W_PAGNO         =  W_PAGNO + 1.
+
+W_CTR_LINE  =  0.                    "明細行クリア
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し出力処理（ゼロ件出力）                                        *
+*----------------------------------------------------------------------*
+FORM ZERO_HEADER.
+
+*                                          "見出し編集
+WRITE: /161 'ﾍﾟｰｼﾞ ', W_PAGNO NO-ZERO.
+WRITE: /011 W_NENDO,'年度',
+073 '部  門  科  目  別  元  帳',
+133 '作成年月日',
+SY-DATUM(4)          ,'年',
+SY-DATUM+4(2) NO-ZERO,'月',
+SY-DATUM+6(2) NO-ZERO,'日',
+164 SY-UZEIT(2)          ,':',
+SY-UZEIT+2(2).
+WRITE: /072 '============================',
+163 '単位：円'.
+WRITE: /071 '(',W_NEN_F NO-ZERO,'年',
+W_TUKI_F NO-ZERO,'月', W_HI_F NO-ZERO,'日～',
+W_NEN_T NO-ZERO,'年',
+W_TUKI_T NO-ZERO,'月',
+W_HI_T NO-ZERO,'日)'.
+WRITE: /001 '勘  定  科  目', 063 '部門'.
+
+SKIP.
+WRITE: /001 '伝票NO',
+012 '年月日',
+037 '相手勘定科目名',
+*         044 '相手補助科目名',
+070 '計上部門名',
+111 '摘  要',
+133 '借  方',
+149 '貸  方',
+165 '残  高'.
+ULINE.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細ｾｰﾌﾞ処理                                                        *
+*----------------------------------------------------------------------*
+FORM EDIT_DETAIL.
+
+MOVE-CORRESPONDING  T_BSEG TO TS_BSEG.        "明細ﾃﾞｰﾀｾｰﾌﾞ
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細出力処理（残高出力なし）                                        *
+*----------------------------------------------------------------------*
+FORM OUT_DETAIL.
+
+IF  TS_BSEG-SHKZG    =  'S'.         "借方/貸方ﾌﾗｸﾞ
+W_KARIKATA      =  TS_BSEG-DMBTR.  "借方国内通貨額
+W_KASHIKATA =  0.
+ELSE.
+W_KASHIKATA     =  TS_BSEG-DMBTR.  "貸方国内通貨額
+W_KARIKATA  =  0.
+ENDIF.
+SKIP.
+WRITE: /001 TS_BSEG-BELNR,           "伝票番号
+012 TS_BSEG-BUDAT+2(6),      "年月日
+019 TS_BSEG-TXT50,           "勘定科目
+*         044 TS_BSEG-TXT50,           "補助科目
+070 TS_BSEG-GSBER,           "部門ｺｰﾄﾞ
+075 TS_BSEG-GTEXT,           "部門名
+106 TS_BSEG-SGTXT.           "摘要
+PERFORM YF01NUMC USING W_KARIKATA 15 0.   "明細借方金額
+WRITE:  124  O_NUM USING EDIT MASK 'RR_______________'.
+PERFORM YF01NUMC USING W_KASHIKATA 15 0.  "明細貸方金額
+WRITE:  140  O_NUM USING EDIT MASK 'RR_______________'.
+
+W_NICHIZAN      =  W_NICHIZAN        "日計残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+W_KANJZAN      =  W_KANJZAN          "勘定別残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+W_CTR_LINE  =  W_CTR_LINE  +  1.     "明細行カウントＵＰ
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細出力処理（残高出力）                                            *
+*----------------------------------------------------------------------*
+FORM OUT_DETAILZ.
+
+IF  TS_BSEG-SHKZG    =  'S'.         "借方/貸方ﾌﾗｸﾞ
+W_KARIKATA      =  TS_BSEG-DMBTR.  "借方国内通貨額
+W_KASHIKATA =  0.
+ELSE.
+W_KASHIKATA     =  TS_BSEG-DMBTR.  "貸方国内通貨額
+W_KARIKATA  =  0.
+ENDIF.
+SKIP.
+WRITE: /001 TS_BSEG-BELNR,           "伝票番号
+012 TS_BSEG-BUDAT+2(6),      "年月日
+019 TS_BSEG-TXT50,           "勘定科目
+*         044 TS_BSEG-TXT50,           "補助科目
+070 TS_BSEG-GSBER,           "部門ｺｰﾄﾞ
+075 TS_BSEG-GTEXT,           "部門名
+106 TS_BSEG-SGTXT.           "摘要
+PERFORM YF01NUMC USING W_KARIKATA 15 0.   "明細借方金額
+WRITE:  124  O_NUM USING EDIT MASK 'RR_______________'.
+PERFORM YF01NUMC USING W_KASHIKATA 15 0.  "明細貸方金額
+WRITE:  140  O_NUM USING EDIT MASK 'RR_______________'.
+
+W_NICHIZAN      =  W_NICHIZAN        "日計残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+W_KANJZAN      =  W_KANJZAN          "勘定別残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+IF  W_TAISHO_D_F EQ 1.               "月次処理
+
+* IF  TS_BSEG-SAKNR >=  '0002000000' AND  TS_BSEG-SAKNR =< '0004099999'.
+*     W_NICHIZAN   = W_GETSUZAN  - W_KANJZAN.    "前月残高と相殺
+*     W_KURIZAN    = W_GETSUZAN  - W_KANJZAN.    "繰越残高算出
+
+*LSEIF TS_BSEG-SAKNR >=  '0005000000' AND TS_BSEG-SAKNR =< '0005099999'.
+*     W_NICHIZAN   = W_GETSUZAN  - W_KANJZAN.    "前月残高と相殺
+*     W_KURIZAN    = W_GETSUZAN  - W_KANJZAN.    "繰越残高算出
+*
+*LSEIF TS_BSEG-SAKNR >=  '0006000000' AND TS_BSEG-SAKNR =< '0006099999'.
+*     W_NICHIZAN   = W_GETSUZAN  - W_KANJZAN.    "前月残高と相殺
+*     W_KURIZAN    = W_GETSUZAN  - W_KANJZAN.    "繰越残高算出
+*
+*   ELSE.
+W_NICHIZAN   = W_GETSUZAN  + W_KANJZAN.    "前月残高と相殺
+W_KURIZAN    = W_GETSUZAN  + W_KANJZAN.    "繰越残高算出
+*   ENDIF.
+* ELSE.
+
+* IF  TS_BSEG-SAKNR >=  '0002000000' AND  TS_BSEG-SAKNR =< '0004099999'.
+*     W_NICHIZAN   =  W_NICHIZAN *  -1."符号の反転
+*
+*LSEIF TS_BSEG-SAKNR >=  '0005000000' AND TS_BSEG-SAKNR =< '0005099999'.
+*     W_NICHIZAN   =  W_NICHIZAN *  -1."符号の反転
+*
+*LSEIF TS_BSEG-SAKNR >=  '0006000000' AND TS_BSEG-SAKNR =< '0006099999'.
+*     W_NICHIZAN   =  W_NICHIZAN *  -1."符号の反転
+*
+*   ELSE.
+*   ENDIF.
+*
+ENDIF.
+
+PERFORM YF01NUMC USING W_NICHIZAN 15 0.   "残高金額
+WRITE:  156 O_NUM USING EDIT MASK 'RR_______________'.
+W_NICHIZAN =  0.                     "日計ｸﾘｱ
+W_CTR_LINE  =  W_CTR_LINE  +  1.     "明細行カウントＵＰ
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  次月へ繰越処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_R_KEI.
+IF  W_TAISHO_D_F = 1.
+SKIP.
+WRITE: /106 '次月へ繰越'.
+PERFORM YF01NUMC USING W_KURIZAN 15 0.  "次月へ繰越
+WRITE:  156  O_NUM USING EDIT MASK 'RR_______________'.
+
+W_GETSUZAN =  0.                   "前月残高ﾜｰｸｸﾘｱ
+W_KANJZAN  =  0.                   "勘定ｺｰﾄﾞ別残高合計ﾜｰｸｸﾘｱ
+W_KURIZAN  =  0.                   "次月へ繰越残高ﾜｰｸｸﾘｱ
+
+ENDIF.
+ENDFORM.
+*----------------------------------------------------------------------*
+*  総勘定元帳残高読込み                                                *
+*----------------------------------------------------------------------*
+FORM EDIT_O_ZANDAKA.
+
+W_GETSUZAN = 0.                      "集計ｴﾘｱ ｸﾘｱ
+W_ZANDAKA  = 0.                      "集計ﾜｰｸ ｸﾘｱ
+
+IF  W_TAISHO_D_F = 1.                "月次処理
+*総勘定元帳残高読込み（勘定ｺｰﾄﾞで集計）
+LOOP AT T_SKC1A.
+IF T_SKC1A-SAKNR       = T_BSEG-HKONT  AND
+T_SKC1A-GSBER       = T_BSEG-GSBER.
+PERFORM ZENGETU.               "前月前日累計情報取得
+ENDIF.
+ENDLOOP.
+
+*   IF  T_BSEG-SAKNR >=  '0002000000' AND  T_BSEG-SAKNR =< '0004099999'.
+*     W_GETSUZAN      =  W_ZANDAKA * -100.
+*
+*ELSEIF T_BSEG-SAKNR >=  '0005000000' AND  T_BSEG-SAKNR =< '0005099999'.
+*     W_GETSUZAN      =  W_ZANDAKA * -100.
+*
+*ELSEIF T_BSEG-SAKNR >=  '0006000000' AND  T_BSEG-SAKNR =< '0006099999'.
+*     W_GETSUZAN      =  W_ZANDAKA * -100.
+*
+*   ELSE.
+W_GETSUZAN      =  W_ZANDAKA * 100.
+*   ENDIF.
+ENDIF.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  前月前日累計情報取得                                                *
+*----------------------------------------------------------------------*
+FORM ZENGETU.
+
+CASE    P_PERIO.
+WHEN  01.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UMSAV.
+WHEN  02.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM01K.
+WHEN  03.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM02K.
+WHEN  04.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM03K.
+WHEN  05.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM04K.
+WHEN  06.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM05K.
+WHEN  07.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM06K.
+WHEN  08.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM07K.
+WHEN  09.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM08K.
+WHEN  10.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM09K.
+WHEN  11.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM10K.
+WHEN  12.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM11K.
+ENDCASE.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM AITE_AC_GET                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM AITE_AC_GET.
+
+MOVE 1 TO W_CNT.
+MOVE SPACE TO W_AC.
+
+DO.
+
+SELECT SINGLE * FROM  BSEG
+WHERE  BUKRS       = P_BUKRS
+AND    BELNR       = T_BSEG-BELNR
+AND    GJAHR       = P_GJAHR
+AND    BUZEI       = W_CNT          .
+
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+
+IF T_BSEG-SHKZG = 'S' AND BSEG-SHKZG = 'H'.
+IF W_AC = SPACE.
+MOVE: BSEG-HKONT TO T_BSEG-ZZKANJYO,
+BSEG-HKONT TO W_AC.
+ELSE.
+MOVE SPACE TO T_BSEG-ZZKANJYO.
+ENDIF.
+ENDIF.
+
+IF T_BSEG-SHKZG = 'H' AND BSEG-SHKZG = 'S'.
+IF W_AC = SPACE.
+MOVE: BSEG-HKONT TO T_BSEG-ZZKANJYO,
+BSEG-HKONT TO W_AC.
+ELSE.
+MOVE SPACE TO T_BSEG-ZZKANJYO.
+ENDIF.
+ENDIF.
+
+W_CNT = W_CNT + 1.
+
+ENDDO.
+
+ENDFORM.
+REPORT YF002900 MESSAGE-ID Y1
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT   58(0).
+*-----------------------------------------------------------------------
+*     ﾌﾟﾛｸﾞﾗﾑID : YF002900
+*     ﾌﾟﾛｸﾞﾗﾑ名 : 部門科目別元帳
+*     処理種別  : バッチ(ABAP/4)
+*     処理概要  : 会計伝票明細ﾃｰﾌﾞﾙより、指定された年月日のﾃﾞｰﾀを抽出し
+*               : 勘定ｺｰﾄﾞ・補助ｺｰﾄ・部門ｺｰﾄﾞごとに以下の処理を行う
+*               : 随時処理
+*               : 伝票の転記日付・伝票番号順で明細を出力し
+*               : 伝票の転記日付が変ったら残高を出力する
+*     入力      : 対象年月日(FROM-TO)，会社ｺｰﾄﾞ，勘定ｺｰﾄﾞ(FROM-TO)
+*     出力      : 部門科目別元帳
+*-----------------------------------------------------------------------
+
+*テーブル定義
+TABLES:BKPF,                           "会計伝票ﾍｯﾀﾞｰ
+BSEG,                           "会計伝票明細
+T001,                           "会社コード
+TGSBT,                          "部門ﾃｰﾌﾞﾙ
+*      ZC250,                          "部門情報ﾃｰﾌﾞﾙ
+SKAT,                           "総勘定元帳ﾏｽﾀ
+SKC1A.                          "総勘定元帳残高
+
+*内部テーブル定義
+DATA: BEGIN   OF       T_BSEG OCCURS 100.       "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+DATA: HKONT(10)   TYPE C,              "勘定ｺｰﾄﾞ
+*     ZBBOOD(02)  TYPE N,              "出力順
+BUDAT(08)   TYPE C,              "年月日
+BELNR(10)   TYPE C,              "伝票番号
+ZZKANJYO(10) TYPE C,             "相手勘定ｺｰﾄﾞ
+*     TXT20(14)   TYPE C,              "相手勘定科目
+TXT50(50)   TYPE C,              "相手勘定科目
+GSBER(04)   TYPE C,              "部門ｺｰﾄﾞ
+GTEXT(30)   TYPE C,              "部門名
+SGTXT(40)   TYPE C,              "摘要
+SHKZG(01)   TYPE C,              "借方/貸方ﾌﾗｸﾞ
+DMBTR(13)   TYPE P,              "国内通貨額
+SAKNR(10)   TYPE C.              "勘定ｺｰﾄﾞ
+DATA: END     OF       T_BSEG.
+
+*内部テーブル定義（セーブ用）
+DATA: BEGIN   OF       TS_BSEG OCCURS 1.        "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+DATA: HKONT(10)   TYPE C,              "勘定ｺｰﾄﾞ
+*     ZBBOOD(02)  TYPE N,              "出力順
+BUDAT(08)   TYPE C,              "年月日
+BELNR(10)   TYPE C,              "伝票番号
+ZZKANJYO(10) TYPE C,             "相手勘定ｺｰﾄﾞ
+*     TXT20(14)   TYPE C,              "相手勘定科目
+TXT50(50)   TYPE C,              "相手勘定科目
+GSBER(04)   TYPE C,              "部門ｺｰﾄﾞ
+GTEXT(30)   TYPE C,              "部門名
+SGTXT(40)   TYPE C,              "摘要
+SHKZG(01)   TYPE C,              "借方/貸方ﾌﾗｸﾞ
+DMBTR(13)   TYPE P,              "国内通貨額
+SAKNR(10)   TYPE C.              "勘定ｺｰﾄﾞ
+DATA: END     OF       TS_BSEG.
+
+DATA: BEGIN   OF       T_SKC1A OCCURS 100.      "総勘定元帳残高ﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  SKC1A.
+DATA: END     OF       T_SKC1A.
+
+*パラメータ定義
+PARAMETERS: P_BUKRS(04),               "会社コード
+P_NEN(04),                 "会計年（暦年）
+P_TUKI(02).                "会計月
+
+SELECT-OPTIONS: S_SAKNR FOR SKAT-SAKNR,"勘定ｺｰﾄﾞFROM-TO
+S_GSBER FOR BSEG-GSBER."事業領域FROM-TO
+*作業用データ定義
+DATA: W_DATE        LIKE SY-DATUM,
+W_NEN_F(04)   TYPE N,
+W_NEN_T(04)   TYPE N,
+W_TUKI_F(02)  TYPE N,
+W_TUKI_T(02)  TYPE N,
+W_HI_F(02)    TYPE N,
+W_HI_T(02)    TYPE N,
+W_NENDO(04)    TYPE N,
+W_NENDO_F(04)  TYPE N,
+W_NENDO_T(04)  TYPE N,
+W_FLG_ZERO(01)       VALUE'0',   "データ0件のとき'0'
+W_GETSUZAN(13) TYPE P,           "前月より繰越金額
+W_NICHIZAN(13) TYPE P,           "日計残高金額
+W_KURIZAN(13) TYPE P,            "次月へ繰越残高金額
+W_KARIKATA(13) TYPE P,           "借方金額明細編集用
+W_KASHIKATA(13) TYPE P,          "貸方金額明細編集用
+W_ZANDAKA(13) TYPE P DECIMALS 2, "総勘定元帳残高ｻﾏﾘ
+W_NIKEI_OLD(08) TYPE C,          "日計日付OLD
+W_CTR_LINE      TYPE I,          "ﾗｲﾝｶｳﾝﾄ
+W_TAISHO_Y_F(04) TYPE N,         "対象年月日の年FROM
+W_TAISHO_M_F(02) TYPE N,         "対象年月日の月FROM
+W_TAISHO_D_F(02) TYPE N,         "対象年月日の日FROM
+W_TAISHO_Y_T(04) TYPE N,         "対象年月日の年TO
+W_TAISHO_M_T(02) TYPE N,         "対象年月日の月TO
+W_TAISHO_D_T(02) TYPE N,         "対象年月日の日TO
+W_TAISHO_YMD_F(08) TYPE N,       "対象年月日の年月日FROM
+W_TAISHO_YMD_T(08) TYPE N,       "対象年月日の年月日TO
+W_PAGNO(3)      TYPE N.
+
+DATA: W_SAKNR_F(10)   TYPE C,          "勘定ｺｰﾄﾞ（最初）
+W_SAKNR_T(10)   TYPE C,          "勘定ｺｰﾄﾞ（最後）
+W_GSBER_F(04)   TYPE C,          "事業領域（最初）
+W_GSBER_T(04)   TYPE C,          "事業領域（最後）
+W_AC(10)        TYPE C,          "相手勘定取得用ワーク
+W_CNT(3)        TYPE N,          "BSEG明細用カウンタ
+W_HKONT(10)     TYPE C,          "勘定ｺｰﾄﾞ（ﾌﾞﾚｲｸ用）
+*     W_ZBBOOD(02)    TYPE N,          "出力順ﾜｰｸ
+W_GSBER(04)     TYPE C,          "事業領域ワーク
+*     W_TXT20(14)     TYPE C,          "勘定科目名
+W_TXT50(50)     TYPE C,          "勘定科目名
+W_LCNT          TYPE I,          "ﾃｰﾌﾞﾙ数
+W_KANJZAN(13)   TYPE P.          "勘定ｺｰﾄﾞ別残高
+
+*共通処理用定義項目
+*  必要な定義
+DATA:   P_GJAHR(4)  TYPE N,            "会計年度
+P_PERIO(3)  TYPE N,            "会計期間
+W_EOM       TYPE D.            "月末日
+
+INCLUDE:YF01NUMC.                      "金額12桁出力用編集ｻﾌﾞ
+INCLUDE:YF01CCUT.                      "桁落ち文字列編集
+
+************************************************************************
+*  主処理                                                              *
+************************************************************************
+START-OF-SELECTION.
+PERFORM  NENGETU.                    "年月日作成
+
+W_SAKNR_F  =  S_SAKNR-LOW.           "勘定ｺｰﾄﾞ(LOW)
+W_SAKNR_T  =  S_SAKNR-HIGH.          "勘定ｺｰﾄﾞ(HIGH)
+W_GSBER_F  =  S_GSBER-LOW.           "事業領域(LOW)
+W_GSBER_T  =  S_GSBER-HIGH.          "事業領域(HIGH)
+
+*総勘定元帳残高ﾃｰﾌﾞﾙの読込み及び内部ﾃｰﾌﾞﾙの作成
+GET                 SKC1A.             "総勘定元帳→内部ﾃｰﾌﾞﾙ
+MOVE-CORRESPONDING  SKC1A TO T_SKC1A.
+APPEND                       T_SKC1A.
+
+END-OF-SELECTION.
+*内部ﾃｰﾌﾞﾙ(T_BSEG)作成
+PERFORM DENMEISAI.                   "会計伝票明細等読込み
+*ソート処理（勘定コード+事業領域＋転記日付＋伝票番号）
+SORT     T_BSEG  BY HKONT GSBER BUDAT BELNR.
+*総勘定元帳出力処理
+PERFORM  PRNT_LIST.
+
+*----------------------------------------------------------------------*
+*  年月日作成                                                          *
+*----------------------------------------------------------------------*
+FORM NENGETU.
+
+*会計年度、会計期間への変換
+MOVE: P_NEN TO W_DATE(4),
+P_TUKI TO W_DATE+4(2),
+'01' TO W_DATE+6(2).
+
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = W_DATE
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = P_GJAHR
+*         E_MONAT        =
+E_POPER        = P_PERIO
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+EXIT.
+ENDIF.
+*会社情報取得
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS       = P_BUKRS        .
+
+*月末日取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = P_GJAHR
+I_PERIV        = T001-PERIV
+I_POPER        = P_PERIO
+IMPORTING
+E_DATE         = W_EOM
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+EXIT.
+ENDIF.
+
+W_TAISHO_Y_F = P_NEN.                "対象年月日取得
+W_TAISHO_M_F = P_TUKI.
+W_TAISHO_D_F = 1.
+W_TAISHO_Y_T = P_NEN.
+W_TAISHO_M_T = P_TUKI.
+W_TAISHO_D_T = W_EOM+6(2).
+
+W_TAISHO_YMD_F+0(4) = P_NEN.
+W_TAISHO_YMD_F+4(2) = P_TUKI.
+W_TAISHO_YMD_F+6(2) = 01.
+
+W_TAISHO_YMD_T = W_EOM.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  会計伝票明細読込み（内部ﾃｰﾌﾞﾙT_BSEG作成）                           *
+*----------------------------------------------------------------------*
+FORM DENMEISAI.
+
+*会計伝票ﾍｯﾀﾞBKPF及び会計伝票明細BSEGの読込み
+SELECT  * FROM BKPF
+WHERE  BUKRS = P_BUKRS         AND       "会社ｺｰﾄﾞ
+GJAHR = P_GJAHR         AND       "会計年度
+BUDAT >= W_TAISHO_YMD_F AND       "転記日付
+BUDAT <= W_TAISHO_YMD_T AND
+BSTAT = SPACE.
+SELECT  * FROM BSEG
+WHERE  BUKRS = P_BUKRS    AND"会社ｺｰﾄﾞ
+BELNR = BKPF-BELNR AND"伝票番号
+GJAHR = P_GJAHR    AND"会計年度
+HKONT >= W_SAKNR_F AND"勘定ｺｰﾄﾞ
+HKONT <= W_SAKNR_T AND
+GSBER >= W_GSBER_F AND"事業領域
+GSBER <= W_GSBER_T.
+PERFORM DENPYO_SAKU.             "伝票ﾃﾞｰﾀ作成
+PERFORM DENPYO_TSUIKA.           "伝票ﾃﾞｰﾀ項目編集
+
+ENDSELECT.
+ENDSELECT.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  会計伝票作成処理                                                    *
+*----------------------------------------------------------------------*
+FORM DENPYO_SAKU.
+T_BSEG-HKONT    =  BSEG-HKONT.       "勘定ｺｰﾄﾞ
+T_BSEG-SAKNR    =  BSEG-HKONT.       "勘定ｺｰﾄﾞ
+IN_CHAR         =  BSEG-SGTXT.
+IN_LEN          =  16.               "桁数
+PERFORM YF01CCUT USING IN_CHAR IN_LEN. "全角文字の処理
+T_BSEG-SGTXT    =  OUT_CHAR.         "摘要
+T_BSEG-GSBER    =  BSEG-GSBER.       "部門ｺｰﾄﾞ
+*
+T_BSEG-BELNR    =  BSEG-BELNR.       "伝票番号
+T_BSEG-SHKZG    =  BSEG-SHKZG.       "借方/貸方ﾌﾗｸﾞ
+T_BSEG-DMBTR    =  BSEG-DMBTR * 100. "国内通貨額
+* T_BSEG-ZZKANJYO =  BSEG-ZZKANJYO.    "相手勘定ｺｰﾄﾞ
+PERFORM AITE_AC_GET.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  会計伝票出力用ﾃｰﾌﾞﾙ追加                                             *
+*----------------------------------------------------------------------*
+FORM DENPYO_TSUIKA.
+
+*部門ﾃｰﾌﾞﾙ読込み
+SELECT  SINGLE * FROM TGSBT
+WHERE  SPRAS = 'J'
+AND    GSBER = T_BSEG-GSBER. "事業領域
+IF  SY-SUBRC = 0.
+ELSE.
+TGSBT-GTEXT   =  ''.               "部門名称
+ENDIF.
+
+*部門情報ﾃｰﾌﾞﾙ読込み
+* SELECT  SINGLE * FROM ZC250
+*         WHERE  KOKRS = 'NTTA'
+*         AND    GSBER = T_BSEG-GSBER. "事業領域（４桁）
+* IF  SY-SUBRC = 0.
+* ELSE.
+*   ZC250-ZBBOOD   =  99.              "出力順HIGH-VALUE
+* ENDIF.
+*総勘定元帳ﾏｽﾀ読込み
+SELECT  SINGLE * FROM SKAT
+WHERE  SPRAS = 'J' AND
+KTOPL = T001-KTOPL AND
+SAKNR = T_BSEG-ZZKANJYO.       "相手勘定ｺｰﾄﾞ
+IF  SY-SUBRC = 0.
+ELSE.
+SKAT-TXT20    =  ''.
+SKAT-TXT50    =  ''.
+ENDIF.
+
+* T_BSEG-ZBBOOD   =  ZC250-ZBBOOD.     "出力順
+T_BSEG-BUDAT    =  BKPF-BUDAT.       "年月日
+T_BSEG-GTEXT    =  TGSBT-GTEXT.      "部門名
+* T_BSEG-TXT20    =  SKAT-TXT20.       "相手勘定科目
+T_BSEG-TXT50    =  SKAT-TXT50.       "相手補助科目
+
+APPEND T_BSEG.
+CLEAR  T_BSEG.
+
+W_FLG_ZERO      =  '1'.              "対象ﾃﾞｰﾀ有り
+
+ENDFORM.
+*======================================================================*
+*  総勘定元帳出力処理                                                  *
+*======================================================================*
+FORM PRNT_LIST.
+
+PERFORM EDT_HEADER.                  "見出し等編集
+
+IF  W_FLG_ZERO  =  '1'.              "対象ﾃﾞｰﾀありか？
+LOOP AT T_BSEG.
+IF  W_HKONT  =  T_BSEG-HKONT AND "勘定ｺｰﾄﾞﾌﾞﾚｲｸか？
+W_GSBER  =  T_BSEG-GSBER.
+IF W_CTR_LINE  >= 23.          "改ページ処理
+NEW-PAGE.
+PERFORM  OUT_HEADER.
+ENDIF.
+ENDIF.
+
+IF  W_HKONT  <>  T_BSEG-HKONT     OR    "勘定ｺｰﾄﾞﾌﾞﾚｲｸか？
+W_GSBER  <>  T_BSEG-GSBER.
+IF W_HKONT = '0000000000'.        "一件目か？
+W_HKONT     = T_BSEG-HKONT.  "勘定ｺｰﾄﾞｾｯﾄ
+W_GSBER     = T_BSEG-GSBER.  "事業領域セット
+W_NIKEI_OLD = T_BSEG-BUDAT.  "日付ｾｯﾄ
+PERFORM  OUT_HEADER.         "見出し出力
+ELSE.
+W_HKONT     =  T_BSEG-HKONT. "勘定ｺｰﾄﾞｾｯﾄ
+W_GSBER     =  T_BSEG-GSBER. "事業領域セット
+W_NIKEI_OLD =  T_BSEG-BUDAT. "日付ｾｯﾄ
+PERFORM OUT_DETAILZ.         "明細出力（残高）
+PERFORM OUT_R_KEI.           "累計・次月繰越出力
+NEW-PAGE.
+W_CTR_LINE =  0.
+PERFORM  OUT_HEADER.         "見出し出力
+ENDIF.
+PERFORM  EDIT_DETAIL.          "明細編集
+
+ELSE.
+
+IF  W_NIKEI_OLD <>  T_BSEG-BUDAT.  "日付ﾌﾞﾚｲｸか？
+W_NIKEI_OLD =  T_BSEG-BUDAT. "日付ｾｯﾄ
+PERFORM OUT_DETAILZ.         "明細出力（残高）
+ELSE.
+PERFORM OUT_DETAIL.          "明細出力（残高なし）
+ENDIF.
+PERFORM  EDIT_DETAIL.          "明細編集
+
+ENDIF.
+
+ENDLOOP.
+
+PERFORM OUT_DETAILZ.               "明細出力
+
+PERFORM OUT_R_KEI.                 "累計・次月繰越出力
+
+ELSE.
+
+PERFORM ZERO_HEADER.               "ゼロ件出力見出し処理
+
+ENDIF.
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し等編集処理                                                    *
+*----------------------------------------------------------------------*
+FORM EDT_HEADER.
+*                                          "対象年度年月編集
+* IF  W_TAISHO_M_F  >=  4.
+W_NENDO   =  P_GJAHR.
+* ELSE.
+*   W_NENDO   =  W_TAISHO_Y_F - 1.
+* ENDIF.
+
+W_NEN_F       =  W_TAISHO_Y_F.
+W_NEN_T       =  W_TAISHO_Y_T.
+W_TUKI_F      =  W_TAISHO_M_F.
+W_TUKI_T      =  W_TAISHO_M_T.
+W_HI_F        =  W_TAISHO_D_F.
+W_HI_T        =  W_TAISHO_D_T.
+"ワーク初期値設定
+W_PAGNO         =  1.
+W_CTR_LINE      =  0.
+W_NIKEI_OLD     =  '00000000'.
+W_HKONT         =  '0000000000'.
+* W_ZBBOOD        =  0.                "出力順初期値
+W_GSBER         =  SPACE.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  見出し出力処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_HEADER.
+
+*総勘定元帳ﾏｽﾀ読込み
+SELECT  SINGLE * FROM SKAT
+WHERE  SPRAS = 'J' AND
+KTOPL = T001-KTOPL AND
+SAKNR = T_BSEG-SAKNR. "勘定ｺｰﾄﾞ１０桁
+IF  SY-SUBRC = 0.
+ELSE.
+SKAT-TXT50    =  ''.
+ENDIF.
+
+W_TXT50 =  SKAT-TXT50.               "勘定科目名
+
+WRITE: 161 'ﾍﾟｰｼﾞ ', W_PAGNO NO-ZERO.
+WRITE: /011 W_NENDO,'年度',
+081 '部  門  科  目  別  元  帳',
+133 '作成年月日',
+SY-DATUM(4)          ,'年',
+SY-DATUM+4(2) NO-ZERO,'月',
+SY-DATUM+6(2) NO-ZERO,'日',
+164 SY-UZEIT(2)          ,':',
+SY-UZEIT+2(2).
+WRITE: /080 '============================',
+163 '単位：円'.
+WRITE: /071 '(',W_NEN_F NO-ZERO,'年',
+W_TUKI_F NO-ZERO,'月', W_HI_F NO-ZERO,'日～',
+W_NEN_T NO-ZERO,'年',
+W_TUKI_T NO-ZERO,'月',
+W_HI_T NO-ZERO,'日)'.
+WRITE: /001 '勘  定  科  目', 063 '部門'.
+
+WRITE: /001 W_HKONT, 012 W_TXT50.
+
+* IF  W_HKONT+5(2) <> '00'.
+*   WRITE: 031 W_HKONT+5(2),035 W_TXT50.
+* ENDIF.
+
+IF  T_BSEG-GSBER <> ''.
+WRITE: 063 T_BSEG-GSBER, 068 T_BSEG-GTEXT.
+ENDIF.
+
+SKIP.
+WRITE: /003 '伝票NO',
+012 '年月日',
+037 '相手勘定科目名',
+*         044 '相手補助科目名',
+070 '計上部門名',
+111 '摘  要',
+133 '借  方',
+149 '貸  方',
+165 '残  高'.
+ULINE.
+
+IF  W_TAISHO_D_F = 1  AND            "月次処理
+W_CTR_LINE  <  23.
+PERFORM EDIT_O_ZANDAKA.            "前月残高算出
+
+WRITE: /106 '前月より繰越'.
+PERFORM YF01NUMC USING W_GETSUZAN 15 0. "前月より繰越
+WRITE:  156  O_NUM USING EDIT MASK 'RR_______________'.
+
+ENDIF.
+
+W_PAGNO         =  W_PAGNO + 1.
+
+W_CTR_LINE  =  0.                    "明細行クリア
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し出力処理（ゼロ件出力）                                        *
+*----------------------------------------------------------------------*
+FORM ZERO_HEADER.
+
+*                                          "見出し編集
+WRITE: /161 'ﾍﾟｰｼﾞ ', W_PAGNO NO-ZERO.
+WRITE: /011 W_NENDO,'年度',
+073 '部  門  科  目  別  元  帳',
+133 '作成年月日',
+SY-DATUM(4)          ,'年',
+SY-DATUM+4(2) NO-ZERO,'月',
+SY-DATUM+6(2) NO-ZERO,'日',
+164 SY-UZEIT(2)          ,':',
+SY-UZEIT+2(2).
+WRITE: /072 '============================',
+163 '単位：円'.
+WRITE: /071 '(',W_NEN_F NO-ZERO,'年',
+W_TUKI_F NO-ZERO,'月', W_HI_F NO-ZERO,'日～',
+W_NEN_T NO-ZERO,'年',
+W_TUKI_T NO-ZERO,'月',
+W_HI_T NO-ZERO,'日)'.
+WRITE: /001 '勘  定  科  目', 063 '部門'.
+
+SKIP.
+WRITE: /001 '伝票NO',
+012 '年月日',
+037 '相手勘定科目名',
+*         044 '相手補助科目名',
+070 '計上部門名',
+111 '摘  要',
+133 '借  方',
+149 '貸  方',
+165 '残  高'.
+ULINE.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細ｾｰﾌﾞ処理                                                        *
+*----------------------------------------------------------------------*
+FORM EDIT_DETAIL.
+
+MOVE-CORRESPONDING  T_BSEG TO TS_BSEG.        "明細ﾃﾞｰﾀｾｰﾌﾞ
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細出力処理（残高出力なし）                                        *
+*----------------------------------------------------------------------*
+FORM OUT_DETAIL.
+
+IF  TS_BSEG-SHKZG    =  'S'.         "借方/貸方ﾌﾗｸﾞ
+W_KARIKATA      =  TS_BSEG-DMBTR.  "借方国内通貨額
+W_KASHIKATA =  0.
+ELSE.
+W_KASHIKATA     =  TS_BSEG-DMBTR.  "貸方国内通貨額
+W_KARIKATA  =  0.
+ENDIF.
+SKIP.
+WRITE: /001 TS_BSEG-BELNR,           "伝票番号
+012 TS_BSEG-BUDAT+2(6),      "年月日
+019 TS_BSEG-TXT50,           "勘定科目
+*         044 TS_BSEG-TXT50,           "補助科目
+070 TS_BSEG-GSBER,           "部門ｺｰﾄﾞ
+075 TS_BSEG-GTEXT,           "部門名
+106 TS_BSEG-SGTXT.           "摘要
+PERFORM YF01NUMC USING W_KARIKATA 15 0.   "明細借方金額
+WRITE:  124  O_NUM USING EDIT MASK 'RR_______________'.
+PERFORM YF01NUMC USING W_KASHIKATA 15 0.  "明細貸方金額
+WRITE:  140  O_NUM USING EDIT MASK 'RR_______________'.
+
+W_NICHIZAN      =  W_NICHIZAN        "日計残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+W_KANJZAN      =  W_KANJZAN          "勘定別残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+W_CTR_LINE  =  W_CTR_LINE  +  1.     "明細行カウントＵＰ
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細出力処理（残高出力）                                            *
+*----------------------------------------------------------------------*
+FORM OUT_DETAILZ.
+
+IF  TS_BSEG-SHKZG    =  'S'.         "借方/貸方ﾌﾗｸﾞ
+W_KARIKATA      =  TS_BSEG-DMBTR.  "借方国内通貨額
+W_KASHIKATA =  0.
+ELSE.
+W_KASHIKATA     =  TS_BSEG-DMBTR.  "貸方国内通貨額
+W_KARIKATA  =  0.
+ENDIF.
+SKIP.
+WRITE: /001 TS_BSEG-BELNR,           "伝票番号
+012 TS_BSEG-BUDAT+2(6),      "年月日
+019 TS_BSEG-TXT50,           "勘定科目
+*         044 TS_BSEG-TXT50,           "補助科目
+070 TS_BSEG-GSBER,           "部門ｺｰﾄﾞ
+075 TS_BSEG-GTEXT,           "部門名
+106 TS_BSEG-SGTXT.           "摘要
+PERFORM YF01NUMC USING W_KARIKATA 15 0.   "明細借方金額
+WRITE:  124  O_NUM USING EDIT MASK 'RR_______________'.
+PERFORM YF01NUMC USING W_KASHIKATA 15 0.  "明細貸方金額
+WRITE:  140  O_NUM USING EDIT MASK 'RR_______________'.
+
+W_NICHIZAN      =  W_NICHIZAN        "日計残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+W_KANJZAN      =  W_KANJZAN          "勘定別残高計算
++ W_KARIKATA
+- W_KASHIKATA.
+
+IF  W_TAISHO_D_F EQ 1.               "月次処理
+
+* IF  TS_BSEG-SAKNR >=  '0002000000' AND  TS_BSEG-SAKNR =< '0004099999'.
+*     W_NICHIZAN   = W_GETSUZAN  - W_KANJZAN.    "前月残高と相殺
+*     W_KURIZAN    = W_GETSUZAN  - W_KANJZAN.    "繰越残高算出
+
+*LSEIF TS_BSEG-SAKNR >=  '0005000000' AND TS_BSEG-SAKNR =< '0005099999'.
+*     W_NICHIZAN   = W_GETSUZAN  - W_KANJZAN.    "前月残高と相殺
+*     W_KURIZAN    = W_GETSUZAN  - W_KANJZAN.    "繰越残高算出
+*
+*LSEIF TS_BSEG-SAKNR >=  '0006000000' AND TS_BSEG-SAKNR =< '0006099999'.
+*     W_NICHIZAN   = W_GETSUZAN  - W_KANJZAN.    "前月残高と相殺
+*     W_KURIZAN    = W_GETSUZAN  - W_KANJZAN.    "繰越残高算出
+*
+*   ELSE.
+W_NICHIZAN   = W_GETSUZAN  + W_KANJZAN.    "前月残高と相殺
+W_KURIZAN    = W_GETSUZAN  + W_KANJZAN.    "繰越残高算出
+*   ENDIF.
+* ELSE.
+
+* IF  TS_BSEG-SAKNR >=  '0002000000' AND  TS_BSEG-SAKNR =< '0004099999'.
+*     W_NICHIZAN   =  W_NICHIZAN *  -1."符号の反転
+*
+*LSEIF TS_BSEG-SAKNR >=  '0005000000' AND TS_BSEG-SAKNR =< '0005099999'.
+*     W_NICHIZAN   =  W_NICHIZAN *  -1."符号の反転
+*
+*LSEIF TS_BSEG-SAKNR >=  '0006000000' AND TS_BSEG-SAKNR =< '0006099999'.
+*     W_NICHIZAN   =  W_NICHIZAN *  -1."符号の反転
+*
+*   ELSE.
+*   ENDIF.
+*
+ENDIF.
+
+PERFORM YF01NUMC USING W_NICHIZAN 15 0.   "残高金額
+WRITE:  156 O_NUM USING EDIT MASK 'RR_______________'.
+W_NICHIZAN =  0.                     "日計ｸﾘｱ
+W_CTR_LINE  =  W_CTR_LINE  +  1.     "明細行カウントＵＰ
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  次月へ繰越処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_R_KEI.
+IF  W_TAISHO_D_F = 1.
+SKIP.
+WRITE: /106 '次月へ繰越'.
+PERFORM YF01NUMC USING W_KURIZAN 15 0.  "次月へ繰越
+WRITE:  156  O_NUM USING EDIT MASK 'RR_______________'.
+
+W_GETSUZAN =  0.                   "前月残高ﾜｰｸｸﾘｱ
+W_KANJZAN  =  0.                   "勘定ｺｰﾄﾞ別残高合計ﾜｰｸｸﾘｱ
+W_KURIZAN  =  0.                   "次月へ繰越残高ﾜｰｸｸﾘｱ
+
+ENDIF.
+ENDFORM.
+*----------------------------------------------------------------------*
+*  総勘定元帳残高読込み                                                *
+*----------------------------------------------------------------------*
+FORM EDIT_O_ZANDAKA.
+
+W_GETSUZAN = 0.                      "集計ｴﾘｱ ｸﾘｱ
+W_ZANDAKA  = 0.                      "集計ﾜｰｸ ｸﾘｱ
+
+IF  W_TAISHO_D_F = 1.                "月次処理
+*総勘定元帳残高読込み（勘定ｺｰﾄﾞで集計）
+LOOP AT T_SKC1A.
+IF T_SKC1A-SAKNR       = T_BSEG-HKONT  AND
+T_SKC1A-GSBER       = T_BSEG-GSBER.
+PERFORM ZENGETU.               "前月前日累計情報取得
+ENDIF.
+ENDLOOP.
+
+*   IF  T_BSEG-SAKNR >=  '0002000000' AND  T_BSEG-SAKNR =< '0004099999'.
+*     W_GETSUZAN      =  W_ZANDAKA * -100.
+*
+*ELSEIF T_BSEG-SAKNR >=  '0005000000' AND  T_BSEG-SAKNR =< '0005099999'.
+*     W_GETSUZAN      =  W_ZANDAKA * -100.
+*
+*ELSEIF T_BSEG-SAKNR >=  '0006000000' AND  T_BSEG-SAKNR =< '0006099999'.
+*     W_GETSUZAN      =  W_ZANDAKA * -100.
+*
+*   ELSE.
+W_GETSUZAN      =  W_ZANDAKA * 100.
+*   ENDIF.
+ENDIF.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  前月前日累計情報取得                                                *
+*----------------------------------------------------------------------*
+FORM ZENGETU.
+
+CASE    P_PERIO.
+WHEN  01.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UMSAV.
+WHEN  02.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM01K.
+WHEN  03.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM02K.
+WHEN  04.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM03K.
+WHEN  05.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM04K.
+WHEN  06.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM05K.
+WHEN  07.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM06K.
+WHEN  08.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM07K.
+WHEN  09.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM08K.
+WHEN  10.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM09K.
+WHEN  11.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM10K.
+WHEN  12.
+W_ZANDAKA       = W_ZANDAKA
++ T_SKC1A-UM11K.
+ENDCASE.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM AITE_AC_GET                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM AITE_AC_GET.
+
+MOVE 1 TO W_CNT.
+MOVE SPACE TO W_AC.
+
+DO.
+
+SELECT SINGLE * FROM  BSEG
+WHERE  BUKRS       = P_BUKRS
+AND    BELNR       = T_BSEG-BELNR
+AND    GJAHR       = P_GJAHR
+AND    BUZEI       = W_CNT          .
+
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+
+IF T_BSEG-SHKZG = 'S' AND BSEG-SHKZG = 'H'.
+IF W_AC = SPACE.
+MOVE: BSEG-HKONT TO T_BSEG-ZZKANJYO,
+BSEG-HKONT TO W_AC.
+ELSE.
+MOVE SPACE TO T_BSEG-ZZKANJYO.
+ENDIF.
+ENDIF.
+
+IF T_BSEG-SHKZG = 'H' AND BSEG-SHKZG = 'S'.
+IF W_AC = SPACE.
+MOVE: BSEG-HKONT TO T_BSEG-ZZKANJYO,
+BSEG-HKONT TO W_AC.
+ELSE.
+MOVE SPACE TO T_BSEG-ZZKANJYO.
+ENDIF.
+ENDIF.
+
+W_CNT = W_CNT + 1.
+
+ENDDO.
+
+ENDFORM.

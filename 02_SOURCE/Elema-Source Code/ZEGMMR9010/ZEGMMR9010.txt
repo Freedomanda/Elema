@@ -1,0 +1,3268 @@
+*&---------------------------------------------------------------------*
+*& プログラムID : ZEGMMR9010
+*& 作成者       : iSiD Jiang
+*& 作成日       : 2015/03/06
+*& 処理概要     : Purchase Orderの一括アップロードを行う。
+*&---------------------------------------------------------------------*
+*& 改定履歴
+*& No   DATE       MODIFYED BY   SUMMARY
+*& 0001 2015/05/13 ISID17        ヘッダ行の存在をチェックし
+*&                               存在しない場合、エラーメッセージを
+*&                               出力し、処理を終了する
+*& 0002 2015/05/15 ISID17        相関チェック①を変更
+*&                               ファイルレイアウトの
+*&                               エラーチェックの改修
+*& 0003 2015/05/25 ISID17        品目単価の設定方法変更
+*& 0004 2015/05/27 ISID17        数値チェック変更
+*& 0005 2015/06/18 ISID18        エラーファイル出力バグ修正
+*&                               エラーファイルにタイトル行を追加
+*&                               テスト実行の初期値はON
+*&---------------------------------------------------------------------*
+REPORT  ZEGMMR9010 LINE-SIZE 255.
+
+*&----------------------------------------------------------------------
+* 定数の宣言
+*&----------------------------------------------------------------------
+CONSTANTS:
+CNS_SLASH       TYPE C VALUE '\',          "File path split
+CNS_RFILE(4)    TYPE C VALUE 'RST_',       "Result file
+CNS_EFILE(4)    TYPE C VALUE 'ERR_',       "Error file
+CNS_TAB         TYPE C VALUE CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB,
+CNS_FTYPE(10)   TYPE C VALUE 'ASC',        "File type
+CNS_TCD1(4)     TYPE C VALUE 'ME21',
+CNS_TCD2(4)     TYPE C VALUE 'ME22',
+CNS_PSTYP_L     TYPE PSTYP  VALUE 'L',     "ファイルの明細カテゴリ
+CNS_ESOKZ0      TYPE ESOKZ  VALUE '0',     "購買情報区分：0(標準)
+CNS_ESOKZ3      TYPE ESOKZ  VALUE '3',     "購買情報区分：3(外注)
+CNS_SCHED       TYPE ETENR  VALUE '0001',  "納入日程行
+CNS_LPEIN       TYPE LPEIN  VALUE 'D',     "納入期日カテゴリ
+CNS_SNO         TYPE DZEKKN VALUE '01',    "勘定設定の連続番号
+CNS_TID1        TYPE TDID   VALUE 'F02',   "Text ID
+CNS_TID2        TYPE TDID   VALUE 'F04',   "Text ID
+CNS_TID3        TYPE TDID   VALUE 'F03',   "Text ID
+CNS_TFMT        TYPE TDFORMAT VALUE '01',  "タグ列
+**** START ADD BY ISID17 2015/05/25 ****
+CNS_COND_TYPE_ZPB1 TYPE KSCHA     VALUE 'ZPB1', "条件タイプ
+CNS_CHANGE_ID_U    TYPE CDCHNGIND VALUE 'U',    "変更
+*  CNS_CHANGE_ID_I    TYPE CDCHNGIND VALUE 'I',    "新規
+**** END ADD BY ISID17 2015/05/25 ****
+CNS_HTYPE       TYPE DATATYPE_D VALUE 'NUMC',"Number type
+CNS_MSG_A       TYPE C VALUE 'A',            "Message type
+CNS_MSG_S       TYPE C VALUE 'S',
+CNS_MSG_W       TYPE C VALUE 'W',
+CNS_MSG_E       TYPE C VALUE 'E'.
+
+*&----------------------------------------------------------------------
+* 型定義
+*&----------------------------------------------------------------------
+TYPES:
+* File field for server file
+BEGIN OF TYP_SFILE,
+FIELD TYPE STRING,
+END OF TYP_SFILE,
+TYP_TD_SFILE TYPE STANDARD TABLE OF TYP_SFILE,
+
+* File field for Local file
+BEGIN OF TYP_FILE,
+TCD   TYPE CHAR4,          "TCD
+**** START UPD BY ISID17 2015/05/26 ****
+*    GFLAG TYPE C,              "GroupFlag
+GFLAG TYPE CHAR1,          "GroupFlag
+**** END UPD BY ISID17 2015/05/26 ****
+BSART TYPE EKKO-BSART,     "DocType
+LIFNR TYPE EKKO-LIFNR,     "Vendor
+BEDAT TYPE EKKO-BEDAT,     "DocDate
+EKORG TYPE EKKO-EKORG,     "PurchOrg
+EKGRP TYPE EKKO-EKGRP,     "PurchGroup
+EBELN TYPE EKKO-EBELN,     "PurchaseOrder
+SUBMI TYPE EKKO-SUBMI,     "CollectiveNo
+RESWK TYPE EKKO-RESWK,     "SupplyingPlant
+WAERS TYPE EKKO-WAERS,     "NetPriceCurrency
+INCO2 TYPE INCO2,          "Incoterms2
+EBELP TYPE CHAR5,          "Item
+KNTTP TYPE EKPO-KNTTP,     "AcctAssgtCat
+PSTYP TYPE EKPO-PSTYP,     "ItemCategory
+MATNR TYPE EKPO-MATNR,     "Material
+MAKTX TYPE MAKT-MAKTX,     "MaterialText
+MENGE TYPE CHAR17,         "POQuantity
+MEINS TYPE EKPO-MEINS,     "OrderUnit
+EINDT TYPE EKET-EINDT,     "DeliveryDate
+NETPR TYPE CHAR17,         "NetPrice
+PEINH TYPE CHAR5,          "PriceUnit
+WERKS TYPE EKPO-WERKS,     "Plant
+LGORT TYPE EKPO-LGORT,     "SLoc
+RETPO TYPE EKPO-RETPO,     "ReturnItem
+**** START UPD BY ISID17 2015/05/26 ****
+*    UMSON TYPE C,              "FreeItem
+UMSON TYPE CHAR1,          "FreeItem
+**** END UPD BY ISID17 2015/05/26 ****
+KOSTL TYPE EKKN-KOSTL,     "CostCenter
+ADRN2 TYPE EKPO-ADRN2,     "Address
+RMTXT TYPE TDLINE,         "TextPORemarks
+LSTRK TYPE TDLINE,         "TextBackOrderListRemarks
+LRTXT TYPE TDLINE,         "TextLabelRemarks
+END OF TYP_FILE,
+TYP_TD_FILE TYPE STANDARD TABLE OF TYP_FILE,
+
+**** START ADD 2015/06/18 ISID18 ****
+BEGIN OF TYP_FILE_STR,
+TCD   TYPE STRING,         "TCD
+GFLAG TYPE STRING,         "GroupFlag
+BSART TYPE STRING,         "DocType
+LIFNR TYPE STRING,         "Vendor
+BEDAT TYPE STRING,         "DocDate
+EKORG TYPE STRING,         "PurchOrg
+EKGRP TYPE STRING,         "PurchGroup
+EBELN TYPE STRING,         "PurchaseOrder
+SUBMI TYPE STRING,         "CollectiveNo
+RESWK TYPE STRING,         "SupplyingPlant
+WAERS TYPE STRING,         "NetPriceCurrency
+INCO2 TYPE STRING,         "Incoterms2
+EBELP TYPE STRING,         "Item
+KNTTP TYPE STRING,         "AcctAssgtCat
+PSTYP TYPE STRING,         "ItemCategory
+MATNR TYPE STRING,         "Material
+MAKTX TYPE STRING,         "MaterialText
+MENGE TYPE STRING,         "POQuantity
+MEINS TYPE STRING,         "OrderUnit
+EINDT TYPE STRING,         "DeliveryDate
+NETPR TYPE STRING,         "NetPrice
+PEINH TYPE STRING,         "PriceUnit
+WERKS TYPE STRING,         "Plant
+LGORT TYPE STRING,         "SLoc
+RETPO TYPE STRING,         "ReturnItem
+UMSON TYPE STRING,         "FreeItem
+KOSTL TYPE STRING,         "CostCenter
+ADRN2 TYPE STRING,         "Address
+RMTXT TYPE STRING,         "TextPORemarks
+LSTRK TYPE STRING,         "TextBackOrderListRemarks
+LRTXT TYPE STRING,         "TextLabelRemarks
+END OF TYP_FILE_STR,
+TYP_TD_FILE_STR TYPE STANDARD TABLE OF TYP_FILE_STR,
+**** END ADD 2015/06/18 ISID18 ****
+
+* Field for message
+BEGIN OF TYP_MSG,
+COL1 TYPE STRING,
+COL2 TYPE STRING,
+COL3 TYPE STRING,
+COL4 TYPE STRING,
+END OF TYP_MSG,
+TYP_TD_MSG TYPE STANDARD TABLE OF TYP_MSG,
+
+**** START ADD BY ISID17 2015/05/25 ****
+* 条件 (トランザクションデータ)
+BEGIN OF TYP_EKKO_KONV,
+EBELN TYPE EKKO-EBELN, "購買伝票番号
+KPOSN TYPE KONV-KPOSN, "条件明細番号
+KNUMV TYPE KONV-KNUMV, "伝票条件番号
+STUNR TYPE KONV-STUNR, "ステップ番号
+ZAEHK TYPE KONV-ZAEHK, "条件カウンタ
+END OF TYP_EKKO_KONV,
+TYP_TD_EKKO_KONV TYPE STANDARD TABLE OF TYP_EKKO_KONV,
+**** END ADD BY ISID17 2015/05/25 ****
+
+* File field for result file
+BEGIN OF TYP_RFILE,
+COL1 TYPE STRING,
+COL2 TYPE STRING,
+COL3 TYPE STRING,
+COL4 TYPE STRING,
+END OF TYP_RFILE,
+TYP_TD_RFILE TYPE STANDARD TABLE OF TYP_RFILE,
+
+* Type for BAPI parameter
+TYP_TD_POITEM         TYPE STANDARD TABLE OF BAPIMEPOITEM,
+TYP_TD_POITEMX        TYPE STANDARD TABLE OF BAPIMEPOITEMX,
+TYP_TD_POADDRDELIVERY TYPE STANDARD TABLE OF BAPIMEPOADDRDELIVERY,
+TYP_TD_POSCHEDULE     TYPE STANDARD TABLE OF BAPIMEPOSCHEDULE,
+TYP_TD_POSCHEDULEX    TYPE STANDARD TABLE OF BAPIMEPOSCHEDULX,
+TYP_TD_POACCOUNT      TYPE STANDARD TABLE OF BAPIMEPOACCOUNT,
+TYP_TD_POACCOUNTX     TYPE STANDARD TABLE OF BAPIMEPOACCOUNTX,
+TYP_TD_POTEXTITEM     TYPE STANDARD TABLE OF BAPIMEPOTEXT.
+
+*&----------------------------------------------------------------------
+* 内部テーブル定義
+*&----------------------------------------------------------------------
+DATA:
+W_CODEPAGE  TYPE ABAP_ENCODING,"Codepage
+W_FLGUTF8   TYPE FLAG,         "UTF-8
+TD_FILE     TYPE TYP_TD_FILE,  "Input file
+**** START UPD 2015/06/18 ISID18 ****
+*  TD_EFILE    TYPE TYP_TD_FILE,  "Error file
+TD_EFILE    TYPE TYP_TD_FILE_STR,  "Error file
+ST_FILE_STR TYPE TYP_FILE_STR,
+**** END UPD 2015/06/18 ISID18 ****
+TD_MSG      TYPE TYP_TD_MSG,
+W_TNUM      TYPE I,            "Total number
+W_SNUM      TYPE I,            "Success number
+W_ENUM      TYPE I.            "Error number
+
+*&----------------------------------------------------------------------
+* 変数の定義
+*&----------------------------------------------------------------------
+DATA:
+W_WERKS TYPE WERKS_D.
+
+*&----------------------------------------------------------------------
+* 選択画面定義(1000)
+*&----------------------------------------------------------------------
+SELECTION-SCREEN BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+
+SELECTION-SCREEN BEGIN OF LINE.
+* サーバ
+SELECTION-SCREEN POSITION 33.
+PARAMETERS:P_SERVE RADIOBUTTON GROUP RB1 DEFAULT 'X'.
+SELECTION-SCREEN: COMMENT 36(8) TEXT-002.
+* ローカル
+SELECTION-SCREEN POSITION 46.
+PARAMETERS:P_LOCAL RADIOBUTTON GROUP RB1.
+SELECTION-SCREEN: COMMENT 49(6) TEXT-003.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+* テスト実行
+SELECTION-SCREEN POSITION 33.
+**** START UPD 2015/06/18 ISID18 ****
+*PARAMETERS: P_TSTCK AS CHECKBOX.
+PARAMETERS: P_TSTCK AS CHECKBOX DEFAULT 'X'.
+**** END UPD 2015/06/18 ISID18 ****
+SELECTION-SCREEN: COMMENT 36(8) TEXT-004.
+
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK BL1.
+
+SELECTION-SCREEN BEGIN OF BLOCK BL2 WITH FRAME TITLE TEXT-005.
+
+* Input file
+PARAMETERS: P_IFILE   TYPE RLGRAP-FILENAME OBLIGATORY.
+* Result file
+PARAMETERS: P_RFILE   TYPE RLGRAP-FILENAME.
+* Error file
+PARAMETERS: P_EFILE   TYPE RLGRAP-FILENAME.
+
+SELECTION-SCREEN END OF BLOCK BL2.
+
+SELECTION-SCREEN BEGIN OF BLOCK BL3 WITH FRAME TITLE TEXT-006.
+* Plant
+SELECT-OPTIONS: S_WERKS FOR W_WERKS OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK BL3.
+
+*----------------------------------------------------------------------*
+* INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+* 初期処理
+PERFORM INIT_DATA.
+
+*----------------------------------------------------------------------*
+* AT SELETION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* 入力チェック
+PERFORM CHECK_INPUT.
+
+AT SELECTION-SCREEN OUTPUT.
+* Modify screen
+PERFORM MODIFY_SCREEN.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_IFILE.
+* 検索ヘルプ
+PERFORM F4_FOR_FILE.
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+* 主処理
+PERFORM MAIN_PROCESS.
+
+*----------------------------------------------------------------------*
+* TOP-OF-PAGE
+*----------------------------------------------------------------------*
+TOP-OF-PAGE.
+* ヘッダ出力
+PERFORM OUTPUT_HEAD.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_DATA
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INIT_DATA .
+
+* Modify screen
+PERFORM MODIFY_SCREEN.
+
+ENDFORM.                    " INIT_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_INPUT
+*&---------------------------------------------------------------------*
+*       入力チェック
+*----------------------------------------------------------------------*
+FORM CHECK_INPUT .
+
+TYPES: BEGIN OF LTYP_WERKS,
+WERKS TYPE T001W-WERKS,
+END OF LTYP_WERKS.
+
+DATA: LTD_WERKS   TYPE STANDARD TABLE OF LTYP_WERKS,
+LST_WERKS   TYPE LTYP_WERKS.
+
+* A-1-1．入力チェック
+* プラントコード存在チェック
+SELECT WERKS
+INTO TABLE LTD_WERKS
+FROM T001W
+WHERE WERKS IN S_WERKS.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'S_WERKS-LOW'.
+*   プラント ( &1 ) は存在しません
+MESSAGE E004(ZMEGSD01) WITH S_WERKS-LOW.
+ENDIF.
+
+* A-1-2．権限チェック
+LOOP AT LTD_WERKS INTO LST_WERKS.
+AUTHORITY-CHECK OBJECT 'M_MSEG_WMB'
+ID 'WERKS' FIELD LST_WERKS-WERKS
+ID 'ACTVT' FIELD '01'.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'S_WERKS-LOW'.
+*     プラントに対する実行権限がありません
+MESSAGE E003(ZMEGSD01).
+
+ENDIF.
+ENDLOOP.
+
+* Result & Error ファイル名取得
+PERFORM SET_RFILE.
+
+ENDFORM.                    " CHECK_INPUT
+
+*&---------------------------------------------------------------------*
+*&      Form  F4_FOR_FILE
+*&---------------------------------------------------------------------*
+*       ファイル名取得
+*----------------------------------------------------------------------*
+FORM F4_FOR_FILE .
+
+DATA:LT_FILE           TYPE FILETABLE,   "ファイル名一覧格納テーブル
+LV_FILENAME(1024) TYPE C,           "ヘッダ
+LV_RC             TYPE I.           "結果
+
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+CHANGING
+FILE_TABLE              = LT_FILE    "ファイル名一覧格納テーブル
+RC                      = LV_RC      "結果
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 5.
+
+IF  SY-SUBRC = 0
+AND LV_RC  >= 0.                             " 結果
+READ TABLE LT_FILE INTO LV_FILENAME INDEX 1.
+IF SY-SUBRC = 0.
+*     ファイル名を選択画面にセット
+P_IFILE = LV_FILENAME.
+
+*     Result & Error ファイル名取得
+PERFORM SET_RFILE.
+
+ENDIF.
+ELSE.
+*   エラーの場合
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " F4_FOR_FILE
+
+*&---------------------------------------------------------------------*
+*&      Form  MODIFY_SCREEN
+*&---------------------------------------------------------------------*
+*       Modify screen
+*----------------------------------------------------------------------*
+FORM MODIFY_SCREEN .
+* Modify screen
+LOOP AT SCREEN.
+IF SCREEN-NAME = 'P_RFILE' OR
+SCREEN-NAME = 'P_EFILE'.
+SCREEN-INPUT = '0'.
+MODIFY SCREEN.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " MODIFY_SCREEN
+
+*&---------------------------------------------------------------------*
+*&      Form  SET_RFILE
+*&---------------------------------------------------------------------*
+*       Result & Error ファイル名取得
+*----------------------------------------------------------------------*
+FORM SET_RFILE .
+
+DATA:
+LW_SHIFTN   TYPE I,
+LW_PATH     TYPE RLGRAP-FILENAME,
+LW_FULLNAME TYPE RLGRAP-FILENAME,
+LW_FILENAME TYPE RLGRAP-FILENAME,
+LW_RFILE    TYPE RLGRAP-FILENAME,
+LW_EFILE    TYPE RLGRAP-FILENAME.
+
+IF P_IFILE IS NOT INITIAL.
+LW_FULLNAME = P_IFILE.
+* search for '\'
+DO.
+SEARCH LW_FULLNAME FOR CNS_SLASH.
+IF SY-SUBRC > 0.
+LW_FILENAME = LW_FULLNAME.
+EXIT.
+ENDIF.
+LW_SHIFTN = SY-FDPOS + 1.
+SHIFT LW_FULLNAME BY LW_SHIFTN PLACES LEFT.
+ENDDO.
+ENDIF.
+
+
+IF LW_FILENAME IS NOT INITIAL.
+LW_FULLNAME = P_IFILE.
+*   Get path
+SEARCH LW_FULLNAME FOR LW_FILENAME.
+LW_PATH = LW_FULLNAME(SY-FDPOS).
+CONDENSE LW_FULLNAME.
+
+*   Get result file
+CONCATENATE LW_PATH CNS_RFILE LW_FILENAME INTO LW_RFILE.
+P_RFILE = LW_RFILE.
+
+*   Get error file
+CONCATENATE LW_PATH CNS_EFILE LW_FILENAME INTO LW_EFILE.
+P_EFILE = LW_EFILE.
+ENDIF.
+
+ENDFORM.                    " SET_RFILE
+
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_PROCESS
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM MAIN_PROCESS .
+
+* A-2. ファイル取込
+PERFORM GET_DATA CHANGING TD_FILE.
+
+* A-3&A-4．データ処理
+PERFORM PROCESS_DATA CHANGING TD_FILE
+TD_EFILE
+TD_MSG.
+
+* A-5．画面出力・ファイル出力
+PERFORM PROCESS_RESULT USING TD_EFILE
+TD_MSG.
+
+ENDFORM.                    " MAIN_PROCESS
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA
+*&---------------------------------------------------------------------*
+*       ファイル取込
+*----------------------------------------------------------------------*
+FORM GET_DATA CHANGING O_TD_FILE TYPE TYP_TD_FILE.
+
+IF P_SERVE = ABAP_ON.
+*   A-2-1．ファイル取込（Server）
+PERFORM GET_DATA_SERVE CHANGING O_TD_FILE.
+ELSE.
+*   A-2-2．ファイル取込（Local）
+PERFORM GET_DATA_LOCAL CHANGING O_TD_FILE.
+ENDIF.
+
+ENDFORM.                    " GET_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_SERVE
+*&---------------------------------------------------------------------*
+*       A-2-1．ファイル取込（Server）
+*----------------------------------------------------------------------*
+*      <--O_TD_FILE   File data
+*----------------------------------------------------------------------*
+FORM GET_DATA_SERVE  CHANGING O_TD_FILE TYPE TYP_TD_FILE.
+
+DATA:
+LW_Z_OUTPUT_CP     TYPE ZTEGZZM001-Z_OUTPUT_CP,
+LW_SAPCODEPAGE     TYPE STRING,
+LST_SFILE          TYPE TYP_SFILE,
+LTD_SFILE          TYPE TYP_TD_SFILE.
+
+* A-2-1-1．文字コードの取得
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = SPACE
+IMPORTING
+EXPCODEPAGE = LW_Z_OUTPUT_CP
+EXPFLGUTF8  = W_FLGUTF8.
+
+IF LW_Z_OUTPUT_CP IS INITIAL.
+*  データが存在しない場合
+MESSAGE S051(ZMEGSD01) WITH TEXT-E01 SY-REPID
+DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+LW_SAPCODEPAGE = LW_Z_OUTPUT_CP.
+
+IF LW_SAPCODEPAGE IS NOT INITIAL.
+W_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( LW_SAPCODEPAGE ).
+ENDIF.
+
+* A-2-1-2．アップロードデータの取込
+IF W_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_IFILE FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE W_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH  CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_IFILE FOR INPUT
+IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS
+SKIPPING BYTE-ORDER MARK.
+ENDIF.
+IF SY-SUBRC <> 0.
+*   エラーが発生した場合
+MESSAGE S035(ZMEGSD01) WITH P_IFILE DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* 読込み
+DO.
+CLEAR LST_SFILE.
+READ DATASET P_IFILE INTO LST_SFILE-FIELD.
+IF SY-SUBRC <> 0.
+EXIT.
+ELSE.
+APPEND LST_SFILE TO LTD_SFILE.
+ENDIF.
+ENDDO.
+
+* ファイルクローズ
+CLOSE DATASET P_IFILE.
+
+IF LTD_SFILE IS NOT INITIAL.
+*   タブで区切って編集
+PERFORM SPLIT_FILE USING    LTD_SFILE
+CHANGING O_TD_FILE.
+ENDIF.
+
+ENDFORM.                    " GET_DATA_SERVE
+*&---------------------------------------------------------------------*
+*&      Form  SPLIT_FILE
+*&---------------------------------------------------------------------*
+*       入力ファイルをタブで区切る
+*----------------------------------------------------------------------*
+*      -->I_TD_SFILE  Server File data
+*      <--O_TD_FILE   File data
+*----------------------------------------------------------------------*
+FORM SPLIT_FILE  USING    I_TD_SFILE TYPE TYP_TD_SFILE
+CHANGING O_TD_FILE  TYPE TYP_TD_FILE.
+
+DATA:
+**** START ADD BY ISID17 2015/05/15 ****
+LST_FILE_BAK       TYPE TYP_SFILE,
+LW_TYP             TYPE C,
+LW_COL             TYPE I,
+LW_COL_H           TYPE I,
+**** END ADD BY ISID17 2015/05/15 ****
+LST_SFILE  TYPE TYP_SFILE,
+LST_FILE   TYPE TYP_FILE.
+
+**** START ADD 2015/06/18 ISID18 ****
+READ TABLE I_TD_SFILE INTO LST_SFILE INDEX 1.
+PERFORM GET_FILE_TITLE
+USING    LST_SFILE
+CHANGING ST_FILE_STR.
+**** END ADD 2015/06/18 ISID18 ****
+
+LOOP AT I_TD_SFILE INTO LST_SFILE.
+CLEAR LST_FILE.
+SPLIT LST_SFILE-FIELD
+AT CNS_TAB
+INTO LST_FILE-TCD        "TCD
+LST_FILE-GFLAG      "GroupFlag
+LST_FILE-BSART      "DocType
+LST_FILE-LIFNR      "Vendor
+LST_FILE-BEDAT      "DocDate
+LST_FILE-EKORG      "PurchOrg
+LST_FILE-EKGRP      "PurchGroup
+LST_FILE-EBELN      "PurchaseOrder
+LST_FILE-SUBMI      "CollectiveNo
+LST_FILE-RESWK      "SupplyingPlant
+LST_FILE-WAERS      "NetPriceCurrency
+LST_FILE-INCO2      "Incoterms2
+LST_FILE-EBELP      "Item
+LST_FILE-KNTTP      "AcctAssgtCat
+LST_FILE-PSTYP      "ItemCategory
+LST_FILE-MATNR      "Material
+LST_FILE-MAKTX      "MaterialText
+LST_FILE-MENGE      "POQuantity
+LST_FILE-MEINS      "OrderUnit
+LST_FILE-EINDT      "DeliveryDate
+LST_FILE-NETPR      "NetPrice
+LST_FILE-PEINH      "PriceUnit
+LST_FILE-WERKS      "Plant
+LST_FILE-LGORT      "SLoc
+LST_FILE-RETPO      "ReturnItem
+LST_FILE-UMSON      "FreeItem
+LST_FILE-KOSTL      "CostCenter
+LST_FILE-ADRN2      "Address
+LST_FILE-RMTXT      "TextPORemarks
+LST_FILE-LSTRK      "TextBackOrderListR
+LST_FILE-LRTXT.     "TextLabelRemarks
+APPEND LST_FILE TO O_TD_FILE.
+
+**** START ADD BY ISID17 2015/05/15 ****
+* A-3-1．ファイル形式チェック
+LST_FILE_BAK = LST_SFILE.
+AT FIRST.
+FIND ALL OCCURRENCES OF CNS_TAB
+IN LST_FILE_BAK-FIELD
+MATCH COUNT LW_COL_H.
+
+DESCRIBE FIELD LST_FILE
+TYPE LW_TYP
+COMPONENTS LW_COL.
+
+LW_COL = LW_COL - 1.
+IF LW_COL <> LW_COL_H.
+MESSAGE S089(ZMEGSD01) DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDAT.
+**** END ADD BY ISID17 2015/05/15 ****
+ENDLOOP.
+
+ENDFORM.                    " SPLIT_FILE
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_LOCAL
+*&---------------------------------------------------------------------*
+*       A-2-2．ファイル取込（Local）
+*----------------------------------------------------------------------*
+*      <--O_TD_FILE   File data
+*----------------------------------------------------------------------*
+FORM GET_DATA_LOCAL CHANGING O_TD_FILE TYPE TYP_TD_FILE.
+
+DATA: LW_ENCODING TYPE ABAP_ENCODING,
+**** START ADD BY ISID17 2015/05/15 ****
+LTD_SFILE          TYPE TYP_TD_SFILE,
+**** END ADD BY ISID17 2015/05/15 ****
+LW_RC       TYPE I,
+LV_FILENAME TYPE STRING.
+
+* A-2-2-1．文字コードの取得
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>GET_SAPLOGON_ENCODING
+CHANGING
+FILE_ENCODING                 = LW_ENCODING
+RC                            = LW_RC
+EXCEPTIONS
+CNTL_ERROR                    = 1
+ERROR_NO_GUI                  = 2
+NOT_SUPPORTED_BY_GUI          = 3
+CANNOT_INITIALIZE_GLOBALSTATE = 4
+OTHERS                        = 5.
+
+* A-2-2-2．アップロードデータの取込
+LV_FILENAME = P_IFILE.
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                = LV_FILENAME
+FILETYPE                = CNS_FTYPE
+**** START UPD BY ISID17 2015/05/15 ****
+*     HAS_FIELD_SEPARATOR     = CNS_TAB
+HAS_FIELD_SEPARATOR     = SPACE
+**** END ADD BY ISID17 2015/05/15 ****
+CODEPAGE                = LW_ENCODING
+TABLES
+**** START UPD BY ISID17 2015/05/15 ****
+*     DATA_TAB                = O_TD_FILE
+DATA_TAB                = LTD_SFILE
+**** END ADD BY ISID17 2015/05/15 ****
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+OTHERS                  = 17.
+
+* エラーが発生した場合
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+
+**** START ADD BY ISID17 2015/05/15 ****
+ELSE.
+IF LTD_SFILE IS NOT INITIAL.
+*   タブで区切って編集
+PERFORM SPLIT_FILE USING    LTD_SFILE
+CHANGING O_TD_FILE.
+ENDIF.
+**** END ADD BY ISID17 2015/05/15 ****
+ENDIF.
+
+ENDFORM.                    " GET_DATA_LOCAL
+
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_DATA
+*&---------------------------------------------------------------------*
+*       データ処理
+*----------------------------------------------------------------------*
+*      <--O_TD_FILE   File data
+*      <--O_TD_EFILE  Error File data
+*      <--O_TD_MSG    Error message table
+*----------------------------------------------------------------------*
+FORM PROCESS_DATA CHANGING O_TD_FILE  TYPE TYP_TD_FILE
+**** START UPD 2015/06/18 ISID18 ****
+*                           O_TD_EFILE TYPE TYP_TD_FILE
+O_TD_EFILE TYPE TYP_TD_FILE_STR
+**** END UPD 2015/06/18 ISID18 ****
+O_TD_MSG   TYPE TYP_TD_MSG.
+*ローカル変数定義
+DATA:
+LW_INDEX           TYPE SY-INDEX,       "Line row
+LW_INDEX_S         TYPE STRING,
+LW_MSG             TYPE STRING,
+LW_ROW             TYPE STRING,
+LST_MSG            TYPE TYP_MSG,
+LW_INDEX_PO        TYPE SY-INDEX,       "PO header row
+LW_EFLG            TYPE C,              "Every row check flag
+LW_EFLG_BAPI       TYPE C,              "BAPI executive flag
+LW_EFLG_G          TYPE C,              "Group error check
+LW_TCD(4)          TYPE C,
+LST_FILE           TYPE TYP_FILE,
+
+**** START ADD BY ISID17 2015/05/13 ****
+LST_FILE_BAK       TYPE TYP_FILE,
+**** END ADD BY ISID17 2015/05/13 ****
+
+**** START UPD 2015/06/18 ISID18 ****
+*    LTD_EFILE          TYPE TYP_TD_FILE,
+LTD_EFILE          TYPE TYP_TD_FILE_STR,
+LST_FILE_STR       TYPE TYP_FILE_STR,
+**** END UPD 2015/06/18 ISID18 ****
+
+**** START DEL BY ISID17 2015/05/13 ****
+*    LW_COL             TYPE I,
+*    LW_TYP             TYPE C,
+**** END DEL BY ISID17 2015/05/13 ****
+
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND    TYPE BAPIMEPOCOND_TP,  "条件 (明細)
+LTD_POCONDX   TYPE BAPIMEPOCONDX_TP, "条件 (明細、変更ツールバー)
+LTD_EKKO_KONV TYPE TYP_TD_EKKO_KONV, "条件 (トランザクションデータ)
+**** END ADD BY ISID17 2015/05/25 ****
+
+LW_BSART           TYPE EKKO-BSART,     "DocType
+LW_WAERS           TYPE EKKO-WAERS,     "NetPriceCurrency
+LW_INCO2           TYPE INCO2,          "Incoterms2
+LW_LIFNR           TYPE LIFNR,          "Vendor
+LW_EKORG           TYPE EKORG,          "PurchaseOrg.
+LST_POHEADER       TYPE BAPIMEPOHEADER,
+LST_POHEADERX      TYPE BAPIMEPOHEADERX,
+LTD_POITEM         TYPE STANDARD TABLE OF BAPIMEPOITEM,
+LTD_POITEMX        TYPE STANDARD TABLE OF BAPIMEPOITEMX,
+LTD_POADDRDELIVERY TYPE STANDARD TABLE OF BAPIMEPOADDRDELIVERY,
+LTD_POSCHEDULE     TYPE STANDARD TABLE OF BAPIMEPOSCHEDULE,
+LTD_POSCHEDULEX    TYPE STANDARD TABLE OF BAPIMEPOSCHEDULX,
+LTD_POACCOUNT      TYPE STANDARD TABLE OF BAPIMEPOACCOUNT,
+LTD_POACCOUNTX     TYPE STANDARD TABLE OF BAPIMEPOACCOUNTX,
+LTD_POTEXTITEM     TYPE STANDARD TABLE OF BAPIMEPOTEXT.
+
+**** START DEL BY ISID17 2015/05/13 ****
+** A-3-1．ファイル形式チェック
+*  READ TABLE O_TD_FILE INTO LST_FILE INDEX 1.
+*  DESCRIBE FIELD LST_FILE TYPE LW_TYP COMPONENTS LW_COL.
+*  IF LW_COL <> 31.
+*    MESSAGE S089(ZMEGSD01) DISPLAY LIKE CNS_MSG_E.
+*    LEAVE LIST-PROCESSING.
+*  ENDIF.
+**** END DEL BY ISID17 2015/05/13 ****
+
+DELETE O_TD_FILE INDEX 1.
+
+LOOP AT O_TD_FILE INTO LST_FILE.
+LW_INDEX = SY-TABIX.
+
+**** START ADD 2015/06/18 ISID18 ****
+MOVE-CORRESPONDING LST_FILE TO LST_FILE_STR.
+**** END ADD 2015/06/18 ISID18 ****
+
+**** START ADD BY ISID17 2015/05/13 ****
+LST_FILE_BAK = LST_FILE.
+
+AT FIRST.
+IF LST_FILE_BAK-GFLAG IS INITIAL.
+MESSAGE S113(ZMEGSD01) DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDAT.
+**** END ADD BY ISID17 2015/05/13 ****
+
+IF LST_FILE-TCD IS NOT INITIAL AND
+LST_FILE-GFLAG IS NOT INITIAL.
+W_TNUM = W_TNUM + 1.               "Total number
+*     A-4-1-2．BAPIの実行
+IF LW_TCD = CNS_TCD1.
+IF LW_EFLG_G <> ABAP_ON.
+PERFORM PO_CREATE_EXECUTE
+USING LW_INDEX_PO
+LST_POHEADER
+LST_POHEADERX
+LTD_POITEM
+LTD_POITEMX
+LTD_POADDRDELIVERY
+LTD_POSCHEDULE
+LTD_POSCHEDULEX
+LTD_POACCOUNT
+LTD_POACCOUNTX
+LTD_POTEXTITEM
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND  "条件 (明細)
+LTD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+CHANGING  LW_EFLG_BAPI
+O_TD_MSG.
+ELSE.
+W_ENUM = W_ENUM + 1.               "Error number
+**** START ADD 2015/06/18 ISID18 ****
+APPEND LINES OF LTD_EFILE TO O_TD_EFILE.
+REFRESH LTD_EFILE.
+**** END ADD 2015/06/18 ISID18 ****
+ENDIF.
+CLEAR LW_EFLG_G.
+ELSEIF LW_TCD = CNS_TCD2.
+IF LW_EFLG_G <> ABAP_ON.
+PERFORM PO_CHANGE_EXECUTE
+USING LW_INDEX_PO
+LST_POHEADER
+LST_POHEADERX
+LTD_POITEM
+LTD_POITEMX
+LTD_POADDRDELIVERY
+LTD_POSCHEDULE
+LTD_POSCHEDULEX
+LTD_POACCOUNT
+LTD_POACCOUNTX
+LTD_POTEXTITEM
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND  "条件 (明細)
+LTD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+CHANGING  LW_EFLG_BAPI
+O_TD_MSG.
+ELSE.
+W_ENUM = W_ENUM + 1.               "Error number
+**** START ADD 2015/06/18 ISID18 ****
+APPEND LINES OF LTD_EFILE TO O_TD_EFILE.
+REFRESH LTD_EFILE.
+**** END ADD 2015/06/18 ISID18 ****
+ENDIF.
+CLEAR LW_EFLG_G.
+
+ENDIF.
+*     Edit error file data
+IF LW_EFLG_BAPI = ABAP_ON.
+APPEND LINES OF LTD_EFILE TO O_TD_EFILE.
+CLEAR LW_EFLG_BAPI.
+**** START ADD 2015/06/18 ISID18 ****
+REFRESH LTD_EFILE.
+**** END ADD 2015/06/18 ISID18 ****
+ELSE.
+REFRESH LTD_EFILE.
+ENDIF.
+
+CLEAR:
+LW_TCD,
+LW_INDEX_PO,
+LW_WAERS,
+LW_INCO2,
+LW_LIFNR,
+LW_EKORG,
+LST_POHEADER,
+LST_POHEADERX.
+REFRESH:
+LTD_POITEM,
+LTD_POITEMX,
+LTD_POADDRDELIVERY,
+LTD_POSCHEDULE,
+LTD_POSCHEDULEX,
+LTD_POACCOUNT,
+LTD_POACCOUNTX,
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND,  "条件 (明細)
+LTD_POCONDX, "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+LTD_POTEXTITEM.
+
+LW_TCD      = LST_FILE-TCD.    "Tcode
+LW_INDEX_PO = LW_INDEX.        "PO row id
+*     For relation data check
+LW_BSART    = LST_FILE-BSART.  "DocType
+LW_WAERS    = LST_FILE-WAERS.  "NetPriceCurrency
+LW_INCO2    = LST_FILE-INCO2.  "Incoterms2
+LW_LIFNR    = LST_FILE-LIFNR.  "Vendor
+LW_EKORG    = LST_FILE-EKORG.  "Purchase Org.
+ELSE.
+IF LST_FILE-BSART IS INITIAL.
+LST_FILE-BSART = LW_BSART.     "DocType
+ENDIF.
+
+IF LST_FILE-WAERS IS INITIAL.
+LST_FILE-WAERS = LW_WAERS.     "NetPriceCurrency
+ENDIF.
+
+IF LST_FILE-INCO2 IS INITIAL.
+LST_FILE-INCO2 = LW_INCO2.     "Incoterms2
+ENDIF.
+
+IF LST_FILE-LIFNR IS INITIAL.
+LST_FILE-LIFNR = LW_LIFNR.     "Vendor
+ENDIF.
+
+IF LST_FILE-EKORG IS INITIAL.
+LST_FILE-EKORG = LW_EKORG.     "Purchase Org.
+ENDIF.
+ENDIF.
+
+*   A-3-2．データチェック
+CLEAR LW_EFLG.
+PERFORM CHECK_DATA USING    LW_INDEX_PO
+CHANGING LST_FILE
+LW_EFLG
+O_TD_MSG.
+IF LW_EFLG = ABAP_ON.
+**** START UPD 2015/06/18 ISID18 ****
+*      APPEND LST_FILE TO O_TD_EFILE.
+APPEND LST_FILE_STR TO LTD_EFILE.
+**** END UPD 2015/06/18 ISID18 ****
+LW_EFLG_G = ABAP_ON.
+CONTINUE.
+ENDIF.
+
+**** START DEL BY ISID17 2015/05/13 ****
+*    IF lw_index = 1 AND
+*      lst_file-gflag IS INITIAL.
+*
+*      MESSAGE s089(zmegsd01) INTO lw_msg.
+*      lw_index_s = lw_index.
+*      CONDENSE lw_index_s.
+*      CONCATENATE text-033 lw_index_s text-034 text-035 lst_file-ebelp
+*        INTO lw_row SEPARATED BY space.
+*      lst_msg-col1 = text-007.
+*      lst_msg-col2 = text-008.
+*      lst_msg-col3 = lw_row.
+*      lst_msg-col4 = lw_msg.
+*      APPEND lst_msg TO o_td_msg.
+*
+*      APPEND lst_file TO o_td_efile.
+*      lw_eflg_g = abap_on.
+*      CONTINUE.
+*    ENDIF.
+**** END DEL BY ISID17 2015/05/13 ****
+
+**** START UPD 2015/06/18 ISID18 ****
+*    APPEND LST_FILE TO LTD_EFILE.
+APPEND LST_FILE_STR TO LTD_EFILE.
+**** END UPD 2015/06/18 ISID18 ****
+
+**** START ADD BY ISID17 2015/05/25 ****
+CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT'
+EXPORTING
+INPUT          = LST_FILE-MEINS
+LANGUAGE       = SY-LANGU
+IMPORTING
+OUTPUT         = LST_FILE-MEINS
+EXCEPTIONS
+UNIT_NOT_FOUND = 1
+OTHERS         = 2.
+IF SY-SUBRC <> 0.
+CLEAR LST_FILE-MEINS.
+ENDIF.
+**** END ADD BY ISID17 2015/05/25 ****
+
+IF LW_TCD = CNS_TCD1.
+*     A-4-1-1．BAPIのパラメータ設定
+PERFORM PO_CREATE_EDIT
+USING    LST_FILE
+CHANGING LST_POHEADER
+LST_POHEADERX
+LTD_POITEM
+LTD_POITEMX
+LTD_POADDRDELIVERY
+LTD_POSCHEDULE
+LTD_POSCHEDULEX
+LTD_POACCOUNT
+LTD_POACCOUNTX
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND  "条件 (明細)
+LTD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+LTD_POTEXTITEM.
+ELSEIF LW_TCD = CNS_TCD2.
+*     A-4-2-1．BAPIのパラメータ設定
+PERFORM PO_CHANGE_EDIT
+USING    LST_FILE
+CHANGING LST_POHEADER
+LST_POHEADERX
+LTD_POITEM
+LTD_POITEMX
+LTD_POADDRDELIVERY
+LTD_POSCHEDULE
+LTD_POSCHEDULEX
+LTD_POACCOUNT
+LTD_POACCOUNTX
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND  "条件 (明細)
+LTD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+LTD_POTEXTITEM.
+ENDIF.
+ENDLOOP.
+
+* Last transaction
+IF LW_EFLG_G <> ABAP_ON.
+IF LW_TCD = CNS_TCD1.
+PERFORM PO_CREATE_EXECUTE
+USING LW_INDEX_PO
+LST_POHEADER
+LST_POHEADERX
+LTD_POITEM
+LTD_POITEMX
+LTD_POADDRDELIVERY
+LTD_POSCHEDULE
+LTD_POSCHEDULEX
+LTD_POACCOUNT
+LTD_POACCOUNTX
+LTD_POTEXTITEM
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND  "条件 (明細)
+LTD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+CHANGING LW_EFLG_BAPI
+O_TD_MSG.
+ELSEIF LW_TCD = CNS_TCD2.
+PERFORM PO_CHANGE_EXECUTE
+USING LW_INDEX_PO
+LST_POHEADER
+LST_POHEADERX
+LTD_POITEM
+LTD_POITEMX
+LTD_POADDRDELIVERY
+LTD_POSCHEDULE
+LTD_POSCHEDULEX
+LTD_POACCOUNT
+LTD_POACCOUNTX
+LTD_POTEXTITEM
+**** START ADD BY ISID17 2015/05/25 ****
+LTD_POCOND  "条件 (明細)
+LTD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+CHANGING LW_EFLG_BAPI
+O_TD_MSG.
+ENDIF.
+
+IF LW_EFLG_BAPI = ABAP_ON.
+APPEND LINES OF LTD_EFILE TO O_TD_EFILE.
+**** START ADD 2015/06/18 ISID18 ****
+REFRESH LTD_EFILE.
+**** END ADD 2015/06/18 ISID18 ****
+ELSE.
+REFRESH LTD_EFILE.
+ENDIF.
+ELSE.
+W_ENUM = W_ENUM + 1.               "Error number
+**** START ADD 2015/06/18 ISID18 ****
+APPEND LINES OF LTD_EFILE TO O_TD_EFILE.
+REFRESH LTD_EFILE.
+**** END ADD 2015/06/18 ISID18 ****
+ENDIF.
+
+**** START ADD 2015/06/18 ISID18 ****
+IF O_TD_EFILE[] IS NOT INITIAL.
+INSERT ST_FILE_STR INTO O_TD_EFILE INDEX 1.
+ENDIF.
+**** END ADD 2015/06/18 ISID18 ****
+
+IF W_TNUM <> W_SNUM + W_ENUM.
+W_TNUM = W_SNUM + W_ENUM.
+ENDIF.
+
+ENDFORM.                    " PROCESS_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA
+*&---------------------------------------------------------------------*
+*       A-3.データチェック
+*----------------------------------------------------------------------*
+*      -->I_W_INDEX  行ID
+*      <--I_ST_FILE  ファイル データ
+*      <--O_W_EFLG   Error Flag
+*      <--O_TD_MSG   Error message table
+*----------------------------------------------------------------------*
+FORM CHECK_DATA USING    I_W_INDEX   TYPE SY-INDEX
+CHANGING I_ST_FILE   TYPE TYP_FILE
+O_W_EFLG    TYPE C
+O_TD_MSG    TYPE TYP_TD_MSG.
+
+* A-3-2-1．TCDのチェック
+IF I_ST_FILE-TCD IS NOT INITIAL AND
+I_ST_FILE-GFLAG IS NOT INITIAL.
+PERFORM CHECK_TCD USING    I_W_INDEX
+I_ST_FILE
+CHANGING O_W_EFLG
+O_TD_MSG.
+IF O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+ENDIF.
+
+* A-3-2-3．データ変換処理
+PERFORM DATA_CONVERSION CHANGING I_ST_FILE.
+
+* A-3-2-2．プラントチェック
+PERFORM CHECK_WERKS USING    I_W_INDEX
+I_ST_FILE
+CHANGING O_W_EFLG
+O_TD_MSG.
+IF O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+* A-3-2-4．日付形式チェック
+PERFORM CHECK_DATE USING    I_W_INDEX
+I_ST_FILE
+CHANGING O_W_EFLG
+O_TD_MSG.
+IF O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+* A-3-2-5．数値形式チェック
+PERFORM CHECK_NUMBER USING    I_W_INDEX
+I_ST_FILE
+CHANGING O_W_EFLG
+O_TD_MSG.
+IF O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+* A-3-2-6．相関チェック①
+PERFORM CHECK_RELATION1 USING    I_W_INDEX
+I_ST_FILE
+CHANGING O_W_EFLG
+O_TD_MSG.
+IF O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+** A-3-2-7．相関チェック②
+*  PERFORM check_relation2 USING    i_w_index
+*                                   i_st_file
+*                          CHANGING o_w_eflg
+*                                   o_td_msg.
+*  IF o_w_eflg = abap_on.
+*    RETURN.
+*  ENDIF.
+
+* A-3-2-8．購買情報マスタ存在チェック
+PERFORM CHECK_EINE USING    I_W_INDEX
+I_ST_FILE
+CHANGING O_W_EFLG
+O_TD_MSG.
+IF O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+ENDFORM.                    " CHECK_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_TCD
+*&---------------------------------------------------------------------*
+*       TCDのチェック
+*----------------------------------------------------------------------*
+*      -->I_W_INDEX  行ID
+*      -->I_ST_FILE  ファイル データ
+*      <--O_W_EFLG   Error Flag
+*      <--O_TD_MSG   Error message table
+*----------------------------------------------------------------------*
+FORM CHECK_TCD  USING    I_W_INDEX   TYPE SY-INDEX
+I_ST_FILE TYPE TYP_FILE
+CHANGING O_W_EFLG  TYPE C
+O_TD_MSG  TYPE TYP_TD_MSG.
+
+DATA:
+LW_ROW   TYPE STRING,
+LW_INDEX TYPE STRING,
+LW_MSG   TYPE STRING,
+LST_MSG  TYPE TYP_MSG.
+
+IF I_ST_FILE-TCD <> CNS_TCD1 AND
+I_ST_FILE-TCD <> CNS_TCD2.
+MESSAGE S090(ZMEGSD01) WITH I_ST_FILE-TCD INTO LW_MSG.
+
+LW_INDEX = I_W_INDEX.
+CONDENSE LW_INDEX.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+ENDIF.
+
+ENDFORM.                    " CHECK_TCD
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_WERKS
+*&---------------------------------------------------------------------*
+*       プラントチェック
+*----------------------------------------------------------------------*
+*      -->I_W_INDEX  行ID
+*      -->I_ST_FILE  ファイル データ
+*      <--O_W_EFLG   Error Flag
+*      <--O_TD_MSG   Error message table
+*----------------------------------------------------------------------*
+FORM CHECK_WERKS  USING    I_W_INDEX   TYPE SY-INDEX
+I_ST_FILE   TYPE TYP_FILE
+CHANGING O_W_EFLG    TYPE C
+O_TD_MSG  TYPE TYP_TD_MSG.
+
+DATA:
+LW_ROW   TYPE STRING,
+LW_INDEX TYPE STRING,
+LW_MSG   TYPE STRING,
+LST_MSG  TYPE TYP_MSG.
+
+IF I_ST_FILE-WERKS NOT IN S_WERKS.
+MESSAGE S091(ZMEGSD01) WITH I_W_INDEX I_ST_FILE-WERKS
+INTO LW_MSG.
+
+LW_INDEX = I_W_INDEX.
+CONDENSE LW_INDEX.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+ENDIF.
+
+ENDFORM.                    " CHECK_WERKS
+
+*&---------------------------------------------------------------------*
+*&      Form  DATA_CONVERSION
+*&---------------------------------------------------------------------*
+*       データ変換処理
+*----------------------------------------------------------------------*
+*      <--O_ST_FILE  ファイル データ
+*----------------------------------------------------------------------*
+FORM DATA_CONVERSION  CHANGING O_ST_FILE TYPE TYP_FILE.
+
+* DocType
+TRANSLATE O_ST_FILE-BSART TO UPPER CASE.
+
+* Vendor
+* * 大文字変換
+TRANSLATE O_ST_FILE-LIFNR TO UPPER CASE.
+* * 変換ルーチン
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = O_ST_FILE-LIFNR
+IMPORTING
+OUTPUT = O_ST_FILE-LIFNR.
+
+* PurchOrg
+TRANSLATE O_ST_FILE-EKORG TO UPPER CASE.
+
+* PurchGroup
+TRANSLATE O_ST_FILE-EKGRP TO UPPER CASE.
+
+* PurchaseOrder
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = O_ST_FILE-EBELN
+IMPORTING
+OUTPUT = O_ST_FILE-EBELN.
+
+* SupplyingPlant
+TRANSLATE O_ST_FILE-RESWK TO UPPER CASE.
+
+* Item
+TRANSLATE O_ST_FILE-EBELP TO UPPER CASE.
+
+* AcctAssgtCat
+TRANSLATE O_ST_FILE-KNTTP TO UPPER CASE.
+
+* ItemCategory
+TRANSLATE O_ST_FILE-PSTYP TO UPPER CASE.
+
+* Material
+TRANSLATE O_ST_FILE-MATNR TO UPPER CASE.
+
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT        = O_ST_FILE-MATNR
+IMPORTING
+OUTPUT       = O_ST_FILE-MATNR
+EXCEPTIONS
+LENGTH_ERROR = 1
+OTHERS       = 2.
+
+* Plant
+TRANSLATE O_ST_FILE-WERKS TO UPPER CASE.
+
+* SLoc
+TRANSLATE O_ST_FILE-LGORT TO UPPER CASE.
+
+* ReturnItem
+TRANSLATE O_ST_FILE-RETPO TO UPPER CASE.
+
+* FreeItem
+TRANSLATE O_ST_FILE-UMSON TO UPPER CASE.
+
+* CostCenter
+TRANSLATE O_ST_FILE-KOSTL TO UPPER CASE.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = O_ST_FILE-KOSTL
+IMPORTING
+OUTPUT = O_ST_FILE-KOSTL.
+
+* Address
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = O_ST_FILE-ADRN2
+IMPORTING
+OUTPUT = O_ST_FILE-ADRN2.
+
+ENDFORM.                    " DATA_CONVERSION
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATE
+*&---------------------------------------------------------------------*
+*       日付形式チェック
+*----------------------------------------------------------------------*
+*      -->I_W_INDEX  行ID
+*      -->I_ST_FILE  ファイル データ
+*      <--O_W_EFLG   Error Flag
+*      <--O_TD_MSG   Error message table
+*----------------------------------------------------------------------*
+FORM CHECK_DATE  USING    I_W_INDEX   TYPE SY-INDEX
+I_ST_FILE   TYPE TYP_FILE
+CHANGING O_W_EFLG    TYPE C
+O_TD_MSG    TYPE TYP_TD_MSG.
+DATA:
+LW_ROW   TYPE STRING,
+LW_INDEX TYPE STRING,
+LW_MSG   TYPE STRING,
+LST_MSG  TYPE TYP_MSG,
+LW_DATE  TYPE SY-DATUM.
+
+LW_INDEX = I_W_INDEX.
+CONDENSE LW_INDEX.
+* DocDate
+IF I_ST_FILE-BEDAT IS NOT INITIAL.
+LW_DATE = I_ST_FILE-BEDAT.
+CALL FUNCTION 'DATE_CHECK_PLAUSIBILITY'
+EXPORTING
+DATE                      = LW_DATE
+EXCEPTIONS
+PLAUSIBILITY_CHECK_FAILED = 1
+OTHERS                    = 2.
+
+IF SY-SUBRC <> 0.
+MESSAGE S092(ZMEGSD01) WITH I_W_INDEX TEXT-E02
+INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+ENDIF.
+
+* DeliveryDate
+CLEAR LW_DATE.
+LW_DATE = I_ST_FILE-EINDT.
+CALL FUNCTION 'DATE_CHECK_PLAUSIBILITY'
+EXPORTING
+DATE                      = LW_DATE
+EXCEPTIONS
+PLAUSIBILITY_CHECK_FAILED = 1
+OTHERS                    = 2.
+
+IF SY-SUBRC <> 0.
+CLEAR: LW_ROW,
+LW_MSG,
+LST_MSG.
+MESSAGE S092(ZMEGSD01) WITH I_W_INDEX TEXT-E03
+INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+ENDFORM.                    " CHECK_DATE
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_NUMBER
+*&---------------------------------------------------------------------*
+*       数値形式チェック
+*----------------------------------------------------------------------*
+*      -->I_W_INDEX  行ID
+*      -->I_ST_FILE  ファイル データ
+*      <--O_W_EFLG   Error Flag
+*      <--O_TD_MSG   Error message table
+*----------------------------------------------------------------------*
+FORM CHECK_NUMBER  USING    I_W_INDEX   TYPE SY-INDEX
+I_ST_FILE   TYPE TYP_FILE
+CHANGING O_W_EFLG    TYPE C
+O_TD_MSG    TYPE TYP_TD_MSG.
+
+DATA:
+LW_ROW   TYPE STRING,
+LW_INDEX TYPE STRING,
+LW_MSG   TYPE STRING,
+LST_MSG  TYPE TYP_MSG,
+**** START ADD BY ISID REN 2015/05/27 ****
+LW_S     TYPE STRING,
+**** END ADD BY ISID REN 2015/05/27 ****
+LW_HTYPE TYPE DD01V-DATATYPE.
+
+LW_INDEX = I_W_INDEX.
+CONDENSE LW_INDEX.
+
+* Item
+CALL FUNCTION 'NUMERIC_CHECK'
+EXPORTING
+STRING_IN = I_ST_FILE-EBELP
+IMPORTING
+HTYPE     = LW_HTYPE.
+IF LW_HTYPE <> CNS_HTYPE.
+CLEAR: LW_ROW,
+LW_MSG,
+LST_MSG.
+MESSAGE S093(ZMEGSD01) WITH I_W_INDEX TEXT-E08
+INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+* POQuantity
+**** START UPD BY ISID REN 2015/05/27 ****
+*  CALL FUNCTION 'NUMERIC_CHECK'
+*    EXPORTING
+*      STRING_IN = I_ST_FILE-MENGE
+*    IMPORTING
+*      HTYPE     = LW_HTYPE.
+*  IF LW_HTYPE <> CNS_HTYPE.
+CALL FUNCTION 'ZEG_ZZ_NUMERIC_CHECK'
+EXPORTING
+IMPNUMERIC = I_ST_FILE-MENGE
+EXCEPTIONS
+NOTNUMERIC = 1
+OTHERS     = 2.
+IF SY-SUBRC <> 0.
+**** END UPD BY ISID REN 2015/05/27 ****
+CLEAR: LW_ROW,
+LW_MSG,
+LST_MSG.
+MESSAGE S093(ZMEGSD01) WITH I_W_INDEX TEXT-E04
+INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+* NetPrice
+**** START UPD BY ISID REN 2015/05/27 ****
+*  CALL FUNCTION 'NUMERIC_CHECK'
+*    EXPORTING
+*      STRING_IN = I_ST_FILE-NETPR
+*    IMPORTING
+*      HTYPE     = LW_HTYPE.
+*  IF LW_HTYPE <> CNS_HTYPE.
+CALL FUNCTION 'ZEG_ZZ_NUMERIC_CHECK'
+EXPORTING
+IMPNUMERIC = I_ST_FILE-NETPR
+EXCEPTIONS
+NOTNUMERIC = 1
+OTHERS     = 2.
+IF SY-SUBRC <> 0.
+**** END UPD BY ISID REN 2015/05/27 ****
+CLEAR: LW_ROW,
+LW_MSG,
+LST_MSG.
+MESSAGE S093(ZMEGSD01) WITH I_W_INDEX TEXT-E05
+INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+**** START UPD BY ISID REN 2015/05/27 ****
+ELSE.
+LW_S = I_ST_FILE-NETPR.
+CALL FUNCTION 'ZEG_ZZ_CURRENCY_DECIMALS_CHK'
+EXPORTING
+IMPWAERS = I_ST_FILE-WAERS
+IMPVALUE = LW_S
+EXCEPTIONS
+ERROR    = 1
+OTHERS   = 2.
+
+IF SY-SUBRC <> 0.
+CLEAR: LW_ROW,
+LST_MSG.
+MESSAGE ID   SY-MSGID
+TYPE   SY-MSGTY
+NUMBER SY-MSGNO
+WITH   SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+INTO   LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+**** END UPD BY ISID REN 2015/05/27 ****
+ENDIF.
+
+* PriceUnit
+CALL FUNCTION 'NUMERIC_CHECK'
+EXPORTING
+STRING_IN = I_ST_FILE-PEINH
+IMPORTING
+HTYPE     = LW_HTYPE.
+IF LW_HTYPE <> CNS_HTYPE.
+CLEAR: LW_ROW,
+LW_MSG,
+LST_MSG.
+MESSAGE S093(ZMEGSD01) WITH I_W_INDEX TEXT-E06
+INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+* Address
+CALL FUNCTION 'NUMERIC_CHECK'
+EXPORTING
+STRING_IN = I_ST_FILE-ADRN2
+IMPORTING
+HTYPE     = LW_HTYPE.
+IF LW_HTYPE <> CNS_HTYPE.
+CLEAR: LW_ROW,
+LW_MSG,
+LST_MSG.
+MESSAGE S093(ZMEGSD01) WITH I_W_INDEX TEXT-E07
+INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+ENDFORM.                    " CHECK_NUMBER
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_RELATION1
+*&---------------------------------------------------------------------*
+*       相関チェック①
+*----------------------------------------------------------------------*
+*      -->I_W_INDEX  行ID
+*      -->I_ST_FILE  ファイル データ
+*      <--O_W_EFLG   Error Flag
+*      <--O_TD_MSG   Error message table
+*----------------------------------------------------------------------*
+FORM CHECK_RELATION1  USING    I_W_INDEX   TYPE SY-INDEX
+I_ST_FILE   TYPE TYP_FILE
+CHANGING O_W_EFLG    TYPE C
+O_TD_MSG    TYPE TYP_TD_MSG.
+
+DATA:
+LW_ROW   TYPE STRING,
+LW_INDEX TYPE STRING,
+LW_MSG   TYPE STRING,
+LST_MSG  TYPE TYP_MSG.
+
+LW_INDEX = I_W_INDEX.
+CONDENSE LW_INDEX.
+
+
+* NetPriceCurrency, NetPrice,PriceUnit check
+IF
+**** START DEL BY ISID17 2015/05/15 ****
+*    I_ST_FILE-WAERS IS NOT INITIAL OR
+**** END DEL BY ISID17 2015/05/15 ****
+I_ST_FILE-NETPR IS NOT INITIAL OR
+I_ST_FILE-PEINH IS NOT INITIAL.
+
+IF I_ST_FILE-WAERS IS INITIAL OR
+I_ST_FILE-NETPR IS INITIAL OR
+I_ST_FILE-PEINH IS INITIAL.
+MESSAGE S094(ZMEGSD01) WITH I_W_INDEX INTO LW_MSG.
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_RELATION1
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_EINE
+*&---------------------------------------------------------------------*
+*       購買情報マスタ存在チェック
+*----------------------------------------------------------------------*
+*      -->I_W_INDEX  行ID
+*      -->I_ST_FILE  ファイル データ
+*      <--O_W_EFLG   Error Flag
+*      <--O_TD_MSG   Error message table
+*----------------------------------------------------------------------*
+FORM CHECK_EINE  USING    I_W_INDEX   TYPE SY-INDEX
+I_ST_FILE   TYPE TYP_FILE
+CHANGING O_W_EFLG    TYPE C
+O_TD_MSG    TYPE TYP_TD_MSG.
+
+DATA:
+LW_NFLG  TYPE C,
+LW_ROW   TYPE STRING,
+LW_INDEX TYPE STRING,
+LW_ESOKZ TYPE ESOKZ,
+LW_MSG   TYPE STRING,
+LW_PMSG  TYPE STRING,
+LST_MSG  TYPE TYP_MSG.
+
+LW_INDEX = I_W_INDEX.
+CONDENSE LW_INDEX.
+
+IF I_ST_FILE-BSART = 'UB'.
+LW_NFLG = ABAP_ON.
+ENDIF.
+
+IF ( I_ST_FILE-BSART = 'NB' OR
+I_ST_FILE-BSART = 'ZB' ) AND
+I_ST_FILE-KNTTP IS NOT INITIAL.
+LW_NFLG = ABAP_ON.
+ENDIF.
+
+IF LW_NFLG <> ABAP_ON.
+*   購買情報区分
+IF I_ST_FILE-PSTYP IS INITIAL.
+LW_ESOKZ = CNS_ESOKZ0.
+ELSEIF I_ST_FILE-PSTYP = CNS_PSTYP_L.
+LW_ESOKZ = CNS_ESOKZ3.
+ENDIF.
+
+SELECT COUNT(*)
+FROM EINA
+INNER JOIN EINE
+ON EINA~INFNR = EINE~INFNR
+WHERE EINA~MATNR = I_ST_FILE-MATNR
+AND EINA~LIFNR = I_ST_FILE-LIFNR
+AND EINE~EKORG = I_ST_FILE-EKORG
+AND EINE~ESOKZ = LW_ESOKZ
+AND EINE~WERKS = I_ST_FILE-WERKS.
+IF SY-SUBRC <> 0.
+
+CONCATENATE TEXT-036 I_ST_FILE-EKORG TEXT-037 I_ST_FILE-WERKS
+INTO LW_PMSG SEPARATED BY SPACE.
+MESSAGE S109(ZMEGSD01) WITH I_ST_FILE-LIFNR
+I_ST_FILE-MATNR LW_PMSG LW_ESOKZ INTO LW_MSG.
+
+CONCATENATE TEXT-033 LW_INDEX TEXT-034 TEXT-035 I_ST_FILE-EBELP
+INTO LW_ROW SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_ROW.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+O_W_EFLG = ABAP_ON.
+RETURN.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_EINE
+
+*&---------------------------------------------------------------------*
+*&      Form  PO_CREATE_EDIT
+*&---------------------------------------------------------------------*
+*       A-4-1-1．BAPIのパラメータ設定
+*----------------------------------------------------------------------*
+*      -->I_ST_FILE  text
+*      <--O_ST_POHEADER  text
+*      <--O_ST__POHEADERX  text
+*      <--O_W_TESTRUN  text
+*      <--O_TD_POITEM  text
+*      <--O_TD_POITEMX  text
+*      <--O_TD_POADDRDELIVERY  text
+*      <--O_TD_POSCHEDULE  text
+*      <--O_TD_POSCHEDULEX  text
+*      <--O_TD_POACCOUNT  text
+*      <--O_TD_POACCOUNTX  text
+**** START ADD BY ISID17 2015/05/25 ****
+*      <--O_TD_POCOND      条件 (明細)
+*      <--O_TD_POCONDX     条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+*      <--O_TD_POTEXTITEM  text
+*----------------------------------------------------------------------*
+FORM PO_CREATE_EDIT
+USING    I_ST_FILE  TYPE TYP_FILE
+CHANGING O_ST_POHEADER       TYPE BAPIMEPOHEADER
+O_ST_POHEADERX      TYPE BAPIMEPOHEADERX
+O_TD_POITEM         TYPE TYP_TD_POITEM
+O_TD_POITEMX        TYPE TYP_TD_POITEMX
+O_TD_POADDRDELIVERY TYPE TYP_TD_POADDRDELIVERY
+O_TD_POSCHEDULE     TYPE TYP_TD_POSCHEDULE
+O_TD_POSCHEDULEX    TYPE TYP_TD_POSCHEDULEX
+O_TD_POACCOUNT      TYPE TYP_TD_POACCOUNT
+O_TD_POACCOUNTX     TYPE TYP_TD_POACCOUNTX
+**** START ADD BY ISID17 2015/05/25 ****
+O_TD_POCOND         TYPE BAPIMEPOCOND_TP
+O_TD_POCONDX        TYPE BAPIMEPOCONDX_TP
+**** END ADD BY ISID17 2015/05/25 ****
+O_TD_POTEXTITEM     TYPE TYP_TD_POTEXTITEM.
+
+DATA:
+LST_POITEM         TYPE BAPIMEPOITEM,
+LST_POITEMX        TYPE BAPIMEPOITEMX,
+LST_POADDRDELIVERY TYPE BAPIMEPOADDRDELIVERY,
+LST_POSCHEDULE     TYPE BAPIMEPOSCHEDULE,
+LST_POSCHEDULEX    TYPE BAPIMEPOSCHEDULX,
+LST_POACCOUNT      TYPE BAPIMEPOACCOUNT,
+LST_POACCOUNTX     TYPE BAPIMEPOACCOUNTX,
+**** START ADD BY ISID17 2015/05/25 ****
+LST_POCOND         TYPE BAPIMEPOCOND,
+LST_POCONDX        TYPE BAPIMEPOCONDX,
+**** END ADD BY ISID17 2015/05/25 ****
+LST_POTEXTITEM     TYPE BAPIMEPOTEXT.
+
+* A-4-1-1．BAPIのパラメータ設定
+IF O_ST_POHEADER IS INITIAL.
+O_ST_POHEADER-DOC_TYPE   = I_ST_FILE-BSART.   "購買伝票タイプ
+O_ST_POHEADER-VENDOR     = I_ST_FILE-LIFNR.   "仕入先勘定コード
+O_ST_POHEADER-INCOTERMS2 = I_ST_FILE-INCO2.   "Incoterms2
+O_ST_POHEADER-DOC_DATE   = I_ST_FILE-BEDAT.   "購買伝票日付
+O_ST_POHEADER-PURCH_ORG  = I_ST_FILE-EKORG.   "購買組織
+O_ST_POHEADER-PUR_GROUP  = I_ST_FILE-EKGRP.   "購買グループ
+O_ST_POHEADER-CURRENCY   = I_ST_FILE-WAERS.   "通貨コード
+O_ST_POHEADER-COLLECT_NO = I_ST_FILE-SUBMI.   "一括番号
+O_ST_POHEADER-SUPPL_PLNT = I_ST_FILE-RESWK.   "供給 (出庫) プラント
+
+IF I_ST_FILE-BSART <> SPACE .
+O_ST_POHEADERX-DOC_TYPE   = ABAP_ON.          "購買伝票タイプ
+ENDIF.
+IF I_ST_FILE-LIFNR <> SPACE .
+O_ST_POHEADERX-VENDOR     = ABAP_ON.          "仕入先勘定コード
+ENDIF.
+IF I_ST_FILE-INCO2 <> SPACE .
+O_ST_POHEADERX-INCOTERMS2  = ABAP_ON.         "Incoterms2
+ENDIF.
+IF I_ST_FILE-BEDAT <> SPACE .
+O_ST_POHEADERX-DOC_DATE   = ABAP_ON.          "購買伝票日付
+ENDIF.
+IF I_ST_FILE-EKORG <> SPACE .
+O_ST_POHEADERX-PURCH_ORG  = ABAP_ON.          "購買組織
+ENDIF.
+IF I_ST_FILE-EKGRP <> SPACE .
+O_ST_POHEADERX-PUR_GROUP  = ABAP_ON.          "購買グループ
+ENDIF.
+
+IF I_ST_FILE-WAERS <> SPACE.
+O_ST_POHEADERX-CURRENCY   = ABAP_ON.          "通貨コード
+ENDIF.
+
+IF I_ST_FILE-SUBMI <> SPACE .
+O_ST_POHEADERX-COLLECT_NO = ABAP_ON.         "一括番号
+ENDIF.
+IF I_ST_FILE-RESWK <> SPACE .
+O_ST_POHEADERX-SUPPL_PLNT = ABAP_ON.         "供給 (出庫) プラント
+ENDIF.
+
+ENDIF.
+
+LST_POITEM-PO_ITEM    = I_ST_FILE-EBELP.    "購買伝票の明細番号
+LST_POITEM-ACCTASSCAT = I_ST_FILE-KNTTP.    "勘定設定カテゴリ
+LST_POITEM-ITEM_CAT   = I_ST_FILE-PSTYP.    "購買伝票の明細カテゴリ
+LST_POITEM-MATERIAL   = I_ST_FILE-MATNR.    "品目コード
+LST_POITEM-SHORT_TEXT = I_ST_FILE-MAKTX.    "テキスト (短)
+LST_POITEM-QUANTITY   = I_ST_FILE-MENGE.    "購買発注量
+LST_POITEM-PO_UNIT    = I_ST_FILE-MEINS.    "発注単位
+LST_POITEM-NET_PRICE  = I_ST_FILE-NETPR.    "NetPrice
+LST_POITEM-PRICE_UNIT = I_ST_FILE-PEINH.    "価格単位
+LST_POITEM-PLANT      = I_ST_FILE-WERKS.    "プラント
+LST_POITEM-STGE_LOC   = I_ST_FILE-LGORT.    "保管場所
+LST_POITEM-RET_ITEM   = I_ST_FILE-RETPO.    "返品明細
+LST_POITEM-FREE_ITEM  = I_ST_FILE-UMSON.    "無償明細
+APPEND LST_POITEM TO O_TD_POITEM.
+
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POITEMX-PO_ITEM    = I_ST_FILE-EBELP.   "購買伝票の明細番号
+ENDIF.
+IF I_ST_FILE-KNTTP <> SPACE.
+LST_POITEMX-ACCTASSCAT = ABAP_ON.           "勘定設定カテゴリ
+ENDIF.
+IF I_ST_FILE-PSTYP <> SPACE.
+LST_POITEMX-ITEM_CAT   = ABAP_ON.           "購買伝票の明細カテゴリ
+ENDIF.
+IF I_ST_FILE-MATNR <> SPACE.
+LST_POITEMX-MATERIAL   = ABAP_ON.           "品目コード
+ENDIF.
+IF I_ST_FILE-MAKTX <> SPACE.
+LST_POITEMX-SHORT_TEXT = ABAP_ON.           "テキスト (短)
+ENDIF.
+IF I_ST_FILE-MENGE <> SPACE.
+LST_POITEMX-QUANTITY   = ABAP_ON.           "購買発注量
+ENDIF.
+IF I_ST_FILE-MEINS <> SPACE.
+LST_POITEMX-PO_UNIT    = ABAP_ON.           "発注単位
+ENDIF.
+IF I_ST_FILE-NETPR <> SPACE.
+LST_POITEMX-NET_PRICE  = ABAP_ON.           "NetPrice
+ENDIF.
+IF I_ST_FILE-PEINH <> SPACE.
+LST_POITEMX-PRICE_UNIT = ABAP_ON.           "価格単位
+ENDIF.
+IF I_ST_FILE-WERKS <> SPACE.
+LST_POITEMX-PLANT      = ABAP_ON.           "プラント
+ENDIF.
+IF I_ST_FILE-LGORT <> SPACE.
+LST_POITEMX-STGE_LOC   = ABAP_ON.           "保管場所
+ENDIF.
+IF I_ST_FILE-RETPO <> SPACE.
+LST_POITEMX-RET_ITEM   = ABAP_ON.           "返品明細
+ENDIF.
+IF I_ST_FILE-UMSON <> SPACE.
+LST_POITEMX-FREE_ITEM  = ABAP_ON.           "無償明細
+ENDIF.
+APPEND LST_POITEMX TO O_TD_POITEMX.
+
+LST_POSCHEDULE-PO_ITEM        = I_ST_FILE-EBELP.   "購買伝票の明細番号
+LST_POSCHEDULE-SCHED_LINE     = CNS_SCHED.         "納入日程行
+LST_POSCHEDULE-DEL_DATCAT_EXT = CNS_LPEIN.         "納入期日カテゴリ
+LST_POSCHEDULE-DELIVERY_DATE  = I_ST_FILE-EINDT.   "納入日付
+LST_POSCHEDULE-QUANTITY       = I_ST_FILE-MENGE.   "計画数量
+APPEND LST_POSCHEDULE TO O_TD_POSCHEDULE.
+
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POSCHEDULEX-PO_ITEM     = I_ST_FILE-EBELP.  "購買伝票の明細番号
+ENDIF.
+
+**** START UPD BY ISID212015/06/04 ****
+*  LST_POSCHEDULEX-SCHED_LINE     = ABAP_ON.         "納入日程行
+LST_POSCHEDULEX-SCHED_LINE     = CNS_SCHED.         "納入日程行
+**** END UPD BY ISID21 2015/06/04 ****
+LST_POSCHEDULEX-DEL_DATCAT_EXT = ABAP_ON.         "納入期日カテゴリ
+IF I_ST_FILE-EINDT <> SPACE.
+LST_POSCHEDULEX-DELIVERY_DATE  = ABAP_ON.       "納入日付
+ENDIF.
+IF I_ST_FILE-MENGE <> SPACE.
+LST_POSCHEDULEX-QUANTITY       = ABAP_ON.       "計画数量
+ENDIF.
+APPEND LST_POSCHEDULEX TO O_TD_POSCHEDULEX.
+
+IF I_ST_FILE-ADRN2 IS NOT INITIAL.
+LST_POADDRDELIVERY-PO_ITEM = I_ST_FILE-EBELP.   "購買伝票の明細番号
+LST_POADDRDELIVERY-ADDR_NO = I_ST_FILE-ADRN2.   "アドレス番号
+APPEND LST_POADDRDELIVERY TO O_TD_POADDRDELIVERY.
+ENDIF.
+
+IF I_ST_FILE-KOSTL IS NOT INITIAL.
+LST_POACCOUNT-PO_ITEM    = I_ST_FILE-EBELP.  "購買伝票の明細番号
+LST_POACCOUNT-SERIAL_NO  = CNS_SNO.          "勘定設定の連続番号
+LST_POACCOUNT-COSTCENTER = I_ST_FILE-KOSTL.  "原価センタ
+APPEND LST_POACCOUNT TO O_TD_POACCOUNT.
+
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POACCOUNTX-PO_ITEM    = I_ST_FILE-EBELP."購買伝票の明細番号
+ENDIF.
+LST_POACCOUNTX-SERIAL_NO  = CNS_SNO.        "勘定設定の連続番号
+IF I_ST_FILE-KOSTL <> SPACE.
+LST_POACCOUNTX-COSTCENTER = ABAP_ON.        "原価センタ
+ENDIF.
+
+APPEND LST_POACCOUNTX TO O_TD_POACCOUNTX.
+ENDIF.
+
+* TextPORemarks
+IF I_ST_FILE-RMTXT IS NOT INITIAL.
+LST_POTEXTITEM-PO_ITEM   = I_ST_FILE-EBELP. "購買伝票の明細番号
+LST_POTEXTITEM-TEXT_ID   = CNS_TID1.        "テキスト ID: F02
+LST_POTEXTITEM-TEXT_FORM = CNS_TFMT.        "タグ列
+LST_POTEXTITEM-TEXT_LINE = I_ST_FILE-RMTXT. "テキスト行
+APPEND LST_POTEXTITEM TO O_TD_POTEXTITEM.
+ENDIF.
+
+* TextBackOrderListRemarks
+IF I_ST_FILE-RMTXT IS NOT INITIAL.
+LST_POTEXTITEM-PO_ITEM   = I_ST_FILE-EBELP. "購買伝票の明細番号
+LST_POTEXTITEM-TEXT_ID   = CNS_TID2.        "テキスト ID : F04
+LST_POTEXTITEM-TEXT_FORM = CNS_TFMT.        "タグ列
+LST_POTEXTITEM-TEXT_LINE = I_ST_FILE-LSTRK. "テキスト行
+APPEND LST_POTEXTITEM TO O_TD_POTEXTITEM.
+ENDIF.
+
+**** START ADD BY ISID17 2015/05/25 **** TODOTEST
+* 条件 (明細、変更ツールバー)
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POCOND-ITM_NUMBER+1(5) = I_ST_FILE-EBELP.    "条件明細番号
+LST_POCOND-COND_TYPE       = CNS_COND_TYPE_ZPB1. "条件タイプ
+LST_POCOND-COND_VALUE      = I_ST_FILE-NETPR.    "条件レート
+LST_POCOND-CURRENCY        = I_ST_FILE-WAERS.    "通貨コード
+LST_POCOND-COND_UNIT       = I_ST_FILE-MEINS.    "条件単位
+LST_POCOND-COND_P_UNT      = I_ST_FILE-PEINH.    "価格条件単位
+LST_POCOND-CHANGE_ID       = CNS_CHANGE_ID_U.    "変更タイプ
+
+APPEND LST_POCOND TO O_TD_POCOND.
+
+LST_POCONDX-ITM_NUMBER+1(5) = I_ST_FILE-EBELP.   "条件明細番号
+LST_POCONDX-COND_TYPE      = ABAP_ON.            "条件タイプ
+
+IF I_ST_FILE-NETPR <> SPACE.
+LST_POCONDX-COND_VALUE   = ABAP_ON.            "条件レート
+ENDIF.
+
+IF I_ST_FILE-WAERS <> SPACE.                     "通貨コード
+LST_POCONDX-CURRENCY     = ABAP_ON.
+ENDIF.
+
+IF I_ST_FILE-MEINS <> SPACE.                     "条件単位
+LST_POCONDX-COND_UNIT    = ABAP_ON.
+ENDIF.
+
+IF I_ST_FILE-PEINH <> SPACE.                     "価格条件単位
+LST_POCONDX-COND_P_UNT   = ABAP_ON.
+ENDIF.
+
+LST_POCONDX-CHANGE_ID      = ABAP_ON.            "変更タイプ
+
+APPEND LST_POCONDX TO O_TD_POCONDX.
+ENDIF.
+**** END ADD BY ISID17 2015/05/25 ****
+
+* TextLabelRemarks
+IF I_ST_FILE-RMTXT IS NOT INITIAL.
+LST_POTEXTITEM-PO_ITEM   = I_ST_FILE-EBELP. "購買伝票の明細番号
+LST_POTEXTITEM-TEXT_ID   = CNS_TID3.        "テキスト ID : F03
+LST_POTEXTITEM-TEXT_FORM = CNS_TFMT.        "タグ列
+LST_POTEXTITEM-TEXT_LINE = I_ST_FILE-LRTXT. "テキスト行
+APPEND LST_POTEXTITEM TO O_TD_POTEXTITEM.
+ENDIF.
+
+ENDFORM.                    " PO_CREATE_EDIT
+*&---------------------------------------------------------------------*
+*&      Form  PO_CREATE_EXECUTE
+*&---------------------------------------------------------------------*
+*       BAPIの実行
+*----------------------------------------------------------------------*
+*      -->I_w_INTEX           Index
+*      -->I_ST_POHEADER       ヘッダデータ
+*      -->I_ST_POHEADERX      ヘッダデータ (変更ツールバー)
+*      -->I_TD_POITEM         明細データ
+*      -->I_TD_POITEMX        明細データ (変更ツールバー)
+*      -->I_TD_POADDRDELIVERY 納入先住所 (明細)
+*      -->I_TD_POSCHEDULE     納入日程
+*      -->I_TD_POSCHEDULEX    納入日程行 (変更ツールバー)
+*      -->I_TD_POACCOUNT      勘定設定項目
+*      -->I_TD_POACCOUNTX     勘定設定項目 (変更ツールバー)
+*      -->I_TD_POTEXTITEM     明細テキスト
+**** START ADD BY ISID17 2015/05/25 ****
+*      -->I_TD_POCOND         条件 (明細)
+*      -->I_TD_POCONDX        条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+*      <--O_W_EFLG            Error Flag
+*      <--O_TD_MSG            Error message table
+*----------------------------------------------------------------------*
+FORM PO_CREATE_EXECUTE
+USING I_W_INDEX            TYPE SY-INDEX
+I_ST_POHEADER        TYPE BAPIMEPOHEADER
+I_ST_POHEADERX       TYPE BAPIMEPOHEADERX
+I_TD_POITEM          TYPE TYP_TD_POITEM
+I_TD_POITEMX         TYPE TYP_TD_POITEMX
+I_TD_POADDRDELIVERY  TYPE TYP_TD_POADDRDELIVERY
+I_TD_POSCHEDULE      TYPE TYP_TD_POSCHEDULE
+I_TD_POSCHEDULEX     TYPE TYP_TD_POSCHEDULEX
+I_TD_POACCOUNT       TYPE TYP_TD_POACCOUNT
+I_TD_POACCOUNTX      TYPE TYP_TD_POACCOUNTX
+I_TD_POTEXTITEM      TYPE TYP_TD_POTEXTITEM
+**** START ADD BY ISID17 2015/05/25 ****
+I_TD_POCOND          TYPE BAPIMEPOCOND_TP
+I_TD_POCONDX         TYPE BAPIMEPOCONDX_TP
+**** END ADD BY ISID17 2015/05/25 ****
+CHANGING O_W_EFLG          TYPE C
+O_TD_MSG          TYPE TYP_TD_MSG.
+DATA:
+LW_TRUN     TYPE BAPIFLAG-BAPIFLAG,
+LW_PO       TYPE BAPIMEPOHEADER-PO_NUMBER,
+LTD_RETURN  TYPE TABLE OF BAPIRET2,
+LST_RETURN  TYPE BAPIRET2,
+LW_POITEM   LIKE LINE OF I_TD_POITEM,
+LW_MSG      TYPE STRING,
+LW_ROW      TYPE STRING,
+LW_RMSG     TYPE STRING,
+LW_ITEM     TYPE STRING,
+LW_ITEM_I   TYPE I,
+LST_MSG     TYPE TYP_MSG.
+
+IF P_TSTCK = ABAP_ON.
+LW_TRUN = ABAP_ON.
+ENDIF.
+
+CALL FUNCTION 'BAPI_PO_CREATE1'
+EXPORTING
+POHEADER         = I_ST_POHEADER
+POHEADERX        = I_ST_POHEADERX
+TESTRUN          = LW_TRUN
+IMPORTING
+EXPPURCHASEORDER = LW_PO
+TABLES
+RETURN           = LTD_RETURN
+POITEM           = I_TD_POITEM
+POITEMX          = I_TD_POITEMX
+POADDRDELIVERY   = I_TD_POADDRDELIVERY
+POSCHEDULE       = I_TD_POSCHEDULE
+POSCHEDULEX      = I_TD_POSCHEDULEX
+POACCOUNT        = I_TD_POACCOUNT
+POACCOUNTX       = I_TD_POACCOUNTX
+**** START ADD BY ISID17 2015/05/25 ****
+POCOND           = I_TD_POCOND  "条件 (明細)
+POCONDX          = I_TD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+POTEXTITEM       = I_TD_POTEXTITEM.
+
+*  w_tnum = w_tnum + 1.      "Total number
+LW_ROW = I_W_INDEX.
+CONDENSE LW_ROW.
+
+* BAPIから返した「RETURN」にエラーメッセージ存在する場合
+LOOP AT LTD_RETURN INTO LST_RETURN
+WHERE TYPE = CNS_MSG_E OR
+TYPE = CNS_MSG_A.
+**** START ADD 2015/06/18 ISID18 ****
+O_W_EFLG = ABAP_ON.
+EXIT.
+**** END ADD 2015/06/18 ISID18 ****
+ENDLOOP.
+
+IF SY-SUBRC = 0.
+W_ENUM = W_ENUM + 1.            "Error number
+
+LOOP AT LTD_RETURN INTO LST_RETURN
+WHERE TYPE = CNS_MSG_E OR
+TYPE = CNS_MSG_A.
+*     Output check message
+IF LST_RETURN-ID IS NOT INITIAL AND
+LST_RETURN-TYPE IS NOT INITIAL AND
+LST_RETURN-NUMBER IS NOT INITIAL.
+MESSAGE ID LST_RETURN-ID TYPE LST_RETURN-TYPE
+NUMBER LST_RETURN-NUMBER
+WITH LST_RETURN-MESSAGE_V1
+LST_RETURN-MESSAGE_V2
+LST_RETURN-MESSAGE_V3
+LST_RETURN-MESSAGE_V4
+INTO LW_MSG.
+
+*       データ更新に失敗しました。(MSG = &1 )
+MESSAGE S098(ZMEGSD01) WITH I_W_INDEX LW_MSG
+INTO LW_MSG.
+CLEAR LW_RMSG.
+
+*       Get Item
+READ TABLE I_TD_POITEM INTO LW_POITEM INDEX LST_RETURN-ROW.
+IF SY-SUBRC = 0 AND
+LW_POITEM-PO_ITEM IS NOT INITIAL.
+LW_ITEM_I = LW_POITEM-PO_ITEM.
+LW_ITEM = LW_ITEM_I.
+ENDIF.
+CONCATENATE TEXT-033 LW_ROW TEXT-034 TEXT-035 LW_ITEM
+INTO LW_RMSG SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-008.
+LST_MSG-COL3 = LW_RMSG.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+ENDIF.
+ENDLOOP.
+IF P_TSTCK <> ABAP_ON..
+CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+ENDIF.
+
+ELSE.
+W_SNUM = W_SNUM + 1.            "Sucessful number
+*   データ登録が正常終了しました。( PO= &1)
+MESSAGE S097(ZMEGSD01) WITH I_W_INDEX LW_PO
+INTO LW_MSG.
+CLEAR LW_RMSG.
+CONCATENATE TEXT-033 LW_ROW TEXT-034 TEXT-035
+INTO LW_RMSG SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-009.
+LST_MSG-COL3 = LW_RMSG.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+
+LOOP AT LTD_RETURN INTO LST_RETURN.
+*     Output check message
+IF LST_RETURN-ID IS NOT INITIAL AND
+LST_RETURN-TYPE IS NOT INITIAL AND
+LST_RETURN-NUMBER IS NOT INITIAL.
+MESSAGE ID LST_RETURN-ID TYPE LST_RETURN-TYPE
+NUMBER LST_RETURN-NUMBER
+WITH LST_RETURN-MESSAGE_V1
+LST_RETURN-MESSAGE_V2
+LST_RETURN-MESSAGE_V3
+LST_RETURN-MESSAGE_V4
+INTO LW_MSG.
+CLEAR LW_RMSG.
+
+*       Get Item
+READ TABLE I_TD_POITEM INTO LW_POITEM INDEX LST_RETURN-ROW.
+IF SY-SUBRC = 0 AND
+LW_POITEM-PO_ITEM IS NOT INITIAL.
+LW_ITEM_I = LW_POITEM-PO_ITEM.
+LW_ITEM = LW_ITEM_I.
+ENDIF.
+CONCATENATE TEXT-033 LW_ROW TEXT-034 TEXT-035 LW_ITEM
+INTO LW_RMSG SEPARATED BY SPACE.
+
+CASE LST_RETURN-TYPE.
+WHEN CNS_MSG_E OR
+CNS_MSG_A.
+LST_MSG-COL2 = TEXT-008.
+WHEN CNS_MSG_W.
+LST_MSG-COL2 = TEXT-030.
+WHEN OTHERS.
+LST_MSG-COL2 = TEXT-009.
+ENDCASE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL3 = LW_RMSG.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+ENDIF.
+ENDLOOP.
+IF P_TSTCK <> ABAP_ON..
+CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+EXPORTING
+WAIT = ABAP_ON.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " PO_CREATE_EXECUTE
+*&---------------------------------------------------------------------*
+*&      Form  PO_CHANGE_EDIT
+*&---------------------------------------------------------------------*
+*       A-4-1-1．BAPIのパラメータ設定
+*----------------------------------------------------------------------*
+*      -->I_ST_FILE  text
+*      <--O_ST_POHEADER  text
+*      <--O_ST__POHEADERX  text
+*      <--O_W_TESTRUN  text
+*      <--O_TD_POITEM  text
+*      <--O_TD_POITEMX  text
+*      <--O_TD_POADDRDELIVERY  text
+*      <--O_TD_POSCHEDULE  text
+*      <--O_TD_POSCHEDULEX  text
+*      <--O_TD_POACCOUNT  text
+*      <--O_TD_POACCOUNTX  text
+**** START ADD BY ISID17 2015/05/25 ****
+*      <--O_TD_POCOND      条件 (明細)
+*      <--O_TD_POCONDX     条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+*      <--O_TD_POTEXTITEM  text
+*----------------------------------------------------------------------*
+FORM PO_CHANGE_EDIT
+USING    I_ST_FILE  TYPE TYP_FILE
+CHANGING O_ST_POHEADER       TYPE BAPIMEPOHEADER
+O_ST_POHEADERX      TYPE BAPIMEPOHEADERX
+O_TD_POITEM         TYPE TYP_TD_POITEM
+O_TD_POITEMX        TYPE TYP_TD_POITEMX
+O_TD_POADDRDELIVERY TYPE TYP_TD_POADDRDELIVERY
+O_TD_POSCHEDULE     TYPE TYP_TD_POSCHEDULE
+O_TD_POSCHEDULEX    TYPE TYP_TD_POSCHEDULEX
+O_TD_POACCOUNT      TYPE TYP_TD_POACCOUNT
+O_TD_POACCOUNTX     TYPE TYP_TD_POACCOUNTX
+**** START ADD BY ISID17 2015/05/25 ****
+O_TD_POCOND         TYPE BAPIMEPOCOND_TP
+O_TD_POCONDX        TYPE BAPIMEPOCONDX_TP
+**** END ADD BY ISID17 2015/05/25 ****
+O_TD_POTEXTITEM     TYPE TYP_TD_POTEXTITEM.
+
+DATA:
+LST_POITEM         TYPE BAPIMEPOITEM,
+LST_POITEMX        TYPE BAPIMEPOITEMX,
+LST_POADDRDELIVERY TYPE BAPIMEPOADDRDELIVERY,
+LST_POSCHEDULE     TYPE BAPIMEPOSCHEDULE,
+LST_POSCHEDULEX    TYPE BAPIMEPOSCHEDULX,
+LST_POACCOUNT      TYPE BAPIMEPOACCOUNT,
+LST_POACCOUNTX     TYPE BAPIMEPOACCOUNTX,
+**** START ADD BY ISID17 2015/05/25 ****
+LST_POCOND         TYPE BAPIMEPOCOND,
+LST_POCONDX        TYPE BAPIMEPOCONDX,
+**** END ADD BY ISID17 2015/05/25 ****
+LST_POTEXTITEM     TYPE BAPIMEPOTEXT.
+
+* A-4-2-1．BAPIのパラメータ設定
+IF O_ST_POHEADER IS INITIAL.
+O_ST_POHEADER-PO_NUMBER  = I_ST_FILE-EBELN.   "購買伝票番号
+O_ST_POHEADER-DOC_TYPE   = I_ST_FILE-BSART.   "購買伝票タイプ
+O_ST_POHEADER-INCOTERMS2  = I_ST_FILE-INCO2.  "Incoterms2
+O_ST_POHEADER-PURCH_ORG  = I_ST_FILE-EKORG.   "購買組織
+O_ST_POHEADER-PUR_GROUP  = I_ST_FILE-EKGRP.   "購買グループ
+O_ST_POHEADER-COLLECT_NO = I_ST_FILE-SUBMI.   "一括番号
+
+*    o_st_poheaderx-po_number  = abap_on.          "購買伝票番号
+IF I_ST_FILE-BSART <> SPACE .
+O_ST_POHEADERX-DOC_TYPE   = ABAP_ON.          "購買伝票タイプ
+ENDIF.
+IF I_ST_FILE-INCO2 <> SPACE .
+O_ST_POHEADERX-INCOTERMS2  = ABAP_ON.         "Incoterms2
+ENDIF.
+IF I_ST_FILE-EKORG <> SPACE .
+O_ST_POHEADERX-PURCH_ORG  = ABAP_ON.          "購買組織
+ENDIF.
+IF I_ST_FILE-EKGRP <> SPACE .
+O_ST_POHEADERX-PUR_GROUP  = ABAP_ON.          "購買グループ
+ENDIF.
+IF I_ST_FILE-SUBMI <> SPACE .
+O_ST_POHEADERX-COLLECT_NO  = ABAP_ON.         "一括番号
+ENDIF.
+ENDIF.
+
+LST_POITEM-PO_ITEM    = I_ST_FILE-EBELP.    "購買伝票の明細番号
+LST_POITEM-ACCTASSCAT = I_ST_FILE-KNTTP.    "勘定設定カテゴリ
+LST_POITEM-ITEM_CAT   = I_ST_FILE-PSTYP.    "購買伝票の明細カテゴリ
+LST_POITEM-MATERIAL   = I_ST_FILE-MATNR.    "品目コード
+LST_POITEM-SHORT_TEXT = I_ST_FILE-MAKTX.    "テキスト (短)
+LST_POITEM-QUANTITY   = I_ST_FILE-MENGE.    "購買発注量
+LST_POITEM-PO_UNIT    = I_ST_FILE-MEINS.    "発注単位
+LST_POITEM-NET_PRICE  = I_ST_FILE-NETPR.    "NetPrice
+LST_POITEM-PRICE_UNIT = I_ST_FILE-PEINH.    "価格単位
+LST_POITEM-PLANT      = I_ST_FILE-WERKS.    "プラント
+LST_POITEM-STGE_LOC   = I_ST_FILE-LGORT.    "保管場所
+
+LST_POITEM-RET_ITEM   = I_ST_FILE-RETPO.    "返品明細
+LST_POITEM-FREE_ITEM  = I_ST_FILE-UMSON.    "無償明細
+
+APPEND LST_POITEM TO O_TD_POITEM.
+
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POITEMX-PO_ITEM    = I_ST_FILE-EBELP.   "購買伝票の明細番号
+ENDIF.
+IF I_ST_FILE-KNTTP <> SPACE.
+LST_POITEMX-ACCTASSCAT = ABAP_ON.           "勘定設定カテゴリ
+ENDIF.
+IF I_ST_FILE-PSTYP <> SPACE.
+LST_POITEMX-ITEM_CAT   = ABAP_ON.           "購買伝票の明細カテゴリ
+ENDIF.
+IF I_ST_FILE-MATNR <> SPACE.
+LST_POITEMX-MATERIAL   = ABAP_ON.           "品目コード
+ENDIF.
+IF I_ST_FILE-MAKTX <> SPACE.
+LST_POITEMX-SHORT_TEXT = ABAP_ON.           "テキスト (短)
+ENDIF.
+IF I_ST_FILE-MENGE <> SPACE.
+LST_POITEMX-QUANTITY   = ABAP_ON.           "購買発注量
+ENDIF.
+IF I_ST_FILE-MEINS <> SPACE.
+LST_POITEMX-PO_UNIT    = ABAP_ON.           "発注単位
+ENDIF.
+IF I_ST_FILE-NETPR <> SPACE.
+LST_POITEMX-NET_PRICE  = ABAP_ON.           "NetPrice
+ENDIF.
+IF I_ST_FILE-PEINH <> SPACE.
+LST_POITEMX-PRICE_UNIT = ABAP_ON.           "価格単位
+ENDIF.
+IF I_ST_FILE-WERKS <> SPACE.
+LST_POITEMX-PLANT      = ABAP_ON.           "プラント
+ENDIF.
+IF I_ST_FILE-LGORT <> SPACE.
+LST_POITEMX-STGE_LOC   = ABAP_ON.           "保管場所
+ENDIF.
+
+IF I_ST_FILE-RETPO <> SPACE.
+LST_POITEMX-RET_ITEM   = ABAP_ON.    "返品明細
+ENDIF.
+
+IF I_ST_FILE-UMSON <> SPACE.
+LST_POITEMX-FREE_ITEM  = ABAP_ON.    "無償明細
+ENDIF.
+
+APPEND LST_POITEMX TO O_TD_POITEMX.
+
+LST_POSCHEDULE-PO_ITEM        = I_ST_FILE-EBELP.   "購買伝票の明細番号
+LST_POSCHEDULE-SCHED_LINE     = CNS_SCHED.         "納入日程行
+LST_POSCHEDULE-DEL_DATCAT_EXT = CNS_LPEIN.         "納入期日カテゴリ
+LST_POSCHEDULE-DELIVERY_DATE  = I_ST_FILE-EINDT.   "納入日付
+LST_POSCHEDULE-QUANTITY       = I_ST_FILE-MENGE.   "計画数量
+APPEND LST_POSCHEDULE TO O_TD_POSCHEDULE.
+
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POSCHEDULEX-PO_ITEM     = I_ST_FILE-EBELP.  "購買伝票の明細番号
+ENDIF.
+LST_POSCHEDULEX-SCHED_LINE     = CNS_SCHED.       "納入日程行
+LST_POSCHEDULEX-DEL_DATCAT_EXT = CNS_LPEIN.       "納入期日カテゴリ
+IF I_ST_FILE-EINDT <> SPACE.
+LST_POSCHEDULEX-DELIVERY_DATE  = ABAP_ON.       "納入日付
+ENDIF.
+IF I_ST_FILE-MENGE <> SPACE.
+LST_POSCHEDULEX-QUANTITY       = ABAP_ON.       "計画数量
+ENDIF.
+APPEND LST_POSCHEDULEX TO O_TD_POSCHEDULEX.
+
+IF I_ST_FILE-ADRN2 IS NOT INITIAL.
+LST_POADDRDELIVERY-PO_ITEM = I_ST_FILE-EBELP.   "購買伝票の明細番号
+LST_POADDRDELIVERY-ADDR_NO = I_ST_FILE-ADRN2.   "アドレス番号
+APPEND LST_POADDRDELIVERY TO O_TD_POADDRDELIVERY.
+ENDIF.
+
+IF I_ST_FILE-KOSTL IS NOT INITIAL.
+LST_POACCOUNT-PO_ITEM    = I_ST_FILE-EBELP.  "購買伝票の明細番号
+LST_POACCOUNT-SERIAL_NO  = CNS_SNO.          "勘定設定の連続番号
+LST_POACCOUNT-COSTCENTER = I_ST_FILE-KOSTL.  "原価センタ
+APPEND LST_POACCOUNT TO O_TD_POACCOUNT.
+
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POACCOUNTX-PO_ITEM    = I_ST_FILE-EBELP."購買伝票の明細番号
+ENDIF.
+LST_POACCOUNTX-SERIAL_NO  = CNS_SNO.          "勘定設定の連続番号
+IF I_ST_FILE-KOSTL <> SPACE.
+LST_POACCOUNTX-COSTCENTER = ABAP_ON.        "原価センタ
+ENDIF.
+APPEND LST_POACCOUNTX TO O_TD_POACCOUNTX.
+ENDIF.
+
+* TextPORemarks
+IF I_ST_FILE-RMTXT IS NOT INITIAL.
+LST_POTEXTITEM-PO_ITEM   = I_ST_FILE-EBELP. "購買伝票の明細番号
+LST_POTEXTITEM-TEXT_ID   = CNS_TID1.        "テキスト ID: F02
+LST_POTEXTITEM-TEXT_FORM = CNS_TFMT.        "タグ列
+LST_POTEXTITEM-TEXT_LINE = I_ST_FILE-RMTXT. "テキスト行
+APPEND LST_POTEXTITEM TO O_TD_POTEXTITEM.
+ENDIF.
+
+* TextBackOrderListRemarks
+IF I_ST_FILE-RMTXT IS NOT INITIAL.
+LST_POTEXTITEM-PO_ITEM   = I_ST_FILE-EBELP. "購買伝票の明細番号
+LST_POTEXTITEM-TEXT_ID   = CNS_TID2.        "テキスト ID: F04
+LST_POTEXTITEM-TEXT_FORM = CNS_TFMT.        "タグ列
+LST_POTEXTITEM-TEXT_LINE = I_ST_FILE-LSTRK. "テキスト行
+APPEND LST_POTEXTITEM TO O_TD_POTEXTITEM.
+ENDIF.
+
+**** START ADD BY ISID17 2015/05/25 ****
+* 条件 (明細、変更ツールバー)
+IF I_ST_FILE-EBELP <> SPACE.
+LST_POCOND-ITM_NUMBER+1(5) = I_ST_FILE-EBELP.    "条件明細番号
+LST_POCOND-COND_TYPE       = CNS_COND_TYPE_ZPB1. "条件タイプ
+LST_POCOND-COND_VALUE      = I_ST_FILE-NETPR.    "条件レート
+LST_POCOND-CURRENCY        = I_ST_FILE-WAERS.    "通貨コード
+LST_POCOND-COND_UNIT       = I_ST_FILE-MEINS.    "条件単位
+LST_POCOND-COND_P_UNT      = I_ST_FILE-PEINH.    "価格条件単位
+LST_POCOND-CHANGE_ID       = CNS_CHANGE_ID_U.    "変更タイプ
+
+APPEND LST_POCOND TO O_TD_POCOND.
+
+LST_POCONDX-ITM_NUMBER+1(5) = I_ST_FILE-EBELP.   "条件明細番号
+LST_POCONDX-COND_TYPE      = ABAP_ON.            "条件タイプ
+
+IF I_ST_FILE-NETPR <> SPACE.
+LST_POCONDX-COND_VALUE   = ABAP_ON.            "条件レート
+ENDIF.
+
+IF I_ST_FILE-WAERS <> SPACE.                     "通貨コード
+LST_POCONDX-CURRENCY     = ABAP_ON.
+ENDIF.
+
+IF I_ST_FILE-MEINS <> SPACE.                     "条件単位
+LST_POCONDX-COND_UNIT    = ABAP_ON.
+ENDIF.
+
+IF I_ST_FILE-PEINH <> SPACE.                     "価格条件単位
+LST_POCONDX-COND_P_UNT   = ABAP_ON.
+ENDIF.
+
+LST_POCONDX-CHANGE_ID      = ABAP_ON.            "変更タイプ
+
+APPEND LST_POCONDX TO O_TD_POCONDX.
+ENDIF.
+**** END ADD BY ISID17 2015/05/25 ****
+
+* TextLabelRemarks
+IF I_ST_FILE-RMTXT IS NOT INITIAL.
+LST_POTEXTITEM-PO_ITEM   = I_ST_FILE-EBELP. "購買伝票の明細番号
+LST_POTEXTITEM-TEXT_ID   = CNS_TID3.        "テキスト ID: F03
+LST_POTEXTITEM-TEXT_FORM = CNS_TFMT.        "タグ列
+LST_POTEXTITEM-TEXT_LINE = I_ST_FILE-LRTXT. "テキスト行
+APPEND LST_POTEXTITEM TO O_TD_POTEXTITEM.
+ENDIF.
+
+ENDFORM.                    " PO_CHANGE_EDIT
+
+*&---------------------------------------------------------------------*
+*&      Form  PO_change_EXECUTE
+*&---------------------------------------------------------------------*
+*       BAPIの実行
+*----------------------------------------------------------------------*
+*      -->I_w_INTEX           Index
+*      -->I_ST_POHEADER       ヘッダデータ
+*      -->I_ST_POHEADERX      ヘッダデータ (変更ツールバー)
+*      -->I_TD_POITEM         明細データ
+*      -->I_TD_POITEMX        明細データ (変更ツールバー)
+*      -->I_TD_POADDRDELIVERY 納入先住所 (明細)
+*      -->I_TD_POSCHEDULE     納入日程
+*      -->I_TD_POSCHEDULEX    納入日程行 (変更ツールバー)
+*      -->I_TD_POACCOUNT      勘定設定項目
+*      -->I_TD_POACCOUNTX     勘定設定項目 (変更ツールバー)
+*      -->I_TD_POTEXTITEM     明細テキスト
+**** START ADD BY ISID17 2015/05/25 ****
+*      -->I_TD_POCOND         条件 (明細)
+*      -->I_TD_POCONDX        条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+*      <--O_W_EFLG            Error Flag
+*      <--O_TD_MSG            Error message table
+*----------------------------------------------------------------------*
+FORM PO_CHANGE_EXECUTE
+USING I_W_INDEX            TYPE SY-INDEX
+I_ST_POHEADER        TYPE BAPIMEPOHEADER
+I_ST_POHEADERX       TYPE BAPIMEPOHEADERX
+I_TD_POITEM          TYPE TYP_TD_POITEM
+I_TD_POITEMX         TYPE TYP_TD_POITEMX
+I_TD_POADDRDELIVERY  TYPE TYP_TD_POADDRDELIVERY
+I_TD_POSCHEDULE      TYPE TYP_TD_POSCHEDULE
+I_TD_POSCHEDULEX     TYPE TYP_TD_POSCHEDULEX
+I_TD_POACCOUNT       TYPE TYP_TD_POACCOUNT
+I_TD_POACCOUNTX      TYPE TYP_TD_POACCOUNTX
+I_TD_POTEXTITEM      TYPE TYP_TD_POTEXTITEM
+**** START ADD BY ISID17 2015/05/25 ****
+I_TD_POCOND          TYPE BAPIMEPOCOND_TP
+I_TD_POCONDX         TYPE BAPIMEPOCONDX_TP
+**** END ADD BY ISID17 2015/05/25 ****
+CHANGING O_W_EFLG    TYPE C
+O_TD_MSG    TYPE TYP_TD_MSG.
+DATA:
+LW_TRUN     TYPE BAPIFLAG-BAPIFLAG,
+LW_PO       TYPE BAPIMEPOHEADER-PO_NUMBER,
+LTD_RETURN  TYPE TABLE OF BAPIRET2,
+LST_RETURN  TYPE BAPIRET2,
+LW_POITEM   LIKE LINE OF I_TD_POITEM,
+LW_ITEM     TYPE STRING,
+LW_ITEM_I   TYPE I,
+LW_ROW      TYPE STRING,
+LW_RMSG     TYPE STRING,
+LW_MSG      TYPE STRING,
+LST_MSG     TYPE TYP_MSG.
+
+IF P_TSTCK = ABAP_ON.
+LW_TRUN = ABAP_ON.
+ENDIF.
+
+LW_PO = I_ST_POHEADER-PO_NUMBER.
+
+CALL FUNCTION 'BAPI_PO_CHANGE'
+EXPORTING
+PURCHASEORDER  = LW_PO
+POHEADER       = I_ST_POHEADER
+POHEADERX      = I_ST_POHEADERX
+TESTRUN        = LW_TRUN
+TABLES
+RETURN         = LTD_RETURN
+POITEM         = I_TD_POITEM
+POITEMX        = I_TD_POITEMX
+POADDRDELIVERY = I_TD_POADDRDELIVERY
+POSCHEDULE     = I_TD_POSCHEDULE
+POSCHEDULEX    = I_TD_POSCHEDULEX
+POACCOUNT      = I_TD_POACCOUNT
+POACCOUNTX     = I_TD_POACCOUNTX
+**** START ADD BY ISID17 2015/05/25 ****
+POCOND         = I_TD_POCOND  "条件 (明細)
+POCONDX        = I_TD_POCONDX "条件 (明細、変更ツールバー)
+**** END ADD BY ISID17 2015/05/25 ****
+POTEXTITEM     = I_TD_POTEXTITEM.
+
+*  w_tnum = w_tnum + 1.                    "Total number
+LW_ROW = I_W_INDEX.
+CONDENSE LW_ROW.
+
+* BAPIから返した「RETURN」にエラーメッセージ存在する場合
+LOOP AT LTD_RETURN INTO LST_RETURN
+WHERE TYPE = CNS_MSG_E OR
+TYPE = CNS_MSG_A.
+**** START ADD 2015/06/18 ISID18 ****
+O_W_EFLG = ABAP_ON.
+EXIT.
+**** END ADD 2015/06/18 ISID18 ****
+ENDLOOP.
+
+IF SY-SUBRC = 0.
+W_ENUM = W_ENUM + 1.            "Error number
+
+LOOP AT LTD_RETURN INTO LST_RETURN
+WHERE TYPE = CNS_MSG_E OR
+TYPE = CNS_MSG_A.
+*     Output check message
+IF LST_RETURN-ID IS NOT INITIAL AND
+LST_RETURN-TYPE IS NOT INITIAL AND
+LST_RETURN-NUMBER IS NOT INITIAL.
+MESSAGE ID LST_RETURN-ID TYPE LST_RETURN-TYPE
+NUMBER LST_RETURN-NUMBER
+WITH LST_RETURN-MESSAGE_V1
+LST_RETURN-MESSAGE_V2
+LST_RETURN-MESSAGE_V3
+LST_RETURN-MESSAGE_V4
+INTO LW_MSG.
+*       データ更新に失敗しました。(MSG = &1 )
+MESSAGE S098(ZMEGSD01) WITH I_W_INDEX LW_MSG
+INTO LW_MSG.
+CLEAR LW_RMSG.
+
+*       Get Item
+READ TABLE I_TD_POITEM INTO LW_POITEM INDEX LST_RETURN-ROW.
+IF SY-SUBRC = 0 AND
+LW_POITEM-PO_ITEM IS NOT INITIAL.
+LW_ITEM_I = LW_POITEM-PO_ITEM.
+LW_ITEM = LW_ITEM_I.
+ENDIF.
+
+CONCATENATE TEXT-033 LW_ROW TEXT-034 TEXT-035 LW_ITEM
+INTO LW_RMSG SEPARATED BY SPACE.
+
+CASE LST_RETURN-TYPE.
+WHEN CNS_MSG_E OR
+CNS_MSG_A.
+LST_MSG-COL2 = TEXT-008.
+WHEN CNS_MSG_W.
+LST_MSG-COL2 = TEXT-030.
+WHEN OTHERS.
+LST_MSG-COL2 = TEXT-009.
+ENDCASE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL3 = LW_RMSG.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+ENDIF.
+ENDLOOP.
+IF P_TSTCK <> ABAP_ON..
+CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+ENDIF.
+
+ELSE.
+W_SNUM = W_SNUM + 1.            "Sucessful number
+*   データ更新が正常終了しました。( PO= &1)
+MESSAGE S099(ZMEGSD01) WITH I_W_INDEX LW_PO
+INTO LW_MSG.
+CLEAR LW_RMSG.
+CONCATENATE TEXT-033 LW_ROW TEXT-034 TEXT-035
+INTO LW_RMSG SEPARATED BY SPACE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL2 = TEXT-009.
+LST_MSG-COL3 = LW_RMSG.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+
+LOOP AT LTD_RETURN INTO LST_RETURN.
+*     Output check message
+IF LST_RETURN-ID IS NOT INITIAL AND
+LST_RETURN-TYPE IS NOT INITIAL AND
+LST_RETURN-NUMBER IS NOT INITIAL.
+MESSAGE ID LST_RETURN-ID TYPE LST_RETURN-TYPE
+NUMBER LST_RETURN-NUMBER
+WITH LST_RETURN-MESSAGE_V1
+LST_RETURN-MESSAGE_V2
+LST_RETURN-MESSAGE_V3
+LST_RETURN-MESSAGE_V4
+INTO LW_MSG.
+CLEAR LW_RMSG.
+
+*       Get Item
+READ TABLE I_TD_POITEM INTO LW_POITEM INDEX LST_RETURN-ROW.
+IF SY-SUBRC = 0 AND
+LW_POITEM-PO_ITEM IS NOT INITIAL.
+LW_ITEM_I = LW_POITEM-PO_ITEM.
+LW_ITEM = LW_ITEM_I.
+ENDIF.
+CONCATENATE TEXT-033 LW_ROW TEXT-034 TEXT-035 LW_ITEM
+INTO LW_RMSG SEPARATED BY SPACE.
+
+CASE LST_RETURN-TYPE.
+WHEN CNS_MSG_E OR
+CNS_MSG_A.
+LST_MSG-COL2 = TEXT-008.
+WHEN CNS_MSG_W.
+LST_MSG-COL2 = TEXT-030.
+WHEN OTHERS.
+LST_MSG-COL2 = TEXT-009.
+ENDCASE.
+LST_MSG-COL1 = TEXT-007.
+LST_MSG-COL3 = LW_RMSG.
+LST_MSG-COL4 = LW_MSG.
+APPEND LST_MSG TO O_TD_MSG.
+ENDIF.
+ENDLOOP.
+
+IF P_TSTCK <> ABAP_ON..
+CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+EXPORTING
+WAIT = ABAP_ON.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " PO_change_EXECUTE
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_RESULT
+*&---------------------------------------------------------------------*
+*       A-5．画面出力・ファイル出力
+*----------------------------------------------------------------------*
+*      -->I_TD_EFILE  Error file table
+*      -->I_TD_MSG    Error message table
+*----------------------------------------------------------------------*
+**** START UPD 2015/06/18 ISID18 ****
+*FORM PROCESS_RESULT USING I_TD_EFILE TYPE TYP_TD_FILE
+FORM PROCESS_RESULT USING I_TD_EFILE TYPE TYP_TD_FILE_STR
+**** END UPD 2015/06/18 ISID18 ****
+I_TD_MSG   TYPE TYP_TD_MSG.
+
+DATA:
+LTD_RFILE TYPE TYP_TD_RFILE.
+
+* A-5-1．結果画面の画面出力
+PERFORM WRITE_RESULT USING I_TD_MSG
+CHANGING LTD_RFILE.
+
+* A-5-2．RESULTファイルのファイル出力
+* A-5-3．ERRORファイルのファイル出力
+PERFORM OUTPUT_FILE USING LTD_RFILE
+I_TD_EFILE.
+
+ENDFORM.                    " PROCESS_RESULT
+
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_RESULT
+*&---------------------------------------------------------------------*
+*       A-5-1．結果画面の画面出力
+*----------------------------------------------------------------------*
+*      -->I_TD_MSG    Error File data
+*      <--O_TD_rfile  Result file table
+*----------------------------------------------------------------------*
+FORM WRITE_RESULT USING    I_TD_MSG   TYPE TYP_TD_MSG
+CHANGING O_TD_RFILE TYPE TYP_TD_RFILE.
+DATA:
+LW_MODE      TYPE STRING,
+LRH_WERKS    LIKE LINE OF S_WERKS,
+LW_WERKS     TYPE STRING,
+LW_SIGN      TYPE STRING,
+LW_OPTION    TYPE STRING,
+LW_LOW       TYPE STRING,
+LW_HIGH      TYPE STRING,
+LW_NO        TYPE I,
+LST_MSG      TYPE TYP_MSG,
+LST_RFILE    TYPE TYP_RFILE.
+
+IF P_SERVE = ABAP_ON.
+LW_MODE = TEXT-002.
+ELSE.
+LW_MODE = TEXT-003.
+ENDIF.
+
+* Plant: SI:X OP:XX LO:XX HI:XX
+LOOP AT S_WERKS INTO LRH_WERKS.
+CLEAR: LW_SIGN,
+LW_OPTION,
+LW_LOW,
+LW_HIGH.
+LW_NO = LW_NO + 1.
+CONCATENATE 'SI:'
+LRH_WERKS-SIGN
+INTO LW_SIGN.
+CONCATENATE 'OP:'
+LRH_WERKS-OPTION
+INTO LW_OPTION.
+CONCATENATE 'LO:'
+LRH_WERKS-LOW
+INTO LW_LOW.
+CONCATENATE 'HI:'
+LRH_WERKS-HIGH
+INTO LW_HIGH.
+IF LW_NO = 1.
+CONCATENATE LW_SIGN
+LW_OPTION
+LW_LOW
+LW_HIGH
+INTO LW_WERKS
+SEPARATED BY SPACE.
+ELSEIF LW_NO > 1
+AND LW_NO <= 5.
+CONCATENATE LW_WERKS
+'/'
+LW_SIGN
+LW_OPTION
+LW_LOW
+LW_HIGH
+INTO LW_WERKS
+SEPARATED BY SPACE.
+ELSE.
+CONCATENATE LW_WERKS
+'/...'
+INTO LW_WERKS
+SEPARATED BY SPACE.
+ENDIF.
+ENDLOOP.
+
+SKIP.
+WRITE: TEXT-016.                        "<Paramenter>
+WRITE:/2 TEXT-017, 24 ':', LW_MODE.     "Mode
+WRITE:/2 TEXT-018, 24 ':', P_TSTCK.     "Test Run
+WRITE:/2 TEXT-019, 24 ':', LW_WERKS.    "Plant
+WRITE:/2 TEXT-020, 24 ':', P_IFILE.     "File Name(Input)
+WRITE:/2 TEXT-021, 24 ':', P_RFILE.     "File Name(Result)
+WRITE:/2 TEXT-022, 24 ':', P_EFILE.     "File Name(Error)
+
+SKIP.
+WRITE: TEXT-023.                        "<Result>
+WRITE:/2 TEXT-024, 24 ':', W_TNUM.      "Number of Transcations
+WRITE:/2 TEXT-025, 24 ':', W_SNUM.      "Number of Normal
+WRITE:/2 TEXT-026, 24 ':', W_ENUM.      "Number of Errors
+
+SKIP.
+WRITE: TEXT-027.                        "<Message>
+LOOP AT I_TD_MSG INTO LST_MSG.
+WRITE:/3 LST_MSG-COL1,
+24 LST_MSG-COL2,
+40 LST_MSG-COL3,
+60 LST_MSG-COL4.
+ENDLOOP.
+
+* RESULTファイルのファイル設定
+* Output header
+CONCATENATE TEXT-010 ':' SY-MANDT INTO LST_RFILE-COL1. "CLIENT
+CONCATENATE TEXT-013 ':' SY-DATUM INTO LST_RFILE-COL3. "Date
+APPEND LST_RFILE TO O_TD_RFILE.
+
+CLEAR LST_RFILE.
+CONCATENATE TEXT-011 ':' SY-CPROG INTO LST_RFILE-COL1. "PROGRAM
+CONCATENATE TEXT-014 ':' SY-UZEIT INTO LST_RFILE-COL3. "Time
+APPEND LST_RFILE TO O_TD_RFILE.
+
+CLEAR LST_RFILE.
+CONCATENATE TEXT-012 ':' SY-UNAME INTO LST_RFILE-COL1. "USER
+LST_RFILE-COL2 = TEXT-015.                             "Title
+APPEND LST_RFILE TO O_TD_RFILE.
+
+CLEAR LST_RFILE.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-016.    "<Paramenter>
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-017.    "Mode
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = LW_MODE.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-018.    "Test Run
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = P_TSTCK.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-019.    "Plant
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = LW_WERKS.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-020.    "File Name(Input)
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = P_IFILE.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-021.    "File Name(Result)
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = P_RFILE.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-022.    "File Name(Error)
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = P_EFILE.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+CLEAR LST_RFILE.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-023.    "<Result>
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-024.    "Number of Transcations
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = W_TNUM.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-025.    "Number of Normal
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = W_SNUM.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-026.    "Number of Errors
+LST_RFILE-COL2 = ':'.
+LST_RFILE-COL3 = W_ENUM.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+CLEAR LST_RFILE.
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LST_RFILE-COL1 = TEXT-027.    "<Message>
+APPEND LST_RFILE TO O_TD_RFILE.
+
+LOOP AT I_TD_MSG INTO LST_MSG.
+LST_RFILE-COL1 = LST_MSG-COL1.
+LST_RFILE-COL2 = LST_MSG-COL2.
+LST_RFILE-COL3 = LST_MSG-COL3.
+LST_RFILE-COL4 = LST_MSG-COL4.
+APPEND LST_RFILE TO O_TD_RFILE.
+ENDLOOP.
+
+ENDFORM.                    " WRITE_RESULT
+
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_HEAD
+*&---------------------------------------------------------------------*
+*       ヘッダ出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_HEAD.
+
+*  SET TITLEBAR 'GUI_TITLE_RESULT'.
+
+WRITE: /2 TEXT-010, 15 ':', 17 SY-MANDT,      "CLIENT
+130 TEXT-013, 135 ':', 137 SY-DATUM,  "Date
+/2 TEXT-011, 15 ':', 17 SY-CPROG,      "PROGRAM
+130 TEXT-014, 135 ':', 137 SY-UZEIT,  "Time
+/2 TEXT-012, 15 ':', 17 SY-UNAME,      "USER
+66 TEXT-015.                          "Title
+
+ENDFORM.                    " OUTPUT_HEAD
+
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_FILE
+*&---------------------------------------------------------------------*
+*       ファイル出力
+*----------------------------------------------------------------------*
+*      -->I_TD_RFILE  Result file table
+*      -->I_TD_EFILE  Error file table
+*----------------------------------------------------------------------*
+FORM OUTPUT_FILE  USING I_TD_RFILE TYPE TYP_TD_RFILE
+**** START UPD 2015/06/18 ISID18 ****
+*                        I_TD_EFILE TYPE TYP_TD_FILE.
+I_TD_EFILE TYPE TYP_TD_FILE_STR.
+**** END UPD 2015/06/18 ISID18 ****
+
+IF P_SERVE = ABAP_ON.
+*   サーバファイル出力
+PERFORM OUTPUT_SERVE USING I_TD_RFILE
+I_TD_EFILE.
+ELSE.
+*   ローカルファイル出力
+PERFORM OUTPUT_LOCAL USING I_TD_RFILE
+I_TD_EFILE.
+ENDIF.
+
+ENDFORM.                    " OUTPUT_FILE
+
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SERVE
+*&---------------------------------------------------------------------*
+*       サーバファイル出力
+*----------------------------------------------------------------------*
+*      -->I_TD_RFILE  Result file table
+*      -->I_TD_EFILE  Error file table
+*----------------------------------------------------------------------*
+FORM OUTPUT_SERVE USING I_TD_RFILE TYPE TYP_TD_RFILE
+**** START UPD 2015/06/18 ISID18 ****
+*                        I_TD_EFILE TYPE TYP_TD_FILE.
+I_TD_EFILE TYPE TYP_TD_FILE_STR.
+**** END UPD 2015/06/18 ISID18 ****
+DATA:
+LST_RFILE TYPE TYP_RFILE,
+**** START UPD 2015/06/18 ISID18 ****
+*    LST_FILE  TYPE TYP_FILE,
+LST_FILE  TYPE TYP_FILE_STR,
+**** END UPD 2015/06/18 ISID18 ****
+LW_FILE   TYPE STRING.
+
+* A-5-2．RESULTファイルのファイル出力
+IF W_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_RFILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE W_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH  CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_RFILE FOR OUTPUT
+IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS.
+ENDIF.
+IF SY-SUBRC <> 0.
+MESSAGE S035(ZMEGSD01) WITH P_RFILE DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+LOOP AT I_TD_RFILE INTO LST_RFILE.
+CLEAR LW_FILE.
+CONCATENATE LST_RFILE-COL1
+LST_RFILE-COL2
+LST_RFILE-COL3
+LST_RFILE-COL4
+INTO LW_FILE SEPARATED BY CNS_TAB.
+TRANSFER LW_FILE TO P_RFILE.
+ENDLOOP.
+
+* ファイルクローズ
+CLOSE DATASET P_RFILE.
+
+* A-5-3．ERRORファイルのファイル出力
+CHECK I_TD_EFILE IS NOT INITIAL.
+IF W_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_EFILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE W_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH  CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_EFILE FOR OUTPUT
+IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS.
+ENDIF.
+IF SY-SUBRC <> 0.
+MESSAGE S035(ZMEGSD01) WITH P_EFILE DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+LOOP AT I_TD_EFILE INTO LST_FILE.
+CLEAR LW_FILE.
+CONCATENATE
+LST_FILE-TCD       "TCD
+LST_FILE-GFLAG     "GroupFlag
+LST_FILE-BSART     "DocType
+LST_FILE-LIFNR     "Vendor
+LST_FILE-BEDAT     "DocDate
+LST_FILE-EKORG     "PurchOrg
+LST_FILE-EKGRP     "PurchGroup
+LST_FILE-EBELN     "PurchaseOrder
+LST_FILE-SUBMI     "CollectiveNo
+LST_FILE-RESWK     "SupplyingPlant
+LST_FILE-WAERS     "NetPriceCurrency
+LST_FILE-INCO2     "Incoterms2
+LST_FILE-EBELP     "Item
+LST_FILE-KNTTP     "AcctAssgtCat
+LST_FILE-PSTYP     "ItemCategory
+LST_FILE-MATNR     "Material
+LST_FILE-MAKTX     "MaterialText
+LST_FILE-MENGE     "POQuantity
+LST_FILE-MEINS     "OrderUnit
+LST_FILE-EINDT     "DeliveryDate
+LST_FILE-NETPR     "NetPrice
+LST_FILE-PEINH     "PriceUnit
+LST_FILE-WERKS     "Plant
+LST_FILE-LGORT     "SLoc
+LST_FILE-RETPO     "ReturnItem
+LST_FILE-UMSON     "FreeItem
+LST_FILE-KOSTL     "CostCenter
+LST_FILE-ADRN2     "Address
+LST_FILE-RMTXT     "TextPORemarks
+LST_FILE-LSTRK     "TextBackOrderListRemarks
+LST_FILE-LRTXT     "TextLabelRemarks
+INTO LW_FILE  SEPARATED BY CNS_TAB.
+TRANSFER LW_FILE TO P_EFILE.
+ENDLOOP.
+
+* ファイルクローズ
+CLOSE DATASET P_EFILE.
+
+ENDFORM.                    " OUTPUT_SERVE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_LOCAL
+*&---------------------------------------------------------------------*
+*       ローカルファイル出力
+*----------------------------------------------------------------------*
+*      -->I_TD_RFILE  Result file table
+*      -->I_TD_EFILE  Error file table
+*----------------------------------------------------------------------*
+FORM OUTPUT_LOCAL USING I_TD_RFILE TYPE TYP_TD_RFILE
+**** START UPD 2015/06/18 ISID18 ****
+*                        I_TD_EFILE TYPE TYP_TD_FILE.
+I_TD_EFILE TYPE TYP_TD_FILE_STR.
+**** END UPD 2015/06/18 ISID18 ****
+
+DATA:
+LW_FILENAME TYPE STRING.
+
+* A-5-2．RESULTファイルのファイル出力
+LW_FILENAME = P_RFILE.
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+FILENAME                = LW_FILENAME
+FILETYPE                = CNS_FTYPE
+WRITE_FIELD_SEPARATOR   = CNS_TAB
+TABLES
+DATA_TAB                = I_TD_RFILE
+EXCEPTIONS
+FILE_WRITE_ERROR        = 1
+NO_BATCH                = 2
+GUI_REFUSE_FILETRANSFER = 3
+INVALID_TYPE            = 4
+NO_AUTHORITY            = 5
+UNKNOWN_ERROR           = 6
+HEADER_NOT_ALLOWED      = 7
+SEPARATOR_NOT_ALLOWED   = 8
+FILESIZE_NOT_ALLOWED    = 9
+HEADER_TOO_LONG         = 10
+DP_ERROR_CREATE         = 11
+DP_ERROR_SEND           = 12
+DP_ERROR_WRITE          = 13
+UNKNOWN_DP_ERROR        = 14
+ACCESS_DENIED           = 15
+DP_OUT_OF_MEMORY        = 16
+DISK_FULL               = 17
+DP_TIMEOUT              = 18
+FILE_NOT_FOUND          = 19
+DATAPROVIDER_EXCEPTION  = 20
+CONTROL_FLUSH_ERROR     = 21
+OTHERS                  = 22.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* A-5-3．ERRORファイルのファイル出力
+CHECK I_TD_EFILE IS NOT INITIAL.
+LW_FILENAME = P_EFILE.
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+FILENAME                = LW_FILENAME
+FILETYPE                = CNS_FTYPE
+WRITE_FIELD_SEPARATOR   = CNS_TAB
+CODEPAGE                = W_CODEPAGE
+TABLES
+DATA_TAB                = I_TD_EFILE
+EXCEPTIONS
+FILE_WRITE_ERROR        = 1
+NO_BATCH                = 2
+GUI_REFUSE_FILETRANSFER = 3
+INVALID_TYPE            = 4
+NO_AUTHORITY            = 5
+UNKNOWN_ERROR           = 6
+HEADER_NOT_ALLOWED      = 7
+SEPARATOR_NOT_ALLOWED   = 8
+FILESIZE_NOT_ALLOWED    = 9
+HEADER_TOO_LONG         = 10
+DP_ERROR_CREATE         = 11
+DP_ERROR_SEND           = 12
+DP_ERROR_WRITE          = 13
+UNKNOWN_DP_ERROR        = 14
+ACCESS_DENIED           = 15
+DP_OUT_OF_MEMORY        = 16
+DISK_FULL               = 17
+DP_TIMEOUT              = 18
+FILE_NOT_FOUND          = 19
+DATAPROVIDER_EXCEPTION  = 20
+CONTROL_FLUSH_ERROR     = 21
+OTHERS                  = 22.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " OUTPUT_LOCAL
+**** START ADD 2015/06/18 ISID18 ****
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_TITLE
+*&---------------------------------------------------------------------*
+*       タイトル行取得
+*----------------------------------------------------------------------*
+*      -->I_ST_SFILE        FILEDATA
+*      <--O_ST_FILE_STR    タイトル行
+*----------------------------------------------------------------------*
+FORM GET_FILE_TITLE
+USING    I_ST_SFILE    TYPE TYP_SFILE
+CHANGING O_ST_FILE_STR TYPE TYP_FILE_STR.
+
+SPLIT I_ST_SFILE-FIELD
+AT CNS_TAB
+INTO O_ST_FILE_STR-TCD        "TCD
+O_ST_FILE_STR-GFLAG      "GroupFlag
+O_ST_FILE_STR-BSART      "DocType
+O_ST_FILE_STR-LIFNR      "Vendor
+O_ST_FILE_STR-BEDAT      "DocDate
+O_ST_FILE_STR-EKORG      "PurchOrg
+O_ST_FILE_STR-EKGRP      "PurchGroup
+O_ST_FILE_STR-EBELN      "PurchaseOrder
+O_ST_FILE_STR-SUBMI      "CollectiveNo
+O_ST_FILE_STR-RESWK      "SupplyingPlant
+O_ST_FILE_STR-WAERS      "NetPriceCurrency
+O_ST_FILE_STR-INCO2      "Incoterms2
+O_ST_FILE_STR-EBELP      "Item
+O_ST_FILE_STR-KNTTP      "AcctAssgtCat
+O_ST_FILE_STR-PSTYP      "ItemCategory
+O_ST_FILE_STR-MATNR      "Material
+O_ST_FILE_STR-MAKTX      "MaterialText
+O_ST_FILE_STR-MENGE      "POQuantity
+O_ST_FILE_STR-MEINS      "OrderUnit
+O_ST_FILE_STR-EINDT      "DeliveryDate
+O_ST_FILE_STR-NETPR      "NetPrice
+O_ST_FILE_STR-PEINH      "PriceUnit
+O_ST_FILE_STR-WERKS      "Plant
+O_ST_FILE_STR-LGORT      "SLoc
+O_ST_FILE_STR-RETPO      "ReturnItem
+O_ST_FILE_STR-UMSON      "FreeItem
+O_ST_FILE_STR-KOSTL      "CostCenter
+O_ST_FILE_STR-ADRN2      "Address
+O_ST_FILE_STR-RMTXT      "TextPORemarks
+O_ST_FILE_STR-LSTRK      "TextBackOrderListR
+O_ST_FILE_STR-LRTXT.     "TextLabelRemarks
+
+ENDFORM.                    " GET_FILE_TITLE
+*Text symbol text・
+*001:Mode
+*002:Server
+*003:Local
+*004:Test Run
+*005:File Option
+*006:General Option
+*007:(Purchase Order)
+*008:[Error]
+*009:[Information]
+*010:CLIENT
+*011:PROGRAM
+*012:USER
+*013:Date
+*014:Time
+*015:<<<Purchase Order Upload>>>
+*016:<Parameters>
+*017:Mode
+*018:Test Run
+*019:Plant
+*020:File Name(Input)
+*021:File Name(Result)
+*022:File Name(Error)
+*023:<Result>
+*024:Number of Transcations
+*025:Number of Normal
+*026:Number of Errors
+*027:<Message>
+*030:[Warning]
+*031:(Row=
+*032:)
+*033:Row:
+*034:/
+*035:Item:
+*036:PUR.ORG =
+*037:/ PLANT =
+*E01:ZTEGZZM001
+*E02:DocDate
+*E03:DeliveryDate
+*E04:POQuantity
+*E05:NetPrice
+*E06:PriceUnit
+*E07:Address
+
+*Selection text・
+*P_EFILE:        File Path(Error)
+*P_IFILE:        File Path(Input)
+*P_LOCAL:        Local
+*P_RFILE:        File Path(Result)
+*P_SERVE:        Server
+*P_TSTCK:        Test Run
+*S_WERKS:        Plant

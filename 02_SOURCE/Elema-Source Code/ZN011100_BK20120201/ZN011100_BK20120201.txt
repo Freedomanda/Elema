@@ -1,0 +1,1065 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN011100                                                    *
+*&         検収状況一覧                                                *
+*&---------------------------------------------------------------------*
+*&  機能     :検収状況をALVで一覧出力する。                            *
+*&                                                                     *
+*&  作成日   : 2012/01/30                                              *
+*&  作成者   : H.KOMIYAMA(SOLFIS)                                      *
+*&  変更履歴 :                                                         *
+*&  変更内容 :                                                         *
+*&---------------------------------------------------------------------*
+REPORT ZN011100
+NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID YN01.
+
+*----------------------------------------------------------------------*
+*   宣言部
+*----------------------------------------------------------------------*
+*** 参照構造
+TYPE-POOLS: SLIS.
+
+*** 参照テーブル
+TABLES: KNB1,
+KNVV.
+
+*** 構造
+*-- 得意先情報取得用
+DATA: BEGIN OF W_KNxx,
+KUNNR LIKE KNVP-KUNNR,              " 得意先コード(受注先)
+NAME1 LIKE KNA1-NAME1,              " 名称１
+KUNN2 LIKE KNVP-KUNN2,              " 取引先の得意先コード
+ZTERM LIKE KNVV-ZTERM,              " 支払条件キー
+END   OF W_KNxx,
+*-- 支払条件取得用
+BEGIN OF W_T052,
+ZTERM LIKE T052-ZTERM,              " 支払条件キー
+ZTAGG LIKE T052-ZTAGG,              " 期限
+END   OF W_T052,
+*-- 自社/外部データ一括取得用
+BEGIN OF W_YN1x0,
+LIST1    TYPE YNLIST11,             " 得意先コード(受注先)
+DVSON    TYPE VKBUR,                " 営業所
+LIST4    TYPE YNLIST14,             " 営業グループ
+WAERS    TYPE WAERS,                " 通貨コード
+KNETXAMT TYPE YNETXAMT,             " 税込金額
+GJAHR    TYPE YNDOCGJAHR,           " 伝票会計年度
+SLPDOC   TYPE YNSLPDOC,             " 伝票番号
+DTLDOC   TYPE YNDTLDOC,             " 伝票明細番号
+VRFCTON  TYPE YNKUNNR,              " 得意先コード(支払人)
+CZFBDT   TYPE ZNECZFBDT,            " 照合締日
+AUTOFLG  TYPE ZNEAUTOFLG,           " 自動生成明細（部分照合）
+END   OF W_YN1x0,
+*-- ALV出力用
+BEGIN OF W_DATA,
+KUNNR     LIKE KNVV-KUNNR,          " 得意先コード
+NAME1     LIKE KNA1-NAME1,          " 得意先名称
+VKBUR     LIKE YN110-DVSON,         " 営業所
+VKGRP     LIKE YN110-LIST4,         " 営業G
+KTEXT(1)  TYPE C,                   " 請求書
+WAERS     LIKE YN110-WAERS,         " 通貨コード
+SUM01     LIKE YN110-KNETXAMT,      " 当月売上
+SUM02     LIKE YN110-KNETXAMT,      " 未照合額
+SUM03     LIKE YN110-KNETXAMT,      " 当月検収
+SUM04     LIKE YN110-KNETXAMT,      " 入金予定
+SUM05     LIKE YN110-KNETXAMT,      " 未検収
+SUM06     LIKE YN110-KNETXAMT,      " 先行入金
+SUM07     LIKE YN110-KNETXAMT,      " 前月以前未検収
+SUM08     LIKE YN110-KNETXAMT,      " 前月以前先行入金
+SUM09     LIKE YN110-KNETXAMT,      " 未入力
+SUM10     LIKE YN110-KNETXAMT,      " 当月売上前月照合
+SUM11     LIKE YN110-KNETXAMT,      " 当月売上当月照合
+SUM12     LIKE YN110-KNETXAMT,      " 前月以前未検収照合
+SUM13     LIKE YN110-KNETXAMT,      " 次月売上照合
+SUM14     LIKE YN110-KNETXAMT,      " 前月以前先行入金照合
+SUM15     LIKE YN110-KNETXAMT,      " 当月発行請求額
+SUM16     LIKE YN110-KNETXAMT,      " 要処理額
+END   OF W_DATA,
+*-- ALV項目カタログ
+W_FIELDCAT TYPE SLIS_FIELDCAT_ALV,
+*-- ALV出力レイアウト
+W_LAYOUT   TYPE SLIS_LAYOUT_ALV,
+*-- ALVバリアント
+W_VARIANT  TYPE DISVARIANT,
+*-- ALVイベント
+W_EVENT    TYPE LINE OF SLIS_T_EVENT,
+*-- ALVプリント
+W_PRINT    TYPE SLIS_PRINT_ALV,
+*-- ALVヘッダ
+W_HEADER   TYPE LINE OF SLIS_T_LISTHEADER.
+
+*** 内部テーブル
+DATA: I_KNxx     LIKE SORTED  TABLE OF W_KNxx
+WITH UNIQUE KEY KUNNR,
+I_T052     LIKE SORTED   TABLE OF W_T052
+WITH UNIQUE KEY ZTERM ZTAGG,
+I_DATA     LIKE STANDARD TABLE OF W_DATA,
+I_YN120_S  LIKE STANDARD TABLE OF W_YN1x0,  " 当月売上
+I_YN120_C  LIKE STANDARD TABLE OF W_YN1x0,  " 当月照合
+I_YN120_N  LIKE STANDARD TABLE OF W_YN1x0,  " 未検収
+I_YN120_P  LIKE STANDARD TABLE OF W_YN1x0,  " 先行入金
+I_YN110_A  LIKE STANDARD TABLE OF W_YN1x0,  " 当月検収
+I_FIELDCAT TYPE SLIS_T_FIELDCAT_ALV,
+I_EVENT    TYPE SLIS_T_EVENT,
+I_HEADER   TYPE SLIS_T_LISTHEADER.
+
+*** グローバル変数
+DATA: G_ZFBDT_DAY(2) TYPE C,
+G_ZFBDT_OLD    TYPE ZFBDT.
+
+*** 定数
+CONSTANTS: C_ON(1)     TYPE C          VALUE 'X',    " フラグON
+C_SAVE(1)   TYPE C          VALUE 'A',    " SAVE機能ON
+C_TYP1(1)   TYPE C          VALUE 'H',    " ヘッダ書式1
+C_TYP2(1)   TYPE C          VALUE 'S',    " ヘッダ書式2
+C_ID(4)     TYPE C          VALUE 'YN01', " READ_TEXTのID
+C_OBJECT(4) TYPE C          VALUE 'KNB1', " オブジェクト名
+C_PARZA     LIKE KNVP-PARZA VALUE '000',  " 取引先カウンタ
+C_REPID     TYPE SY-REPID   VALUE 'ZN011100', " プログラム名
+C_TABNAME   TYPE SLIS_TABNAME VALUE 'W_DATA'. " ALV参照構造名
+
+*&---------------------------------------------------------------------*
+*&   画面項目定義
+*&---------------------------------------------------------------------*
+*-- データ選択
+SELECTION-SCREEN BEGIN OF BLOCK BK01 WITH FRAME TITLE TEXT-S01.
+*-- 会社コード
+PARAMETERS: P_BUKRS    LIKE YN120-BUKRS  OBLIGATORY MEMORY ID BUK,
+*-- 照合締日
+P_CZFBDT   LIKE YN120-CZFBDT OBLIGATORY.
+*-- 得意先コード（受注先）
+SELECT-OPTIONS: S_KUNNR    FOR KNB1-KUNNR,
+*-- 営業所
+S_VKBUR    FOR KNVV-VKBUR,
+*-- 営業グループ
+S_VKGRP    FOR KNVV-VKGRP.
+SELECTION-SCREEN END   OF BLOCK BK01.
+
+*-- 処理オプション
+SELECTION-SCREEN BEGIN OF BLOCK BK02 WITH FRAME TITLE TEXT-S02.
+*-- レイアウト
+PARAMETERS:
+P_LYOUT TYPE DISVARIANT-VARIANT.
+SELECTION-SCREEN END   OF BLOCK BK02.
+
+*-- システム項目
+SELECTION-SCREEN BEGIN OF BLOCK BK03 WITH FRAME TITLE TEXT-S03.
+*-- 販売組織
+PARAMETERS: P_VKORG LIKE KNVV-VKORG OBLIGATORY,
+*-- 流通チャネル
+P_VTWEG LIKE KNVV-VTWEG OBLIGATORY,
+*-- 製品部門
+P_SPART LIKE KNVV-SPART OBLIGATORY,
+*-- 支払人取引先機能
+P_PARVW LIKE KNVP-PARVW OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK BK03.
+
+************************************************************************
+INITIALIZATION.
+************************************************************************
+
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LYOUT.
+************************************************************************
+*-- ALVバリアント取得
+PERFORM F_CALL_ALV_VARIANT CHANGING P_LYOUT.
+
+************************************************************************
+AT SELECTION-SCREEN.
+************************************************************************
+*-- チェック処理
+PERFORM F_CHECK_PARAMETER.
+
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+*-- 初期処理
+PERFORM INT_SEC.
+*-- メイン処理
+PERFORM MAIN_SEC.
+*-- 終了処理
+PERFORM END_SEC.
+
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+
+*&-------------------------------------------------------------------*
+*&      Form  F_CALL_ALV_VARIANT
+*&-------------------------------------------------------------------*
+*       ALVレイアウト用F4ヘルプ
+*--------------------------------------------------------------------*
+*      <--AO_VARI    ALVレイアウト
+*--------------------------------------------------------------------*
+FORM F_CALL_ALV_VARIANT CHANGING VALUE(AO_VARI) TYPE ANY.
+
+DATA:
+LW_DISVARIANT TYPE DISVARIANT.
+
+CLEAR:
+LW_DISVARIANT,
+AO_VARI.
+
+LW_DISVARIANT-REPORT = SY-REPID.
+
+CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+EXPORTING
+IS_VARIANT          = LW_DISVARIANT
+I_SAVE              = C_SAVE
+I_DISPLAY_VIA_GRID  = C_ON
+IMPORTING
+ES_VARIANT          = LW_DISVARIANT
+EXCEPTIONS
+NOT_FOUND           = 1
+PROGRAM_ERROR       = 2
+OTHERS              = 3.
+
+IF SY-SUBRC = 0.
+AO_VARI = LW_DISVARIANT-VARIANT.
+ENDIF.
+
+ENDFORM.                    " F_CALL_ALV_VARIANT
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_PARAMETER
+*&---------------------------------------------------------------------*
+*       チェック処理
+*----------------------------------------------------------------------*
+FORM F_CHECK_PARAMETER.
+
+*-- 会社コードの存在チェック
+PERFORM F_CHECK_P_BUKRS.
+
+*-- 締日チェック
+PERFORM F_CHECK_P_CZFBDT.
+
+ENDFORM.                    " F_CHECK_PARAMETER
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_P_BUKRS
+*&---------------------------------------------------------------------*
+*       会社コードの存在チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_P_BUKRS.
+
+DATA: L_BUKRS LIKE T001-BUKRS.
+
+SELECT SINGLE BUKRS             " 会社コード
+FROM T001
+INTO L_BUKRS
+WHERE BUKRS = P_BUKRS.         " 会社コード
+
+IF SY-SUBRC <> 0.
+*-- 対象データがありません
+MESSAGE E762.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_P_BUKRS
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_P_CZFBDT
+*&---------------------------------------------------------------------*
+*       締日チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_P_CZFBDT.
+
+DATA: L_ZFBDT TYPE ZFBDT.
+
+*-- 末日の取得
+PERFORM F_CALL_LAST_DAY_OF_MONTHS USING P_CZFBDT
+CHANGING L_ZFBDT.
+
+*-- 末日の判定
+IF P_CZFBDT = L_ZFBDT.
+G_ZFBDT_DAY = P_CZFBDT+6(2).
+ELSE.
+*-- 五十日の判定
+IF P_CZFBDT+5(2) = 05
+OR P_CZFBDT+5(2) = 10
+OR P_CZFBDT+5(2) = 15
+OR P_CZFBDT+5(2) = 20
+OR P_CZFBDT+5(2) = 25.
+G_ZFBDT_DAY = P_CZFBDT+5(2).
+ELSE.
+*-- 入力された締日が、五十日、末日ではありません
+MESSAGE E913.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_P_CZFBDT
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_LAST_DAY_OF_MONTHS
+*&---------------------------------------------------------------------*
+*       末日の取得
+*----------------------------------------------------------------------*
+*      -->AI_DATE  算出基準日
+*      <--AO_DATE  取得末日
+*----------------------------------------------------------------------*
+FORM F_CALL_LAST_DAY_OF_MONTHS USING VALUE(AI_DATE) TYPE ANY
+CHANGING VALUE(AO_DATE) TYPE ANY.
+
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN                  = AI_DATE
+IMPORTING
+LAST_DAY_OF_MONTH       = AO_DATE
+EXCEPTIONS
+OTHERS                   = 0.
+
+ENDFORM.                    " F_CALL_LAST_DAY_OF_MONTHS
+*&---------------------------------------------------------------------*
+*&      Form  INT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INT_SEC.
+
+ENDFORM.                    " INT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_SEC
+*&---------------------------------------------------------------------*
+*      メイン処理
+*----------------------------------------------------------------------*
+FORM MAIN_SEC.
+
+*-- 処理対象得意先コードの確定
+PERFORM F_CONFIRM_CUSTOMER_PROC.
+
+*-- データ取得処理
+PERFORM F_GET_DATA_PROC.
+
+*-- 出力データ作成処理
+PERFORM F_MAKE_OUTPUT_DATA_PROC.
+
+ENDFORM.                    " MAIN_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_CONFIRM_CUSTOMER_PROC
+*&---------------------------------------------------------------------*
+*       処理対象得意先コードの確定
+*----------------------------------------------------------------------*
+FORM F_CONFIRM_CUSTOMER_PROC.
+
+*-- 得意先マスタデータ抽出
+PERFORM F_SELECT_KNxx.
+
+*-- 支払人の支払条件抽出
+PERFORM F_SELECT_T052.
+
+*-- 得意先データ絞込み
+PERFORM F_REFINE_KNxx.
+
+ENDFORM.                    " F_CONFIRM_CUSTOMER_PROC
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_KNxx
+*&---------------------------------------------------------------------*
+*       得意先マスタデータ抽出
+*----------------------------------------------------------------------*
+FORM F_SELECT_KNxx.
+
+REFRESH: I_KNxx.
+
+SELECT KNVP~KUNNR                         " 得意先コード
+KNA1~NAME1                         " 名称１
+KNVP~KUNN2                         " 取引先の得意先コード
+KNVV~ZTERM                         " 支払条件キー
+FROM KNVP INNER JOIN KNVV
+ON KNVP~VKORG = KNVV~VKORG
+AND KNVP~VTWEG = KNVV~VTWEG
+AND KNVP~SPART = KNVV~SPART
+AND KNVP~KUNN2 = KNVV~KUNNR
+INNER JOIN KNA1
+ON KNVP~KUNNR = KNA1~KUNNR
+INTO CORRESPONDING FIELDS OF TABLE I_KNxx
+WHERE KNVP~KUNNR IN S_KUNNR              " 得意先コード
+AND KNVP~VKORG  = P_VKORG              " 販売組織
+AND KNVP~VTWEG  = P_VTWEG              " 流通チャネル
+AND KNVP~SPART  = P_SPART              " 製品部門
+AND KNVP~PARVW  = P_PARVW              " 取引先機能
+AND KNVP~PARZA  = C_PARZA.             " 取引カウンタ
+
+ENDFORM.                    " F_SELECT_KNxx
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_T052
+*&---------------------------------------------------------------------*
+*       支払人の支払条件抽出
+*----------------------------------------------------------------------*
+FORM F_SELECT_T052.
+
+CHECK NOT I_KNxx[] IS INITIAL.
+
+REFRESH: I_T052.
+
+SELECT ZTERM                              " 支払条件キー
+ZTAGG                              " 期限
+FROM T052
+INTO CORRESPONDING FIELDS OF TABLE I_T052
+FOR ALL ENTRIES IN I_KNxx
+WHERE ZTERM = I_KNxx-ZTERM.              " 支払条件キー
+
+*-- 期日を若番1つに絞り込む
+DELETE ADJACENT  DUPLICATES FROM I_T052
+COMPARING ZTERM.                   " 支払条件キー
+
+ENDFORM.                    " F_SELECT_T052
+*&---------------------------------------------------------------------*
+*&      Form  F_REFINE_KNxx
+*&---------------------------------------------------------------------*
+*       得意先データ絞込み
+*----------------------------------------------------------------------*
+FORM F_REFINE_KNxx.
+
+LOOP AT I_KNxx INTO W_KNxx.
+*-- 支払条件の読込み
+CLEAR: W_T052.
+READ TABLE I_T052 INTO W_T052
+WITH KEY ZTERM = W_KNxx-ZTERM   " 支払条件キー
+BINARY SEARCH.
+*-- 締日<>期日の場合、処理対象外とする
+IF W_T052-ZTAGG <> G_ZFBDT_DAY.
+DELETE I_KNxx.
+CONTINUE.
+ENDIF.
+ENDLOOP.
+
+*-- 該当得意先が0件の場合、メッセージを出力して終了
+IF I_KNxx[] IS INITIAL.
+*--　&1 日締に該当する得意先が存在しません
+MESSAGE S925 WITH P_CZFBDT.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+FREE: I_T052.
+
+ENDFORM.                    " F_REFINE_KNxx
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_YK_ZFBDT_GET_BY_KNVV
+*&---------------------------------------------------------------------*
+*       前回締日の取得
+*----------------------------------------------------------------------*
+FORM F_CALL_YK_ZFBDT_GET_BY_KNVV.
+
+CLEAR: W_KNxx,
+G_ZFBDT_OLD.
+
+*-- 代表得意先コード読込
+READ TABLE I_KNxx INTO W_KNxx INDEX 1.
+
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD               = W_KNxx-KUNNR  " 得意先コード(支払人)
+I_VKORG              = P_VKORG       " 販売組織
+I_VTWEG              = P_VTWEG       " 流通チャネル
+I_SPART              = P_SPART       " 製品部門
+I_DAY                = P_CZFBDT      " 照合締日
+IMPORTING
+E_ZFBDT_OLD           = G_ZFBDT_OLD   " 前回締日
+EXCEPTIONS
+OTHERS                = 0.
+
+ENDFORM.                    " F_CALL_YK_ZFBDT_GET_BY_KNVV
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_DATA_PROC
+*&---------------------------------------------------------------------*
+*       データ取得処理
+*----------------------------------------------------------------------*
+FORM F_GET_DATA_PROC.
+
+*-- 前回締日の取得
+PERFORM F_CALL_YK_ZFBDT_GET_BY_KNVV.
+
+*-- 自社データ一括取得
+PERFORM F_SELECT_YN120.
+
+*-- 外部データ一括取得
+PERFORM F_SELECT_YN110.
+
+ENDFORM.                    " F_GET_DATA_PROC
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_YN120
+*&---------------------------------------------------------------------*
+*       自社データ一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_YN120.
+
+REFRESH: I_YN120_S,
+I_YN120_C,
+I_YN120_N,
+I_YN120_P.
+
+*-- 当月売上
+SELECT LIST1                              " 得意先コード(受注先)
+DVSON                              " 営業所
+LIST4                              " 営業グループ
+WAERS                              " 通貨コード
+KNETXAMT                           " 税込金額
+GJAHR                              " 伝票会計年度
+SLPDOC                             " 伝票番号
+DTLDOC                             " 伝票明細番号
+VRFCTON                            " 得意先コード(支払人)
+CZFBDT                             " 照合締日
+AUTOFLG                            " 自動生成明細（部分照合）
+FROM YN120
+INTO CORRESPONDING FIELDS OF TABLE I_YN120_S
+FOR ALL ENTRIES IN I_KNxx
+WHERE VRFCTON = I_KNxx-KUNN2             " 得意先コード(支払人)
+AND BUKRS   = P_BUKRS                  " 会社コード
+AND ZFBDT   = P_CZFBDT.                " 計上締日 = 今回締日
+
+*-- 次月売上当月照合
+SELECT LIST1                              " 得意先コード(受注先)
+DVSON                              " 営業所
+LIST4                              " 営業グループ
+WAERS                              " 通貨コード
+KNETXAMT                           " 税込金額
+GJAHR                              " 伝票会計年度
+SLPDOC                             " 伝票番号
+DTLDOC                             " 伝票明細番号
+VRFCTON                            " 得意先コード(支払人)
+CZFBDT                             " 照合締日
+AUTOFLG                            " 自動生成明細（部分照合）
+FROM YN120
+INTO CORRESPONDING FIELDS OF TABLE I_YN120_C
+FOR ALL ENTRIES IN I_KNxx
+WHERE VRFCTON = I_KNxx-KUNN2             " 得意先コード(支払人)
+AND BUKRS   = P_BUKRS                  " 会社コード
+AND ZFBDT   > P_CZFBDT                 " 計上締日 > 今回締日
+AND CZFBDT  = P_CZFBDT.                " 照合締日 = 今回締日
+
+*-- 前回以前未検収
+SELECT LIST1                              " 得意先コード(受注先)
+DVSON                              " 営業所
+LIST4                              " 営業グループ
+WAERS                              " 通貨コード
+KNETXAMT                           " 税込金額
+GJAHR                              " 伝票会計年度
+SLPDOC                             " 伝票番号
+DTLDOC                             " 伝票明細番号
+VRFCTON                            " 得意先コード(支払人)
+CZFBDT                             " 照合締日
+AUTOFLG                            " 自動生成明細（部分照合）
+FROM YN120
+INTO CORRESPONDING FIELDS OF TABLE I_YN120_N
+FOR ALL ENTRIES IN I_KNxx
+WHERE VRFCTON =  I_KNxx-KUNN2            " 得意先コード(支払人)
+AND BUKRS   =  P_BUKRS                 " 会社コード
+AND ZFBDT   <= P_CZFBDT                " 計上締日 ≦ 前回締日
+AND CZFBDT  >  P_CZFBDT                " 照合締日 ＞ 今回締日
+AND (  AUTOFLG = SPACE                 " 部分照合：なし
+OR AUTOFLG = 1 ).                  " 部分照合：元自社
+
+*-- 前月以前先行入金
+SELECT LIST1                              " 得意先コード(受注先)
+DVSON                              " 営業所
+LIST4                              " 営業グループ
+WAERS                              " 通貨コード
+KNETXAMT                           " 税込金額
+GJAHR                              " 伝票会計年度
+SLPDOC                             " 伝票番号
+DTLDOC                             " 伝票明細番号
+VRFCTON                            " 得意先コード(支払人)
+CZFBDT                             " 照合締日
+AUTOFLG                            " 自動生成明細（部分照合）
+FROM YN120
+INTO CORRESPONDING FIELDS OF TABLE I_YN120_P
+FOR ALL ENTRIES IN I_KNxx
+WHERE VRFCTON =  I_KNxx-KUNN2            " 得意先コード(支払人)
+AND BUKRS   =  P_BUKRS                 " 会社コード
+AND ZFBDT   <= P_CZFBDT                " 計上締日 ≦ 前回締日
+AND AUTOFLG =  2.                      " 部分照合：元外部
+
+ENDFORM.                    " F_SELECT_YN120
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_YN110
+*&---------------------------------------------------------------------*
+*       外部データ一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_YN110.
+
+REFRESH: I_YN110_A.
+
+*-- 当月検収
+SELECT LIST1                              " 得意先コード(受注先)
+DVSON                              " 営業所
+LIST4                              " 営業グループ
+WAERS                              " 通貨コード
+KNETXAMT                           " 税込金額
+GJAHR                              " 伝票会計年度
+SLPDOC                             " 伝票番号
+DTLDOC                             " 伝票明細番号
+VRFCTON                            " 得意先コード(支払人)
+FROM YN110
+INTO CORRESPONDING FIELDS OF TABLE I_YN110_A
+FOR ALL ENTRIES IN I_KNxx
+WHERE VRFCTON = I_KNxx-KUNN2             " 得意先コード(支払人)
+AND BUKRS   = P_BUKRS                  " 会社コード
+AND ZFBDT   = P_CZFBDT.                " 計上締日 = 今回締日
+
+ENDFORM.                    " F_SELECT_YN110
+*&---------------------------------------------------------------------*
+*&      Form  F_MAKE_OUTPUT_DATA_PROC
+*&---------------------------------------------------------------------*
+*       出力データ作成処理
+*----------------------------------------------------------------------*
+FORM F_MAKE_OUTPUT_DATA_PROC.
+
+*-- 取得金額集計
+PERFORM F_COLLECT_KNETXAMT.
+
+IF I_DATA[] IS INITIAL.
+*-- 対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+*-- その他出力項目設定
+PERFORM F_SET_OTHER_FIELD.
+
+ENDFORM.                    " F_MAKE_OUTPUT_DATA_PROC
+*&---------------------------------------------------------------------*
+*&      Form  F_COLLECT_KNETXAMT
+*&---------------------------------------------------------------------*
+*       取得金額集計
+*----------------------------------------------------------------------*
+FORM F_COLLECT_KNETXAMT.
+
+LOOP AT I_YN120_S INTO W_YN1x0.
+CLEAR: W_DATA.
+PERFORM F_SET_KEY_DATA USING W_YN1x0
+CHANGING W_DATA.    " キー項目設定
+*-- 当月売上
+W_DATA-SUM01 = W_YN1x0-KNETXAMT.        " 税込金額
+*-- 未検収
+IF  W_YN1x0-CZFBDT > P_CZFBDT           " 照合締日 > 今回締日
+AND (  W_YN1x0-AUTOFLG = SPACE          " 部分照合：なし
+OR W_YN1x0-AUTOFLG = 1 ).           " 部分照合：元自社
+W_DATA-SUM05 = W_YN1x0-KNETXAMT.      " 未検収
+ENDIF.
+*-- 先行入金
+IF  W_YN1x0-CZFBDT  > P_CZFBDT          " 照合締日 > 今回締日
+AND W_YN1x0-AUTOFLG = 2.                " 部分照合：外部
+W_DATA-SUM06 = W_YN1x0-KNETXAMT.      " 未検収
+ENDIF.
+*-- 当月売上前月照合
+IF  W_YN1x0-CZFBDT = G_ZFBDT_OLD.       " 照合締日 = 前回締日
+W_DATA-SUM10 = W_YN1x0-KNETXAMT.      " 未検収
+ENDIF.
+*-- 当月売上当月照合
+IF  W_YN1x0-CZFBDT = P_CZFBDT.          " 照合締日 = 今回締日
+W_DATA-SUM11 = W_YN1x0-KNETXAMT.      " 未検収
+ENDIF.
+COLLECT W_DATA INTO I_DATA.
+ENDLOOP.
+
+LOOP AT I_YN120_C INTO W_YN1x0.
+CLEAR: W_DATA.
+PERFORM F_SET_KEY_DATA USING W_YN1x0
+CHANGING W_DATA.    " キー項目設定
+*-- 次月売上照合
+W_DATA-SUM13 = W_YN1x0-KNETXAMT.        " 税込金額
+COLLECT W_DATA INTO I_DATA.
+ENDLOOP.
+
+LOOP AT I_YN120_N INTO W_YN1x0.
+CLEAR: W_DATA.
+PERFORM F_SET_KEY_DATA USING W_YN1x0
+CHANGING W_DATA.    " キー項目設定
+*-- 前月以前未検収
+W_DATA-SUM07 = W_YN1x0-KNETXAMT.        " 税込金額
+COLLECT W_DATA INTO I_DATA.
+ENDLOOP.
+
+LOOP AT I_YN120_P INTO W_YN1x0.
+CLEAR: W_DATA.
+PERFORM F_SET_KEY_DATA USING W_YN1x0
+CHANGING W_DATA.    " キー項目設定
+*-- 前月以前先行入金
+W_DATA-SUM08 = W_YN1x0-KNETXAMT.        " 税込金額
+COLLECT W_DATA INTO I_DATA.
+ENDLOOP.
+
+LOOP AT I_YN110_A INTO W_YN1x0.
+CLEAR: W_DATA.
+PERFORM F_SET_KEY_DATA USING W_YN1x0
+CHANGING W_DATA.    " キー項目設定
+*-- 当月検収
+W_DATA-SUM03 = W_YN1x0-KNETXAMT.        " 税込金額
+*-- 未入力
+IF  W_YN1x0-CZFBDT = P_CZFBDT.          " 照合締日 > 今回締日
+W_DATA-SUM09 = W_YN1x0-KNETXAMT.      " 未入力
+ENDIF.
+*-- 入金予定
+IF  W_YN1x0-CZFBDT = P_CZFBDT.          " 照合締日 = 今回締日
+W_DATA-SUM04 = W_YN1x0-KNETXAMT.      " 入金予定
+ENDIF.
+ENDLOOP.
+
+FREE: I_YN120_S,
+I_YN120_C,
+I_YN120_N,
+I_YN120_P,
+I_YN110_A.
+
+ENDFORM.                    " F_COLLECT_KNETXAMT
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_KEY_DATA
+*&---------------------------------------------------------------------*
+*       キー項目設定
+*----------------------------------------------------------------------*
+*      -->AI_YN1x0  自社/外部データ
+*      <--AO_DATA   出力データ
+*----------------------------------------------------------------------*
+FORM F_SET_KEY_DATA USING VALUE(AI_YN1x0) LIKE W_YN1x0
+CHANGING VALUE(AO_DATA)  LIKE W_DATA.
+
+AO_DATA-KUNNR = AI_YN1x0-LIST1.           " 得意先コード(受注先)
+AO_DATA-VKBUR = AI_YN1x0-DVSON.           " 営業所
+AO_DATA-VKGRP = AI_YN1x0-LIST4.           " 営業グループ
+AO_DATA-WAERS = AI_YN1x0-WAERS.           " 通貨コード
+
+ENDFORM.                    " F_SET_KEY_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_OTHER_FIELD
+*&---------------------------------------------------------------------*
+*       その他出力項目設定
+*----------------------------------------------------------------------*
+FORM F_SET_OTHER_FIELD.
+
+LOOP AT I_DATA INTO W_DATA.
+*-- 得意先マスタ読込み
+CLEAR: W_KNxx.
+READ TABLE I_KNxx INTO W_KNxx
+WITH KEY KUNNR = W_DATA-KUNNR
+BINARY SEARCH.
+*-- 得意先名称
+W_DATA-NAME1 = W_KNxx-NAME1.
+*-- 請求書
+PERFORM F_CALL_READ_TEXT USING W_KNxx-KUNN2  " 得意先コード(支払人)
+CHANGING W_DATA-KTEXT. " 請求書
+*-- 未照合額 ( 未検収 ＋ 前月以前未検収 )
+W_DATA-SUM02 = W_DATA-SUM05 + W_DATA-SUM07.
+*-- 当月発行請求額 ( 当月売上 - 当月売上前月照合 )
+W_DATA-SUM15 = W_DATA-SUM01 - W_DATA-SUM10.
+*-- 要処理額 ( 当月検収額 - 入金予定額 )
+W_DATA-SUM16 = W_DATA-SUM03 - W_DATA-SUM04.
+MODIFY I_DATA FROM W_DATA.
+ENDLOOP.
+
+ENDFORM.                    " F_SET_OTHER_FIELD
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_READ_TEXT
+*&---------------------------------------------------------------------*
+*      得意先マスタ会社コードビューのテキスト取得
+*----------------------------------------------------------------------*
+*      -->AI_KUNNR   得意先コード
+*      <--AO_KTEXT   得意先マスタ(会社コード)テキスト
+*--------------------------------------------------------------------*
+FORM F_CALL_READ_TEXT USING VALUE(AI_KUNNR) TYPE ANY
+CHANGING VALUE(AO_KTEXT) TYPE ANY.
+
+DATA: L_NAME TYPE THEAD-TDNAME,
+LI_TLINE TYPE STANDARD TABLE OF TLINE WITH HEADER LINE.
+
+CLEAR: L_NAME.
+REFRESH: LI_TLINE.
+
+CONCATENATE AI_KUNNR
+P_BUKRS
+INTO L_NAME.
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+CLIENT                        = SY-MANDT
+ID                            = 'YN01'
+LANGUAGE                      = SY-LANGU
+NAME                          = L_NAME
+OBJECT                        = 'KNB1'
+TABLES
+LINES                         = LI_TLINE
+EXCEPTIONS
+OTHERS                        = 0.
+
+LOOP AT LI_TLINE.
+AO_KTEXT = LI_TLINE-TDLINE+0(1).
+EXIT.
+ENDLOOP.
+
+ENDFORM.                    " F_CALL_READ_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  END_SEC
+*&---------------------------------------------------------------------*
+*       終了処理
+*----------------------------------------------------------------------*
+FORM END_SEC.
+
+*-- ALVフィールドカタログ設定
+PERFORM F_SET_FIELDCAT.
+
+*-- ALV表示設定
+PERFORM F_SET_DISPLAY.
+
+*-- ALVイベント設定
+PERFORM F_SET_EVENT.
+
+*-- ALV出力
+PERFORM F_OUTPUT_ALV.
+
+ENDFORM.                    " END_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       フィールドカタログ設定
+*----------------------------------------------------------------------*
+FORM F_SET_FIELDCAT.
+
+REFRESH: I_FIELDCAT.
+
+*-- フィールドカタログ生成
+CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+EXPORTING
+I_PROGRAM_NAME               = C_REPID
+I_INTERNAL_TABNAME           = C_TABNAME
+I_INCLNAME                   = C_REPID
+CHANGING
+CT_FIELDCAT                  = I_FIELDCAT
+EXCEPTIONS
+OTHERS                       = 0.
+
+*-- 項目名設定変更
+PERFORM F_CHANGE_FIELD_TEXT.
+
+ENDFORM.                    " F_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  F_CHANGE_FIELD_TEXT
+*&---------------------------------------------------------------------*
+*       ALV項目名設定変更
+*----------------------------------------------------------------------*
+FORM F_CHANGE_FIELD_TEXT.
+
+LOOP AT I_FIELDCAT INTO W_FIELDCAT.
+W_FIELDCAT-DDICTXT = 'L'.
+CASE W_FIELDCAT-COL_POS.
+WHEN 1.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F01.
+WHEN 2.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F02.
+WHEN 3.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F03.
+WHEN 4.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F04.
+WHEN 5.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F05.
+WHEN 6.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F06.
+WHEN 7.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F07.
+WHEN 8.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F08.
+WHEN 9.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F09.
+WHEN 10.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F10.
+WHEN 11.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F11.
+WHEN 12.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F12.
+WHEN 13.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F13.
+WHEN 14.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F14.
+WHEN 15.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F15.
+WHEN 16.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F16.
+WHEN 17.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F17.
+WHEN 18.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F18.
+WHEN 19.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F19.
+WHEN 20.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F20.
+WHEN 21.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F21.
+WHEN 22.
+W_FIELDCAT-SELTEXT_L    =
+W_FIELDCAT-REPTEXT_DDIC = TEXT-F22.
+ENDCASE.
+MODIFY I_FIELDCAT FROM W_FIELDCAT.
+ENDLOOP.
+
+ENDFORM.                    " F_CHANGE_FIELD_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_DISPLAY
+*&---------------------------------------------------------------------*
+*       ALV表示設定
+*----------------------------------------------------------------------*
+FORM F_SET_DISPLAY.
+
+CLEAR: W_LAYOUT,
+W_VARIANT.
+
+*-- レイアウト
+W_LAYOUT-COLWIDTH_OPTIMIZE    = C_ON.              " 列幅最適
+W_LAYOUT-DETAIL_INITIAL_LINES = C_ON.
+W_LAYOUT-ZEBRA                = C_ON.              " 縞々
+
+*-- バリアント
+W_VARIANT-REPORT  = SY-REPID.
+W_VARIANT-VARIANT = P_LYOUT.
+
+ENDFORM.                    " F_SET_DISPLAY
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_EVENT
+*&---------------------------------------------------------------------*
+*       ALVイベント設定
+*----------------------------------------------------------------------*
+FORM F_SET_EVENT.
+
+REFRESH: I_EVENT.
+
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+IMPORTING
+ET_EVENTS             = I_EVENT
+EXCEPTIONS
+OTHERS                = 0.
+
+READ TABLE I_EVENT INTO W_EVENT WITH KEY NAME = SLIS_EV_TOP_OF_PAGE.
+IF SY-SUBRC = 0 .
+W_EVENT-FORM = 'F_CALL_TOP_OF_PAGE'.
+MODIFY I_EVENT INDEX SY-TABIX FROM W_EVENT.
+ENDIF.
+
+ENDFORM.                    " F_SET_EVENT
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       ALV出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_ALV.
+
+*-- プリント設定
+CLEAR: W_PRINT.
+W_PRINT-NO_PRINT_LISTINFOS = C_ON.
+
+SORT I_DATA.
+
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM                = C_REPID
+IS_LAYOUT                         = W_LAYOUT
+IT_FIELDCAT                       = I_FIELDCAT
+I_DEFAULT                         = C_ON
+I_SAVE                            = C_SAVE
+IS_VARIANT                        = W_VARIANT
+IT_EVENTS                         = I_EVENT
+IS_PRINT                          = W_PRINT
+TABLES
+T_OUTTAB                          = I_DATA
+EXCEPTIONS
+PROGRAM_ERROR                     = 1
+OTHERS                            = 2.
+
+IF SY-SUBRC <> 0.
+*-- 予期せぬ障害が発生しました
+MESSAGE S013.
+STOP.
+ENDIF.
+
+ENDFORM.                    " F_OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+*       ALVヘッダ設定
+*----------------------------------------------------------------------*
+FORM F_CALL_TOP_OF_PAGE.
+
+data: L_INFO(60) TYPE C,
+L_PAGNO(4) TYPE C.
+
+*-- タイトル
+PERFORM F_SET_HEADER USING C_TYP1
+TEXT-H01.
+
+*-- ページ
+CLEAR: L_INFO,
+L_PAGNO.
+L_PAGNO = SY-PAGNO.
+CONCATENATE TEXT-H02
+L_PAGNO
+INTO L_INFO.
+PERFORM F_SET_HEADER USING C_TYP2
+L_INFO.
+
+*-- 処理日付
+CLEAR: L_INFO.
+CONCATENATE TEXT-H03
+sy-datum+0(4) TEXT-H06
+sy-datum+4(2) TEXT-H06
+sy-datum+6(2)
+INTO L_INFO.
+PERFORM F_SET_HEADER USING C_TYP2
+L_INFO.
+
+*-- 処理時刻
+CLEAR: L_INFO.
+CONCATENATE TEXT-H04
+sy-uzeit+0(2) TEXT-H07
+sy-uzeit+2(2) TEXT-H07
+sy-uzeit+4(2)
+INTO L_INFO.
+PERFORM F_SET_HEADER USING C_TYP2
+L_INFO.
+
+*-- ユーザID
+CLEAR: L_INFO.
+CONCATENATE TEXT-H05
+SY-UNAME
+INTO L_INFO.
+PERFORM F_SET_HEADER USING C_TYP2
+L_INFO.
+
+CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+EXPORTING
+IT_LIST_COMMENTARY   = I_HEADER.
+
+REFRESH: I_HEADER.
+
+ENDFORM.                    " F_CALL_TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_HEADER
+*&---------------------------------------------------------------------*
+*       ヘッダ編集
+*----------------------------------------------------------------------*
+*      -->AI_TYP    タイプ
+*      -->AI_INFO   編集内容
+*----------------------------------------------------------------------*
+FORM F_SET_HEADER USING VALUE(AI_TYP)  TYPE ANY
+VALUE(AI_INFO) TYPE ANY.
+
+CLEAR: W_HEADER.
+
+W_HEADER-TYP  = AI_TYP.
+W_HEADER-INFO = AI_INFO.
+APPEND W_HEADER TO I_HEADER.
+
+ENDFORM.                    " F_SET_HEADER

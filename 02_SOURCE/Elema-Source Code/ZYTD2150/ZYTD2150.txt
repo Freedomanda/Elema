@@ -1,0 +1,583 @@
+report ZYTD2150 message-id y1
+line-size  170
+line-count  58
+no standard page heading .
+************************************************************************
+***  REPROT     ZYTD2150
+***  PROGRAM    入庫バッチインプット（移行用）
+***  MAKE DATE  1998.12.18
+***  CODE BY    S.AOYAGI(PSS)
+*** 変更履歴
+*** 1999.07.26  4.0バージョンに変更 Nakai(PSS)
+*** 2002.02.22  y.tatebayashi(psd)
+***             ①存在チェックの追加
+***             ②ファイル読み込み(ローカル)の追加
+***             ※過去のコメントは削除させていただきました。
+*** 2002.05.13  タブ区切りで受け取り
+*** 2009.07.01  d.kodama(ndsc)
+***             入力ファイルにて「国内通貨額」が1以上の数字でない値の
+***             場合エラーを出力して後続処理をしない
+*&  2012/08/20  ISID ES-UP
+************************************************************************
+selection-screen skip 1 .
+parameters : p_bldat     like mkpf-bldat obligatory ,
+p_budat     like mkpf-budat obligatory .
+selection-screen skip 1 .
+parameters : p_ifile(128) type c lower case .
+parameters : p_sel1 radiobutton group radi ,
+p_sel2 radiobutton group radi .
+selection-screen skip 1 .
+parameters   p_chk       as checkbox     default 'X' .
+
+************************************************************************
+tables : mara  ,   "
+mard  ,   "
+t001l ,   "
+t001w .   "
+*BDCtab
+data : begin of bdc occurs 0 .
+include structure bdcdata.
+data : end   of bdc .
+*読み込みデータ
+data : begin of in_file occurs 0 ,
+*      data(52) type c , "2002/05/13 MOD START
+* Mod ES-UP 2012/10/23 -->
+*      data(100) type c , "2002/05/13 MOD END
+data      type string,
+* Mod ES-UP 2012/10/23 <--
+end   of in_file.
+*加工済みデータ
+data : begin of itab occurs 0  ,
+werks     like rm07m-werks ,  " プラント
+lgort     like rm07m-lgort ,  " 保管場所
+matnr     like mseg-matnr  ,  " 品目コード
+erfmg(13) type c           ,  " 入庫数
+exbwr(13) type c           ,  " 国内通貨額
+end   of itab           .
+*エラーデータ
+data : begin of etab occurs 0  ,
+werks     like rm07m-werks ,  " プラント
+lgort     like rm07m-lgort ,  " 保管場所
+matnr     like mseg-matnr  ,  " 品目コード
+erfmg(13) type c           ,  " 入庫数
+exbwr(13) type c           ,  " 国内通貨額
+flag                       ,  " FLAG
+end of etab             .
+data : total type i ,
+okcnt type i ,
+line  type i .
+data : msg1  like message .
+* Mod ES-UP 2012/08/20 -->
+**2002/05/13 ADD START
+**DATA:W_DUMMY(1000) TYPE C.
+*DATA W_TAB TYPE X VALUE '09'.
+**2002/05/13 ADD END
+*-----------------------------------------------------------------------
+*  固定値
+*-----------------------------------------------------------------------
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Mod ES-UP 2012/08/20 <--
+************************************************************************
+start-of-selection .
+
+if     p_sel1 = 'X' and p_ifile =  space .
+message i403 with 'ファイル名を指定してください' .
+stop .
+elseif p_sel1 = 'X' and p_ifile <> space .
+perform open_file  .              " OPEN FILE
+perform read_file  .              " ｲﾝﾀﾌｪｰｽﾌｧｲﾙREAD
+elseif p_sel2 = 'X' and p_sel1 = space   .
+perform read_local .
+endif .
+perform edit       .              " データ編集
+perform err_check  .              " ERROR CHECK
+perform make_bdc   .              " BDCDATA 作成
+perform infomation .              " 結果出力
+end-of-selection.
+************************************************************************
+***  ファイルオープン
+************************************************************************
+form open_file.
+* Mod ES-UP 2012/08/20 -->
+*  open dataset p_ifile for input in text mode .
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+
+open dataset p_ifile for input
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/08/20 <--
+if sy-subrc <> 0 .
+message i402
+with '入庫データファイル' 'オープンエラー' p_ifile .
+stop .
+endif .
+endform .
+************************************************************************
+***  ファイルの読込み
+************************************************************************
+form read_file .
+refresh in_file .  clear total .
+do.
+* Mod ES-UP 2012/10/23 -->
+*     read dataset p_ifile into in_file.
+read dataset p_ifile into in_file-data.
+* Mod ES-UP 2012/10/23 <--
+*     CLEAR W_DUMMY.
+*     read dataset p_ifile into W_DUMMY.  "2002/05/13 MOD
+if sy-subrc <> 0 .  exit .
+*     ELSE.                "2002/05/13 ADD
+*       PERFORM SPLIT_DATA."2002/05/13 ADD
+endif .
+append in_file .
+total = total + 1 .
+enddo.
+close dataset p_ifile .
+describe table in_file lines line .
+if line < 1 .
+message i400 with '入庫データはありません' .  stop .
+endif .
+endform .
+************************************************************************
+***  データ編集
+************************************************************************
+form edit .
+*2009.07.01 append start
+data : n_exbwr type p,
+s_exbwr type string.
+*2009.07.01 append end
+refresh : itab , etab .
+loop at in_file .
+* クリア
+clear : itab , etab , n_exbwr, s_exbwr.
+* 設定
+*    itab-werks = in_file-data+0(4)   .
+*    itab-lgort = in_file-data+4(4)   .
+*    itab-matnr = in_file-data+8(18)  .
+*    itab-erfmg = in_file-data+26(13) .
+*    itab-exbwr = in_file-data+39(13) .
+PERFORM SPLIT_DATA.        "2002/05/13 ADD
+***2002.07.29 ADD >>>
+TRANSLATE ITAB-MATNR to UPPER CASE.
+***2002.07.29 ADD <<<
+* 品目コードは内部書式に変換する
+call function 'CONVERSION_EXIT_MATN1_INPUT'
+exporting
+input   = itab-matnr
+importing
+output  = itab-matnr
+exceptions
+others  = 1 .
+* チェック（引っかかったらフラグ入れてContinue）
+*-- 品目の存在チェック
+select single * from mara where matnr = itab-matnr .
+if sy-subrc <> 0 .
+etab-flag = '1'.
+move-corresponding itab to etab .
+append etab .
+continue .
+endif .
+*-- プラントの存在チェック
+select single * from t001w where werks = itab-werks .
+if sy-subrc <> 0 .
+etab-flag = '2'.
+move-corresponding itab to etab .
+append etab .
+continue .
+endif .
+*-- プラント/保管場所の存在チェック
+select single * from t001l where werks = itab-werks
+and lgort = itab-lgort .
+if sy-subrc <> 0 .
+etab-flag = '3' .
+move-corresponding itab to etab .
+append etab .
+continue .
+endif .
+*-- 品目/プラント/保管場所の存在チェック
+select single * from mard where matnr = itab-matnr
+and werks = itab-werks
+and lgort = itab-lgort .
+if sy-subrc <> 0 .
+etab-flag = '4' .
+move-corresponding itab to etab .
+append etab .
+continue .
+endif.
+*2009.07.01 append start
+*-- 「国内通貨額」の値チェック
+s_exbwr = itab-exbwr.
+if s_exbwr CO '1234567890-'.
+n_exbwr = itab-exbwr .
+endif.
+if NOT n_exbwr > 0 .
+etab-flag = '5'.
+move-corresponding itab to etab .
+append etab .
+continue .
+endif.
+*2009.07.01 append end
+
+* 登録
+append itab .
+endloop .
+endform .
+************************************************************************
+***  エラーチェック
+************************************************************************
+form err_check.
+*2009.07.01 append start
+data exbwr_err type i.
+clear exbwr_err.
+*2009.07.01 append start
+
+if p_chk = 'X'.
+describe table etab lines line.
+if line < 1.
+write:/ 'エラーチェック結果'.
+write:/ 'エラーはありませんでした'.
+stop.
+else.
+write:/ 'エラーチェック結果'.uline.
+*    write:/1 text-001,10 text-002,20 text-003,32 text-004, "05/13 MOD
+*          44 text-005.                                     "05/13 MOD
+write:/1 text-001,10 text-002,20 text-003,40 text-004,  "05/13 MOD
+55 text-005.                                      "05/13 MOD
+loop at etab.
+write:/ etab-werks  under text-001,
+etab-lgort  under text-002,
+etab-matnr  under text-003,
+etab-erfmg  under text-004,
+etab-exbwr  under text-005.
+case etab-flag .
+when '1' .
+*56→70 に変更 2002/05/13 MOD
+write: 70 'この品目はR/3に登録されていません' .
+when '2' .
+write: 70 'このプラントはR/3に登録されていません' .
+when '3' .
+write: 70 'プラントに保管場所が登録されていません' .
+when '4' .
+write: 70
+'この品目はこのプラント/保管場所に登録されていません' .
+*2009.07.01 append start
+when '5 '.
+write: 70
+'「国内通貨額」には1以上の数値を入力して下さい'.
+*2009.07.01 append end
+endcase .
+endloop.
+message i402 with '読込件数=' total '件'.
+message i402 with 'ｴﾗｰ 件数=' line  '件'.
+stop.
+endif.
+*2009.07.01 append start
+else.
+loop at etab where flag = '5'.
+write:/ etab-werks  under text-001,
+etab-lgort  under text-002,
+etab-matnr  under text-003,
+etab-erfmg  under text-004,
+etab-exbwr  under text-005.
+write: 70
+'「国内通貨額」には1以上の数値を入力して下さい'.
+exbwr_err = exbwr_err + 1.
+endloop.
+if exbwr_err > 0.
+message i402 with 'ｴﾗｰ 件数=' exbwr_err '件'.
+stop.
+endif.
+*2009.07.01 append end
+endif.
+endform.
+************************************************************************
+*** ＢＤＣデータ作成
+************************************************************************
+form make_bdc.
+data suryo(13) .
+clear : line , okcnt .  refresh bdc .
+loop at itab .
+if line is initial .
+
+perform frm_set_bdctab tables   bdc
+using : 'X' 'SAPMM07M'       '0400'     , " 第１画面
+' ' 'RM07M-BWARTWA'  '561'      , " 移動タイプ
+' ' 'RM07M-WERKS'    itab-werks , " プラント
+' ' 'RM07M-LGORT'    itab-lgort , " 保管場所
+' ' 'MKPF-BLDAT'     p_bldat    , " 伝票日付
+' ' 'MKPF-BUDAT'     p_budat    , " 転記日付
+' ' 'BDC_OKCODE'     'NPE'      , " 個別入力
+*                       ' ' 'SAPMM07M'       '0410'     , " 第２画面
+'X' 'SAPMM07M'       '0410'     , " 第２画面
+' ' 'MSEG-MATNR'     itab-matnr . " 品目コード
+suryo = itab-erfmg .
+perform frm_set_bdctab tables   bdc
+using : ' ' 'MSEG-ERFMG'     suryo      , " 数量
+' ' 'MSEG-LGORT'     itab-lgort . " 保管場所
+clear suryo .
+suryo = itab-exbwr .
+perform frm_set_bdctab tables   bdc
+using   ' ' 'MSEG-EXBWR'     suryo      . " 金額
+else .
+
+perform frm_set_bdctab tables   bdc
+using : 'X' 'SAPMM07M'       '0410'     , " 第２画面
+' ' 'BDC_OKCODE'     'NPE'      , " 個別入力
+*                      ' ' 'DKACB-FMORE'    ' '        , "DEL 05/13
+*                       ' ' 'SAPMM07M'       '0410'     , " 第２画面
+'X' 'SAPMM07M'       '0410'     , " 第２画面
+' ' 'MSEG-MATNR'     itab-matnr . " 品目コード
+clear suryo .
+suryo = itab-erfmg .
+perform frm_set_bdctab tables   bdc
+using   ' ' 'MSEG-ERFMG'     suryo      . " 数量
+clear suryo .
+suryo = itab-exbwr .
+perform frm_set_bdctab tables   bdc
+using   ' ' 'MSEG-EXBWR'     suryo      . " 金額
+endif .
+perform frm_set_bdctab tables   bdc
+*               using : ' ' 'DKACB-FMORE'    ' '        , "DEL 05/13
+using : ' ' 'BDC_OKCODE'     '/00'      .
+*                       ' ' 'DKACB-FMORE'    ' '        ."DEL 05/13
+line = line + 1 .
+if line >= 1 .
+perform frm_set_bdctab tables   bdc
+using : ' ' 'BDC_OKCODE'     'BU'       . " 保存
+*2002/05/13 ADD START
+perform frm_set_bdctab tables   bdc
+using : 'X' 'SAPLKACB'       '0002'     , " 第１画面
+' ' 'BDC_OKCODE'     '/00'       . " 保存
+*2002/05/13 ADD END
+perform call_tran .            "バッチインプット実行
+refresh bdc .  clear line .
+endif .
+endloop .
+if line <> 0 .
+perform frm_set_bdctab tables   bdc
+using : ' ' 'BDC_OKCODE'     'BU'       . " 保存
+*2002/05/13 ADD START
+perform frm_set_bdctab tables   bdc
+using : 'X' 'SAPLKACB'       '0002'     , " 第１画面
+' ' 'BDC_OKCODE'     '/00'       . " 保存
+*2002/05/13 ADD END
+endif .
+describe table bdc lines line .
+if line > 0 .
+perform call_tran .             "バッチインプット実行
+endif .
+endform .
+************************************************************************
+***  バッチインプット実行
+************************************************************************
+form call_tran.                                    "TESTは 'A' にする
+DATA W_MODE TYPE C.                                "MOD 5/13
+W_MODE = 'N'.                                    "MOD 5/13
+call transaction 'MB1C' using  bdc
+*                         mode   'N'       " 本番は 'N' にする "MOD 5/13
+mode   W_MODE    " 本番は 'N' にする "MOD 5/13
+update 'S'.
+if sy-subrc = 0.
+okcnt = okcnt + 1.
+else.
+call function 'WRITE_MESSAGE'
+exporting
+msgid   = sy-msgid
+msgno   = sy-msgno
+msgty   = sy-msgty
+msgv1   = sy-msgv1
+msgv2   = sy-msgv2
+msgv3   = sy-msgv3
+msgv4   = sy-msgv4
+msgv5   = sy-msgv4
+importing
+messg   = msg1
+exceptions
+others  = 1.
+*2002/05/13 MOD START
+*   message i400 with msg1.
+*   message i402 with '品目=' itab-matnr.
+WRITE:/1 '品目 =',
+6 itab-matnr,
+26 'プラント',
+36 itab-werks,
+/1 msg1-MSGTX.
+*2002/05/13 MOD END
+endif.
+endform.
+************************************************************************
+***  プログラムＩＤとＤＹＮＰＲＯ番号をセット
+************************************************************************
+form frm_set_bdctab
+tables p_bdcdata structure bdcdata
+using  value(operand1) value(operand2) value(operand3) .
+clear p_bdcdata .
+if operand1 = 'X' .
+p_bdcdata-dynbegin = operand1 .     " 'X'
+p_bdcdata-program  = operand2 .     " PROGRAM NAME
+p_bdcdata-dynpro   = operand3 .     " Dynpro NO
+append p_bdcdata .
+else .
+p_bdcdata-fnam = operand2 .
+p_bdcdata-fval = operand3 .
+append p_bdcdata .
+endif .
+endform.
+***********************************************************************
+***  結果出力
+***********************************************************************
+form infomation.
+message i402 with '読込件数=' total '件'.
+message i402 with '登録件数=' okcnt '件(伝票単位)'.
+endform.
+*** END OF PROGRAM ***
+************************************************************************
+***  ローカルより読み込み
+************************************************************************
+form read_local.
+* Mod ES-UP 2012/08/20 -->
+*  call function 'UPLOAD'
+*       exporting
+*            filename                = p_ifile
+**            filetype                = 'DAT'
+*       tables
+*            data_tab                = in_file
+*       exceptions
+*            conversion_error        = 1
+*            invalid_table_width     = 2
+*            invalid_type            = 3
+*            no_batch                = 4
+*            unknown_error           = 5
+*            others                  = 6 .
+DATA: L_FILE_TABLE TYPE FILETABLE,
+L_FILE       TYPE REF TO FILE_TABLE,
+L_TITLE      TYPE STRING,
+l_INITIAL_DIRECTORY type string,
+l_DEFAULT_FILENAME  type string,
+L_RC         TYPE I.
+DATA: L_FILENAME TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+L_TITLE = ``.
+perform split_file using p_ifile
+l_INITIAL_DIRECTORY
+l_DEFAULT_FILENAME.
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+WINDOW_TITLE            = L_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+DEFAULT_FILENAME        = l_DEFAULT_FILENAME
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+INITIAL_DIRECTORY       = l_INITIAL_DIRECTORY
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = L_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS "POVの時は、すべて0にすること
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 5 ).
+IF L_RC > 0.
+READ TABLE L_FILE_TABLE REFERENCE INTO L_FILE INDEX 1.
+IF SY-SUBRC = 0.
+L_FILENAME = L_FILE->FILENAME.
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILENAME
+*      FILETYPE                = 'DAT'
+*      HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER_LENGTH           = 0
+*      READ_BY_LINE            = 'X'
+*      DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+*      IGNORE_CERR             = ABAP_TRUE
+*      REPLACEMENT             = '#'
+*      VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*    IMPORTING
+*      FILELENGTH              = FILELENGTH
+*      HEADER                  = HEADER
+CHANGING
+DATA_TAB                = in_file[]
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+ENDIF.
+ENDIF.
+* Mod ES-UP 2012/08/20 <--
+*- エラー確認
+if sy-subrc <> 0 .
+message s638 .  stop .
+endif .
+* データ件数チェック
+describe table in_file lines total .
+if total = 0 .
+message s639 .  stop .
+endif .
+
+endform.                    " read_local
+* Add ES-UP 2012/11/01 -->
+form split_file using p_full type clike
+p_path type string
+p_name type string.
+data: l_delimiter type c length 1,
+l_split     type ref to string,
+i_split     type standard table of string,
+l_tabix     type i.
+*
+clear: p_path, p_name.
+cl_gui_frontend_services=>get_file_separator(
+changing file_separator    = l_delimiter ).
+split p_full at l_delimiter into table i_split.
+l_tabix = lines( i_split ).
+if l_tabix = 0.
+return.
+endif.
+read table i_split into p_name index l_tabix.
+delete i_split index l_tabix.
+concatenate lines of i_split into p_path separated by l_delimiter.
+endform.
+* Add ES-UP 2012/11/01 <--
+*&---------------------------------------------------------------------*
+*&      Form  SPLIT_DATA
+*&---------------------------------------------------------------------*
+*       タブ区切り受け取り 2002/05/13 ADD
+*----------------------------------------------------------------------*
+FORM SPLIT_DATA.
+* Mod ES-UP 2012/08/20 -->
+*  SPLIT in_file-data AT W_TAB INTO
+SPLIT in_file-data AT CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB INTO
+* Mod ES-UP 2012/08/20 <--
+itab-werks
+itab-lgort
+itab-matnr
+itab-erfmg
+itab-exbwr.
+CALL FUNCTION 'AIPC_CONVERT_TO_UPPERCASE'
+EXPORTING
+I_INPUT        = itab-matnr
+I_LANGU        = SY-LANGU
+IMPORTING
+E_OUTPUT       = itab-matnr.
+ENDFORM.                    " SPLIT_DATA

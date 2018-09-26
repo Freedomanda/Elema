@@ -1,0 +1,3722 @@
+************************************************************************
+* プログラムID  :ZF21400
+* プログラム名  :支払金額確認表出力処理
+* 作成日        :2008/02/16
+* 作成者        :DMC
+* 変更履歴      :
+* 変更日　    変更者  変更内容
+* 2008/06/18  DMC     ・期日払残の集計ロジック修正
+*                     ・既存レイアウト上への出力項目の追加
+*                     ・選択画面へI/O項目追加(出力区分)
+*                     ・出力区分の設定内容によって
+*                       出力対象絞込機能追加する
+*                     ・合計リストを最終ページに出力する
+* 2008/12/15  DMC     ・支払方法名称の取得条件を国コードが'JP'に限定
+*                     ・決済日付と支払計上日がブランクも対象とする
+************************************************************************
+REPORT ZF21400 MESSAGE-ID  Y1
+LINE-SIZE   170
+LINE-COUNT  58
+NO STANDARD PAGE HEADING.
+*----------------------------------------------------------------------*
+*       構造定義          　　　　                                     *
+*----------------------------------------------------------------------*
+* ヘッダ編集用構造
+TYPES:
+BEGIN OF STRT_HEADER,
+BUKRS       TYPE  LFB1-BUKRS,      "会社コード
+LIFNR       TYPE  LFA1-LIFNR,      "仕入先
+NAME1       TYPE  LFA1-NAME1,      "仕入先名称
+ZTERM       TYPE  LFM1-ZTERM,	     "支払条件
+VTEXT       TYPE  TVZBT-VTEXT,     "支払条件名称
+ZWELS       TYPE  LFB1-ZWELS,      "支払方法
+TEXT1(153)  TYPE  C,               "支払方法名称
+ZFBDT       TYPE  DATS,	     "締日
+DATBEG      TYPE  DATS,	     "支払期間-LOW
+DATEND      TYPE  DATS,	     "支払期間-HIGH
+LAND1       TYPE  LFA1-LAND1,      "国コード
+END OF STRT_HEADER.
+* 支払条件のマスタ用構造
+TYPES:
+BEGIN OF STRT_ZTERM,
+ZTERM       TYPE  TVZBT-ZTERM,     "支払条件キー
+VTEXT       TYPE  TVZBT-VTEXT,     "支払条件テキスト
+END OF STRT_ZTERM.
+* 支払方法のマスタ用構造
+TYPES:
+BEGIN OF STRT_ZLSCH,
+LAND1       TYPE  T042Z-LAND1,     "国コード
+ZLSCH       TYPE  T042Z-ZLSCH,     "支払方法
+TEXT1       TYPE  T042Z-TEXT1,     "国の言語による支払方法名
+END OF STRT_ZLSCH.
+* 毎仕入先単位の通貨コード件数用構造
+TYPES:
+BEGIN OF STRT_CURR_CNT,
+BUKRS       TYPE  LFB1-BUKRS,      "会社コード
+LIFNR       TYPE  LFA1-LIFNR,      "仕入先
+CNT         TYPE I,                "件数
+END OF STRT_CURR_CNT.
+* 明細編集用構造
+TYPES:
+BEGIN OF STRT_DETAIL,
+BUKRS       TYPE  ZF2020-BUKRS,    "会社コード
+LIFNR       TYPE  ZF2020-LIFNR,    "仕入先
+WAERS       TYPE  ZF2020-WAERS,    "通貨コード
+ZFBDT       TYPE  ZF2020-ZFBDT,    "締日
+SEQ_NO      TYPE  ZF2020-SEQ_NO,   "SEQ
+SHKZG       TYPE  ZF2020-SHKZG,    "貸借フラグ
+BLART       TYPE  ZF2020-BLART,    "伝票タイプ
+BLART_O     TYPE  ZF2020-BLART,    "支払依頼伝票タイプ
+BUDAT       TYPE  ZF2020-BUDAT,    "転記日付
+HKONT_S     TYPE  ZF2020-HKONT_S,  "勘定コード(借方)
+WRBTR_S     TYPE  ZF2020-WRBTR_S,  "伝票通貨額(借方)
+HKONT_H     TYPE  ZF2020-HKONT_H,  "勘定コード(貸方)
+WRBTR_H     TYPE  ZF2020-WRBTR_H,  "伝票通貨額(貸方)
+ZTERM       TYPE  ZF2020-ZTERM,    "支払条件
+STATUS      TYPE  ZF2020-STATUS,   "ステータス
+CMP_FLG     TYPE ZF2020-CMP_FLG,   "完了フラグ
+FAEDT       TYPE ZF2020-FAEDT,     "支払期日
+CMP_DAT     TYPE ZF2020-CMP_DAT,   "完了日付
+*   insert 2008/06/18 DMC {
+AUGDT       TYPE ZF2020-AUGDT,     "決済日付
+* } insert 2008/06/18 DMC
+CADAT       TYPE ZF2020-CADAT,     "支払計上日
+END OF STRT_DETAIL.
+TYPES:
+BEGIN OF STRT_OUTPUT,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+NAME1                 TYPE LFA1-NAME1,      "仕入先名称
+ZTERM                 TYPE LFB1-ZTERM,      "支払条件
+VTEXT                 TYPE TVZBT-VTEXT,     "支払条件名称
+ZWELS                 TYPE LFB1-ZWELS,      "支払方法
+TEXT1(117)            TYPE C,               "支払方法名称
+ZFBDT                 TYPE DATS,            "締日
+DATBEG                TYPE DATS,            "支払期間-LOW
+DATEND                TYPE DATS,            "支払期間-HIGH
+KENSYU_GOKEYI         TYPE ZF2020-WRBTR_H,  "検収合計
+KENSYU_SYOGO          TYPE ZF2020-WRBTR_H,  "検収照合
+KENSYU_SONOTA         TYPE ZF2020-WRBTR_H,  "検収その他
+YIRAYI_GOKEYI         TYPE ZF2020-WRBTR_H,  "支払依頼合計
+YIRAYI_SYOGO          TYPE ZF2020-WRBTR_H,  "支払依頼照合
+YIRAYI_SONOTA         TYPE ZF2020-WRBTR_H,  "支払依頼その他
+ZENGETSUMI_GOKEYI     TYPE ZF2020-WRBTR_H,  "前月以前締未払合計
+ZENGETSUMI_SYOGO      TYPE ZF2020-WRBTR_H,  "前月以前締未払照合
+ZENGETSUMI_SONOTA     TYPE ZF2020-WRBTR_H,  "前月以前締未払その他
+YIRAYISYO_GOKEYI      TYPE ZF2020-WRBTR_H,  "支払依頼小計合計
+YIRAYISYO_SYOGO       TYPE ZF2020-WRBTR_H,  "支払依頼小計照合
+YIRAYISYO_SONOTA      TYPE ZF2020-WRBTR_H,  "支払依頼小計その他
+TOGETSU_SOKEYI        TYPE ZF2020-WRBTR_H,  "当月締支払総合計
+TOGETSU_GINKO         TYPE ZF2020-WRBTR_H,  "当月締支払銀行振込
+TOGETSU_SIHARAYI      TYPE ZF2020-WRBTR_H,  "当月締支払支払手形
+TOGETSU_WURAGAKI      TYPE ZF2020-WRBTR_H,  "当月締支払裏書手形
+TOGETSU_SIYIRE        TYPE ZF2020-WRBTR_H,  "当月締支払仕入割引
+TOGETSU_SONOTA        TYPE ZF2020-WRBTR_H,  "当月締支払その他
+TOGETSU_SIHARAYIKEYI  TYPE ZF2020-WRBTR_H,  "当月締支払支払計
+TOGETSU_SOSAYI        TYPE ZF2020-WRBTR_H,  "当月締支払相殺
+ZENGETSU_SOKEYI       TYPE ZF2020-WRBTR_H,  "以前締支払総合計
+ZENGETSU_GINKO        TYPE ZF2020-WRBTR_H,  "以前締支払銀行振込
+ZENGETSU_SIHARAYI     TYPE ZF2020-WRBTR_H,  "以前締支払支払手形
+ZENGETSU_WURAGAKI     TYPE ZF2020-WRBTR_H,  "以前締支払裏書手形
+ZENGETSU_SIYIRE       TYPE ZF2020-WRBTR_H,  "以前締支払仕入割引
+ZENGETSU_SONOTA       TYPE ZF2020-WRBTR_H,  "以前締支払その他
+ZENGETSU_SIHARAYIKEYI TYPE ZF2020-WRBTR_H,  "以前締支払支払計
+ZENGETSU_SOSAYI       TYPE ZF2020-WRBTR_H,  "以前締支払相殺
+SIHARAYI_SOKEYI       TYPE ZF2020-WRBTR_H,  "支払額計総合計
+SIHARAYI_GINKO        TYPE ZF2020-WRBTR_H,  "支払額計銀行振込
+SIHARAYI_SIHARAYI     TYPE ZF2020-WRBTR_H,  "支払額計支払手形
+SIHARAYI_WURAGAKI     TYPE ZF2020-WRBTR_H,  "支払額計裏書手形
+SIHARAYI_SIYIRE       TYPE ZF2020-WRBTR_H,  "支払額計仕入割引
+SIHARAYI_SONOTA       TYPE ZF2020-WRBTR_H,  "支払額計その他
+SIHARAYI_SIHARAYIKEYI TYPE ZF2020-WRBTR_H,  "支払額計支払計
+SIHARAYI_SOSAYI       TYPE ZF2020-WRBTR_H,  "支払額計相殺
+SAGAKU1               TYPE ZF2020-WRBTR_H,  "差額①
+KIJITSUZAN            TYPE ZF2020-WRBTR_H,  "期日払残
+SAGAKU2               TYPE ZF2020-WRBTR_H,  "差額②
+*   insert 2008/06/18 DMC {
+SIHARAYI_ZAN          TYPE ZF2020-WRBTR_H,  "支払後残
+SAGAKU                TYPE ZF2020-WRBTR_H,  "差額
+OBJFLG(1)             TYPE C,               "対象ﾌﾗｸﾞ（'T'⇒対象）
+* } insert 2008/06/18 DMC
+END OF STRT_OUTPUT.
+* 検収データ用構造
+TYPES:
+BEGIN OF STRT_KENSYU,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+KENSYU_GOKEYI         TYPE ZF2020-WRBTR_H,  "検収合計
+KENSYU_SYOGO          TYPE ZF2020-WRBTR_H,  "検収照合
+KENSYU_SONOTA         TYPE ZF2020-WRBTR_H,  "検収その他
+END OF STRT_KENSYU.
+* 支払依頼データ用構造
+TYPES:
+BEGIN OF STRT_YIRAYI,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+YIRAYI_GOKEYI         TYPE ZF2020-WRBTR_H,  "支払依頼合計
+YIRAYI_SYOGO          TYPE ZF2020-WRBTR_H,  "支払依頼照合
+YIRAYI_SONOTA         TYPE ZF2020-WRBTR_H,  "支払依頼その他
+END OF STRT_YIRAYI.
+* 前月以前締未払データ用構造
+TYPES:
+BEGIN OF STRT_ZENGETSUMI,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+ZENGETSUMI_GOKEYI     TYPE ZF2020-WRBTR_H,  "前月以前締未払合計
+ZENGETSUMI_SYOGO      TYPE ZF2020-WRBTR_H,  "前月以前締未払照合
+ZENGETSUMI_SONOTA     TYPE ZF2020-WRBTR_H,  "前月以前締未払その他
+END OF STRT_ZENGETSUMI.
+* 支払依頼小計データ用構造
+TYPES:
+BEGIN OF STRT_YIRAYISYO,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+YIRAYISYO_GOKEYI      TYPE ZF2020-WRBTR_H,  "支払依頼小計合計
+YIRAYISYO_SYOGO       TYPE ZF2020-WRBTR_H,  "支払依頼小計照合
+YIRAYISYO_SONOTA      TYPE ZF2020-WRBTR_H,  "支払依頼小計その他
+END OF STRT_YIRAYISYO.
+* 当月締支払データ用構造
+TYPES:
+BEGIN OF STRT_TOGETSU,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+TOGETSU_SOKEYI        TYPE ZF2020-WRBTR_H,  "当月締支払総合計
+TOGETSU_GINKO         TYPE ZF2020-WRBTR_H,  "当月締支払銀行振込
+TOGETSU_SIHARAYI      TYPE ZF2020-WRBTR_H,  "当月締支払支払手形
+TOGETSU_WURAGAKI      TYPE ZF2020-WRBTR_H,  "当月締支払裏書手形
+TOGETSU_SIYIRE        TYPE ZF2020-WRBTR_H,  "当月締支払仕入割引
+TOGETSU_SONOTA        TYPE ZF2020-WRBTR_H,  "当月締支払その他
+TOGETSU_SIHARAYIKEYI  TYPE ZF2020-WRBTR_H,  "当月締支払支払計
+TOGETSU_SOSAYI        TYPE ZF2020-WRBTR_H,  "当月締支払相殺
+END OF STRT_TOGETSU.
+* 以前締支払データ用構造
+TYPES:
+BEGIN OF STRT_ZENGETSU,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+ZENGETSU_SOKEYI       TYPE ZF2020-WRBTR_H,  "以前締支払総合計
+ZENGETSU_GINKO        TYPE ZF2020-WRBTR_H,  "以前締支払銀行振込
+ZENGETSU_SIHARAYI     TYPE ZF2020-WRBTR_H,  "以前締支払支払手形
+ZENGETSU_WURAGAKI     TYPE ZF2020-WRBTR_H,  "以前締支払裏書手形
+ZENGETSU_SIYIRE       TYPE ZF2020-WRBTR_H,  "以前締支払仕入割引
+ZENGETSU_SONOTA       TYPE ZF2020-WRBTR_H,  "以前締支払その他
+ZENGETSU_SIHARAYIKEYI TYPE ZF2020-WRBTR_H,  "以前締支払支払計
+ZENGETSU_SOSAYI       TYPE ZF2020-WRBTR_H,  "以前締支払相殺
+END OF STRT_ZENGETSU.
+* 支払額計データ用構造
+TYPES:
+BEGIN OF STRT_SIHARAYI,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+SIHARAYI_SOKEYI       TYPE ZF2020-WRBTR_H,  "支払額計総合計
+SIHARAYI_GINKO        TYPE ZF2020-WRBTR_H,  "支払額計銀行振込
+SIHARAYI_SIHARAYI     TYPE ZF2020-WRBTR_H,  "支払額計支払手形
+SIHARAYI_WURAGAKI     TYPE ZF2020-WRBTR_H,  "支払額計裏書手形
+SIHARAYI_SIYIRE       TYPE ZF2020-WRBTR_H,  "支払額計仕入割引
+SIHARAYI_SONOTA       TYPE ZF2020-WRBTR_H,  "支払額計その他
+SIHARAYI_SIHARAYIKEYI TYPE ZF2020-WRBTR_H,  "支払額計支払計
+SIHARAYI_SOSAYI       TYPE ZF2020-WRBTR_H,  "支払額計相殺
+END OF STRT_SIHARAYI.
+* 差額①データ用構造
+TYPES:
+BEGIN OF STRT_SAGAKU1,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+SAGAKU1               TYPE ZF2020-WRBTR_H,  "差額①
+END OF STRT_SAGAKU1.
+* 期日払残データ用構造
+TYPES:
+BEGIN OF STRT_KIJITSUZAN,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+KIJITSUZAN            TYPE ZF2020-WRBTR_H,  "期日払残
+END OF STRT_KIJITSUZAN.
+* 差額②データ用構造
+TYPES:
+BEGIN OF STRT_SAGAKU2,
+BUKRS                 TYPE LFB1-BUKRS,      "会社コード
+LIFNR                 TYPE LFA1-LIFNR,      "仕入先
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+SAGAKU2               TYPE ZF2020-WRBTR_H,  "差額②
+END OF STRT_SAGAKU2.
+*   insert 2008/06/18 DMC {
+* 最後合計データ用構造
+TYPES:
+BEGIN OF STRT_KOUKEYI,
+WAERS                 TYPE ZF2020-WAERS,    "通貨コード
+GOUKEYI               TYPE ZF2020-WRBTR_H,  "差額②/残高差額 合計
+END OF STRT_KOUKEYI.
+* } insert 2008/06/18 DMC
+*----------------------------------------------------------------------*
+*       定数定義                                                       *
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_I_M1       TYPE I VALUE -1,
+C_C_01(2)    TYPE C VALUE '01',
+C_C_1(1)     TYPE C VALUE '1',
+C_C_9(1)     TYPE C VALUE '9',
+C_C_A(1)     TYPE C VALUE 'A',  "支払依頼額行
+C_C_B(1)     TYPE C VALUE 'B',  "前月以前締期日の未払行
+C_C_D(1)     TYPE C VALUE 'D',  "当月締支払額行
+C_C_E(1)     TYPE C VALUE 'E',  "前月以前締支払額行
+C_C_I(1)     TYPE C VALUE 'I',
+C_C_X(1)     TYPE C VALUE 'X',
+C_C_JPY(3)   TYPE C VALUE 'JPY',
+C_C_EQ(2)    TYPE C VALUE 'EQ',
+C_SHKZG_S(1) TYPE C VALUE 'S',  "借 ('S')
+C_SHKZG_H(1) TYPE C VALUE 'H',  "貸 ('H')
+*   insert 2008/06/18 DMC {
+C_I_1             TYPE I VALUE  1,
+C_DOUTYP_1(1)     TYPE C VALUE '1',
+C_DOUTYP_2(1)     TYPE C VALUE '2',
+C_DOUTYP_3(1)     TYPE C VALUE '3',
+C_DOUTYP_4(1)     TYPE C VALUE '4',
+* } insert 2008/06/18 DMC
+*   insert 2008/06/25 S.MIKAMI {
+C_DOUTYP_5(1)     TYPE C VALUE '5',
+C_DOUTYP_6(1)     TYPE C VALUE '6',
+* } insert 2008/06/25 S.MIKAMI
+C_OK(1)      TYPE C VALUE 'T',  "成功
+*   insert 2008/12/15 DMC {
+C_C_JP(2)    TYPE C VALUE 'JP'.
+* } insert 2008/12/15 DMC
+*----------------------------------------------------------------------*
+*       テーブル定義                                                   *
+*----------------------------------------------------------------------*
+DATA:
+ITAB_HEADER     TYPE TABLE OF STRT_HEADER,   "ヘッダ編集用内部テーブル
+ITAB_ZTERM      TYPE TABLE OF STRT_ZTERM,    "支払条件用内部テーブル
+ITAB_ZLSCH      TYPE TABLE OF STRT_ZLSCH,    "支払方法用内部テーブル
+ITAB_DETAIL     TYPE TABLE OF STRT_DETAIL,   "明細編集用内部テーブル
+ITAB_COM_DETAIL TYPE TABLE OF STRT_DETAIL,   "共通明細編集内部テーブル
+ITAB_CURR_CNT   TYPE TABLE OF STRT_CURR_CNT, "通貨件数用内部テーブル
+ITAB_KENSYU     TYPE TABLE OF STRT_KENSYU,      "検収データ
+ITAB_YIRAYI     TYPE TABLE OF STRT_YIRAYI,      "支払依頼データ
+ITAB_ZENGETSUMI TYPE TABLE OF STRT_ZENGETSUMI,  "前月以前締未払データ
+ITAB_YIRAYISYO  TYPE TABLE OF STRT_YIRAYISYO,   "支払依頼小計データ
+ITAB_TOGETSU    TYPE TABLE OF STRT_TOGETSU,     "当月締支払データ
+ITAB_ZENGETSU   TYPE TABLE OF STRT_ZENGETSU,    "以前締支払データ
+ITAB_SIHARAYI   TYPE TABLE OF STRT_SIHARAYI,    "支払額計データ
+ITAB_SAGAKU1    TYPE TABLE OF STRT_SAGAKU1,     "差額①データ
+ITAB_KIJITSUZAN TYPE TABLE OF STRT_KIJITSUZAN,  "期日払残データ
+ITAB_SAGAKU2    TYPE TABLE OF STRT_SAGAKU1,     "差額②データ
+*   insert 2008/06/18 DMC {
+ITAB_SIHARAYIZAN TYPE TABLE OF STRT_KIJITSUZAN,  "支払後残データ
+ITAB_SAGAKU      TYPE TABLE OF STRT_SAGAKU2,     "差額データ
+ITAB_SAGAKU2_GOUKEYI TYPE TABLE OF STRT_KOUKEYI, "差額②合計データ
+ITAB_SAGAKU_GOUKEYI  TYPE TABLE OF STRT_KOUKEYI, "差額合計データ
+* } insert 2008/06/18 DMC
+ITAB_OUTPUT     TYPE TABLE OF STRT_OUTPUT.      "出力内部テーブル
+*----------------------------------------------------------------------*
+*       変数定義                                                       *
+*----------------------------------------------------------------------*
+DATA:
+*   insert 2008/06/18 DMC {
+G_TOTAL_PAGE TYPE I,        "出力総頁数
+* } insert 2008/06/18 DMC
+G_LIFNR TYPE LFA1-LIFNR,    "仕入先
+G_SAKNR TYPE SKA1-SAKNR,    "勘定コード
+G_BLART TYPE T003-BLART,    "伝票タイプ
+G_ZTERM TYPE T052-ZTERM.    "支払条件
+*----------------------------------------------------------------------*
+*     入力画面定義
+*----------------------------------------------------------------------*
+* 会社コード
+PARAMETERS: P_BUKRS  LIKE T001-BUKRS OBLIGATORY.
+* 仕入先
+SELECT-OPTIONS: S_LIFNR  FOR G_LIFNR.
+* 締日
+PARAMETERS: P_ZFBDT  LIKE SY-DATUM OBLIGATORY.
+* 支払期間
+SELECT-OPTIONS: S_PERD  FOR SY-DATUM OBLIGATORY NO-EXTENSION.
+*   insert 2008/06/18 DMC {
+SELECTION-SCREEN BEGIN OF LINE.
+* 出力区分
+SELECTION-SCREEN COMMENT 1(8) TEXT-S01.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_ZOUTYP TYPE ZEOUTYP.
+* 出力区分内容説明
+SELECTION-SCREEN POSITION 37.
+SELECTION-SCREEN COMMENT 37(83) P_TYPTXT.
+SELECTION-SCREEN END OF LINE.
+* } insert 2008/06/18 DMC
+SELECTION-SCREEN SKIP 1.
+
+SELECTION-SCREEN BEGIN OF BLOCK B1 WITH FRAME TITLE TEXT-B01.
+* 支払依頼勘定
+SELECT-OPTIONS: S_SAKNR7 FOR G_SAKNR OBLIGATORY.
+* 支払依頼伝票タイプ（検収照合）
+SELECT-OPTIONS: S_BLART1 FOR G_BLART OBLIGATORY.
+* 支払依頼伝票タイプ(検収照合以外)
+SELECT-OPTIONS: S_BLART2 FOR G_BLART OBLIGATORY.
+* 期日払用支払条件
+SELECT-OPTIONS: S_ZTERM  FOR G_ZTERM OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK B1.
+
+SELECTION-SCREEN BEGIN OF BLOCK B2 WITH FRAME TITLE TEXT-B02.
+* 銀行勘定
+SELECT-OPTIONS: S_SAKNR1 FOR G_SAKNR OBLIGATORY.
+* 手形勘定
+SELECT-OPTIONS: S_SAKNR2 FOR G_SAKNR OBLIGATORY.
+* 裏書手形勘定
+SELECT-OPTIONS: S_SAKNR3 FOR G_SAKNR OBLIGATORY.
+* 仕入割引勘定
+SELECT-OPTIONS: S_SAKNR4 FOR G_SAKNR OBLIGATORY.
+* その他勘定
+SELECT-OPTIONS: S_SAKNR5 FOR G_SAKNR OBLIGATORY.
+* 相殺勘定
+SELECT-OPTIONS: S_SAKNR6 FOR G_SAKNR OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK B2.
+************************************************************************
+INITIALIZATION.
+************************************************************************
+* 締日と支払期間の初期値の設定
+PERFORM SET_DEFAULT_DATE.
+* 変数の初期化
+PERFORM INIT_PROCCESS.
+*   insert 2008/06/18 DMC {
+************************************************************************
+AT SELECTION-SCREEN ON P_ZOUTYP.
+************************************************************************
+* 出力区分内容説明の取得処理
+PERFORM GET_TEXT.
+************************************************************************
+AT SELECTION-SCREEN OUTPUT.
+************************************************************************
+* } insert 2008/06/18 DMC
+************************************************************************
+AT SELECTION-SCREEN.
+************************************************************************
+* 会社コードの存在チェック
+PERFORM CHECK_BUKRS.
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+* 出力画面「<ヘッダ部>」の作成処理
+PERFORM SELECT_HEADER_DATA.
+* 出力画面「<明細部>」の作成処理
+PERFORM EDIT_OUTPUT_DATA.
+* データの出力処理
+PERFORM OUTPUT_DATA.
+*   insert 2008/06/18 DMC {
+* 最終ページの出力処理
+PERFORM OUTPUT_LAST_PAGE.
+* } insert 2008/06/18 DMC
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROCCESS
+*&---------------------------------------------------------------------*
+*       変数の初期化
+*----------------------------------------------------------------------*
+FORM INIT_PROCCESS.
+REFRESH: ITAB_HEADER,      "ヘッダ編集用内部テーブル
+ITAB_ZTERM,       "支払条件用内部テーブル
+ITAB_ZLSCH,       "支払方法用内部テーブル
+ITAB_CURR_CNT,    "通貨コード件数内部テーブル
+ITAB_DETAIL,      "明細編集用内部テーブル
+ITAB_COM_DETAIL,  "明細編集用内部テーブル
+ITAB_KENSYU,      "検収データ
+ITAB_YIRAYI,      "支払依頼データ
+ITAB_ZENGETSUMI,  "前月以前締未払データ
+ITAB_YIRAYISYO,   "支払依頼小計データ
+ITAB_TOGETSU,     "当月締支払データ
+ITAB_ZENGETSU,    "以前締支払データ
+ITAB_SIHARAYI,    "支払額計データ
+ITAB_SAGAKU1,     "差額①データ
+ITAB_KIJITSUZAN,  "期日払残データ
+ITAB_SAGAKU2,     "差額②データ
+*   insert 2008/06/18 DMC {
+ITAB_SIHARAYIZAN,     "支払後残データ
+ITAB_SAGAKU,          "差額データ
+ITAB_SAGAKU2_GOUKEYI, "差額②合計データ
+ITAB_SAGAKU_GOUKEYI,  "差額合計データ
+* } insert 2008/06/18 DMC
+ITAB_OUTPUT.      "出力内部テーブル
+CLEAR:   G_LIFNR,          "仕入先
+G_SAKNR,          "勘定コード
+G_BLART,          "伝票タイプ
+*   insert 2008/06/18 DMC {
+G_TOTAL_PAGE,
+* } insert 2008/06/18 DMC
+G_ZTERM.          "支払条件
+
+ENDFORM.        "INIT_PROCCESS
+*&---------------------------------------------------------------------*
+*&      Form  SET_DEFAULT_DATE
+*&---------------------------------------------------------------------*
+*       締日と支払期間の初期値の設定
+*----------------------------------------------------------------------*
+FORM SET_DEFAULT_DATE.
+DATA: L_FIRST_DATE TYPE SYST-DATUM,
+L_LAST_DATE  TYPE SYST-DATUM.
+CLEAR: L_FIRST_DATE, L_LAST_DATE.
+* 実行日より前月日付の取得
+CALL FUNCTION 'RE_ADD_MONTH_TO_DATE'
+EXPORTING
+MONTHS  = C_I_M1
+OLDDATE = SY-DATUM
+IMPORTING
+NEWDATE = L_LAST_DATE.
+* 実行日より前月末日付の取得
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN            = L_LAST_DATE
+IMPORTING
+LAST_DAY_OF_MONTH = P_ZFBDT. "締日
+* 実行日より当月始日付の取得
+L_FIRST_DATE = SY-DATUM.
+CONCATENATE L_FIRST_DATE+0(6)
+C_C_01
+INTO  L_FIRST_DATE.
+
+* 実行日より当月末日付の取得
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN            = SY-DATUM
+IMPORTING
+LAST_DAY_OF_MONTH = L_LAST_DATE.
+* 支払期間の設定
+MOVE: C_C_I        TO S_PERD-SIGN,
+C_C_EQ       TO S_PERD-OPTION,
+L_FIRST_DATE TO S_PERD-LOW,
+L_LAST_DATE  TO S_PERD-HIGH.
+APPEND S_PERD.
+
+ENDFORM.        "SET_DEFAULT_DATE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BUKRS
+*&---------------------------------------------------------------------*
+*       会社コードの存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_BUKRS.
+DATA: L_BUKRS TYPE T001-BUKRS.
+CLEAR: L_BUKRS.
+* 会社コードテーブルの検索
+SELECT SINGLE BUKRS
+FROM T001
+INTO L_BUKRS
+WHERE BUKRS = P_BUKRS.
+
+* 存在しない場合
+IF SY-SUBRC <> 0.
+*   Eメッセージの出力
+MESSAGE E612 WITH TEXT-M01 P_BUKRS TEXT-M02.
+ENDIF.
+ENDFORM.        "CHECK_BUKRS
+*&---------------------------------------------------------------------*
+*&      Form  SELECT_HEADER_DATA
+*&---------------------------------------------------------------------*
+*       出力画面「<ヘッダ部>」の作成処理
+*----------------------------------------------------------------------*
+FORM SELECT_HEADER_DATA.
+DATA: L_WA_HEADER TYPE STRT_HEADER.
+* 画面で「仕入先」の入力するかの判断
+* 画面で「仕入先」入力しない場合（全社分の場合）
+IF S_LIFNR IS INITIAL.
+L_WA_HEADER-BUKRS  = P_BUKRS.      "会社コード
+L_WA_HEADER-NAME1  = TEXT-T01.     "仕入先名称
+L_WA_HEADER-ZFBDT  = P_ZFBDT.      "締日
+L_WA_HEADER-DATBEG = S_PERD-LOW.   "支払期間-LOW
+L_WA_HEADER-DATEND = S_PERD-HIGH.  "支払期間-HIGH
+APPEND L_WA_HEADER TO ITAB_HEADER.
+
+* 画面で「仕入先」入力する場合
+ELSE.
+*   支払条件の名称の取得
+PERFORM SELECT_TVZBT.
+*   支払方法の名称の取得
+PERFORM SELECT_T042Z.
+*   仕入先情報の取得
+PERFORM SELECT_LFA1_LFB1.
+ENDIF.
+
+ENDFORM.        "SELECT_HEADER_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SELECT_LFA1_LFB1
+*&---------------------------------------------------------------------*
+*       仕入先情報の取得
+*----------------------------------------------------------------------*
+FORM SELECT_LFA1_LFB1.
+DATA: L_WA_HEADER TYPE STRT_HEADER,
+L_WA_ZTERM  TYPE STRT_ZTERM,
+L_EKORG     TYPE LFM1-EKORG VALUE '1000',
+L_TABIX     TYPE SY-TABIX.
+CLEAR: L_WA_HEADER,  L_WA_ZTERM,  L_TABIX.
+* 仕入先情報テーブルの検索
+SELECT LFA1~LIFNR        "仕入先
+LFA1~LAND1        "国コード
+LFA1~NAME1        "名称
+LFB1~BUKRS        "会社コード
+LFB1~ZWELS        "支払方法
+LFM1~ZTERM        "支払条件
+FROM LFA1 INNER JOIN LFB1 ON
+LFA1~LIFNR = LFB1~LIFNR
+INNER JOIN LFM1 ON
+LFA1~LIFNR = LFM1~LIFNR
+INTO CORRESPONDING FIELDS OF TABLE ITAB_HEADER
+WHERE LFB1~LIFNR IN S_LIFNR AND     "仕入先
+LFB1~BUKRS = P_BUKRS  AND     "会社コード
+LFM1~EKORG = L_EKORG.         "購買組織
+* 存在する場合
+IF SY-SUBRC = 0.
+LOOP AT ITAB_HEADER INTO L_WA_HEADER.
+L_TABIX = SY-TABIX.
+*     支払条件の名称の取得
+READ TABLE ITAB_ZTERM INTO L_WA_ZTERM
+WITH KEY ZTERM = L_WA_HEADER-ZTERM.  "支払条件キー
+
+L_WA_HEADER-VTEXT = L_WA_ZTERM-VTEXT.     "支払条件名称
+
+*     支払方法の名称の取得
+PERFORM GET_ZLSCH CHANGING L_WA_HEADER.
+
+L_WA_HEADER-ZFBDT  = P_ZFBDT.        "締日
+L_WA_HEADER-DATBEG = S_PERD-LOW.     "支払期間-LOW
+IF S_PERD-HIGH IS INITIAL.
+L_WA_HEADER-DATEND = S_PERD-LOW.
+ELSE.
+L_WA_HEADER-DATEND = S_PERD-HIGH.  "支払期間-HIGH
+ENDIF.
+*     ヘッダ編集用内部テーブルの更新
+MODIFY ITAB_HEADER FROM L_WA_HEADER INDEX L_TABIX
+TRANSPORTING VTEXT TEXT1 ZFBDT
+DATBEG DATEND.
+ENDLOOP.
+* 存在しない場合
+ELSE.
+*   sメッセージの出力
+MESSAGE S400 WITH TEXT-M05.
+STOP.
+ENDIF.
+
+ENDFORM.        "SELECT_LFA1_LFB1
+*&---------------------------------------------------------------------*
+*&      Form  SELECT_T042Z
+*&---------------------------------------------------------------------*
+*       支払方法のマスタデータの取得処理
+*----------------------------------------------------------------------*
+FORM SELECT_T042Z.
+* 自動支払の支払方法テーブルの検索
+SELECT LAND1                        "国コード
+ZLSCH                        "支払方法
+TEXT1                        "支払方法名
+FROM   T042Z                        "自動支払の支払方法
+INTO   TABLE ITAB_ZLSCH.
+ENDFORM.        "SELECT_T042Z
+*&---------------------------------------------------------------------*
+*&      Form  SELECT_TVZBT
+*&---------------------------------------------------------------------*
+*       支払条件のマスタデータの取得処理
+*----------------------------------------------------------------------*
+FORM SELECT_TVZBT.
+* 得意先: 支払条件テキストテーブルの検索
+SELECT ZTERM                        "支払条件キー
+VTEXT                        "支払条件テキスト
+FROM   TVZBT                        "得意先: 支払条件テキスト
+INTO   TABLE ITAB_ZTERM
+WHERE  SPRAS = SY-LANGU.            "言語キー
+
+ENDFORM.        "SELECT_TVZBT
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZLSCH
+*&---------------------------------------------------------------------*
+*       支払方法の名称の取得
+*----------------------------------------------------------------------*
+*  <--  C_WA_HEADER   ヘッダ編集用構造
+*----------------------------------------------------------------------*
+FORM GET_ZLSCH CHANGING C_WA_HEADER TYPE STRT_HEADER.
+DATA: L_WA_ZLSCH    TYPE STRT_ZLSCH,
+L_LEN         TYPE  I,
+L_POS         TYPE  I  VALUE 0.
+CLEAR: L_WA_ZLSCH,  L_LEN,  L_POS.
+* 文字列の編集
+CONDENSE C_WA_HEADER-ZWELS.
+L_LEN = STRLEN( C_WA_HEADER-ZWELS ).
+DO L_LEN TIMES.
+*   支払方法の名称の取得
+READ TABLE ITAB_ZLSCH INTO L_WA_ZLSCH
+*   delete 2008/12/15 DMC {
+*         WITH KEY LAND1 = C_WA_HEADER-LAND1            "国コード
+* } delete 2008/12/15 DMC
+*   insert 2008/12/15 DMC {
+WITH KEY LAND1 = C_C_JP                       "国コード
+* } insert 2008/12/15 DMC
+ZLSCH = C_WA_HEADER-ZWELS+L_POS(1).  "支払方法
+*   支払方法名の編集
+L_POS = L_POS + 1.
+CONDENSE L_WA_ZLSCH-TEXT1.
+CONCATENATE C_WA_HEADER-TEXT1
+L_WA_ZLSCH-TEXT1
+INTO        C_WA_HEADER-TEXT1.
+ENDDO.
+
+ENDFORM.        "GET_ZLSCH
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       出力画面「<明細部>」データの作成処理
+*----------------------------------------------------------------------*
+FORM EDIT_OUTPUT_DATA.
+DATA: L_ITAB_HEADER_TMP TYPE TABLE OF STRT_HEADER,
+L_WA_HEADER       TYPE STRT_HEADER,
+L_WA_CURR_CNT     TYPE STRT_CURR_CNT,
+L_WA_DETAIL       TYPE STRT_DETAIL,
+L_WA_OUTPUT       TYPE STRT_OUTPUT,
+L_YIRAYI_FLG      TYPE CHAR1,
+L_ZENGETSUMI_FLG  TYPE CHAR1,
+L_TOGETSUI_FLG    TYPE CHAR1,
+L_ZENGETSU_FLG    TYPE CHAR1,
+L_KIJITSUZAN_FLG  TYPE CHAR1,
+*   insert 2008/06/18 DMC {
+L_SIHARAYIZAN_FLG TYPE CHAR1.
+* } insert 2008/06/18 DMC
+REFRESH: L_ITAB_HEADER_TMP.
+CLEAR: L_WA_HEADER,    L_WA_CURR_CNT,  L_WA_DETAIL,
+L_WA_OUTPUT,    L_YIRAYI_FLG,   L_ZENGETSUMI_FLG,
+L_TOGETSUI_FLG, L_ZENGETSU_FLG, L_KIJITSUZAN_FLG.
+* ソートキー：会社コード、仕入先で　昇順でソート
+SORT ITAB_HEADER ASCENDING BY BUKRS LIFNR.
+
+LOOP AT ITAB_HEADER INTO L_WA_HEADER.
+
+*   毎仕入先の明細編集用データの取得処理
+PERFORM SELECT_DETAIL USING L_WA_HEADER.
+
+*   ソートキー：会社コード、仕入先で昇順ソート通貨コードで降順
+SORT ITAB_DETAIL BY BUKRS LIFNR ASCENDING WAERS DESCENDING.
+
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL.
+*     毎通貨コードの最後レコードに読み込む場合
+AT END OF WAERS.
+*       「<ヘッダ部>」からの集計キー項目コピー処理
+PERFORM EDIT_HEADER USING    L_WA_HEADER
+CHANGING L_WA_OUTPUT.
+
+*      「出力内部テーブル」の「通貨コード」
+L_WA_OUTPUT-WAERS = L_WA_DETAIL-WAERS.
+
+*       出力画面の「<明細部>－支払依頼額行」の編集処理
+PERFORM EDIT_YIRAYI_DATA USING    L_WA_HEADER
+L_WA_OUTPUT-WAERS
+CHANGING L_WA_OUTPUT
+L_YIRAYI_FLG.
+*       出力画面の「<明細部>－前月以前締期日の未払行」の編集処理
+PERFORM EDIT_ZENGETSUMI_DATA USING    L_WA_HEADER
+L_WA_OUTPUT-WAERS
+CHANGING L_WA_OUTPUT
+L_ZENGETSUMI_FLG.
+*       出力画面の「<明細部>－支払依頼額(小計)行」の編集処理
+PERFORM EDIT_YIRAYISYO_DATA CHANGING L_WA_OUTPUT.
+
+*       出力画面の「<明細部>－当月締支払額行」の編集処理
+PERFORM EDIT_TOGETSU_DATA USING    L_WA_HEADER
+L_WA_OUTPUT-WAERS
+CHANGING L_WA_OUTPUT
+L_TOGETSUI_FLG.
+*       出力画面の「<明細部>－前月以前締支払額行」の編集処理
+PERFORM EDIT_ZENGETSU_DATA USING    L_WA_HEADER
+L_WA_OUTPUT-WAERS
+CHANGING L_WA_OUTPUT
+L_ZENGETSU_FLG.
+*       出力画面の「<明細部>－支払額(計)行」の編集処理
+PERFORM EDIT_SIHARAYI_DATA CHANGING L_WA_OUTPUT.
+
+*       出力画面の「<明細部>－差額①行」の編集処理
+PERFORM EDIT_SAGAKU1_DATA CHANGING L_WA_OUTPUT.
+
+*       出力画面の「<明細部>－期日払残行」の編集処理
+PERFORM EDIT_KIJITSUZAN_DATA USING    L_WA_HEADER
+L_WA_OUTPUT-WAERS
+CHANGING L_WA_OUTPUT
+L_KIJITSUZAN_FLG.
+*       出力画面の「<明細部>－差額②行」の編集処理
+PERFORM EDIT_SAGAKU2_DATA CHANGING L_WA_OUTPUT.
+*   insert 2008/06/18 DMC {
+*       出力画面の「<残高部>－支払後残行」の編集処理
+PERFORM EDIT_SIHARAYIZAN_DATA USING   L_WA_HEADER
+L_WA_OUTPUT-WAERS
+CHANGING L_WA_OUTPUT
+L_SIHARAYIZAN_FLG.
+*       出力画面の「<残高部>－期日払残行」の編集処理
+"「<明細部>－期日払残行」と同じなので、同一データが利用できる
+
+*       出力画面の「<残高部>－差額行」の編集処理
+PERFORM EDIT_SAGAKU_DATA CHANGING L_WA_OUTPUT.
+* } insert 2008/06/18 DMC
+*       仕入先データが支払状況TBLに存在しない場合
+IF L_YIRAYI_FLG <> C_OK AND L_ZENGETSUMI_FLG <> C_OK
+AND L_TOGETSUI_FLG <> C_OK AND L_ZENGETSU_FLG <> C_OK
+AND L_KIJITSUZAN_FLG <> C_OK
+*   insert 2008/06/18 DMC {
+AND L_SIHARAYIZAN_FLG <> C_OK.
+* } insert 2008/06/18 DMC
+*         この「出力内部テーブル」の構造を初期化する
+CLEAR L_WA_OUTPUT.
+
+*       仕入先データが支払状況TBLに存在の場合
+ELSE.
+*        「出力内部テーブル」の構造を「出力内部テーブル」に格納する
+APPEND L_WA_OUTPUT TO ITAB_OUTPUT.
+*         この「出力内部テーブル」の構造を初期化する
+CLEAR L_WA_OUTPUT.
+*         毎仕入の通貨コード件数の計算
+L_WA_CURR_CNT-CNT = L_WA_CURR_CNT-CNT + 1.
+ENDIF.
+ENDAT.
+
+AT END OF LIFNR.
+*       画面で「仕入先」入力する場合
+IF NOT S_LIFNR IS INITIAL AND L_WA_CURR_CNT-CNT > 0.
+*         毎仕入先単位の通貨コード件数内部テーブルの追加
+L_WA_CURR_CNT-BUKRS = L_WA_HEADER-BUKRS.  "会社コード
+L_WA_CURR_CNT-LIFNR = L_WA_HEADER-LIFNR.  "仕入先
+APPEND L_WA_CURR_CNT TO ITAB_CURR_CNT.
+CLEAR: L_WA_CURR_CNT.
+APPEND L_WA_HEADER TO L_ITAB_HEADER_TMP.
+ENDIF.
+ENDAT.
+
+AT END OF BUKRS.
+*       画面で「仕入先」入力しない場合
+IF S_LIFNR IS INITIAL AND L_WA_CURR_CNT-CNT > 0.
+*         毎仕入先単位の通貨コード件数内部テーブルの追加
+L_WA_CURR_CNT-BUKRS = L_WA_HEADER-BUKRS.  "会社コード
+APPEND L_WA_CURR_CNT TO ITAB_CURR_CNT.
+CLEAR: L_WA_CURR_CNT.
+APPEND L_WA_HEADER TO L_ITAB_HEADER_TMP.
+ENDIF.
+ENDAT.
+ENDLOOP.  "L_ITAB_DETAIL
+ENDLOOP.      "ITAB_HEADER
+* 仕入先データが支払状況TBLに存在しない場合
+IF L_ITAB_HEADER_TMP IS INITIAL.
+*   Sメッセージの出力
+MESSAGE S401 WITH TEXT-M04 TEXT-M02.
+STOP.
+* 仕入先データが支払状況TBLに存在の場合
+ELSE.
+ITAB_HEADER = L_ITAB_HEADER_TMP.
+REFRESH: L_ITAB_HEADER_TMP.
+ENDIF.
+ENDFORM.        "EDIT_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_HEADER
+*&---------------------------------------------------------------------*
+*       「<ヘッダ部>」からの集計キー項目コピー処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER   ヘッダ編集用構造
+*  <--  C_WA_OUTPUT   出力用構造
+*----------------------------------------------------------------------*
+FORM EDIT_HEADER USING    U_WA_HEADER TYPE STRT_HEADER
+CHANGING C_WA_OUTPUT TYPE STRT_OUTPUT.
+C_WA_OUTPUT-BUKRS  = U_WA_HEADER-BUKRS.   "会社コード
+C_WA_OUTPUT-LIFNR  = U_WA_HEADER-LIFNR.   "仕入先
+C_WA_OUTPUT-NAME1  = U_WA_HEADER-NAME1.   "仕入先名称
+C_WA_OUTPUT-ZTERM  = U_WA_HEADER-ZTERM.   "支払条件
+C_WA_OUTPUT-VTEXT  = U_WA_HEADER-VTEXT.   "支払条件名称
+C_WA_OUTPUT-ZWELS  = U_WA_HEADER-ZWELS.   "支払方法
+C_WA_OUTPUT-TEXT1  = U_WA_HEADER-TEXT1.   "支払方法名称
+C_WA_OUTPUT-ZFBDT  = U_WA_HEADER-ZFBDT.   "締日
+C_WA_OUTPUT-DATBEG = U_WA_HEADER-DATBEG.  "支払期間-LOW
+C_WA_OUTPUT-DATEND = U_WA_HEADER-DATEND.  "支払期間-HIGH
+
+ENDFORM.        "EDIT_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  SELECT_DETAIL
+*&---------------------------------------------------------------------*
+*       毎仕入先の明細編集用データの取得処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER     ヘッダ編集用構造
+*----------------------------------------------------------------------*
+FORM SELECT_DETAIL USING U_WA_HEADER TYPE STRT_HEADER.
+DATA: L_WA_DETAIL TYPE STRT_DETAIL,
+L_COND(255) TYPE C,
+L_ITAB_COND LIKE TABLE OF L_COND.
+REFRESH: ITAB_DETAIL, L_ITAB_COND.
+CLEAR: L_WA_DETAIL, L_COND.
+* 画面で「仕入先」入力しない場合（全社分の場合）
+IF S_LIFNR IS INITIAL.
+CONCATENATE ' BUKRS = ''' U_WA_HEADER-BUKRS ''''      "会社コード
+' AND ( CMP_FLG <> ''' C_C_X ''''         "完了フラグ
+' OR  ( CMP_FLG = ''' C_C_X ''''          "完了フラグ
+' AND CMP_DAT >= ''' S_PERD-LOW ''''      "完了日付
+' ) )'
+INTO L_COND.
+APPEND L_COND TO L_ITAB_COND.
+
+* 画面で「仕入先」入力する場合
+ELSE.
+CONCATENATE ' BUKRS = ''' U_WA_HEADER-BUKRS ''''        "会社コード
+' AND LIFNR = ''' U_WA_HEADER-LIFNR ''''    "仕入先
+' AND ( CMP_FLG <> ''' C_C_X ''''           "完了フラグ
+' OR ( CMP_FLG = ''' C_C_X ''''             "完了フラグ
+' AND CMP_DAT >= ''' S_PERD-LOW ''''        "完了日付
+' ) )'
+INTO L_COND.
+APPEND L_COND TO L_ITAB_COND.
+ENDIF.
+
+* 支払状況TBLの検索
+SELECT BUKRS                 "会社コード
+LIFNR                 "仕入先
+WAERS                 "通貨コード
+ZFBDT                 "締日
+SEQ_NO                "SEQ
+SHKZG                 "貸借フラグ
+BLART                 "伝票タイプ
+BLART_O               "支払依頼伝票タイプ
+BUDAT                 "転記日付
+HKONT_S               "勘定コード(借方)
+WRBTR_S               "伝票通貨額(借方)
+HKONT_H               "勘定コード(貸方)
+WRBTR_H               "伝票通貨額(貸方)
+ZTERM                 "支払条件
+STATUS                "ステータス
+CMP_FLG               "完了フラグ
+FAEDT                 "支払期日
+CMP_DAT               "完了日付
+*   insert 2008/06/18 DMC {
+AUGDT                 "決済日付
+* } insert 2008/06/18 DMC
+CADAT                 "支払計上日
+FROM   ZF2020                "支払状況TBL
+INTO   TABLE ITAB_DETAIL
+WHERE  (L_ITAB_COND).
+
+* 画面で「仕入先」入力しない場合（全社分の場合）
+IF S_LIFNR IS INITIAL.
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL.
+L_WA_DETAIL-LIFNR = SPACE.
+MODIFY ITAB_DETAIL FROM L_WA_DETAIL TRANSPORTING LIFNR.
+ENDLOOP.
+ENDIF.
+ENDFORM.        "SELECT_DETAIL
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_YIRAYI_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－支払依頼額行」の編集処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER     ヘッダ編集用構造
+*  -->  U_WAERS         通貨コード
+*  <--  C_WA_OUTPUT     出力用構造
+*  <--  C_YIRAYI_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM EDIT_YIRAYI_DATA USING    U_WA_HEADER   TYPE STRT_HEADER
+U_WAERS       TYPE ZF2020-WAERS
+CHANGING C_WA_OUTPUT   TYPE STRT_OUTPUT
+C_YIRAYI_FLG  TYPE CHAR1.
+* 出力画面の「<明細部>－支払依頼額行」の取得処理
+PERFORM GET_YIRAYI_DATA USING    U_WA_HEADER
+U_WAERS
+CHANGING C_YIRAYI_FLG.
+* 出力画面の「<明細部>－支払依頼額行」の合計処理
+PERFORM SUM_BLOCK1_DATA USING    C_C_A
+CHANGING C_WA_OUTPUT.
+
+ENDFORM.         "EDIT_YIRAYI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_YIRAYI_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－支払依頼額行」の取得処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER     ヘッダ編集用構造
+*  -->  U_WAERS         通貨コード
+*  <--  C_YIRAYI_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM GET_YIRAYI_DATA USING    U_WA_HEADER  TYPE STRT_HEADER
+U_WAERS      TYPE ZF2020-WAERS
+CHANGING C_YIRAYI_FLG TYPE CHAR1.
+DATA: L_WA_DETAIL TYPE STRT_DETAIL.
+REFRESH ITAB_COM_DETAIL.
+CLEAR: L_WA_DETAIL,C_YIRAYI_FLG.
+* <明細部>－支払依頼額データの取得処理
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL
+WHERE BUKRS  =  U_WA_HEADER-BUKRS AND  "会社コード
+LIFNR  =  U_WA_HEADER-LIFNR AND  "仕入先
+ZFBDT  =  U_WA_HEADER-ZFBDT AND   "締日
+SEQ_NO =  C_C_1             AND   "SEQ(1：親のデータ)
+WAERS  =  U_WAERS.
+C_YIRAYI_FLG = C_OK.
+*   取得したレコードを「共通明細編集内部テーブル」に格納する
+APPEND L_WA_DETAIL TO ITAB_COM_DETAIL.
+ENDLOOP.
+
+ENDFORM.        "GET_YIRAYI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ZENGETSUMI_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－前月以前締期日の未払行」の編集処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER       ヘッダ編集用構造
+*  -->  U_WAERS           通貨コード
+*  <--  C_WA_OUTPUT       出力用構造
+*  <--  C_ZENGETSUMI_FLG  リターンフラグ
+*----------------------------------------------------------------------*
+FORM EDIT_ZENGETSUMI_DATA USING    U_WA_HEADER      TYPE STRT_HEADER
+U_WAERS          TYPE ZF2020-WAERS
+CHANGING C_WA_OUTPUT      TYPE STRT_OUTPUT
+C_ZENGETSUMI_FLG TYPE CHAR1.
+* 出力画面の「<明細部>－前月以前締期日の未払行」の取得処理
+PERFORM GET_ZENGETSUMI_DATA USING    U_WA_HEADER
+U_WAERS
+CHANGING C_ZENGETSUMI_FLG.
+* 出力画面の「<明細部>－前月以前締期日の未払行」の合計処理
+PERFORM SUM_BLOCK1_DATA USING    C_C_B
+CHANGING C_WA_OUTPUT.
+
+ENDFORM.         "EDIT_ZENGETSUMI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZENGETSUMI_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－前月以前締期日の未払行」の取得処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER       ヘッダ編集用構造
+*  -->  U_WAERS           通貨コード
+*  <--  C_ZENGETSUMI_FLG  リターンフラグ
+*----------------------------------------------------------------------*
+FORM GET_ZENGETSUMI_DATA USING    U_WA_HEADER      TYPE STRT_HEADER
+U_WAERS          TYPE ZF2020-WAERS
+CHANGING C_ZENGETSUMI_FLG TYPE CHAR1.
+DATA: L_WA_DETAIL  TYPE  STRT_DETAIL.
+REFRESH ITAB_COM_DETAIL.
+CLEAR: L_WA_DETAIL,C_ZENGETSUMI_FLG.
+* <明細部>－前月以前締期日の未払データの取得処理
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL
+*   modify 2008/06/25 S.MIKAMI {
+WHERE BUKRS   =  U_WA_HEADER-BUKRS AND   "会社コード
+LIFNR   =  U_WA_HEADER-LIFNR AND   "仕入先
+ZFBDT   <  P_ZFBDT           AND   "締日
+BUDAT   <= P_ZFBDT           AND   "締日時点で転記済
+*   delete 2008/12/15 DMC {
+*           ( AUGDT      IS INITIAL              "未消込、もしくは
+*          OR AUGDT   >  P_ZFBDT )         AND   "締日時点で未決済
+*             CADAT      IS INITIAL        AND   "支払計上なし
+* } delete 2008/12/15 DMC
+*   insert 2008/12/15 DMC {
+( AUGDT      IS INITIAL              "未消込、もしくは
+OR AUGDT   =  SPACE                   "未消込、もしくは
+OR AUGDT   >  P_ZFBDT )         AND   "締日時点で未決済
+( CADAT      IS INITIAL              "支払計上なし
+OR CADAT   =  SPACE )           AND   "支払計上なし
+* } insert 2008/12/15 DMC
+WAERS   =  U_WAERS.                "通貨コード
+*       WHERE BUKRS   =  U_WA_HEADER-BUKRS AND   "会社コード
+*             LIFNR   =  U_WA_HEADER-LIFNR AND   "仕入先
+*             ZFBDT   <  P_ZFBDT           AND   "締日
+*             ( ( CMP_FLG <> C_C_X AND           "完了フラグ
+*                 STATUS  =  C_C_1 )       OR    "ステータス
+*               ( STATUS  =  C_C_9 AND           "ステータス
+*                 CADAT >= S_PERD-LOW ) ) AND    "支払計上日
+*             ZTERM   IN S_ZTERM          AND    "期日払用支払条件
+*             WAERS   =  U_WAERS.                "通貨コード
+* } modify 2008/06/25 S.MIKAMI
+C_ZENGETSUMI_FLG = C_OK.
+*   取得したレコードを「共通明細編集内部テーブル」に格納する
+APPEND L_WA_DETAIL TO ITAB_COM_DETAIL.
+ENDLOOP.
+
+ENDFORM.        "GET_ZENGETSUMI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SUM_BLOCK1_DATA
+*&---------------------------------------------------------------------*
+*       出力画面のブロック1の合計処理
+*----------------------------------------------------------------------*
+*  --> U_FIELD_KBN     合計行区分
+*  <-- C_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SUM_BLOCK1_DATA USING    U_FIELD_KBN TYPE CHAR1
+CHANGING C_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_DETAIL   TYPE STRT_DETAIL,
+L_SUM_S1      TYPE ZF2020-WRBTR_S,   "照合_借
+L_SUM_S2      TYPE ZF2020-WRBTR_S,   "その他_借
+L_SUM_H1      TYPE ZF2020-WRBTR_H,   "照合_貸
+L_SUM_H2      TYPE ZF2020-WRBTR_H.   "その他_貸
+CLEAR: L_WA_DETAIL,  L_SUM_S1,  L_SUM_S2,
+L_SUM_H1,     L_SUM_H2.
+
+LOOP AT ITAB_COM_DETAIL INTO L_WA_DETAIL.
+*   支払依頼額行を合計する場合
+IF U_FIELD_KBN = C_C_A.
+*    「貸借フラグ」が「借 ('S')」場合
+IF L_WA_DETAIL-SHKZG = C_SHKZG_S.
+*       画面の「支払依頼伝票タイプ」に存在の場合
+IF L_WA_DETAIL-BLART IN S_BLART1.
+*         変数「支払依頼照合」の合計
+L_SUM_S1 = L_SUM_S1 + L_WA_DETAIL-WRBTR_S.
+
+*       画面の「支払依頼伝票タイプ(検収照合以外)」に存在の場合
+ELSEIF L_WA_DETAIL-BLART IN S_BLART2.
+*         変数「支払依頼その他」の合計
+L_SUM_S2 = L_SUM_S2 + L_WA_DETAIL-WRBTR_S.
+ENDIF.
+
+*    「貸借フラグ」が「貸 ('H')」場合
+ELSEIF L_WA_DETAIL-SHKZG = C_SHKZG_H.
+*       画面の「支払依頼伝票タイプ」に存在の場合
+IF L_WA_DETAIL-BLART IN S_BLART1.
+*         変数「支払依頼照合」の合計
+L_SUM_H1 = L_SUM_H1 + L_WA_DETAIL-WRBTR_H.
+
+*       画面の「支払依頼伝票タイプ(検収照合以外)」に存在の場合
+ELSEIF L_WA_DETAIL-BLART IN S_BLART2.
+*         変数「支払依頼その他」の合計
+L_SUM_H2 = L_SUM_H2 + L_WA_DETAIL-WRBTR_H.
+ENDIF.
+ENDIF.
+*   前月以前締期日の未払行を合計する場合
+ELSEIF U_FIELD_KBN = C_C_B.
+*    「貸借フラグ」が「借 ('S')」場合
+IF L_WA_DETAIL-SHKZG = C_SHKZG_S.
+*       画面の「支払依頼伝票タイプ」に存在の場合
+IF L_WA_DETAIL-BLART_O IN S_BLART1.
+*         変数「支払依頼照合」の合計
+L_SUM_S1 = L_SUM_S1 + L_WA_DETAIL-WRBTR_S.
+
+*       画面の「支払依頼伝票タイプ(検収照合以外)」に存在の場合
+ELSEIF L_WA_DETAIL-BLART_O IN S_BLART2.
+*         変数「支払依頼その他」の合計
+L_SUM_S2 = L_SUM_S2 + L_WA_DETAIL-WRBTR_S.
+ENDIF.
+
+*    「貸借フラグ」が「貸 ('H')」場合
+ELSEIF L_WA_DETAIL-SHKZG = C_SHKZG_H.
+*       画面の「支払依頼伝票タイプ」に存在の場合
+IF L_WA_DETAIL-BLART_O IN S_BLART1.
+*         変数「支払依頼照合」の合計
+L_SUM_H1 = L_SUM_H1 + L_WA_DETAIL-WRBTR_H.
+
+*       画面の「支払依頼伝票タイプ(検収照合以外)」に存在の場合
+ELSEIF L_WA_DETAIL-BLART_O IN S_BLART2.
+*         変数「支払依頼その他」の合計
+L_SUM_H2 = L_SUM_H2 + L_WA_DETAIL-WRBTR_H.
+ENDIF.
+ENDIF.
+ENDIF.
+*   最後レコード処理する時
+AT LAST.
+*     支払依頼額行を合計する場合
+IF U_FIELD_KBN = C_C_A.
+*      「出力内部テーブル」の「支払依頼照合」
+*          ＝変数「照合_貸」－変数「照合_借」
+C_WA_OUTPUT-YIRAYI_SYOGO = L_SUM_H1 - L_SUM_S1.
+
+*      「出力内部テーブル」の「支払依頼その他」
+*          ＝変数「その他_貸」－変数「その他_借」
+C_WA_OUTPUT-YIRAYI_SONOTA = L_SUM_H2 - L_SUM_S2.
+
+*      「出力内部テーブル」の「支払依頼合計」
+*           ＝「支払依頼照合」＋「支払依頼その他」
+C_WA_OUTPUT-YIRAYI_GOKEYI =
+C_WA_OUTPUT-YIRAYI_SYOGO + C_WA_OUTPUT-YIRAYI_SONOTA.
+
+*     前月以前締期日の未払行を合計する場合
+ELSEIF U_FIELD_KBN = C_C_B.
+*      「出力内部テーブル」の構造の「前月以前締未払照合」
+*          ＝変数「照合_貸」－変数「照合_借」
+C_WA_OUTPUT-ZENGETSUMI_SYOGO = L_SUM_H1 - L_SUM_S1.
+
+*      「出力内部テーブル」の構造の「前月以前締未払その他」
+*          ＝変数「その他_貸」－変数「その他_借」
+C_WA_OUTPUT-ZENGETSUMI_SONOTA = L_SUM_H2 - L_SUM_S2.
+
+*      「出力内部テーブル」の構造の「前月以前締未払合計」
+*           ＝「前月以前締未払照合」＋「前月以前締未払その他」
+C_WA_OUTPUT-ZENGETSUMI_GOKEYI = C_WA_OUTPUT-ZENGETSUMI_SYOGO
++ C_WA_OUTPUT-ZENGETSUMI_SONOTA.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.        "SUM_BLOCK1_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_YIRAYISYO_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「支払依頼額(小計)行」の編集処理
+*----------------------------------------------------------------------*
+*  <--  C_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM EDIT_YIRAYISYO_DATA CHANGING C_WA_OUTPUT TYPE STRT_OUTPUT.
+*  「出力内部テーブル」の構造：「支払依頼小計合計」＝
+*               「支払依頼合計」＋「前月以前締未払合計」
+C_WA_OUTPUT-YIRAYISYO_GOKEYI
+= C_WA_OUTPUT-YIRAYI_GOKEYI + C_WA_OUTPUT-ZENGETSUMI_GOKEYI.
+
+*  「出力内部テーブル」の構造：「支払依頼小計照合」＝
+*               「支払依頼照合」＋「前月以前締未払照合」
+C_WA_OUTPUT-YIRAYISYO_SYOGO
+= C_WA_OUTPUT-YIRAYI_SYOGO + C_WA_OUTPUT-ZENGETSUMI_SYOGO.
+
+*  「出力内部テーブル」の構造:「支払依頼小計その他」＝
+*               「支払依頼その他」＋「前月以前締未払その他」
+C_WA_OUTPUT-YIRAYISYO_SONOTA
+= C_WA_OUTPUT-YIRAYI_SONOTA + C_WA_OUTPUT-ZENGETSUMI_SONOTA.
+
+ENDFORM.        "EDIT_YIRAYISYO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_TOGETSU_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－当月締支払額行」の編集処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER     ヘッダ編集用構造
+*  -->  U_WAERS         通貨コード
+*  <--  C_WA_OUTPUT     出力用構造
+*  <--  C_TOGETSUI_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM EDIT_TOGETSU_DATA USING    U_WA_HEADER    TYPE STRT_HEADER
+U_WAERS        TYPE ZF2020-WAERS
+CHANGING C_WA_OUTPUT    TYPE STRT_OUTPUT
+C_TOGETSUI_FLG TYPE CHAR1.
+* 出力画面の「<明細部>－当月締支払額行」の取得処理
+PERFORM GET_TOGETSU_DATA USING    U_WA_HEADER
+U_WAERS
+CHANGING C_TOGETSUI_FLG.
+* 出力画面の「<明細部>－当月締支払額行」の合計処理
+PERFORM SUM_BLOCK2_DATA USING    C_C_D
+CHANGING C_WA_OUTPUT.
+ENDFORM.        "EDIT_TOGETSU_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_TOGETSU_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－当月締支払額行」の取得処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER      ヘッダ編集用構造
+*  -->  U_WAERS          通貨コード
+*  <--  C_TOGETSU_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM GET_TOGETSU_DATA USING    U_WA_HEADER    TYPE STRT_HEADER
+U_WAERS        TYPE ZF2020-WAERS
+CHANGING C_TOGETSU_FLG  TYPE CHAR1.
+DATA: L_WA_DETAIL TYPE STRT_DETAIL.
+REFRESH ITAB_COM_DETAIL.
+CLEAR: L_WA_DETAIL,C_TOGETSU_FLG.
+* <明細部>－当月締支払額行データの取得処理
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL
+WHERE BUKRS  =  U_WA_HEADER-BUKRS AND   "会社コード
+LIFNR  =  U_WA_HEADER-LIFNR AND   "仕入先
+ZFBDT  =  P_ZFBDT AND             "締日
+SEQ_NO <> C_C_1             AND   "SEQ(1：親のデータ)
+* 2009/01/23 Modify Start
+*             BUDAT  IN S_PERD            AND   "転記日付
+CADAT  IN S_PERD            AND   "支払計上日
+* 2009/01/23 Modify End
+WAERS = U_WAERS.                  "通貨コード
+C_TOGETSU_FLG = C_OK.
+*   取得したレコードを「共通明細編集内部テーブル」に格納する
+APPEND L_WA_DETAIL TO ITAB_COM_DETAIL.
+ENDLOOP.
+
+ENDFORM.        "GET_TOGETSU_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ZENGETSU_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－前月以前締支払額行」の編集処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER       ヘッダ編集用構造
+*  -->  U_WAERS           通貨コード
+*  <--  C_WA_OUTPUT       出力用構造
+*  <--  C_ZENGETSU_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM  EDIT_ZENGETSU_DATA USING    U_WA_HEADER    TYPE STRT_HEADER
+U_WAERS        TYPE ZF2020-WAERS
+CHANGING C_WA_OUTPUT    TYPE STRT_OUTPUT
+C_ZENGETSU_FLG TYPE CHAR1.
+* 出力画面の「<明細部>－前月以前締支払額行」の取得処理
+PERFORM GET_ZENGETSU_DATA USING    U_WA_HEADER
+U_WAERS
+CHANGING C_ZENGETSU_FLG.
+* 出力画面の「<明細部>－前月以前締支払額行」の合計処理
+PERFORM SUM_BLOCK2_DATA USING    C_C_E
+CHANGING C_WA_OUTPUT.
+
+ENDFORM.        " EDIT_ZENGETSU_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZENGETSU_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－前月以前締支払額行」の取得処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER       ヘッダ編集用構造
+*  -->  U_WAERS           通貨コード
+*  <--  C_ZENGETSU_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM GET_ZENGETSU_DATA USING    U_WA_HEADER    TYPE STRT_HEADER
+U_WAERS        TYPE ZF2020-WAERS
+CHANGING C_ZENGETSU_FLG TYPE CHAR1.
+DATA: L_WA_DETAIL TYPE STRT_DETAIL.
+REFRESH ITAB_COM_DETAIL.
+CLEAR: L_WA_DETAIL,C_ZENGETSU_FLG.
+* <明細部>－前月以前締支払額行データの取得処理
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL
+WHERE BUKRS  =  U_WA_HEADER-BUKRS AND   "会社コード
+LIFNR  =  U_WA_HEADER-LIFNR AND   "仕入先
+ZFBDT  <  P_ZFBDT AND             "締日
+SEQ_NO <> C_C_1             AND   "SEQ(1：親のデータ)
+BUDAT  IN S_PERD            AND   "転記日付
+*   delete 2008/06/25 S.MIKAMI {
+*             ZTERM  IN S_ZTERM           AND   "期日払用支払条件
+* } delete 2008/06/25 S.MIKAMI
+WAERS = U_WAERS.                  "通貨コード
+C_ZENGETSU_FLG = C_OK.
+*   取得したレコードを「共通明細編集内部テーブル」に格納する
+APPEND L_WA_DETAIL TO ITAB_COM_DETAIL.
+ENDLOOP.
+
+ENDFORM.        "GET_ZENGETSU_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SUM_BLOCK2_DATA
+*&---------------------------------------------------------------------*
+*       出力画面のブロック2の合計処理
+*----------------------------------------------------------------------*
+*  --> U_FIELD_KBN     合計行区分
+*  <-- C_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SUM_BLOCK2_DATA USING    U_FIELD_KBN TYPE CHAR1
+CHANGING C_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_DETAIL        TYPE STRT_DETAIL,
+L_SUM_GINKO_S      TYPE ZF2020-WRBTR_S, "銀行振込_借
+L_SUM_SIHARAYI_S   TYPE ZF2020-WRBTR_S, "支払手形_借
+L_SUM_WURAGAKI_S   TYPE ZF2020-WRBTR_S, "裏書手形_借
+L_SUM_SIYIRE_S     TYPE ZF2020-WRBTR_S, "仕入割引_借
+L_SUM_SONOTA_S     TYPE ZF2020-WRBTR_S, "その他_借
+L_SUM_SOSAYI_S     TYPE ZF2020-WRBTR_S, "相殺_借
+L_SUM_GINKO_H      TYPE ZF2020-WRBTR_H, "銀行振込_貸
+L_SUM_SIHARAYI_H   TYPE ZF2020-WRBTR_H, "支払手形_貸
+L_SUM_WURAGAKI_H   TYPE ZF2020-WRBTR_H, "裏書手形_貸
+L_SUM_SIYIRE_H     TYPE ZF2020-WRBTR_H, "仕入割引_貸
+L_SUM_SONOTA_H     TYPE ZF2020-WRBTR_H, "その他_貸
+L_SUM_SOSAYI_H     TYPE ZF2020-WRBTR_H. "相殺_貸
+CLEAR: L_WA_DETAIL,      L_SUM_GINKO_S,  L_SUM_SIHARAYI_S,
+L_SUM_WURAGAKI_S, L_SUM_SIYIRE_S, L_SUM_SONOTA_S,
+L_SUM_SOSAYI_S,   L_SUM_GINKO_H,  L_SUM_SIHARAYI_H,
+L_SUM_WURAGAKI_H, L_SUM_SIYIRE_H, L_SUM_SONOTA_H,
+L_SUM_SOSAYI_H.
+
+LOOP AT ITAB_COM_DETAIL INTO L_WA_DETAIL.
+*  「貸借フラグ」が「借 ('S')」場合
+IF L_WA_DETAIL-SHKZG = C_SHKZG_S.
+*    「勘定コード(借方)」が　画面の「銀行勘定」に存在する場合
+IF L_WA_DETAIL-HKONT_S IN S_SAKNR1.
+*       変数「銀行振込_借」の合計
+L_SUM_GINKO_S = L_SUM_GINKO_S + L_WA_DETAIL-WRBTR_S.
+
+*    「勘定コード(借方)」が　画面の「手形勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_S IN S_SAKNR2.
+*       変数「支払手形_借」の合計
+L_SUM_SIHARAYI_S = L_SUM_SIHARAYI_S + L_WA_DETAIL-WRBTR_S.
+
+*    「勘定コード(借方)」が　画面の「裏書手形勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_S IN S_SAKNR3.
+*       変数「裏書手形_借」の合計
+L_SUM_WURAGAKI_S = L_SUM_WURAGAKI_S + L_WA_DETAIL-WRBTR_S.
+
+*    「勘定コード(借方)」が　画面の「仕入割引勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_S IN S_SAKNR4.
+*       変数「仕入割引_借」の合計
+L_SUM_SIYIRE_S = L_SUM_SIYIRE_S + L_WA_DETAIL-WRBTR_S.
+
+*    「勘定コード(借方)」が　画面の「その他勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_S IN S_SAKNR5.
+*       変数「その他_借」の合計
+L_SUM_SONOTA_S = L_SUM_SONOTA_S + L_WA_DETAIL-WRBTR_S.
+
+*    「勘定コード(借方)」が　画面の「相殺勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_S IN S_SAKNR6.
+*       変数「相殺_借」の合計
+L_SUM_SOSAYI_S = L_SUM_SOSAYI_S + L_WA_DETAIL-WRBTR_S.
+ENDIF.
+
+*  「貸借フラグ」が「貸 ('H')」場合
+ELSEIF L_WA_DETAIL-SHKZG = C_SHKZG_H.
+*    「勘定コード(貸方)」が　画面の「銀行勘定」に存在する場合
+IF L_WA_DETAIL-HKONT_H IN S_SAKNR1.
+*       変数「銀行振込_貸」の合計
+L_SUM_GINKO_H = L_SUM_GINKO_H + L_WA_DETAIL-WRBTR_H.
+
+*    「勘定コード(貸方)」が　画面の「手形勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_H IN S_SAKNR2.
+*       変数「支払手形_貸」の合計
+L_SUM_SIHARAYI_H = L_SUM_SIHARAYI_H + L_WA_DETAIL-WRBTR_H.
+
+*    「勘定コード(貸方)」が　画面の「裏書手形勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_H IN S_SAKNR3.
+*       変数「裏書手形_貸」の合計
+L_SUM_WURAGAKI_H = L_SUM_WURAGAKI_H + L_WA_DETAIL-WRBTR_H.
+
+*    「勘定コード(貸方)」が　画面の「仕入割引勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_H IN S_SAKNR4.
+*       変数「仕入割引_貸」の合計
+L_SUM_SIYIRE_H = L_SUM_SIYIRE_H + L_WA_DETAIL-WRBTR_H.
+
+*    「勘定コード(貸方)」が　画面の「その他勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_H IN S_SAKNR5.
+*       変数「その他_貸」の合計
+L_SUM_SONOTA_H = L_SUM_SONOTA_H + L_WA_DETAIL-WRBTR_H.
+
+*    「勘定コード(貸方)」が　画面の「相殺勘定」に存在する場合
+ELSEIF L_WA_DETAIL-HKONT_H IN S_SAKNR6.
+*       変数「相殺_貸」の合計
+L_SUM_SOSAYI_H = L_SUM_SOSAYI_H + L_WA_DETAIL-WRBTR_H.
+ENDIF.
+ENDIF.
+
+*   最後レコード処理する時
+AT LAST.
+*     当月締支払額行を合計する場合
+IF U_FIELD_KBN = C_C_D.
+*      「出力内部テーブル」の構造:「当月締支払銀行振込」＝
+*              変数「銀行振込_貸」－変数「銀行振込_借」
+C_WA_OUTPUT-TOGETSU_GINKO = L_SUM_GINKO_H - L_SUM_GINKO_S.
+*      「出力内部テーブル」の構造:「当月締支払支払手形」＝
+*              変数「支払手形_貸」－変数「支払手形_借」
+C_WA_OUTPUT-TOGETSU_SIHARAYI
+= L_SUM_SIHARAYI_H - L_SUM_SIHARAYI_S.
+*      「出力内部テーブル」の構造:「当月締支払裏書手形」＝
+*              変数「裏書手形_貸」－変数「裏書手形_借」
+C_WA_OUTPUT-TOGETSU_WURAGAKI
+= L_SUM_WURAGAKI_H - L_SUM_WURAGAKI_S.
+*      「出力内部テーブル」の構造:「当月締支払仕入割引」＝
+*              変数「仕入割引_貸」－変数「仕入割引_借」
+C_WA_OUTPUT-TOGETSU_SIYIRE = L_SUM_SIYIRE_H - L_SUM_SIYIRE_S.
+*      「出力内部テーブル」の構造:「当月締支払その他」＝
+*              変数「その他_貸」－変数「その他_借」
+C_WA_OUTPUT-TOGETSU_SONOTA = L_SUM_SONOTA_H - L_SUM_SONOTA_S.
+*       「出力内部テーブル」の構造:「当月締支払相殺」＝
+*              変数「相殺_貸」－変数「相殺_借」
+C_WA_OUTPUT-TOGETSU_SOSAYI = L_SUM_SOSAYI_H - L_SUM_SOSAYI_S.
+*  　  「出力内部テーブル」の構造:「当月支払計」＝
+*              「当月締支払銀行振込」＋「当月締支払支払手形」＋
+*              「当月締支払裏書手形」＋「当月締支払仕入割引」＋
+*              「当月締支払その他」
+C_WA_OUTPUT-TOGETSU_SIHARAYIKEYI
+= C_WA_OUTPUT-TOGETSU_GINKO + C_WA_OUTPUT-TOGETSU_SIHARAYI
++ C_WA_OUTPUT-TOGETSU_WURAGAKI + C_WA_OUTPUT-TOGETSU_SIYIRE
++ C_WA_OUTPUT-TOGETSU_SONOTA.
+*      「出力内部テーブル」の構造:「当月総合計」＝
+*              「当月締支払支払計」＋「当月締支払相殺」
+C_WA_OUTPUT-TOGETSU_SOKEYI = C_WA_OUTPUT-TOGETSU_SIHARAYIKEYI
++ C_WA_OUTPUT-TOGETSU_SOSAYI.
+
+*     前月以前締支払額行を合計する場合
+ELSEIF U_FIELD_KBN = C_C_E.
+*      「出力内部テーブル」の構造:「以前締支払銀行振込」＝
+*              変数「銀行振込_貸」－変数「銀行振込_借」
+C_WA_OUTPUT-ZENGETSU_GINKO = L_SUM_GINKO_H - L_SUM_GINKO_S.
+*      「出力内部テーブル」の構造:「以前締支払支払手形」＝
+*              変数「支払手形_貸」－変数「支払手形_借」
+C_WA_OUTPUT-ZENGETSU_SIHARAYI
+= L_SUM_SIHARAYI_H - L_SUM_SIHARAYI_S.
+*      「出力内部テーブル」の構造:「以前締支払裏書手形」＝
+*              変数「裏書手形_貸」－変数「裏書手形_借」
+C_WA_OUTPUT-ZENGETSU_WURAGAKI
+= L_SUM_WURAGAKI_H - L_SUM_WURAGAKI_S.
+*      「出力内部テーブル」の構造:「以前締支払仕入割引」＝
+*              変数「仕入割引_貸」－変数「仕入割引_借」
+C_WA_OUTPUT-ZENGETSU_SIYIRE = L_SUM_SIYIRE_H - L_SUM_SIYIRE_S.
+*      「出力内部テーブル」の構造:「以前締支払その他」＝
+*              変数「その他_貸」－ 変数「その他_借」
+C_WA_OUTPUT-ZENGETSU_SONOTA = L_SUM_SONOTA_H - L_SUM_SONOTA_S.
+*       「出力内部テーブル」の構造:「以前締支払相殺」＝
+*              変数「相殺_貸」－変数「相殺_借」
+C_WA_OUTPUT-ZENGETSU_SOSAYI = L_SUM_SOSAYI_H - L_SUM_SOSAYI_S.
+*  　  「出力内部テーブル」の構造:「以前支払計」＝
+*              「以前締支払銀行振込」＋「以前締支払支払手形」＋
+*              「以前締支払裏書手形」＋「以前締支払仕入割引」＋
+*              「以前締支払その他」
+C_WA_OUTPUT-ZENGETSU_SIHARAYIKEYI
+= C_WA_OUTPUT-ZENGETSU_GINKO + C_WA_OUTPUT-ZENGETSU_SIHARAYI
++ C_WA_OUTPUT-ZENGETSU_WURAGAKI + C_WA_OUTPUT-ZENGETSU_SIYIRE
++ C_WA_OUTPUT-ZENGETSU_SONOTA.
+*      「出力内部テーブル」の構造:「以前総合計」＝
+*              「当月締支払支払計」＋「以前締支払相殺」
+C_WA_OUTPUT-ZENGETSU_SOKEYI = C_WA_OUTPUT-ZENGETSU_SIHARAYIKEYI
++ C_WA_OUTPUT-ZENGETSU_SOSAYI.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.        "SUM_BLOCK2_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_SIHARAYI_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－支払額(計)行」の編集処理
+*----------------------------------------------------------------------*
+*  <--  C_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM EDIT_SIHARAYI_DATA CHANGING C_WA_OUTPUT TYPE STRT_OUTPUT.
+*「出力内部テーブル」の構造:「支払額計総合計」＝
+*        「当月締支払総合計」+「以前締支払総合計」
+C_WA_OUTPUT-SIHARAYI_SOKEYI
+= C_WA_OUTPUT-TOGETSU_SOKEYI + C_WA_OUTPUT-ZENGETSU_SOKEYI.
+*「出力内部テーブル」の構造:「支払額計銀行振込」＝
+*        「当月締支払銀行振込」+「以前締支払銀行振込」
+C_WA_OUTPUT-SIHARAYI_GINKO
+= C_WA_OUTPUT-TOGETSU_GINKO + C_WA_OUTPUT-ZENGETSU_GINKO.
+*「出力内部テーブル」の構造:「支払額計支払手形」＝
+*         「当月締支払支払手形」+「以前締支払支払手形」
+C_WA_OUTPUT-SIHARAYI_SIHARAYI
+= C_WA_OUTPUT-TOGETSU_SIHARAYI + C_WA_OUTPUT-ZENGETSU_SIHARAYI.
+*「出力内部テーブル」の構造:「支払額計裏書手形」＝
+*         「当月締支払裏書手形」+「以前締支払裏書手形」
+C_WA_OUTPUT-SIHARAYI_WURAGAKI
+= C_WA_OUTPUT-TOGETSU_WURAGAKI + C_WA_OUTPUT-ZENGETSU_WURAGAKI.
+*「出力内部テーブル」の構造:「支払額計仕入割引」＝
+*         「当月締支払仕入割引」+「以前締支払仕入割引」
+C_WA_OUTPUT-SIHARAYI_SIYIRE
+= C_WA_OUTPUT-TOGETSU_SIYIRE + C_WA_OUTPUT-ZENGETSU_SIYIRE.
+*「出力内部テーブル」の構造:「支払額計その他」＝
+*         「当月締支払その他」+「以前締支払その他」
+C_WA_OUTPUT-SIHARAYI_SONOTA
+= C_WA_OUTPUT-TOGETSU_SONOTA + C_WA_OUTPUT-ZENGETSU_SONOTA.
+*「出力内部テーブル」の構造:「支払額計支払計」＝
+*         「当月締支払支払計」+「以前締支払支払計」
+C_WA_OUTPUT-SIHARAYI_SIHARAYIKEYI =
+C_WA_OUTPUT-TOGETSU_SIHARAYIKEYI + C_WA_OUTPUT-ZENGETSU_SIHARAYIKEYI.
+*「出力内部テーブル」の構造:「支払額計相殺」＝
+*         「当月締支払相殺」+「以前締支払相殺」
+C_WA_OUTPUT-SIHARAYI_SOSAYI
+= C_WA_OUTPUT-TOGETSU_SOSAYI + C_WA_OUTPUT-ZENGETSU_SOSAYI.
+
+ENDFORM.        "EDIT_SIHARAYI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_SAGAKU1_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「差額①行」の編集処理
+*----------------------------------------------------------------------*
+*  <--   C_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM  EDIT_SAGAKU1_DATA CHANGING C_WA_OUTPUT   TYPE STRT_OUTPUT.
+* 差額① = 支払依頼小計合計 － 支払額計総合計
+C_WA_OUTPUT-SAGAKU1
+= C_WA_OUTPUT-YIRAYISYO_GOKEYI - C_WA_OUTPUT-SIHARAYI_SOKEYI.
+
+ENDFORM.        "EDIT_SAGAKU1_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_KIJITSUZAN_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－期日払残行」の編集処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER         ヘッダ編集用構造
+*  -->  U_WAERS             通貨コード
+*  <--  C_WA_OUTPUT         出力用構造
+*  <--  C_KIJITSUZAN_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM EDIT_KIJITSUZAN_DATA USING    U_WA_HEADER      TYPE STRT_HEADER
+U_WAERS          TYPE ZF2020-WAERS
+CHANGING C_WA_OUTPUT      TYPE STRT_OUTPUT
+C_KIJITSUZAN_FLG TYPE CHAR1.
+DATA: L_WA_DETAIL   TYPE STRT_DETAIL,
+L_SUM_S1      TYPE ZF2020-WRBTR_S, "期日払残_借
+L_SUM_H1      TYPE ZF2020-WRBTR_H. "期日払残_貸
+CLEAR: L_WA_DETAIL, L_SUM_S1, L_SUM_H1.
+* 出力画面の「<明細部>－期日払残行」の取得処理
+PERFORM GET_KIJITSUZAN_DATA USING    U_WA_HEADER
+U_WAERS
+CHANGING C_KIJITSUZAN_FLG.
+
+LOOP AT ITAB_COM_DETAIL INTO L_WA_DETAIL.
+*  「貸借フラグ」が「借 ('S')」場合
+IF L_WA_DETAIL-SHKZG = C_SHKZG_S.
+*     変数「期日払残_借」の合計
+L_SUM_S1 = L_SUM_S1 + L_WA_DETAIL-WRBTR_S.
+
+*  「貸借フラグ」が「貸 ('H')」場合
+ELSEIF L_WA_DETAIL-SHKZG = C_SHKZG_H.
+*     変数「期日払残_貸」の合計
+L_SUM_H1 = L_SUM_H1 + L_WA_DETAIL-WRBTR_H.
+
+ENDIF.
+*   最後レコード処理する時
+AT LAST.
+*    「出力内部テーブル」の構造の「期日払残」
+*        ＝変数「期日払残_貸」－変数「期日払残_借」
+C_WA_OUTPUT-KIJITSUZAN = L_SUM_H1 - L_SUM_S1.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.         "EDIT_KIJITSUZAN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_KIJITSUZAN_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<明細部>－期日払残行」の取得処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER         ヘッダ編集用構造
+*  -->  U_WAERS             通貨コード
+*  <--  C_KIJITSUZAN_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM GET_KIJITSUZAN_DATA USING    U_WA_HEADER      TYPE STRT_HEADER
+U_WAERS          TYPE ZF2020-WAERS
+CHANGING C_KIJITSUZAN_FLG TYPE CHAR1.
+DATA: L_WA_DETAIL TYPE STRT_DETAIL.
+REFRESH ITAB_COM_DETAIL.
+CLEAR: L_WA_DETAIL,C_KIJITSUZAN_FLG.
+* <明細部>－期日払残行データの取得処理
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL
+WHERE BUKRS   =  U_WA_HEADER-BUKRS AND   "会社コード
+LIFNR   =  U_WA_HEADER-LIFNR AND   "仕入先
+ZFBDT   =<  P_ZFBDT          AND   "締日
+*   modify 2008/06/18 DMC {
+*   insert 2008/06/25 S.MIKAMI {
+ZTERM  IN S_ZTERM            AND   "支払基準日
+* } insert 2008/06/25 S.MIKAMI
+FAEDT   >  S_PERD-HIGH       AND   "支払期日がHIHGより後
+BUDAT   <= S_PERD-HIGH       AND   "HIHG時点で転記済
+*   delete 2008/12/15 DMC {
+*           ( AUGDT      IS INITIAL              "未消込、もしくは
+*          OR AUGDT   >  S_PERD-HIGH )     AND   "支払期間より後決済
+*             CADAT      IS INITIAL        AND   "支払計上なし
+* } delete 2008/12/15 DMC
+*   insert 2008/12/15 DMC {
+( AUGDT      IS INITIAL              "未消込、もしくは
+OR AUGDT   =  SPACE                   "未消込、もしくは
+OR AUGDT   >  S_PERD-HIGH )     AND   "支払期間より後決済
+( CADAT      IS INITIAL              "支払計上なし
+OR CADAT   =  SPACE )           AND   "支払計上なし
+* } insert 2008/12/15 DMC
+*-------------------------------------------------------------->>>>>>
+*             ( ( CMP_FLG <> C_C_X AND           "完了フラグ
+*                 STATUS  =  C_C_1 ) OR          "支払期間
+*               ( STATUS  =  C_C_9 AND           "ステータス
+*                 CADAT > S_PERD-HIGH ) )  AND   "支払計上日
+*             FAEDT   >  S_PERD-HIGH       AND   "支払期間
+*             ZTERM   IN S_ZTERM           AND   "期日払用支払条件
+* } modify 2008/06/18 DMC
+WAERS   =  U_WAERS.                "通貨コード
+C_KIJITSUZAN_FLG = C_OK.
+*   取得したレコードを「共通明細編集内部テーブル」に格納する
+APPEND L_WA_DETAIL TO ITAB_COM_DETAIL.
+ENDLOOP.
+ENDFORM.        "GET_KIJITSUZAN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_SAGAKU2_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「差額②行」の編集処理
+*----------------------------------------------------------------------*
+*  <--   C_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM  EDIT_SAGAKU2_DATA CHANGING C_WA_OUTPUT   TYPE STRT_OUTPUT.
+* 差額② = 差額① － 期日払残
+C_WA_OUTPUT-SAGAKU2 = C_WA_OUTPUT-SAGAKU1 - C_WA_OUTPUT-KIJITSUZAN.
+
+ENDFORM.        "EDIT_SAGAKU2_DATA
+*   insert 2008/06/18 DMC {
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_SIHARAYIZAN_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<残高部>－支払後残行」の編集処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER         ヘッダ編集用構造
+*  -->  U_WAERS             通貨コード
+*  <--  C_WA_OUTPUT         出力用構造
+*  <--  C_SIHARAYIZAN_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM EDIT_SIHARAYIZAN_DATA USING   U_WA_HEADER       TYPE STRT_HEADER
+U_WAERS           TYPE ZF2020-WAERS
+CHANGING C_WA_OUTPUT       TYPE STRT_OUTPUT
+C_SIHARAYIZAN_FLG TYPE CHAR1.
+DATA: L_WA_DETAIL   TYPE STRT_DETAIL,
+L_SUM_S1      TYPE ZF2020-WRBTR_S, "支払後残_借
+L_SUM_H1      TYPE ZF2020-WRBTR_H. "支払後残_貸
+CLEAR: L_WA_DETAIL, L_SUM_S1, L_SUM_H1.
+* 出力画面の「<残高部>－支払後残行」の取得処理
+PERFORM GET_SIHARAYIZAN_DATA USING   U_WA_HEADER
+U_WAERS
+CHANGING C_SIHARAYIZAN_FLG.
+
+LOOP AT ITAB_COM_DETAIL INTO L_WA_DETAIL.
+*  「貸借フラグ」が「借 ('S')」場合
+IF L_WA_DETAIL-SHKZG = C_SHKZG_S.
+*     変数「支払後残_借」の合計
+L_SUM_S1 = L_SUM_S1 + L_WA_DETAIL-WRBTR_S.
+
+*  「貸借フラグ」が「貸 ('H')」場合
+ELSEIF L_WA_DETAIL-SHKZG = C_SHKZG_H.
+*     変数「支払後残_貸」の合計
+L_SUM_H1 = L_SUM_H1 + L_WA_DETAIL-WRBTR_H.
+
+ENDIF.
+*   最後レコード処理する時
+AT LAST.
+*    「出力内部テーブル」の構造の「支払後残」
+*        ＝変数「支払後残_貸」－変数「支払後残_借」
+C_WA_OUTPUT-SIHARAYI_ZAN = L_SUM_H1 - L_SUM_S1.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.         "EDIT_SIHARAYIZAN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_SIHARAYIZAN_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<残高部>－支払後残行」の取得処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER         ヘッダ編集用構造
+*  -->  U_WAERS             通貨コード
+*  <--  C_SIHARAYIZAN_FLG    リターンフラグ
+*----------------------------------------------------------------------*
+FORM GET_SIHARAYIZAN_DATA USING   U_WA_HEADER       TYPE STRT_HEADER
+U_WAERS           TYPE ZF2020-WAERS
+CHANGING C_SIHARAYIZAN_FLG TYPE CHAR1.
+DATA: L_WA_DETAIL TYPE STRT_DETAIL.
+REFRESH ITAB_COM_DETAIL.
+CLEAR: L_WA_DETAIL,C_SIHARAYIZAN_FLG.
+* <残高部>－支払後残行データの取得処理
+LOOP AT ITAB_DETAIL INTO L_WA_DETAIL
+WHERE BUKRS   =  U_WA_HEADER-BUKRS AND   "会社コード
+LIFNR   =  U_WA_HEADER-LIFNR AND   "仕入先
+ZFBDT   =<  P_ZFBDT          AND   "締日
+BUDAT   <= S_PERD-HIGH       AND   "HIHG時点で転記済
+*   delete 2008/12/15 DMC {
+*           ( AUGDT      IS INITIAL              "未消込、もしくは
+*          OR AUGDT   >  S_PERD-HIGH )     AND   "支払期間より後決済
+*             CADAT      IS INITIAL        AND   "支払計上なし
+* } delete 2008/12/15 DMC
+*   insert 2008/12/15 DMC {
+( AUGDT      IS INITIAL              "未消込、もしくは
+OR AUGDT   =  SPACE                   "未消込、もしくは
+OR AUGDT   >  S_PERD-HIGH )     AND   "支払期間より後決済
+( CADAT      IS INITIAL              "支払計上なし
+OR CADAT   =  SPACE )           AND   "支払計上なし
+* } insert 2008/12/15 DMC
+WAERS   =  U_WAERS.                "通貨コード
+C_SIHARAYIZAN_FLG = C_OK.
+*   取得したレコードを「共通明細編集内部テーブル」に格納する
+APPEND L_WA_DETAIL TO ITAB_COM_DETAIL.
+ENDLOOP.
+ENDFORM.        "GET_SIHARAYIZAN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_SAGAKU_DATA
+*&---------------------------------------------------------------------*
+*       出力画面の「<残高部>－差額行」の編集処理
+*----------------------------------------------------------------------*
+*  <--   C_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM EDIT_SAGAKU_DATA CHANGING C_WA_OUTPUT   TYPE STRT_OUTPUT.
+* 差額 = 支払後残 － 期日払残
+C_WA_OUTPUT-SAGAKU
+= C_WA_OUTPUT-SIHARAYI_ZAN - C_WA_OUTPUT-KIJITSUZAN.
+
+ENDFORM.        "EDIT_SAGAKU_DATA
+* } insert 2008/06/18 DMC
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       データの出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_DATA.
+DATA: L_WA_OUTPUT_TMP   TYPE STRT_OUTPUT,
+L_WA_HEADER       TYPE STRT_HEADER,
+L_WA_CURR_CNT     TYPE STRT_CURR_CNT,
+L_CURRENCY_CNT    TYPE I,
+L_LINENO          TYPE I,
+L_PAGE_NO         TYPE I,
+*   insert 2008/06/18 DMC {
+L_TABIX           TYPE SY-TABIX,
+L_OK_FLG          LIKE C_OK.
+* } insert 2008/06/18 DMC
+CLEAR: L_WA_OUTPUT_TMP, L_WA_HEADER, L_WA_CURR_CNT,
+L_CURRENCY_CNT,  L_LINENO,    L_PAGE_NO,
+*   insert 2008/06/18 DMC {
+L_TABIX,   L_OK_FLG.
+* } insert 2008/06/18 DMC
+* 出力のレコードを 編集する　
+LOOP AT ITAB_HEADER INTO L_WA_HEADER.
+REFRESH: ITAB_KENSYU,     ITAB_YIRAYI,   ITAB_ZENGETSUMI,
+ITAB_YIRAYISYO,  ITAB_TOGETSU,  ITAB_ZENGETSU,
+ITAB_SIHARAYI,   ITAB_SAGAKU1,  ITAB_KIJITSUZAN,
+ITAB_SAGAKU2,
+*   insert 2008/06/18 DMC {
+ITAB_SIHARAYIZAN, ITAB_SAGAKU.
+L_TABIX = SY-TABIX.
+* } insert 2008/06/18 DMC
+*   仕入先
+AT NEW LIFNR.
+CLEAR: L_LINENO,
+*   insert 2008/06/18 DMC {
+L_OK_FLG.
+
+*     画面の出力区分が　SPACE以外の場合
+IF P_ZOUTYP <> SPACE.
+*       対象絞込処理
+PERFORM FILTER_LIFNR USING    L_WA_HEADER
+CHANGING L_OK_FLG.
+*       対象以外の場合
+IF  L_OK_FLG <> C_OK.
+*         この仕入先をスキップする
+CONTINUE.
+*       対象の場合
+ELSE.
+*         対象ﾌﾗｸﾞセット
+L_WA_OUTPUT_TMP-OBJFLG = C_OK.
+MODIFY ITAB_OUTPUT FROM L_WA_OUTPUT_TMP TRANSPORTING OBJFLG
+WHERE BUKRS = L_WA_HEADER-BUKRS AND
+LIFNR = L_WA_HEADER-LIFNR.
+ENDIF.
+*     画面の出力区分が　SPACEの場合(全対象)
+ELSE.
+*       対象ﾌﾗｸﾞセット
+L_WA_OUTPUT_TMP-OBJFLG = C_OK.
+MODIFY ITAB_OUTPUT FROM L_WA_OUTPUT_TMP TRANSPORTING OBJFLG
+WHERE BUKRS = L_WA_HEADER-BUKRS AND
+LIFNR = L_WA_HEADER-LIFNR.
+ENDIF.
+* } insert 2008/06/18 DMC
+NEW-PAGE.
+L_PAGE_NO = L_PAGE_NO + 1.
+ENDAT.
+CLEAR L_WA_OUTPUT_TMP.
+*   通貨がJPYのレコードを一行目に 編集する　
+READ TABLE ITAB_OUTPUT INTO L_WA_OUTPUT_TMP
+WITH KEY BUKRS = L_WA_HEADER-BUKRS
+LIFNR = L_WA_HEADER-LIFNR
+WAERS = C_C_JPY.
+IF SY-SUBRC = 0.
+*     画面の金額明細行の作成処理
+PERFORM SET_MEISAYI_DATA USING L_WA_OUTPUT_TMP.
+ENDIF.
+*   通貨がJPY以外のレコードを順次に 編集する　
+LOOP AT ITAB_OUTPUT INTO L_WA_OUTPUT_TMP
+WHERE BUKRS =  L_WA_HEADER-BUKRS AND
+LIFNR =  L_WA_HEADER-LIFNR AND
+WAERS <> C_C_JPY.
+*     画面の金額明細行の作成処理
+PERFORM SET_MEISAYI_DATA USING L_WA_OUTPUT_TMP.
+ENDLOOP.
+
+*   毎仕入先単位の通貨コード件数の取得
+READ TABLE ITAB_CURR_CNT INTO L_WA_CURR_CNT
+WITH KEY BUKRS = L_WA_HEADER-BUKRS
+LIFNR = L_WA_HEADER-LIFNR.
+L_CURRENCY_CNT = L_WA_CURR_CNT-CNT.
+
+*   通貨が1～3種の場合
+IF L_CURRENCY_CNT > 0 AND L_CURRENCY_CNT =< 3.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック1の出力処理
+PERFORM OUTPUT_BLOCK1 USING L_LINENO.
+*     画面のブロック2の出力処理
+PERFORM OUTPUT_BLOCK2 USING L_LINENO.
+*     画面のブロック3の出力処理
+PERFORM OUTPUT_BLOCK3 USING L_LINENO.
+*   通貨が4種の場合
+ELSEIF L_CURRENCY_CNT = 4.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック1の出力処理
+PERFORM OUTPUT_BLOCK1 USING L_LINENO.
+*     画面のブロック2の出力処理
+PERFORM OUTPUT_BLOCK2 USING L_LINENO.
+WRITE: /3(166) SY-ULINE.
+
+NEW-PAGE.
+L_PAGE_NO = L_PAGE_NO + 1.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック3の出力処理
+PERFORM OUTPUT_BLOCK3 USING L_LINENO.
+
+*   通貨が5種の場合
+ELSEIF L_CURRENCY_CNT = 5.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック1の出力処理
+PERFORM OUTPUT_BLOCK1 USING L_LINENO.
+WRITE: /3(166) SY-ULINE.
+
+NEW-PAGE.
+L_PAGE_NO = L_PAGE_NO + 1.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック2の出力処理
+PERFORM OUTPUT_BLOCK2 USING L_LINENO.
+*     画面のブロック3の出力処理
+PERFORM OUTPUT_BLOCK3 USING L_LINENO.
+
+*   通貨が6～7種の場合
+ELSEIF L_CURRENCY_CNT = 6 OR L_CURRENCY_CNT = 7.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック1の出力処理
+PERFORM OUTPUT_BLOCK1 USING L_LINENO.
+WRITE: /3(166) SY-ULINE.
+
+NEW-PAGE.
+L_PAGE_NO = L_PAGE_NO + 1.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック2の出力処理
+PERFORM OUTPUT_BLOCK2 USING L_LINENO.
+WRITE: /3(166) SY-ULINE.
+
+NEW-PAGE.
+L_PAGE_NO = L_PAGE_NO + 1.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック3の出力処理
+PERFORM OUTPUT_BLOCK3 USING L_LINENO.
+*   通貨が7種以上の場合
+ELSE.
+*     画面のヘッダ行の出力処理
+PERFORM OUTPUT_HEADER_LINE USING L_WA_HEADER
+L_PAGE_NO.
+*     画面のブロック1の出力処理
+PERFORM OUTPUT_BLOCK1 USING L_LINENO.
+*     画面のブロック2の出力処理
+PERFORM OUTPUT_BLOCK2 USING L_LINENO.
+*     画面のブロック3の出力処理
+PERFORM OUTPUT_BLOCK3 USING L_LINENO.
+ENDIF.
+WRITE:/3(166) SY-ULINE.
+ENDLOOP.    "ITAB_HEADER
+*   insert 2008/06/18 DMC {
+IF L_PAGE_NO = 0.
+*   Sメッセージの出力
+MESSAGE S401 WITH TEXT-M04 TEXT-M02.
+STOP.
+ELSE.
+G_TOTAL_PAGE = L_PAGE_NO.
+ENDIF.
+* } insert 2008/06/18 DMC
+ENDFORM.        "OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_MEISAYI_DATA
+*&---------------------------------------------------------------------*
+*       画面の金額明細行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_MEISAYI_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+* 画面の検収データ行の作成処理
+PERFORM SET_KENSYU_DATA USING U_WA_OUTPUT.
+* 画面の支払依頼データ行の作成処理
+PERFORM SET_YIRAYI_DATA USING U_WA_OUTPUT.
+* 画面の前月以前締未払データ行の作成処理
+PERFORM SET_ZENGETSUMI_DATA USING U_WA_OUTPUT.
+* 画面の支払依頼小計データ行の作成処理
+PERFORM SET_YIRAYISYO_DATA USING U_WA_OUTPUT.
+
+* 画面の当月締支払データ行の作成処理
+PERFORM SET_TOGETSU_DATA USING U_WA_OUTPUT.
+* 画面の以前締支払データ行の作成処理
+PERFORM SET_ZENGETSU_DATA USING U_WA_OUTPUT.
+* 画面の支払額計データ行の作成処理
+PERFORM SET_SIHARAYI_DATA USING U_WA_OUTPUT.
+
+* 画面の差額①データ行の作成処理
+PERFORM SET_SAGAKU1_DATA USING U_WA_OUTPUT.
+* 画面の期日払残データ行の作成処理
+PERFORM SET_KIJITSUZAN_DATA USING U_WA_OUTPUT.
+* 画面の差額②データ行の作成処理
+PERFORM SET_SAGAKU2_DATA USING U_WA_OUTPUT.
+
+*   insert 2008/06/18 DMC {
+* 画面の支払後残行の作成処理
+PERFORM SET_SIHARAYIZAN_DATA USING U_WA_OUTPUT.
+* 画面の差額データ行の作成処理
+PERFORM SET_SAGAKU_DATA USING U_WA_OUTPUT.
+* } insert 2008/06/18 DMC
+ENDFORM.        "SET_MEISAYI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_KENSYU_DATA
+*&---------------------------------------------------------------------*
+*       画面の検収データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_KENSYU_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_KENSYU TYPE  STRT_KENSYU.
+CLEAR: L_WA_KENSYU.
+* 会社コード
+L_WA_KENSYU-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_KENSYU-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_KENSYU-WAERS = U_WA_OUTPUT-WAERS.
+* 検収合計
+L_WA_KENSYU-KENSYU_GOKEYI = U_WA_OUTPUT-KENSYU_GOKEYI.
+* 検収照合
+L_WA_KENSYU-KENSYU_SYOGO  = U_WA_OUTPUT-KENSYU_SYOGO.
+* 検収その他
+L_WA_KENSYU-KENSYU_SONOTA = U_WA_OUTPUT-KENSYU_SONOTA.
+APPEND L_WA_KENSYU TO ITAB_KENSYU.
+ENDFORM.        "SET_KENSYU_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_YIRAYI_DATA
+*&---------------------------------------------------------------------*
+*       画面の支払依頼データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_YIRAYI_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_YIRAYI TYPE  STRT_YIRAYI.
+CLEAR: L_WA_YIRAYI.
+* 会社コード
+L_WA_YIRAYI-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_YIRAYI-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_YIRAYI-WAERS = U_WA_OUTPUT-WAERS.
+* 支払依頼合計
+L_WA_YIRAYI-YIRAYI_GOKEYI = U_WA_OUTPUT-YIRAYI_GOKEYI.
+* 支払依頼照合
+L_WA_YIRAYI-YIRAYI_SYOGO  = U_WA_OUTPUT-YIRAYI_SYOGO.
+* 支払依頼その他
+L_WA_YIRAYI-YIRAYI_SONOTA = U_WA_OUTPUT-YIRAYI_SONOTA.
+APPEND L_WA_YIRAYI TO ITAB_YIRAYI.
+ENDFORM.        "SET_YIRAYI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_ZENGETSUMI_DATA
+*&---------------------------------------------------------------------*
+*       画面の前月以前締未払データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_ZENGETSUMI_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_ZENGETSUMI TYPE  STRT_ZENGETSUMI.
+CLEAR: L_WA_ZENGETSUMI.
+* 会社コード
+L_WA_ZENGETSUMI-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_ZENGETSUMI-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_ZENGETSUMI-WAERS = U_WA_OUTPUT-WAERS.
+* 前月以前締未払合計
+L_WA_ZENGETSUMI-ZENGETSUMI_GOKEYI = U_WA_OUTPUT-ZENGETSUMI_GOKEYI.
+* 前月以前締未払照合
+L_WA_ZENGETSUMI-ZENGETSUMI_SYOGO  = U_WA_OUTPUT-ZENGETSUMI_SYOGO.
+* 前月以前締未払その他
+L_WA_ZENGETSUMI-ZENGETSUMI_SONOTA = U_WA_OUTPUT-ZENGETSUMI_SONOTA.
+APPEND L_WA_ZENGETSUMI TO ITAB_ZENGETSUMI.
+ENDFORM.        "SET_ZENGETSUMI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_YIRAYISYO_DATA
+*&---------------------------------------------------------------------*
+*       画面の支払依頼小計データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_YIRAYISYO_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_YIRAYISYO TYPE  STRT_YIRAYISYO.
+CLEAR: L_WA_YIRAYISYO.
+* 会社コード
+L_WA_YIRAYISYO-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_YIRAYISYO-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_YIRAYISYO-WAERS = U_WA_OUTPUT-WAERS.
+* 前月以前締未払合計
+L_WA_YIRAYISYO-YIRAYISYO_GOKEYI = U_WA_OUTPUT-YIRAYISYO_GOKEYI.
+* 前月以前締未払照合
+L_WA_YIRAYISYO-YIRAYISYO_SYOGO  = U_WA_OUTPUT-YIRAYISYO_SYOGO.
+* 前月以前締未払その他
+L_WA_YIRAYISYO-YIRAYISYO_SONOTA = U_WA_OUTPUT-YIRAYISYO_SONOTA.
+APPEND L_WA_YIRAYISYO TO ITAB_YIRAYISYO.
+ENDFORM.        "SET_YIRAYISYO_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_TOGETSU_DATA
+*&---------------------------------------------------------------------*
+*       画面の当月締支払データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_TOGETSU_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_TOGETSU TYPE  STRT_TOGETSU.
+CLEAR: L_WA_TOGETSU.
+* 会社コード
+L_WA_TOGETSU-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_TOGETSU-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_TOGETSU-WAERS = U_WA_OUTPUT-WAERS.
+* 当月締支払総合計
+L_WA_TOGETSU-TOGETSU_SOKEYI = U_WA_OUTPUT-TOGETSU_SOKEYI.
+* 当月締支払銀行振込
+L_WA_TOGETSU-TOGETSU_GINKO  = U_WA_OUTPUT-TOGETSU_GINKO.
+* 当月締支払支払手形
+L_WA_TOGETSU-TOGETSU_SIHARAYI = U_WA_OUTPUT-TOGETSU_SIHARAYI.
+* 当月締支払裏書手形
+L_WA_TOGETSU-TOGETSU_WURAGAKI = U_WA_OUTPUT-TOGETSU_WURAGAKI.
+* 当月締支払仕入割引
+L_WA_TOGETSU-TOGETSU_SIYIRE = U_WA_OUTPUT-TOGETSU_SIYIRE.
+* 当月締支払その他
+L_WA_TOGETSU-TOGETSU_SONOTA = U_WA_OUTPUT-TOGETSU_SONOTA.
+* 当月締支払支払計
+L_WA_TOGETSU-TOGETSU_SIHARAYIKEYI = U_WA_OUTPUT-TOGETSU_SIHARAYIKEYI.
+* 当月締支払相殺
+L_WA_TOGETSU-TOGETSU_SOSAYI = U_WA_OUTPUT-TOGETSU_SOSAYI.
+APPEND L_WA_TOGETSU TO ITAB_TOGETSU.
+ENDFORM.        "SET_TOGETSU_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_ZENGETSU_DATA
+*&---------------------------------------------------------------------*
+*       画面の以前締支払データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_ZENGETSU_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_ZENGETSU TYPE  STRT_ZENGETSU.
+CLEAR: L_WA_ZENGETSU.
+* 会社コード
+L_WA_ZENGETSU-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_ZENGETSU-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_ZENGETSU-WAERS = U_WA_OUTPUT-WAERS.
+* 以前締支払総合計
+L_WA_ZENGETSU-ZENGETSU_SOKEYI = U_WA_OUTPUT-ZENGETSU_SOKEYI.
+* 以前締支払銀行振込
+L_WA_ZENGETSU-ZENGETSU_GINKO  = U_WA_OUTPUT-ZENGETSU_GINKO.
+* 以前締支払支払手形
+L_WA_ZENGETSU-ZENGETSU_SIHARAYI = U_WA_OUTPUT-ZENGETSU_SIHARAYI.
+* 以前締支払裏書手形
+L_WA_ZENGETSU-ZENGETSU_WURAGAKI = U_WA_OUTPUT-ZENGETSU_WURAGAKI.
+* 以前締支払仕入割引
+L_WA_ZENGETSU-ZENGETSU_SIYIRE = U_WA_OUTPUT-ZENGETSU_SIYIRE.
+* 以前締支払その他
+L_WA_ZENGETSU-ZENGETSU_SONOTA = U_WA_OUTPUT-ZENGETSU_SONOTA.
+* 以前締支払支払計
+L_WA_ZENGETSU-ZENGETSU_SIHARAYIKEYI =
+U_WA_OUTPUT-ZENGETSU_SIHARAYIKEYI.
+* 以前締支払相殺
+L_WA_ZENGETSU-ZENGETSU_SOSAYI = U_WA_OUTPUT-ZENGETSU_SOSAYI.
+APPEND L_WA_ZENGETSU TO ITAB_ZENGETSU.
+ENDFORM.        "SET_ZENGETSU_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_SIHARAYI_DATA
+*&---------------------------------------------------------------------*
+*       画面の支払額計データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_SIHARAYI_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_SIHARAYI TYPE  STRT_SIHARAYI.
+CLEAR: L_WA_SIHARAYI.
+* 会社コード
+L_WA_SIHARAYI-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_SIHARAYI-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_SIHARAYI-WAERS = U_WA_OUTPUT-WAERS.
+* 支払額計総合計
+L_WA_SIHARAYI-SIHARAYI_SOKEYI = U_WA_OUTPUT-SIHARAYI_SOKEYI.
+* 支払額計銀行振込
+L_WA_SIHARAYI-SIHARAYI_GINKO  = U_WA_OUTPUT-SIHARAYI_GINKO.
+* 支払額計支払手形
+L_WA_SIHARAYI-SIHARAYI_SIHARAYI = U_WA_OUTPUT-SIHARAYI_SIHARAYI.
+* 支払額計裏書手形
+L_WA_SIHARAYI-SIHARAYI_WURAGAKI = U_WA_OUTPUT-SIHARAYI_WURAGAKI.
+* 支払額計仕入割引
+L_WA_SIHARAYI-SIHARAYI_SIYIRE = U_WA_OUTPUT-SIHARAYI_SIYIRE.
+* 支払額計その他
+L_WA_SIHARAYI-SIHARAYI_SONOTA = U_WA_OUTPUT-SIHARAYI_SONOTA.
+* 支払額計支払計
+L_WA_SIHARAYI-SIHARAYI_SIHARAYIKEYI =
+U_WA_OUTPUT-SIHARAYI_SIHARAYIKEYI.
+* 支払額計相殺
+L_WA_SIHARAYI-SIHARAYI_SOSAYI = U_WA_OUTPUT-SIHARAYI_SOSAYI.
+APPEND L_WA_SIHARAYI TO ITAB_SIHARAYI.
+ENDFORM.        "SET_SIHARAYI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_SAGAKU1_DATA
+*&---------------------------------------------------------------------*
+*       画面の差額①データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_SAGAKU1_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_SAGAKU1 TYPE  STRT_SAGAKU1.
+CLEAR: L_WA_SAGAKU1.
+* 会社コード
+L_WA_SAGAKU1-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_SAGAKU1-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_SAGAKU1-WAERS = U_WA_OUTPUT-WAERS.
+* 差額①
+L_WA_SAGAKU1-SAGAKU1 = U_WA_OUTPUT-SAGAKU1.
+APPEND L_WA_SAGAKU1 TO ITAB_SAGAKU1.
+ENDFORM.        "SET_SAGAKU1_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_KIJITSUZAN_DATA
+*&---------------------------------------------------------------------*
+*       画面の期日払残データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_KIJITSUZAN_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_KIJITSUZAN TYPE  STRT_KIJITSUZAN.
+CLEAR: L_WA_KIJITSUZAN.
+* 会社コード
+L_WA_KIJITSUZAN-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_KIJITSUZAN-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_KIJITSUZAN-WAERS = U_WA_OUTPUT-WAERS.
+* 期日払残
+L_WA_KIJITSUZAN-KIJITSUZAN = U_WA_OUTPUT-KIJITSUZAN.
+APPEND L_WA_KIJITSUZAN TO ITAB_KIJITSUZAN.
+ENDFORM.        "SET_KIJITSUZAN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_SAGAKU2_DATA
+*&---------------------------------------------------------------------*
+*       画面の差額②データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_SAGAKU2_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_SAGAKU2 TYPE  STRT_SAGAKU2.
+CLEAR: L_WA_SAGAKU2.
+* 会社コード
+L_WA_SAGAKU2-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_SAGAKU2-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_SAGAKU2-WAERS = U_WA_OUTPUT-WAERS.
+* 差額②
+L_WA_SAGAKU2-SAGAKU2 = U_WA_OUTPUT-SAGAKU2.
+APPEND L_WA_SAGAKU2 TO ITAB_SAGAKU2.
+ENDFORM.        "SET_SAGAKU2_DATA
+*   insert 2008/06/18 DMC {
+*&---------------------------------------------------------------------*
+*&      Form  SET_SIHARAYIZAN_DATA
+*&---------------------------------------------------------------------*
+*       画面の支払後残データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_SIHARAYIZAN_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_SIHARAYIZAN TYPE STRT_KIJITSUZAN.
+CLEAR: L_WA_SIHARAYIZAN.
+* 会社コード
+L_WA_SIHARAYIZAN-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_SIHARAYIZAN-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_SIHARAYIZAN-WAERS = U_WA_OUTPUT-WAERS.
+* 支払後残
+L_WA_SIHARAYIZAN-KIJITSUZAN = U_WA_OUTPUT-SIHARAYI_ZAN.
+APPEND L_WA_SIHARAYIZAN TO ITAB_SIHARAYIZAN.
+ENDFORM.        "SET_SIHARAYIZAN_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_SAGAKU_DATA
+*&---------------------------------------------------------------------*
+*       画面の差額データ行の作成処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*----------------------------------------------------------------------*
+FORM SET_SAGAKU_DATA USING U_WA_OUTPUT TYPE STRT_OUTPUT.
+DATA: L_WA_SAGAKU TYPE  STRT_SAGAKU2.
+CLEAR: L_WA_SAGAKU.
+* 会社コード
+L_WA_SAGAKU-BUKRS = U_WA_OUTPUT-BUKRS.
+* 仕入先
+L_WA_SAGAKU-LIFNR = U_WA_OUTPUT-LIFNR.
+* 通貨コード
+L_WA_SAGAKU-WAERS = U_WA_OUTPUT-WAERS.
+* 差額
+L_WA_SAGAKU-SAGAKU2 = U_WA_OUTPUT-SAGAKU.
+APPEND L_WA_SAGAKU TO ITAB_SAGAKU.
+ENDFORM.        "SET_SAGAKU_DATA
+* } insert 2008/06/18 DMC
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_BLOCK1
+*&---------------------------------------------------------------------*
+*       画面のブロック1の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_LINENO        行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_BLOCK1 USING U_LINENO TYPE I.
+DATA: L_WA_KENSYU    TYPE STRT_KENSYU,
+L_WA_YIRAYI    TYPE STRT_YIRAYI,
+L_WA_ZENGETSUMI TYPE STRT_ZENGETSUMI,
+L_WA_YIRAYISYO TYPE STRT_YIRAYISYO.
+* 画面の合計見出し行の出力処理
+PERFORM OUTPUT_GOKEYI_TITLE.
+
+LOOP AT ITAB_KENSYU INTO L_WA_KENSYU.
+U_LINENO = U_LINENO + 1.
+*   画面の検収金額行の出力処理
+PERFORM OUTPUT_KENSYU_LINE USING L_WA_KENSYU
+U_LINENO.
+ENDLOOP.
+
+CLEAR: U_LINENO.
+*   modify 2008/06/18 DMC {
+*  WRITE:/3 SY-VLINE, 168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:/3 SY-VLINE, 99 SY-VLINE.
+* } modify 2008/06/18 DMC
+LOOP AT ITAB_YIRAYI INTO L_WA_YIRAYI.
+U_LINENO = U_LINENO + 1.
+*   画面の支払依頼額行の出力処理
+PERFORM OUTPUT_YIRAYI_LINE USING L_WA_YIRAYI
+U_LINENO.
+ENDLOOP.
+
+CLEAR: U_LINENO.
+*   modify 2008/06/18 DMC {
+*  WRITE:/3 SY-VLINE, 168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:/3 SY-VLINE, 99 SY-VLINE.
+* } modify 2008/06/18 DMC
+LOOP AT ITAB_ZENGETSUMI INTO L_WA_ZENGETSUMI.
+U_LINENO = U_LINENO + 1.
+*   画面の前月以前締未払行の出力処理
+PERFORM OUTPUT_ZENGETSUMI_LINE USING L_WA_ZENGETSUMI
+U_LINENO.
+ENDLOOP.
+
+CLEAR: U_LINENO.
+*   modify 2008/06/18 DMC {
+*  WRITE:/3 SY-VLINE, 168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:/3 SY-VLINE, 99 SY-VLINE.
+* } modify 2008/06/18 DMC
+LOOP AT ITAB_YIRAYISYO INTO L_WA_YIRAYISYO.
+U_LINENO = U_LINENO + 1.
+*   画面の支払依頼額(小計)行の出力処理
+PERFORM OUTPUT_YIRAYISYO_LINE USING L_WA_YIRAYISYO
+U_LINENO.
+ENDLOOP.
+
+ENDFORM.        "OUTPUT_BLOCK1
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_BLOCK2
+*&---------------------------------------------------------------------*
+*       画面のブロック2の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_LINENO        行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_BLOCK2 USING U_LINENO TYPE I.
+DATA: L_WA_TOGETSU TYPE STRT_TOGETSU,
+L_WA_ZENGETSU TYPE STRT_ZENGETSU,
+L_WA_SIHARAYI TYPE STRT_SIHARAYI.
+* 画面の総合計見出し行の出力処理
+PERFORM OUTPUT_SOKEYI_TITLE.
+
+CLEAR: U_LINENO.
+WRITE:/3 SY-VLINE, 168 SY-VLINE.
+LOOP AT ITAB_TOGETSU INTO L_WA_TOGETSU.
+U_LINENO = U_LINENO + 1.
+*   画面の当月締支払額行の出力処理
+PERFORM OUTPUT_TOGETSU_LINE USING L_WA_TOGETSU
+U_LINENO.
+ENDLOOP.
+
+CLEAR: U_LINENO.
+WRITE:/3 SY-VLINE, 168 SY-VLINE.
+LOOP AT ITAB_ZENGETSU INTO L_WA_ZENGETSU.
+U_LINENO = U_LINENO + 1.
+*   画面の前月以前締支払額行の出力処理
+PERFORM OUTPUT_ZENGETSU_LINE USING L_WA_ZENGETSU
+U_LINENO.
+ENDLOOP.
+
+CLEAR: U_LINENO.
+WRITE:/3 SY-VLINE, 168 SY-VLINE.
+LOOP AT ITAB_SIHARAYI INTO L_WA_SIHARAYI.
+U_LINENO = U_LINENO + 1.
+*   画面の支払額(計)行の出力処理
+PERFORM OUTPUT_SIHARAYI_LINE USING L_WA_SIHARAYI
+U_LINENO.
+ENDLOOP.
+
+ENDFORM.        "OUTPUT_BLOCK2
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_BLOCK3
+*&---------------------------------------------------------------------*
+*       画面のブロック3の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_LINENO        行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_BLOCK3 USING U_LINENO TYPE I.
+DATA: L_WA_SAGAKU1 TYPE STRT_SAGAKU1,
+L_WA_KIJITSUZAN TYPE STRT_KIJITSUZAN,
+L_WA_SAGAKU2 TYPE STRT_SAGAKU2.
+
+* 画面の支払額(計)SPLIT行の出力処理
+PERFORM OUTPUT_SPLIT_LINE.
+
+CLEAR: U_LINENO.
+WRITE:/3 SY-VLINE, 168 SY-VLINE.
+LOOP AT ITAB_SAGAKU1 INTO L_WA_SAGAKU1.
+U_LINENO = U_LINENO + 1.
+*   画面の差額①行の出力処理
+PERFORM OUTPUT_SAGAKU1_LINE USING L_WA_SAGAKU1
+U_LINENO.
+ENDLOOP.
+
+CLEAR: U_LINENO.
+WRITE:/3 SY-VLINE, 168 SY-VLINE.
+LOOP AT ITAB_KIJITSUZAN INTO L_WA_KIJITSUZAN.
+U_LINENO = U_LINENO + 1.
+*   画面の期日払残行の出力処理
+PERFORM OUTPUT_KIJITSUZAN_LINE USING L_WA_KIJITSUZAN
+U_LINENO.
+ENDLOOP.
+
+CLEAR: U_LINENO.
+WRITE:/3 SY-VLINE, 168 SY-VLINE.
+LOOP AT ITAB_SAGAKU2 INTO L_WA_SAGAKU2.
+U_LINENO = U_LINENO + 1.
+*   画面の差額②行の出力処理
+PERFORM OUTPUT_SAGAKU2_LINE USING L_WA_SAGAKU2
+U_LINENO.
+ENDLOOP.
+ENDFORM.        "OUTPUT_BLOCK3
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_HEADER_LINE
+*&---------------------------------------------------------------------*
+*       画面のヘッダ行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_HEADER     ヘッダ構造
+*  -->  U_PAGE_NO       ページNo.
+*----------------------------------------------------------------------*
+FORM OUTPUT_HEADER_LINE USING U_WA_HEADER TYPE STRT_HEADER
+U_PAGE_NO   TYPE I.
+DATA: L_DATUM         TYPE SY-DATUM,
+L_UZEIT         TYPE SY-UZEIT.
+L_DATUM = SY-DATUM.
+L_UZEIT = SY-UZEIT.
+WRITE: 55   TEXT-T02,                   "Title
+129  TEXT-T31,                   "出力日時Text
+138  L_DATUM                     "作成日
+INTENSIFIED OFF,
+149  L_UZEIT                     "作成時
+INTENSIFIED OFF,
+158  TEXT-T32,                   "PAGE.Text
+163  U_PAGE_NO CENTERED          "PAGE NO
+INTENSIFIED OFF.
+SKIP 1.
+WRITE: /3   TEXT-T03,                   "会社コードText
+27  U_WA_HEADER-BUKRS           "会社コード
+INTENSIFIED OFF.
+WRITE: /3   TEXT-T04,                   "仕入先Text
+27  U_WA_HEADER-LIFNR           "仕入先コード
+INTENSIFIED OFF,
+41  U_WA_HEADER-NAME1           "仕入先名称
+INTENSIFIED OFF.
+WRITE: /3   TEXT-T05,                   "支払条件Text
+27  U_WA_HEADER-ZTERM           "支払条件コード
+INTENSIFIED OFF,
+41  U_WA_HEADER-VTEXT           "支払条件名称
+INTENSIFIED OFF.
+WRITE: /3   TEXT-T06,                   "支払方法Text
+27  U_WA_HEADER-ZWELS           "支払方法コード
+INTENSIFIED OFF,
+41  U_WA_HEADER-TEXT1           "支払方法名称
+INTENSIFIED OFF.
+WRITE: /3   TEXT-T07,                   "締日Text
+27  U_WA_HEADER-ZFBDT           "締日
+INTENSIFIED OFF.
+WRITE: /3   TEXT-T08,                   "支払期間Text
+27  U_WA_HEADER-DATBEG          "支払期間-LOW
+INTENSIFIED OFF,
+38  TEXT-T09,                   "～Text
+41  U_WA_HEADER-DATEND          "支払期間-HIGH
+INTENSIFIED OFF.
+
+ENDFORM.        "OUTPUT_HEADER_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_GOKEYI_TITLE
+*&---------------------------------------------------------------------*
+*       画面の合計見出し行の出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_GOKEYI_TITLE.
+* 合計見出し行
+*   modify 2008/06/18 DMC {
+*  WRITE: /3(166) SY-ULINE.
+*-------------------------------------------------->>>>
+WRITE: /3(97) SY-ULINE.
+* } modify 2008/06/18 DMC
+
+WRITE: /3 SY-VLINE,
+27 TEXT-T33,            "通貨
+44 TEXT-T10,            "合計Text
+55 TEXT-T11,            "検収照合分Text
+76 TEXT-T12,            "その他Text
+*   insert 2008/06/18 DMC {
+102 TEXT-T35,           "【残高】Text
+125 TEXT-T33,           "通貨Text
+142 TEXT-T34,           "金額Text
+* } insert 2008/06/18 DMC
+*   modify 2008/06/18 DMC {
+*          168 SY-VLINE.
+*  WRITE: /3(166) SY-ULINE.
+*  WRITE: /3 SY-VLINE, 168 SY-VLINE.
+*-------------------------------------------------->>>>
+99 SY-VLINE.
+WRITE: /3(97) SY-ULINE.
+WRITE: /3 SY-VLINE, 99 SY-VLINE.
+* } modify 2008/06/18 DMC
+ENDFORM.        "OUTPUT_GOKEYI_TITLE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_KENSYU_LINE
+*&---------------------------------------------------------------------*
+*       画面の検収金額行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_OUTPUT     出力用構造
+*  -->  U_LINENO        行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_KENSYU_LINE USING U_WA_KENSYU    TYPE STRT_KENSYU
+U_LINENO       TYPE I.
+DATA: L_STR_KENSYU_GOKEYI(16) TYPE C, "検収合計
+L_STR_KENSYU_SYOGO(16)  TYPE C, "検収照合
+L_STR_KENSYU_SONOTA(16) TYPE C. "検収その他
+*   insert 2008/06/18 DMC {
+DATA: L_WA_SIHARAYIZAN  TYPE STRT_KIJITSUZAN,    "支払後残行
+L_STR_KINGAKU(16) TYPE C.                  "支払後残金額
+* } insert 2008/06/18 DMC
+* マイナスの書式変換：検収合計
+WRITE U_WA_KENSYU-KENSYU_GOKEYI TO L_STR_KENSYU_GOKEYI
+CURRENCY U_WA_KENSYU-WAERS.
+IF U_WA_KENSYU-KENSYU_GOKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_KENSYU_GOKEYI.
+ENDIF.
+CONDENSE L_STR_KENSYU_GOKEYI.
+* マイナスの書式変換：検収照合
+WRITE U_WA_KENSYU-KENSYU_SYOGO TO L_STR_KENSYU_SYOGO
+CURRENCY U_WA_KENSYU-WAERS.
+IF U_WA_KENSYU-KENSYU_SYOGO < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_KENSYU_SYOGO.
+ENDIF.
+CONDENSE L_STR_KENSYU_SYOGO.
+* マイナスの書式変換：検収その他
+WRITE U_WA_KENSYU-KENSYU_SONOTA TO L_STR_KENSYU_SONOTA
+CURRENCY U_WA_KENSYU-WAERS.
+IF U_WA_KENSYU-KENSYU_SONOTA < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_KENSYU_SONOTA.
+ENDIF.
+CONDENSE L_STR_KENSYU_SONOTA.
+*   insert 2008/06/18 DMC {
+* 同一通貨の支払後残行を読み出す
+READ TABLE ITAB_SIHARAYIZAN INTO L_WA_SIHARAYIZAN
+WITH KEY BUKRS =  U_WA_KENSYU-BUKRS
+LIFNR =  U_WA_KENSYU-LIFNR
+WAERS =  U_WA_KENSYU-WAERS.
+* マイナスの書式変換：支払後残金額
+WRITE L_WA_SIHARAYIZAN-KIJITSUZAN TO L_STR_KINGAKU
+CURRENCY L_WA_SIHARAYIZAN-WAERS.
+IF L_WA_SIHARAYIZAN-KIJITSUZAN < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_KINGAKU.
+ENDIF.
+CONDENSE L_STR_KINGAKU.
+* } insert 2008/06/18 DMC
+* 検収金額行
+IF U_LINENO = 1.
+WRITE:  /5  TEXT-T13.                         "検収金額Text
+*   modify 2008/06/18 DMC {
+*    WRITE:3 SY-VLINE,
+*          27  U_WA_KENSYU-WAERS                   "通貨コード
+*              INTENSIFIED OFF,
+*          32  L_STR_KENSYU_GOKEYI RIGHT-JUSTIFIED  "検収合計
+*              INTENSIFIED OFF,
+*          49  L_STR_KENSYU_SYOGO RIGHT-JUSTIFIED  "検収照合
+*              INTENSIFIED OFF,
+*          66  L_STR_KENSYU_SONOTA RIGHT-JUSTIFIED "検収その他
+*              INTENSIFIED OFF,
+*          168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:3 SY-VLINE,
+103 TEXT-T36.                           "支払後残Text
+* } modify 2008/06/18 DMC
+ELSE.
+*   modify 2008/06/18 DMC {
+*    WRITE:/3 SY-VLINE,
+*          27  U_WA_KENSYU-WAERS                   "通貨コード
+*              INTENSIFIED OFF,
+*          32  L_STR_KENSYU_GOKEYI RIGHT-JUSTIFIED "検収合計
+*              INTENSIFIED OFF,
+*          49  L_STR_KENSYU_SYOGO RIGHT-JUSTIFIED  "検収照合
+*              INTENSIFIED OFF,
+*          66  L_STR_KENSYU_SONOTA RIGHT-JUSTIFIED "検収その他
+*              INTENSIFIED OFF,
+*          168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:/3 SY-VLINE.
+* } modify 2008/06/18 DMC
+ENDIF.
+*   insert 2008/06/18 DMC {
+WRITE:27  U_WA_KENSYU-WAERS                   "通貨コード
+INTENSIFIED OFF,
+32  L_STR_KENSYU_GOKEYI RIGHT-JUSTIFIED "検収合計
+INTENSIFIED OFF,
+49  L_STR_KENSYU_SYOGO RIGHT-JUSTIFIED  "検収照合
+INTENSIFIED OFF,
+66  L_STR_KENSYU_SONOTA RIGHT-JUSTIFIED "検収その他
+INTENSIFIED OFF,
+125 L_WA_SIHARAYIZAN-WAERS              "通貨コード
+INTENSIFIED OFF,
+130 L_STR_KINGAKU RIGHT-JUSTIFIED       "支払後残金額
+INTENSIFIED OFF,
+99 SY-VLINE.
+* } insert 2008/06/18 DMC
+ENDFORM.        "OUTPUT_KENSYU_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_YIRAYI_LINE
+*&---------------------------------------------------------------------*
+*       画面の支払依頼額行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_YIRAYI     出力用構造
+*  -->  U_LINENO        行NO.
+*----------------------------------------------------------------------*
+FORM  OUTPUT_YIRAYI_LINE USING U_WA_YIRAYI    TYPE STRT_YIRAYI
+U_LINENO       TYPE I.
+DATA: L_STR_YIRAYI_GOKEYI(16) TYPE C,  "支払依頼合計
+L_STR_YIRAYI_SYOGO(16)  TYPE C,  "支払依頼照合
+L_STR_YIRAYI_SONOTA(16) TYPE C.  "支払依頼その他
+*   insert 2008/06/18 DMC {
+DATA: L_WA_KIJITSUZAN   TYPE STRT_KIJITSUZAN,    "期日払残行
+L_STR_KINGAKU(16) TYPE C.                  "期日払残金額
+* } insert 2008/06/18 DMC
+* マイナスの書式変換：支払依頼合計
+WRITE U_WA_YIRAYI-YIRAYI_GOKEYI TO L_STR_YIRAYI_GOKEYI
+CURRENCY U_WA_YIRAYI-WAERS.
+IF U_WA_YIRAYI-YIRAYI_GOKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_YIRAYI_GOKEYI.
+ENDIF.
+CONDENSE L_STR_YIRAYI_GOKEYI.
+* マイナスの書式変換：支払依頼照合
+WRITE U_WA_YIRAYI-YIRAYI_SYOGO TO L_STR_YIRAYI_SYOGO
+CURRENCY U_WA_YIRAYI-WAERS.
+IF U_WA_YIRAYI-YIRAYI_SYOGO < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_YIRAYI_SYOGO.
+ENDIF.
+CONDENSE L_STR_YIRAYI_SYOGO.
+* マイナスの書式変換：支払依頼その他
+WRITE U_WA_YIRAYI-YIRAYI_SONOTA TO L_STR_YIRAYI_SONOTA
+CURRENCY U_WA_YIRAYI-WAERS.
+IF U_WA_YIRAYI-YIRAYI_SONOTA < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_YIRAYI_SONOTA.
+ENDIF.
+CONDENSE L_STR_YIRAYI_SONOTA.
+*   insert 2008/06/18 DMC {
+* 同一通貨の期日払残行を読み出す
+READ TABLE ITAB_KIJITSUZAN INTO L_WA_KIJITSUZAN
+WITH KEY BUKRS =  U_WA_YIRAYI-BUKRS
+LIFNR =  U_WA_YIRAYI-LIFNR
+WAERS =  U_WA_YIRAYI-WAERS.
+* マイナスの書式変換：支払後残金額
+WRITE L_WA_KIJITSUZAN-KIJITSUZAN TO L_STR_KINGAKU
+CURRENCY L_WA_KIJITSUZAN-WAERS.
+IF L_WA_KIJITSUZAN-KIJITSUZAN < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_KINGAKU.
+ENDIF.
+CONDENSE L_STR_KINGAKU.
+* } insert 2008/06/18 DMC
+* 支払依頼額行
+IF U_LINENO = 1.
+WRITE: /5  TEXT-T14.                           "支払依頼額Text
+*   modify 2008/06/18 DMC {
+*    WRITE:3 SY-VLINE,
+*          27 U_WA_YIRAYI-WAERS                    "通貨コード
+*             INTENSIFIED OFF,
+*          32 L_STR_YIRAYI_GOKEYI RIGHT-JUSTIFIED  "支払依頼合計
+*             INTENSIFIED OFF,
+*          49 L_STR_YIRAYI_SYOGO  RIGHT-JUSTIFIED  "支払依頼照合
+*             INTENSIFIED OFF,
+*          66 L_STR_YIRAYI_SONOTA RIGHT-JUSTIFIED  "支払依頼その他
+*             INTENSIFIED OFF,
+*          168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:3 SY-VLINE,
+103 TEXT-T29.                           "期日払残Text
+* } modify 2008/06/18 DMC
+ELSE.
+*   modify 2008/06/18 DMC {
+*    WRITE:/3 SY-VLINE,
+*           27 U_WA_YIRAYI-WAERS                    "通貨コード
+*              INTENSIFIED OFF,
+*           32 L_STR_YIRAYI_GOKEYI RIGHT-JUSTIFIED  "支払依頼合計
+*              INTENSIFIED OFF,
+*           49 L_STR_YIRAYI_SYOGO  RIGHT-JUSTIFIED  "支払依頼照合
+*              INTENSIFIED OFF,
+*           66 L_STR_YIRAYI_SONOTA RIGHT-JUSTIFIED  "支払依頼その他
+*              INTENSIFIED OFF,
+*           168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:/3 SY-VLINE.
+* } modify 2008/06/18 DMC
+ENDIF.
+*   insert 2008/06/18 DMC {
+WRITE:27  U_WA_YIRAYI-WAERS                    "通貨コード
+INTENSIFIED OFF,
+32  L_STR_YIRAYI_GOKEYI RIGHT-JUSTIFIED  "支払依頼合計
+INTENSIFIED OFF,
+49  L_STR_YIRAYI_SYOGO  RIGHT-JUSTIFIED  "支払依頼照合
+INTENSIFIED OFF,
+66  L_STR_YIRAYI_SONOTA RIGHT-JUSTIFIED  "支払依頼その他
+INTENSIFIED OFF,
+125 L_WA_KIJITSUZAN-WAERS                "通貨コード
+INTENSIFIED OFF,
+130 L_STR_KINGAKU RIGHT-JUSTIFIED        "期日払残金額
+INTENSIFIED OFF,
+99  SY-VLINE.
+* } insert 2008/06/18 DMC
+ENDFORM.        "OUTPUT_YIRAYI_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ZENGETSUMI_LINE
+*&---------------------------------------------------------------------*
+*       画面の前月以前締未払行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_ZENGETSUMI     出力用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM  OUTPUT_ZENGETSUMI_LINE USING U_WA_ZENGETSUMI TYPE STRT_ZENGETSUMI
+U_LINENO        TYPE I.
+DATA: L_STR_ZENGETSUMI_GOKEYI(16) TYPE C, "前月以前締未払合計
+L_STR_ZENGETSUMI_SYOGO(16)  TYPE C, "前月以前締未払照合
+L_STR_ZENGETSUMI_SONOTA(16) TYPE C. "前月以前締未払その他
+*   insert 2008/06/18 DMC {
+DATA: L_WA_SAGAKU       TYPE STRT_SAGAKU2,       "差額行
+L_STR_KINGAKU(16) TYPE C.                  "差額金額
+* } insert 2008/06/18 DMC
+* マイナスの書式変換：前月以前締未払合計
+WRITE U_WA_ZENGETSUMI-ZENGETSUMI_GOKEYI TO L_STR_ZENGETSUMI_GOKEYI
+CURRENCY U_WA_ZENGETSUMI-WAERS.
+IF U_WA_ZENGETSUMI-ZENGETSUMI_GOKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSUMI_GOKEYI.
+ENDIF.
+CONDENSE L_STR_ZENGETSUMI_GOKEYI.
+* マイナスの書式変換：前月以前締未払照合
+WRITE U_WA_ZENGETSUMI-ZENGETSUMI_SYOGO TO L_STR_ZENGETSUMI_SYOGO
+CURRENCY U_WA_ZENGETSUMI-WAERS.
+IF U_WA_ZENGETSUMI-ZENGETSUMI_SYOGO < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSUMI_SYOGO.
+ENDIF.
+CONDENSE L_STR_ZENGETSUMI_SYOGO.
+* マイナスの書式変換：前月以前締未払その他
+WRITE U_WA_ZENGETSUMI-ZENGETSUMI_SONOTA TO L_STR_ZENGETSUMI_SONOTA
+CURRENCY U_WA_ZENGETSUMI-WAERS.
+IF U_WA_ZENGETSUMI-ZENGETSUMI_SONOTA < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSUMI_SONOTA.
+ENDIF.
+CONDENSE L_STR_ZENGETSUMI_SONOTA.
+*   insert 2008/06/18 DMC {
+* 同一通貨の差額行を読み出す
+READ TABLE ITAB_SAGAKU INTO L_WA_SAGAKU
+WITH KEY BUKRS =  U_WA_ZENGETSUMI-BUKRS
+LIFNR =  U_WA_ZENGETSUMI-LIFNR
+WAERS =  U_WA_ZENGETSUMI-WAERS.
+* マイナスの書式変換：差額金額
+WRITE L_WA_SAGAKU-SAGAKU2 TO L_STR_KINGAKU
+CURRENCY L_WA_SAGAKU-WAERS.
+IF L_WA_SAGAKU-SAGAKU2 < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_KINGAKU.
+ENDIF.
+CONDENSE L_STR_KINGAKU.
+* } insert 2008/06/18 DMC
+* 前月以前締期日の未払行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T15.                       "前月以前締期日の未払Text
+*   modify 2008/06/18 DMC {
+*    WRITE:3 SY-VLINE,
+*          27 U_WA_ZENGETSUMI-WAERS                "通貨コード
+*             INTENSIFIED OFF,
+*       32 L_STR_ZENGETSUMI_GOKEYI RIGHT-JUSTIFIED "前月以前締未払合計
+*          INTENSIFIED OFF,
+*       49 L_STR_ZENGETSUMI_SYOGO  RIGHT-JUSTIFIED "前月以前締未払照合
+*          INTENSIFIED OFF,
+*       66 L_STR_ZENGETSUMI_SONOTA RIGHT-JUSTIFIED "前月以前締未払その他
+*          INTENSIFIED OFF,
+*       168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:3 SY-VLINE,
+103 TEXT-T37.                           "差額Text
+* } modify 2008/06/18 DMC
+ELSE.
+*   modify 2008/06/18 DMC {
+*    WRITE:/3 SY-VLINE,
+*           27 U_WA_ZENGETSUMI-WAERS               "通貨コード
+*              INTENSIFIED OFF,
+*       32 L_STR_ZENGETSUMI_GOKEYI RIGHT-JUSTIFIED "前月以前締未払合計
+*          INTENSIFIED OFF,
+*       49 L_STR_ZENGETSUMI_SYOGO  RIGHT-JUSTIFIED "前月以前締未払照合
+*          INTENSIFIED OFF,
+*       66 L_STR_ZENGETSUMI_SONOTA RIGHT-JUSTIFIED "前月以前締未払その他
+*          INTENSIFIED OFF,
+*       168 SY-VLINE.
+*----------------------------------------------->>>>
+WRITE:/3 SY-VLINE.
+* } modify 2008/06/18 DMC
+ENDIF.
+*   insert 2008/06/18 DMC {
+WRITE:27  U_WA_ZENGETSUMI-WAERS               "通貨コード
+INTENSIFIED OFF,
+32 L_STR_ZENGETSUMI_GOKEYI RIGHT-JUSTIFIED "前月以前締未払合計
+INTENSIFIED OFF,
+49 L_STR_ZENGETSUMI_SYOGO  RIGHT-JUSTIFIED "前月以前締未払照合
+INTENSIFIED OFF,
+66 L_STR_ZENGETSUMI_SONOTA RIGHT-JUSTIFIED "前月以前締未払その他
+INTENSIFIED OFF,
+125 L_WA_SAGAKU-WAERS                   "通貨コード
+INTENSIFIED OFF,
+130 L_STR_KINGAKU RIGHT-JUSTIFIED       "差額金額
+INTENSIFIED OFF,
+99  SY-VLINE.
+* } insert 2008/06/18 DMC
+ENDFORM.        "OUTPUT_ZENGETSUMI_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_YIRAYISYO_LINE
+*&---------------------------------------------------------------------*
+*       画面の支払依頼額(小計)行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_YIRAYISYO      出力用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM  OUTPUT_YIRAYISYO_LINE USING U_WA_YIRAYISYO  TYPE STRT_YIRAYISYO
+U_LINENO        TYPE I.
+DATA: L_STR_YIRAYISYO_GOKEYI(16) TYPE C,  "支払依頼小計合計
+L_STR_YIRAYISYO_SYOGO(16)  TYPE C,  "支払依頼小計照合
+L_STR_YIRAYISYO_SONOTA(16) TYPE C.  "支払依頼小計その他
+* マイナスの書式変換：支払依頼小計合計
+WRITE U_WA_YIRAYISYO-YIRAYISYO_GOKEYI TO L_STR_YIRAYISYO_GOKEYI
+CURRENCY U_WA_YIRAYISYO-WAERS.
+IF U_WA_YIRAYISYO-YIRAYISYO_GOKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_YIRAYISYO_GOKEYI.
+ENDIF.
+CONDENSE L_STR_YIRAYISYO_GOKEYI.
+* マイナスの書式変換：支払依頼小計照合
+WRITE U_WA_YIRAYISYO-YIRAYISYO_SYOGO TO L_STR_YIRAYISYO_SYOGO
+CURRENCY U_WA_YIRAYISYO-WAERS.
+IF U_WA_YIRAYISYO-YIRAYISYO_SYOGO < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_YIRAYISYO_SYOGO.
+ENDIF.
+CONDENSE L_STR_YIRAYISYO_SYOGO.
+* マイナスの書式変換：支払依頼小計その他
+WRITE U_WA_YIRAYISYO-YIRAYISYO_SONOTA TO L_STR_YIRAYISYO_SONOTA
+CURRENCY U_WA_YIRAYISYO-WAERS.
+IF U_WA_YIRAYISYO-YIRAYISYO_SONOTA < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_YIRAYISYO_SONOTA.
+ENDIF.
+CONDENSE L_STR_YIRAYISYO_SONOTA.
+* 支払依頼額(小計)行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T16.                      "支払依頼額(小計)Text
+WRITE:3 SY-VLINE,
+27 U_WA_YIRAYISYO-WAERS                   "通貨コード
+INTENSIFIED OFF,
+32 L_STR_YIRAYISYO_GOKEYI RIGHT-JUSTIFIED "支払依頼小計合計
+INTENSIFIED OFF,
+49 L_STR_YIRAYISYO_SYOGO  RIGHT-JUSTIFIED "支払依頼小計照合
+INTENSIFIED OFF,
+66 L_STR_YIRAYISYO_SONOTA RIGHT-JUSTIFIED "支払依頼小計その他
+INTENSIFIED OFF,
+*   modify 2008/06/18 DMC {
+*          168 SY-VLINE.
+*----------------------------------------------->>>>
+99 SY-VLINE.
+* } modify 2008/06/18 DMC
+ELSE.
+WRITE:/3 SY-VLINE,
+27 U_WA_YIRAYISYO-WAERS                   "通貨コード
+INTENSIFIED OFF,
+32 L_STR_YIRAYISYO_GOKEYI RIGHT-JUSTIFIED "支払依頼小計合計
+INTENSIFIED OFF,
+49 L_STR_YIRAYISYO_SYOGO  RIGHT-JUSTIFIED "支払依頼小計照合
+INTENSIFIED OFF,
+66 L_STR_YIRAYISYO_SONOTA RIGHT-JUSTIFIED "支払依頼小計その他
+INTENSIFIED OFF,
+*   modify 2008/06/18 DMC {
+*           168 SY-VLINE.
+*----------------------------------------------->>>>
+99 SY-VLINE.
+* } modify 2008/06/18 DMC
+ENDIF.
+ENDFORM.        "OUTPUT_YIRAYISYO_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SOKEYI_TITLE
+*&---------------------------------------------------------------------*
+*       画面の総合計見出し行の出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_SOKEYI_TITLE.
+* 総合計見出し行
+WRITE: /3(166) SY-ULINE.
+WRITE: /3  SY-VLINE,
+27  TEXT-T33,  "通貨
+42  TEXT-T17,  "総合計Text
+57  TEXT-T18,  "銀行振込Text
+74  TEXT-T19,  "支払手形
+91  TEXT-T20,  "裏書手形
+108 TEXT-T21,  "仕入割引
+127 TEXT-T22,  "その他
+144 TEXT-T23,  "支払計
+163 TEXT-T24,  "相殺
+168 SY-VLINE.
+WRITE: /3(166) SY-ULINE.
+ENDFORM.        "OUTPUT_SOKEYI_TITLE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_TOGETSU_LINE
+*&---------------------------------------------------------------------*
+*       画面の当月締支払額行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_TOGETSU        出力用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_TOGETSU_LINE USING U_WA_TOGETSU     TYPE STRT_TOGETSU
+U_LINENO         TYPE I.
+DATA: L_STR_TOGETSU_SOKEYI(16)       TYPE C,  "当月締支払総合計
+L_STR_TOGETSU_GINKO(16)        TYPE C,  "当月締支払銀行振込
+L_STR_TOGETSU_SIHARAYI(16)     TYPE C,  "当月締支払支払手形
+L_STR_TOGETSU_WURAGAKI(16)     TYPE C,  "当月締支払裏書手形
+L_STR_TOGETSU_SIYIRE(16)       TYPE C,  "当月締支払仕入割引
+L_STR_TOGETSU_SONOTA(16)       TYPE C,  "当月締支払その他
+L_STR_TOGETSU_SIHARAYIKEYI(16) TYPE C,  "当月締支払支払計
+L_STR_TOGETSU_SOSAYI(16)       TYPE C.  "当月締支払相殺
+* マイナスの書式変換：当月締支払総合計
+WRITE U_WA_TOGETSU-TOGETSU_SOKEYI TO L_STR_TOGETSU_SOKEYI
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_SOKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_SOKEYI.
+ENDIF.
+CONDENSE L_STR_TOGETSU_SOKEYI.
+* マイナスの書式変換：当月締支払銀行振込
+WRITE U_WA_TOGETSU-TOGETSU_GINKO TO L_STR_TOGETSU_GINKO
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_GINKO < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_GINKO.
+ENDIF.
+CONDENSE L_STR_TOGETSU_GINKO.
+* マイナスの書式変換：当月締支払支払手形
+WRITE U_WA_TOGETSU-TOGETSU_SIHARAYI TO L_STR_TOGETSU_SIHARAYI
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_SIHARAYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_SIHARAYI.
+ENDIF.
+CONDENSE L_STR_TOGETSU_SIHARAYI.
+* マイナスの書式変換：当月締支払裏書手形
+WRITE U_WA_TOGETSU-TOGETSU_WURAGAKI TO L_STR_TOGETSU_WURAGAKI
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_WURAGAKI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_WURAGAKI.
+ENDIF.
+CONDENSE L_STR_TOGETSU_WURAGAKI.
+* マイナスの書式変換：当月締支払仕入割引
+WRITE U_WA_TOGETSU-TOGETSU_SIYIRE TO L_STR_TOGETSU_SIYIRE
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_SIYIRE < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_SIYIRE.
+ENDIF.
+CONDENSE L_STR_TOGETSU_SIYIRE.
+* マイナスの書式変換：当月締支払その他
+WRITE U_WA_TOGETSU-TOGETSU_SONOTA TO L_STR_TOGETSU_SONOTA
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_SONOTA < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_SONOTA.
+ENDIF.
+CONDENSE L_STR_TOGETSU_SONOTA.
+* マイナスの書式変換：当月締支払支払計
+WRITE U_WA_TOGETSU-TOGETSU_SIHARAYIKEYI TO L_STR_TOGETSU_SIHARAYIKEYI
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_SIHARAYIKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_SIHARAYIKEYI.
+ENDIF.
+CONDENSE L_STR_TOGETSU_SIHARAYIKEYI.
+* マイナスの書式変換：当月締支払相殺
+WRITE U_WA_TOGETSU-TOGETSU_SOSAYI TO L_STR_TOGETSU_SOSAYI
+CURRENCY U_WA_TOGETSU-WAERS.
+IF U_WA_TOGETSU-TOGETSU_SOSAYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_TOGETSU_SOSAYI.
+ENDIF.
+CONDENSE L_STR_TOGETSU_SOSAYI.
+* 当月締支払額行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T25.                           "当月締支払額Text
+WRITE:3 SY-VLINE,
+27 U_WA_TOGETSU-WAERS                   "通貨コード
+INTENSIFIED OFF,
+32  L_STR_TOGETSU_SOKEYI RIGHT-JUSTIFIED   "当月締支払総合計
+INTENSIFIED OFF,
+49  L_STR_TOGETSU_GINKO RIGHT-JUSTIFIED    "当月締支払銀行振込
+INTENSIFIED OFF,
+66  L_STR_TOGETSU_SIHARAYI RIGHT-JUSTIFIED "当月締支払支払手形
+INTENSIFIED OFF,
+83  L_STR_TOGETSU_WURAGAKI RIGHT-JUSTIFIED "当月締支払裏書手形
+INTENSIFIED OFF,
+100 L_STR_TOGETSU_SIYIRE RIGHT-JUSTIFIED   "当月締支払仕入割引
+INTENSIFIED OFF,
+117 L_STR_TOGETSU_SONOTA RIGHT-JUSTIFIED       "当月締支払その他
+INTENSIFIED OFF,
+134 L_STR_TOGETSU_SIHARAYIKEYI RIGHT-JUSTIFIED "当月締支払支払計
+INTENSIFIED OFF,
+151 L_STR_TOGETSU_SOSAYI RIGHT-JUSTIFIED       "当月締支払相殺
+INTENSIFIED OFF,
+168 SY-VLINE.
+ELSE.
+WRITE:/3 SY-VLINE,
+27 U_WA_TOGETSU-WAERS                  "通貨コード
+INTENSIFIED OFF,
+32  L_STR_TOGETSU_SOKEYI RIGHT-JUSTIFIED   "当月締支払総合計
+INTENSIFIED OFF,
+49  L_STR_TOGETSU_GINKO RIGHT-JUSTIFIED    "当月締支払銀行振込
+INTENSIFIED OFF,
+66  L_STR_TOGETSU_SIHARAYI RIGHT-JUSTIFIED "当月締支払支払手形
+INTENSIFIED OFF,
+83  L_STR_TOGETSU_WURAGAKI RIGHT-JUSTIFIED "当月締支払裏書手形
+INTENSIFIED OFF,
+100 L_STR_TOGETSU_SIYIRE RIGHT-JUSTIFIED   "当月締支払仕入割引
+INTENSIFIED OFF,
+117 L_STR_TOGETSU_SONOTA RIGHT-JUSTIFIED       "当月締支払その他
+INTENSIFIED OFF,
+134 L_STR_TOGETSU_SIHARAYIKEYI RIGHT-JUSTIFIED "当月締支払支払計
+INTENSIFIED OFF,
+151 L_STR_TOGETSU_SOSAYI RIGHT-JUSTIFIED       "当月締支払相殺
+INTENSIFIED OFF,
+168 SY-VLINE.
+ENDIF.
+
+ENDFORM.        "OUTPUT_TOGETSU_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ZENGETSU_LINE
+*&---------------------------------------------------------------------*
+*       画面の前月以前締支払額行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_ZENGETSU       出力用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_ZENGETSU_LINE USING U_WA_ZENGETSU    TYPE STRT_ZENGETSU
+U_LINENO         TYPE I.
+DATA: L_STR_ZENGETSU_SOKEYI(16)       TYPE C,  "以前締支払総合計
+L_STR_ZENGETSU_GINKO(16)        TYPE C,  "以前締支払銀行振込
+L_STR_ZENGETSU_SIHARAYI(16)     TYPE C,  "以前締支払支払手形
+L_STR_ZENGETSU_WURAGAKI(16)     TYPE C,  "以前締支払裏書手形
+L_STR_ZENGETSU_SIYIRE(16)       TYPE C,  "以前締支払仕入割引
+L_STR_ZENGETSU_SONOTA(16)       TYPE C,  "以前締支払その他
+L_STR_ZENGETSU_SIHARAYIKEYI(16) TYPE C,  "以前締支払支払計
+L_STR_ZENGETSU_SOSAYI(16)       TYPE C.  "以前締支払相殺
+* マイナスの書式変換：以前締支払総合計
+WRITE U_WA_ZENGETSU-ZENGETSU_SOKEYI TO L_STR_ZENGETSU_SOKEYI
+CURRENCY U_WA_ZENGETSU-WAERS.
+IF U_WA_ZENGETSU-ZENGETSU_SOKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_SOKEYI.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_SOKEYI.
+* マイナスの書式変換：以前締支払銀行振込
+WRITE U_WA_ZENGETSU-ZENGETSU_GINKO TO L_STR_ZENGETSU_GINKO
+CURRENCY U_WA_ZENGETSU-WAERS.
+IF U_WA_ZENGETSU-ZENGETSU_GINKO < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_GINKO.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_GINKO.
+* マイナスの書式変換：以前締支払支払手形
+WRITE U_WA_ZENGETSU-ZENGETSU_SIHARAYI TO L_STR_ZENGETSU_SIHARAYI
+CURRENCY U_WA_ZENGETSU-WAERS.
+IF U_WA_ZENGETSU-ZENGETSU_SIHARAYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_SIHARAYI.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_SIHARAYI.
+* マイナスの書式変換：以前締支払裏書手形
+WRITE U_WA_ZENGETSU-ZENGETSU_WURAGAKI TO L_STR_ZENGETSU_WURAGAKI
+CURRENCY U_WA_ZENGETSU-WAERS.
+IF U_WA_ZENGETSU-ZENGETSU_WURAGAKI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_WURAGAKI.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_WURAGAKI.
+* マイナスの書式変換：以前締支払仕入割引
+WRITE U_WA_ZENGETSU-ZENGETSU_SIYIRE TO L_STR_ZENGETSU_SIYIRE
+CURRENCY U_WA_ZENGETSU-WAERS.
+IF U_WA_ZENGETSU-ZENGETSU_SIYIRE < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_SIYIRE.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_SIYIRE.
+* マイナスの書式変換：以前締支払その他
+WRITE U_WA_ZENGETSU-ZENGETSU_SONOTA TO L_STR_ZENGETSU_SONOTA
+CURRENCY U_WA_ZENGETSU-WAERS.
+IF U_WA_ZENGETSU-ZENGETSU_SONOTA < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_SONOTA.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_SONOTA.
+* マイナスの書式変換：以前締支払支払計
+WRITE U_WA_ZENGETSU-ZENGETSU_SIHARAYIKEYI
+TO L_STR_ZENGETSU_SIHARAYIKEYI CURRENCY U_WA_ZENGETSU-WAERS.
+
+IF U_WA_ZENGETSU-ZENGETSU_SIHARAYIKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_SIHARAYIKEYI.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_SIHARAYIKEYI.
+* マイナスの書式変換：以前締支払相殺
+WRITE U_WA_ZENGETSU-ZENGETSU_SOSAYI TO L_STR_ZENGETSU_SOSAYI
+CURRENCY U_WA_ZENGETSU-WAERS.
+IF U_WA_ZENGETSU-ZENGETSU_SOSAYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_ZENGETSU_SOSAYI.
+ENDIF.
+CONDENSE L_STR_ZENGETSU_SOSAYI.
+* 前月以前締支払額行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T26.                         "前月以前締支払額Text
+WRITE:3 SY-VLINE,
+27 U_WA_ZENGETSU-WAERS                   "通貨コード
+INTENSIFIED OFF,
+32  L_STR_ZENGETSU_SOKEYI RIGHT-JUSTIFIED    "以前締支払総合計
+INTENSIFIED OFF,
+49  L_STR_ZENGETSU_GINKO RIGHT-JUSTIFIED     "以前締支払銀行振込
+INTENSIFIED OFF,
+66  L_STR_ZENGETSU_SIHARAYI RIGHT-JUSTIFIED  "以前締支払支払手形
+INTENSIFIED OFF,
+83  L_STR_ZENGETSU_WURAGAKI RIGHT-JUSTIFIED  "以前締支払裏書手形
+INTENSIFIED OFF,
+100 L_STR_ZENGETSU_SIYIRE RIGHT-JUSTIFIED    "以前締支払仕入割引
+INTENSIFIED OFF,
+117 L_STR_ZENGETSU_SONOTA RIGHT-JUSTIFIED       "以前締支払その他
+INTENSIFIED OFF,
+134 L_STR_ZENGETSU_SIHARAYIKEYI RIGHT-JUSTIFIED "以前締支払支払計
+INTENSIFIED OFF,
+151 L_STR_ZENGETSU_SOSAYI RIGHT-JUSTIFIED       "以前締支払相殺
+INTENSIFIED OFF,
+168 SY-VLINE.
+ELSE.
+WRITE:/3 SY-VLINE,
+27 U_WA_ZENGETSU-WAERS                   "通貨コード
+INTENSIFIED OFF,
+32  L_STR_ZENGETSU_SOKEYI RIGHT-JUSTIFIED    "以前締支払総合計
+INTENSIFIED OFF,
+49  L_STR_ZENGETSU_GINKO RIGHT-JUSTIFIED     "以前締支払銀行振込
+INTENSIFIED OFF,
+66  L_STR_ZENGETSU_SIHARAYI RIGHT-JUSTIFIED  "以前締支払支払手形
+INTENSIFIED OFF,
+83  L_STR_ZENGETSU_WURAGAKI RIGHT-JUSTIFIED  "以前締支払裏書手形
+INTENSIFIED OFF,
+100 L_STR_ZENGETSU_SIYIRE RIGHT-JUSTIFIED    "以前締支払仕入割引
+INTENSIFIED OFF,
+117 L_STR_ZENGETSU_SONOTA RIGHT-JUSTIFIED    "以前締支払その他
+INTENSIFIED OFF,
+134 L_STR_ZENGETSU_SIHARAYIKEYI RIGHT-JUSTIFIED "以前締支払支払計
+INTENSIFIED OFF,
+151 L_STR_ZENGETSU_SOSAYI RIGHT-JUSTIFIED       "以前締支払相殺
+INTENSIFIED OFF,
+168 SY-VLINE.
+ENDIF.
+
+ENDFORM.        "OUTPUT_ZENGETSU_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SIHARAYI_LINE
+*&---------------------------------------------------------------------*
+*       画面の支払額(計)行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_SIHARAYI       出力用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_SIHARAYI_LINE USING U_WA_SIHARAYI    TYPE STRT_SIHARAYI
+U_LINENO         TYPE I.
+DATA: L_STR_SIHARAYI_SOKEYI(16)       TYPE C,  "支払額計総合計
+L_STR_SIHARAYI_GINKO(16)        TYPE C,  "支払額計銀行振込
+L_STR_SIHARAYI_SIHARAYI(16)     TYPE C,  "支払額計支払手形
+L_STR_SIHARAYI_WURAGAKI(16)     TYPE C,  "支払額計裏書手形
+L_STR_SIHARAYI_SIYIRE(16)       TYPE C,  "支払額計仕入割引
+L_STR_SIHARAYI_SONOTA(16)       TYPE C,  "支払額計その他
+L_STR_SIHARAYI_SIHARAYIKEYI(16) TYPE C,  "支払額計支払計
+L_STR_SIHARAYI_SOSAYI(16)       TYPE C.  "支払額計相殺
+* マイナスの書式変換：支払額計総合計
+WRITE U_WA_SIHARAYI-SIHARAYI_SOKEYI TO L_STR_SIHARAYI_SOKEYI
+CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_SOKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_SOKEYI.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_SOKEYI.
+* マイナスの書式変換：支払額計銀行振込
+WRITE U_WA_SIHARAYI-SIHARAYI_GINKO TO L_STR_SIHARAYI_GINKO
+CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_GINKO < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_GINKO.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_GINKO.
+* マイナスの書式変換：支払額計支払手形
+WRITE U_WA_SIHARAYI-SIHARAYI_SIHARAYI TO L_STR_SIHARAYI_SIHARAYI
+CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_SIHARAYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_SIHARAYI.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_SIHARAYI.
+* マイナスの書式変換：支払額計裏書手形
+WRITE U_WA_SIHARAYI-SIHARAYI_WURAGAKI TO L_STR_SIHARAYI_WURAGAKI
+CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_WURAGAKI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_WURAGAKI.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_WURAGAKI.
+* マイナスの書式変換：支払額計仕入割引
+WRITE U_WA_SIHARAYI-SIHARAYI_SIYIRE TO L_STR_SIHARAYI_SIYIRE
+CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_SIYIRE < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_SIYIRE.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_SIYIRE.
+* マイナスの書式変換：支払額計その他
+WRITE U_WA_SIHARAYI-SIHARAYI_SONOTA TO L_STR_SIHARAYI_SONOTA
+CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_SONOTA < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_SONOTA.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_SONOTA.
+* マイナスの書式変換：支払額計支払計
+WRITE U_WA_SIHARAYI-SIHARAYI_SIHARAYIKEYI
+TO L_STR_SIHARAYI_SIHARAYIKEYI CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_SIHARAYIKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_SIHARAYIKEYI.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_SIHARAYIKEYI.
+* マイナスの書式変換：支払額計相殺
+WRITE U_WA_SIHARAYI-SIHARAYI_SOSAYI TO L_STR_SIHARAYI_SOSAYI
+CURRENCY U_WA_SIHARAYI-WAERS.
+IF U_WA_SIHARAYI-SIHARAYI_SOSAYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SIHARAYI_SOSAYI.
+ENDIF.
+CONDENSE L_STR_SIHARAYI_SOSAYI.
+* 支払額(計)行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T27.                                "支払額(計)Text
+WRITE:3 SY-VLINE,
+27 U_WA_SIHARAYI-WAERS                     "通貨コード
+INTENSIFIED OFF,
+32  L_STR_SIHARAYI_SOKEYI RIGHT-JUSTIFIED      "支払額計総合計
+INTENSIFIED OFF,
+49  L_STR_SIHARAYI_GINKO RIGHT-JUSTIFIED       "支払額計銀行振込
+INTENSIFIED OFF,
+66  L_STR_SIHARAYI_SIHARAYI RIGHT-JUSTIFIED    "支払額計支払手形
+INTENSIFIED OFF,
+83  L_STR_SIHARAYI_WURAGAKI RIGHT-JUSTIFIED    "支払額計裏書手形
+INTENSIFIED OFF,
+100 L_STR_SIHARAYI_SIYIRE RIGHT-JUSTIFIED      "支払額計仕入割引
+INTENSIFIED OFF,
+117 L_STR_SIHARAYI_SONOTA RIGHT-JUSTIFIED      "支払額計その他
+INTENSIFIED OFF,
+134 L_STR_SIHARAYI_SIHARAYIKEYI RIGHT-JUSTIFIED "支払額計支払計
+INTENSIFIED OFF,
+151 L_STR_SIHARAYI_SOSAYI RIGHT-JUSTIFIED       "支払額計相殺
+INTENSIFIED OFF,
+168 SY-VLINE.
+ELSE.
+WRITE:/3 SY-VLINE,
+27 U_WA_SIHARAYI-WAERS                     "通貨コード
+INTENSIFIED OFF,
+32  L_STR_SIHARAYI_SOKEYI RIGHT-JUSTIFIED      "支払額計総合計
+INTENSIFIED OFF,
+49  L_STR_SIHARAYI_GINKO RIGHT-JUSTIFIED       "支払額計銀行振込
+INTENSIFIED OFF,
+66  L_STR_SIHARAYI_SIHARAYI RIGHT-JUSTIFIED    "支払額計支払手形
+INTENSIFIED OFF,
+83  L_STR_SIHARAYI_WURAGAKI RIGHT-JUSTIFIED    "支払額計裏書手形
+INTENSIFIED OFF,
+100 L_STR_SIHARAYI_SIYIRE RIGHT-JUSTIFIED      "支払額計仕入割引
+INTENSIFIED OFF,
+117 L_STR_SIHARAYI_SONOTA RIGHT-JUSTIFIED      "支払額計その他
+INTENSIFIED OFF,
+134 L_STR_SIHARAYI_SIHARAYIKEYI RIGHT-JUSTIFIED "支払額計支払計
+INTENSIFIED OFF,
+151 L_STR_SIHARAYI_SOSAYI RIGHT-JUSTIFIED       "支払額計相殺
+INTENSIFIED OFF,
+168 SY-VLINE.
+ENDIF.
+
+ENDFORM.        "OUTPUT_SIHARAYI_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SPLIT_LINE
+*&---------------------------------------------------------------------*
+*       画面のSPLIT行の出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_SPLIT_LINE.
+* split 行
+WRITE: /3(166) SY-ULINE.
+WRITE: /3 SY-VLINE,
+27 TEXT-T33,        "通貨
+44 TEXT-T34,        "額
+168 SY-VLINE.
+WRITE: /3(166) SY-ULINE.
+
+ENDFORM.        "OUTPUT_SPLIT_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SAGAKU1_LINE
+*&---------------------------------------------------------------------*
+*       画面の差額①行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_SAGAKU1        出力用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_SAGAKU1_LINE USING U_WA_SAGAKU1     TYPE STRT_SAGAKU1
+U_LINENO         TYPE I.
+DATA: L_STR_SAGAKU1(16) TYPE C.     "差額①
+* マイナスの書式変換：差額①
+WRITE U_WA_SAGAKU1-SAGAKU1 TO L_STR_SAGAKU1
+CURRENCY U_WA_SAGAKU1-WAERS.
+IF U_WA_SAGAKU1-SAGAKU1 < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SAGAKU1.
+ENDIF.
+CONDENSE L_STR_SAGAKU1.
+* 差額①行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T28.                          "支払額(計)Text
+WRITE: 3 SY-VLINE,
+27 U_WA_SAGAKU1-WAERS                 "通貨コード
+INTENSIFIED OFF,
+32 L_STR_SAGAKU1 RIGHT-JUSTIFIED      "差額①
+INTENSIFIED OFF,
+168 SY-VLINE.
+ELSE.
+WRITE:/3 SY-VLINE,
+27 U_WA_SAGAKU1-WAERS                 "通貨コード
+INTENSIFIED OFF,
+32 L_STR_SAGAKU1 RIGHT-JUSTIFIED     "差額①
+INTENSIFIED OFF,
+168 SY-VLINE.
+ENDIF.
+ENDFORM.        "OUTPUT_SAGAKU1_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_KIJITSUZAN_LINE
+*&---------------------------------------------------------------------*
+*       画面の期日払残行の出力処理
+*----------------------------------------------------------------------*
+*  -->  U_WA_KIJITSUZAN     期日払残行用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_KIJITSUZAN_LINE USING U_WA_KIJITSUZAN  TYPE STRT_KIJITSUZAN
+U_LINENO         TYPE I.
+DATA: L_STR_KIJITSUZAN(16) TYPE C.  "期日払残
+* マイナスの書式変換：期日払残
+WRITE U_WA_KIJITSUZAN-KIJITSUZAN TO L_STR_KIJITSUZAN
+CURRENCY U_WA_KIJITSUZAN-WAERS.
+IF U_WA_KIJITSUZAN-KIJITSUZAN < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_KIJITSUZAN.
+ENDIF.
+CONDENSE L_STR_KIJITSUZAN.
+* 期日払残行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T29.                          "期日払残Text
+WRITE: 3 SY-VLINE,
+27 U_WA_KIJITSUZAN-WAERS              "通貨コード
+INTENSIFIED OFF,
+32 L_STR_KIJITSUZAN RIGHT-JUSTIFIED   "期日払残
+INTENSIFIED OFF,
+168 SY-VLINE.
+ELSE.
+WRITE:/3 SY-VLINE,
+27 U_WA_KIJITSUZAN-WAERS              "通貨コード
+INTENSIFIED OFF,
+32 L_STR_KIJITSUZAN RIGHT-JUSTIFIED   "期日払残
+INTENSIFIED OFF,
+168 SY-VLINE.
+ENDIF.
+ENDFORM.        "OUTPUT_KIJITSUZAN_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SAGAKU2_LINE
+*&---------------------------------------------------------------------*
+*       画面の差額②行の出力処理
+*----------------------------------------------------------------------*
+*  -->  C_WA_SAGAKU2        出力用構造
+*  -->  U_LINENO            行NO.
+*----------------------------------------------------------------------*
+FORM OUTPUT_SAGAKU2_LINE USING U_WA_SAGAKU2    TYPE STRT_SAGAKU2
+U_LINENO        TYPE I.
+DATA: L_STR_SAGAKU2(16) TYPE C.  "差額②
+* マイナスの書式変換：差額②
+WRITE U_WA_SAGAKU2-SAGAKU2 TO L_STR_SAGAKU2
+CURRENCY U_WA_SAGAKU2-WAERS.
+IF U_WA_SAGAKU2-SAGAKU2 < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_SAGAKU2.
+ENDIF.
+CONDENSE L_STR_SAGAKU2.
+* 差額②行
+IF U_LINENO = 1.
+WRITE: /5 TEXT-T30.                          "差額②Text
+WRITE: 3 SY-VLINE,
+27 U_WA_SAGAKU2-WAERS                 "通貨コード
+INTENSIFIED OFF,
+32 L_STR_SAGAKU2 RIGHT-JUSTIFIED      "差額②
+INTENSIFIED OFF,
+168 SY-VLINE.
+ELSE.
+WRITE:/3 SY-VLINE,
+27 U_WA_SAGAKU2-WAERS                 "通貨コード
+INTENSIFIED OFF,
+32 L_STR_SAGAKU2 RIGHT-JUSTIFIED      "差額②
+INTENSIFIED OFF,
+168 SY-VLINE.
+ENDIF.
+ENDFORM.        "OUTPUT_SAGAKU2_LINE
+*   insert 2008/06/18 DMC {
+*&---------------------------------------------------------------------*
+*&      Form  GET_TEXT
+*&---------------------------------------------------------------------*
+*       出力区分内容説明の取得処理
+*----------------------------------------------------------------------*
+FORM GET_TEXT.
+DATA: L_DOMNAME TYPE DD07V-DOMNAME,
+L_DOMVALUE TYPE DD07V-DOMVALUE_L,
+L_DDTEXT TYPE DD07V-DDTEXT.
+L_DOMNAME = 'ZDOUTYP'.
+L_DOMVALUE  = P_ZOUTYP.
+
+CALL FUNCTION 'DOMAIN_VALUE_GET'
+EXPORTING
+I_DOMNAME  = L_DOMNAME
+I_DOMVALUE = L_DOMVALUE
+IMPORTING
+E_DDTEXT   = L_DDTEXT.
+P_TYPTXT = L_DDTEXT.
+ENDFORM.        "GET_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  FILTER_LIFNR
+*&---------------------------------------------------------------------*
+*       対象絞込処理
+*----------------------------------------------------------------------*
+*  -->  U_LIFNR        ヘッダ編集用構造
+*  -->  C_OK_FLG       対象ﾌﾗｸﾞ(対象となるﾌﾗｸﾞ⇒'T')
+*----------------------------------------------------------------------*
+FORM FILTER_LIFNR USING    U_WA_HEADER  TYPE STRT_HEADER
+CHANGING C_OK_FLG     LIKE C_OK.
+DATA: LF_SAGAKU2 TYPE C.   "ﾌﾗｸﾞ:差額②がゼロ以外
+DATA: LF_SAGAKU  TYPE C.   "ﾌﾗｸﾞ:残高差額がゼロ以外
+DATA: LV_ZERO    TYPE BSEG-DMBTR.
+
+DATA: L_WA_OUTPUT_TMP   TYPE STRT_OUTPUT.
+
+CLEAR: C_OK_FLG.
+* 同一仕入先を読み出して　差額②と残高差額の判断を行う
+LOOP AT ITAB_OUTPUT INTO L_WA_OUTPUT_TMP
+WHERE BUKRS =  U_WA_HEADER-BUKRS AND
+LIFNR =  U_WA_HEADER-LIFNR.
+
+** 何れかの通貨で差額が発生する場合、差額フラグをセット
+*   残高差額
+IF L_WA_OUTPUT_TMP-SAGAKU <> LV_ZERO.
+LF_SAGAKU = 'X'.
+ENDIF.
+*   差額②
+IF L_WA_OUTPUT_TMP-SAGAKU2 <> LV_ZERO.
+LF_SAGAKU2 = 'X'.
+ENDIF.
+*   両方とも差額フラグが立ったらループを抜ける
+IF LF_SAGAKU = 'X' AND LF_SAGAKU2 = 'X'.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+CASE P_ZOUTYP.
+**  出力区分1:差額②、残高差額共に発生する仕入先を出力する
+WHEN C_DOUTYP_1.
+*     差額②、残高差額、両方の値がゼロ以外の場合
+IF LF_SAGAKU2 = 'X' AND LF_SAGAKU = 'X'.
+*       対象フラグのセット
+C_OK_FLG = C_OK.
+ENDIF.
+**  出力区分2:差額②、残高差額の何れかが発生する仕入先を出力する
+WHEN C_DOUTYP_2.
+*     差額②、残高差額、何れかの値がゼロ以外の場合
+IF LF_SAGAKU2 = 'X' OR LF_SAGAKU = 'X'.
+*       対象フラグのセット
+C_OK_FLG = C_OK.
+ENDIF.
+**  出力区分3:差額②のみ発生する仕入先を出力する
+WHEN C_DOUTYP_3.
+*     差額②の値がゼロ以外、残高差額がゼロの場合
+IF LF_SAGAKU2 = 'X' AND LF_SAGAKU <> 'X'.
+*       対象フラグのセット
+C_OK_FLG = C_OK.
+ENDIF.
+**  出力区分4:残高差額のみ発生する仕入先を出力する
+WHEN C_DOUTYP_4.
+*     差額②の値がゼロ、残高差額がゼロ以外の場合
+IF LF_SAGAKU2 <> 'X' AND LF_SAGAKU = 'X'.
+*       対象フラグのセット
+C_OK_FLG = C_OK.
+ENDIF.
+*   insert 2008/06/25 S.MIKAMI {
+**  出力区分5:差額の発生する仕入先を出力する
+WHEN C_DOUTYP_5.
+*     差額②の値がゼロの場合
+IF LF_SAGAKU2 = 'X'.
+*       対象フラグのセット
+C_OK_FLG = C_OK.
+ENDIF.
+**  出力区分6:残高差額の発生する仕入先を出力する
+WHEN C_DOUTYP_6.
+*     残高差額がゼロ以外の場合
+IF LF_SAGAKU = 'X'.
+*       対象フラグのセット
+C_OK_FLG = C_OK.
+ENDIF.
+* } insert 2008/06/25 S.MIKAMI
+WHEN OTHERS.
+ENDCASE.
+ENDFORM.        "FILTER_LIFNR
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_LAST_PAGE
+*&---------------------------------------------------------------------*
+*       最終ページの出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_LAST_PAGE.
+
+* 画面の最終ページの合計データ行の作成処理
+PERFORM SET_LAST_GOUKEYI_DATA.
+
+NEW-PAGE.
+* 画面の出力区分行の出力処理
+PERFORM OUTPUT_ZOUTYP_LINE.
+* 全社分以外の場合
+IF NOT S_LIFNR IS INITIAL.
+*   画面の仕入先件数行の出力処理
+PERFORM OUTPUT_TOTAL_PAGE_LINE.
+ENDIF.
+* 画面の差額②合計行の出力処理
+PERFORM OUTPUT_SAGAKU2_GOUKEYI_LINE.
+* 画面の差額合計行の出力処理
+PERFORM OUTPUT_SAGAKU_GOUKEYI_LINE.
+
+ENDFORM.        "OUTPUT_LAST_PAGE
+*&---------------------------------------------------------------------*
+*&      Form  SET_LAST_GOUKEYI_DATA
+*&---------------------------------------------------------------------*
+*       画面の差額②と差額データ行の作成処理
+*----------------------------------------------------------------------*
+FORM SET_LAST_GOUKEYI_DATA.
+DATA: L_WA_HEADER  TYPE STRT_HEADER,
+L_WA_OUTPUT_TMP       TYPE STRT_OUTPUT,
+L_WA_SAGAKU2_GOUKEYI  TYPE STRT_KOUKEYI,    "差額②合計構造
+L_WA_SAGAKU_GOUKEYI   TYPE STRT_KOUKEYI,    "差額合計構造
+L_SAGAKU2_GOUKEYI     TYPE ZF2020-WRBTR_H,  "差額②合計金額
+L_SAGAKU_GOUKEYI      TYPE ZF2020-WRBTR_H.  "差額合計金額
+* 対象以外データの削除
+DELETE ITAB_OUTPUT WHERE OBJFLG <> C_OK.
+L_WA_OUTPUT_TMP-LIFNR = SPACE.
+MODIFY ITAB_OUTPUT FROM L_WA_OUTPUT_TMP TRANSPORTING LIFNR
+WHERE OBJFLG = C_OK.
+SORT ITAB_OUTPUT ASCENDING BY BUKRS LIFNR WAERS.
+LOOP AT ITAB_OUTPUT INTO L_WA_OUTPUT_TMP.
+*   差額②の合計
+L_SAGAKU2_GOUKEYI = L_SAGAKU2_GOUKEYI + L_WA_OUTPUT_TMP-SAGAKU2.
+*   差額の合計
+L_SAGAKU_GOUKEYI  = L_SAGAKU_GOUKEYI + L_WA_OUTPUT_TMP-SAGAKU.
+*   通貨コード
+AT END OF WAERS.
+*     差額②合計内部テーブルに格納する
+L_WA_SAGAKU2_GOUKEYI-WAERS = L_WA_OUTPUT_TMP-WAERS.
+L_WA_SAGAKU2_GOUKEYI-GOUKEYI = L_SAGAKU2_GOUKEYI.
+APPEND L_WA_SAGAKU2_GOUKEYI TO ITAB_SAGAKU2_GOUKEYI.
+*     差額合計内部テーブルに格納する
+L_WA_SAGAKU_GOUKEYI-WAERS = L_WA_OUTPUT_TMP-WAERS.
+L_WA_SAGAKU_GOUKEYI-GOUKEYI = L_SAGAKU_GOUKEYI.
+APPEND L_WA_SAGAKU_GOUKEYI TO ITAB_SAGAKU_GOUKEYI.
+CLEAR: L_WA_SAGAKU2_GOUKEYI, L_WA_SAGAKU_GOUKEYI,
+L_SAGAKU2_GOUKEYI, L_SAGAKU_GOUKEYI.
+ENDAT.
+ENDLOOP.
+ENDFORM.        "SET_LAST_GOUKEYI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ZOUTYP_LINE
+*&---------------------------------------------------------------------*
+*       画面の出力区分行の出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_ZOUTYP_LINE.
+WRITE:  /5 TEXT-T38,         "出力区分Text
+31 TEXT-T43,         ": Text
+33 P_ZOUTYP,         "出力区分
+35 P_TYPTXT.         "出力区分内容
+WRITE:  /.
+ENDFORM.        "OUTPUT_ZOUTYP_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_TOTAL_PAGE_LINE
+*&---------------------------------------------------------------------*
+*       画面の仕入先件数行の出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_TOTAL_PAGE_LINE.
+DATA: L_PAGE_NO(5) TYPE C.
+L_PAGE_NO = G_TOTAL_PAGE.
+WRITE:  /5 TEXT-T39,                   "仕入先件数Text
+31 TEXT-T43,                   ": Text
+33 L_PAGE_NO RIGHT-JUSTIFIED   "件数
+INTENSIFIED OFF,
+39 TEXT-T40.                   "件Text
+WRITE:  /.
+ENDFORM.        "OUTPUT_TOTAL_PAGE_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SAGAKU2_GOUKEYI_LINE
+*&---------------------------------------------------------------------*
+*       画面の差額②合計行の出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_SAGAKU2_GOUKEYI_LINE.
+DATA: L_WA_SAGAKU2_GOUKEYI  TYPE STRT_KOUKEYI,    "差額②合計構造
+L_LINE                TYPE SY-TABIX,
+L_STR_GOUKEYI(16)     TYPE C.               "合計
+
+* 通貨がJPYのレコードを一行目に 編集する　
+READ TABLE ITAB_SAGAKU2_GOUKEYI INTO L_WA_SAGAKU2_GOUKEYI
+WITH KEY WAERS = C_C_JPY.
+IF SY-SUBRC = 0.
+PERFORM OUTPUT_LAST_GOUKEYI_LINE USING L_WA_SAGAKU2_GOUKEYI
+TEXT-T41
+C_I_1.
+ELSE.
+L_LINE = C_I_1.
+ENDIF.
+* 通貨がJPY以外のレコードを順次に 編集する　
+LOOP AT ITAB_SAGAKU2_GOUKEYI INTO L_WA_SAGAKU2_GOUKEYI
+WHERE WAERS <> C_C_JPY.
+PERFORM OUTPUT_LAST_GOUKEYI_LINE USING L_WA_SAGAKU2_GOUKEYI
+TEXT-T41
+L_LINE.
+L_LINE = SPACE.
+ENDLOOP.
+WRITE: /.
+ENDFORM.        "OUTPUT_SAGAKU2_GOUKEYI_LINE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_SAGAKU_GOUKEYI_LINE
+*&---------------------------------------------------------------------*
+*       画面の差額合計行の出力処理
+*----------------------------------------------------------------------*
+FORM OUTPUT_SAGAKU_GOUKEYI_LINE.
+DATA: L_WA_SAGAKU_GOUKEYI   TYPE STRT_KOUKEYI,    "差額合計構造
+L_LINE                TYPE SY-TABIX,
+L_STR_GOUKEYI(16)     TYPE C.               "合計
+* 通貨がJPYのレコードを一行目に 編集する　
+READ TABLE ITAB_SAGAKU_GOUKEYI INTO L_WA_SAGAKU_GOUKEYI
+WITH KEY WAERS = C_C_JPY.
+IF SY-SUBRC = 0.
+PERFORM OUTPUT_LAST_GOUKEYI_LINE USING L_WA_SAGAKU_GOUKEYI
+TEXT-T42
+C_I_1.
+ELSE.
+L_LINE = C_I_1.
+ENDIF.
+* 通貨がJPY以外のレコードを順次に 編集する　
+LOOP AT ITAB_SAGAKU_GOUKEYI INTO L_WA_SAGAKU_GOUKEYI
+WHERE WAERS <> C_C_JPY.
+PERFORM OUTPUT_LAST_GOUKEYI_LINE USING L_WA_SAGAKU_GOUKEYI
+TEXT-T42
+L_LINE.
+L_LINE = SPACE.
+ENDLOOP.
+ENDFORM.        "OUTPUT_SAGAKU_GOUKEYI_LINE
+*---------------------------------------------------------------------*
+*       FORM OUTPUT_LAST_GOUKEYI_LINE                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  U_WA_GOUKEYI                                                  *
+*---------------------------------------------------------------------*
+FORM OUTPUT_LAST_GOUKEYI_LINE USING U_WA_GOUKEYI TYPE STRT_KOUKEYI
+U_TEXT       TYPE STRING
+U_TABIX      TYPE I.
+DATA: L_STR_GOUKEYI(16)     TYPE C.               "合計
+
+* マイナスの書式変換：差額と差額②合計
+WRITE U_WA_GOUKEYI-GOUKEYI TO L_STR_GOUKEYI
+CURRENCY U_WA_GOUKEYI-WAERS.
+IF U_WA_GOUKEYI-GOUKEYI < 0.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = L_STR_GOUKEYI.
+ENDIF.
+IF U_TABIX = 1.
+WRITE: /5 U_TEXT.  "差額②合計Text
+ELSE.
+WRITE: /3 SPACE.
+ENDIF.
+WRITE: 27  U_WA_GOUKEYI-WAERS     "通貨コード
+INTENSIFIED OFF,
+31  TEXT-T43,                      ": Text
+33  L_STR_GOUKEYI RIGHT-JUSTIFIED  "合計
+INTENSIFIED OFF.
+*  WRITE:  /.
+ENDFORM.        "OUTPUT_LAST_GOUKEYI_LINE
+* } insert 2008/06/18 DMC

@@ -1,0 +1,352 @@
+*&---------------------------------------------------------------------*
+*&[プログラム名]
+*&  ZE011101_SCALE   移行用　EDI得意先品目単価マスタ送信
+*&
+*&[処理概要]
+*&  移行用　EDI得意先品目単価マスタ送信を行う。
+*&
+*&[改定履歴]
+*& YYYY/MM/DD  Programar         Description
+*& 2012/09/03  ISID              ES-UP
+*&---------------------------------------------------------------------*
+Report ZE011101 Message-ID Y1 .
+
+
+
+Tables : EDPP1 ,       "パートナープロファイル
+KNMT  ,       "得意先品目
+KONM  ,       "所謂スケール条件テーブル
+A901  ,       "所謂価格テーブル
+KONP  .       "所謂条件テーブル
+
+*** とりあえず宣言部
+* ＥＤＩ得意先
+Ranges : R_KUNNR For KNMT-KUNNR ,
+R_KDMAT For KNMT-KDMAT .
+
+* 出力ファイルの構造
+Types : Begin Of OUT_TYP ,
+KUNNR Like KNMT-KUNNR ,
+ZZZKDMAT Like KNMT-KDMAT ,
+DATBI Like A901-DATBI ,
+KSTBM(12) Type C ,
+MATNR Like KNMT-MATNR ,
+KBETR(15) Type C ,
+LOEVM_KO Like KONP-LOEVM_KO ,
+DATUM Like SYST-DATUM ,
+UZEIT Like SYST-UZEIT ,
+KNUMH Like A901-KNUMH ,
+End Of OUT_TYP .
+* Add ES-UP 2012/09/03 -->
+*-----------------------------------------------------------------------
+*  固定値
+*-----------------------------------------------------------------------
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/09/03 <--
+* 出力ファイルのデータ領域
+Data : WK_OUT Type OUT_TYP ,
+TB_OUT Type Table Of OUT_TYP ,
+TB_SCL Type Table Of OUT_TYP ,
+TB_MAT Type Table Of OUT_TYP .
+
+
+
+* 値置き場
+Data : W_KNUMH Like A901-KNUMH ,
+W_KBETR Like KONP-KBETR ,
+W_KSTBM Like KONM-KSTBM ,
+W_KPEIN Like KONP-KPEIN ,
+W_KONWA Like KONP-KONWA ,
+L_KSTBM Type P .
+*
+DATA: BEGIN OF EXEC_PROTOCOL.
+INCLUDE STRUCTURE BTCXPM.
+DATA: END OF EXEC_PROTOCOL.
+
+DATA: GT_PROTOCOL   LIKE TABLE OF EXEC_PROTOCOL,
+G_COMMANDNAME LIKE SXPGCOLIST-NAME,
+G_STATUS      LIKE EXTCMDEXEX-STATUS.
+* ファイルパス
+Parameters : P_OPATH(128) Type C
+Default '\\TECSAP01\WORK\HATATEST.DAT'
+,
+P_DATUM      Type D
+Default SY-DATUM
+.
+*Select-options:P_DATUM for SY-DATUM.
+Select-options:s_kunnr for knmt-kunnr.
+Start-Of-Selection .
+
+Perform Init_Section .
+Perform Data_Edit .
+Perform File_Out .
+
+**********************
+*******初期処理*******
+**********************
+Form Init_Section .
+
+Clear : TB_OUT ,
+WK_OUT .
+
+Refresh : TB_OUT ,
+TB_SCL .
+
+EndForm .
+**********************
+******データ取得******
+**********************
+Form Data_Edit .
+***まずはEDI取引先を絞り込みましょう
+
+Select PARNUM
+From EDPP1
+Into R_KUNNR-LOW
+Where PARTYP EQ 'KU'
+And  PARNUM IN S_Kunnr.
+
+Move : 'EQ' To R_KUNNR-OPTION ,
+'I'  To R_KUNNR-SIGN   .
+Append : R_KUNNR .
+Clear :  R_KUNNR .
+EndSelect .
+If SY-SUBRC NE 0 .
+Message I400 With 'EDI得意先が存在しません' .
+Stop .
+Endif.
+
+***次に得意先品目を取得します。
+Select KUNNR
+KDMAT
+MATNR
+From KNMT
+Into (WK_OUT-KUNNR,WK_OUT-ZZZKDMAT,WK_OUT-MATNR)
+Where KUNNR IN R_KUNNR
+And  VKORG EQ '1000'
+And  VTWEG EQ '10'
+.
+Move : WK_OUT-ZZZKDMAT To R_KDMAT-LOW ,
+'EQ' To R_KDMAT-OPTION ,
+'I'  To R_KDMAT-SIGN   .
+.
+Append : WK_OUT To TB_MAT ,
+R_KDMAT .
+Clear : WK_OUT .
+EndSelect .
+*~* さらにこの中で価格を取得する♪
+Select KUNNR
+ZZZKDMAT
+DATBI
+KNUMH
+From A901
+Into Corresponding Fields Of Table TB_OUT
+Where KAPPL    EQ 'V'
+And  KSCHL    IN ('ZPR0','ZPR1','ZPR2')
+And  VKORGAU  EQ '1000'
+And  VTWEG    EQ '10'
+And  KUNNR    IN R_KUNNR
+AND   DATBI   >= P_DATUM .
+*  And  ZZZKDMAT IN R_KDMAT
+*  And  DATBI    GE P_DATUM
+*  And  DATAB    LE P_DATUM
+*.
+*~*~* さらに単価をＧｅｔする♪
+Loop At TB_OUT Into WK_OUT .
+Select Single KBETR KPEIN LOEVM_KO KONWA
+From KONP
+Into (W_KBETR,W_KPEIN,WK_OUT-LOEVM_KO,W_KONWA)
+Where KNUMH EQ WK_OUT-KNUMH
+And  KOPOS EQ '01'
+And  KAPPL EQ 'V'
+And  KSCHL IN ('ZPR0','ZPR1','ZPR2')
+.
+Perform Change_KBETR Using W_KPEIN W_KONWA W_KBETR WK_OUT-KBETR .
+Move : L_KSTBM To WK_OUT-KSTBM .
+Read Table TB_MAT With KEY KUNNR = WK_OUT-KUNNR
+ZZZKDMAT = WK_OUT-ZZZKDMAT
+Into WK_OUT
+Transporting MATNR .
+If SY-SUBRC NE 0 .
+Write / WK_OUT-ZZZKDMAT .
+Continue .
+EndIf .
+Modify TB_OUT From WK_OUT .
+Select KBETR KSTBM
+From KONM
+Into (W_KBETR , W_KSTBM)
+Where KNUMH EQ WK_OUT-KNUMH
+.
+Perform Change_KBETR Using W_KPEIN W_KONWA W_KBETR WK_OUT-KBETR .
+Move : W_KSTBM To L_KSTBM ,
+L_KSTBM To WK_OUT-KSTBM .
+Append WK_OUT To TB_SCL .
+EndSelect .
+Clear : W_KBETR , W_KPEIN , WK_OUT-KBETR ,WK_OUT-KSTBM , L_KSTBM .
+EndLoop .
+Append Lines Of TB_SCL To TB_OUT .
+EndForm .
+**********************
+*****ファイル出力*****
+**********************
+Form File_Out .
+* Mod ES-UP 2012/10/24 -->
+*  Data : W_LINE(1000) Type C ,
+Data : W_LINE Type string,
+* Mod ES-UP 2012/10/24 <--
+* Mod ES-UP 2012/10/22 -->
+W_COUNT Type P ,
+w_errcnt type p.
+* Mod ES-UP 2012/10/22 <--
+
+* Mod ES-UP 2012/09/03 -->
+*  Clear : W_COUNT .
+*  Open Dataset P_OPATH In Text Mode
+*                       For Output
+*  .
+data: l_conv type ref to zcl_conv_to_sjis,
+l_errfile type string,
+l_message type string,
+l_openflg type abap_bool.
+data:
+l_msgv1   type bapiret2-MESSAGE_V1,
+l_msgv2   type bapiret2-MESSAGE_V1.
+
+create object l_conv.
+l_errfile = l_conv->get_error_filename( filename = P_OPATH
+foldnum  = 0 ).
+if l_errfile is initial.
+message e001(z2).
+endif.
+* Mod ES-UP 2012/09/03 <--
+
+Open Dataset P_OPATH For Output
+IN LEGACY TEXT MODE CODE PAGE l_conv->codepage
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/09/03 <--
+Sort TB_OUT By KUNNR ZZZKDMAT DATBI KSTBM .
+* Add ES-UP 2012/10/22 -->
+l_openflg = abap_false.
+* Add ES-UP 2012/10/22 <--
+Loop At TB_OUT Into WK_OUT Where MATNR NE Space .
+* Mod ES-UP 2012/10/22 -->
+WK_OUT-DATUM = SY-DATUM.
+WK_OUT-UZEIT = SY-UZEIT.
+Perform Make_Line Using W_LINE .
+if l_conv->convert_check( W_LINE ) = abap_true.
+Transfer W_LINE To P_OPATH .
+else.
+if l_openflg = abap_false.
+l_openflg = abap_true.
+open dataset l_errfile for output
+in legacy text mode code page l_conv->codepage
+message l_message
+ignoring conversion errors.
+if sy-subrc <> 0.
+message l_message type 'E'.
+endif.
+endif.
+transfer W_LINE to l_errfile.
+Add 1 To w_errcnt.
+endif.
+* Mod ES-UP 2012/10/22 <--
+Add 1 To W_COUNT .
+Write :/ W_LINE .
+EndLoop .
+
+* Add ES-UP 2012/10/22 -->
+if l_openflg = abap_true.
+close dataset l_errfile.
+message s002(z2).
+endif.
+* Add ES-UP 2012/10/22 <--
+
+Close Dataset P_OPATH .
+PERFORM frm_sxpg_call_system.               "汎用モジュールの起動
+
+* Mod ES-UP 2012/10/22 -->
+write w_errcnt to l_msgv1 LEFT-JUSTIFIED.
+write w_count  to l_msgv2 LEFT-JUSTIFIED.
+concatenate l_msgv1 '/' l_msgv2 into l_message.
+Message I402 With l_message
+'件出力しました。'.
+* Mod ES-UP 2012/10/22 <--
+
+EndForm .
+**********************
+******ライン作成******
+**********************
+Form Make_Line Using L_LINE .
+Concatenate : WK_OUT-KUNNR
+WK_OUT-ZZZKDMAT
+WK_OUT-DATBI
+WK_OUT-KSTBM
+WK_OUT-MATNR
+WK_OUT-KBETR
+WK_OUT-LOEVM_KO
+WK_OUT-DATUM
+WK_OUT-UZEIT
+Into  L_LINE
+Separated By '","'
+,
+'"'
+L_LINE
+'"'
+Into  L_LINE
+.
+EndForm .
+
+
+Form Change_KBETR Using P_KPEIN P_KONWA P_KBETR PK_KBETR .
+
+Data : KBETR(13) Type P Decimals 5 ,
+L_KBETR(15) Type C .
+Move : P_KBETR To KBETR .
+Call Function 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+Exporting
+CURRENCY          = P_KONWA
+SAP_AMOUNT        = P_KBETR
+Importing
+IDOC_AMOUNT       = L_KBETR
+.
+
+Move L_KBETR To KBETR .
+If W_KPEIN NE 0 .
+Divide KBETR By W_KPEIN .
+EndIf .
+Move : KBETR To PK_KBETR .
+EndForm .
+*&-------------------------------------------------------------------*
+*       汎用モジュール ＳＸＰＧ_ＣＡＬＬ_ＳＹＳＴＥＭ の起動
+*--------------------------------------------------------------------*
+FORM frm_sxpg_call_system.
+G_COMMANDNAME = 'ZEDI_OUTBOUNDM'.
+CALL FUNCTION 'SXPG_CALL_SYSTEM'
+EXPORTING
+COMMANDNAME                      = G_COMMANDNAME
+*       ADDITIONAL_PARAMETERS            = ' '
+*  IMPORTING
+*      STATUS                           = G_STATUS
+*       EXITCODE                         =
+TABLES
+EXEC_PROTOCOL                    = GT_PROTOCOL
+EXCEPTIONS
+NO_PERMISSION                    = 1
+COMMAND_NOT_FOUND                = 2
+PARAMETERS_TOO_LONG              = 3
+SECURITY_RISK                    = 4
+WRONG_CHECK_CALL_INTERFACE       = 5
+PROGRAM_START_ERROR              = 6
+PROGRAM_TERMINATION_ERROR        = 7
+X_ERROR                          = 8
+PARAMETER_EXPECTED               = 9
+TOO_MANY_PARAMETERS              = 10
+ILLEGAL_COMMAND                  = 11
+OTHERS                           = 12.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC <> 0.
+MESSAGE I400 WITH text-001.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_sxpg_call_system

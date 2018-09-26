@@ -1,0 +1,361 @@
+REPORT ZZMIKAMI_005 MESSAGE-ID Z1.
+
+TABLES: BKPF,
+BSEG.
+
+
+*** 構造 ***
+
+* 伝票ヘッダ
+TYPES:BEGIN OF TYP_BKPF_00,
+BUKRS         TYPE BKPF-BUKRS,        "会社コード
+BELNR         TYPE BKPF-BELNR,        "伝票番号
+GJAHR         TYPE BKPF-GJAHR,        "会計年度
+BLART         TYPE BKPF-BLART,        "伝票タイプ
+BUDAT         TYPE BKPF-BUDAT,        "転記日付
+MONAT         TYPE BKPF-MONAT,        "会計期間
+CPUDT         TYPE BKPF-CPUDT,        "登録日
+USNAM         TYPE BKPF-USNAM,        "登録者ID
+END   OF TYP_BKPF_00.
+
+* 伝票明細
+TYPES:BEGIN OF TYP_BSEG_00,
+BUKRS         TYPE BSEG-BUKRS,        "会社コード
+BELNR         TYPE BSEG-BELNR,        "伝票番号
+GJAHR         TYPE BSEG-GJAHR,        "会計年度
+KOART         TYPE BSEG-KOART,        "勘定タイプ
+SHKZG         TYPE BSEG-SHKZG,        "貸借フラグ
+GSBER         TYPE BSEG-GSBER,        "事業領域
+DMBTR         TYPE BSEG-DMBTR,        "国内通貨額
+SGTXT         TYPE BSEG-SGTXT,        "明細テキスト
+KOSTL         TYPE BSEG-KOSTL,        "原価センタ
+HKONT         TYPE BSEG-HKONT,        "G/L勘定コード
+PRCTR         TYPE BSEG-PRCTR,        "利益センタ
+END   OF TYP_BSEG_00.
+
+* 出力用ファイル項目
+TYPES:BEGIN OF TYP_FILE,
+BELNR_C(30)   TYPE C,        "仕訳番号
+HKONT_C(30)   TYPE C,        "科目コード
+DMBTR_C(15)   TYPE C,        "金額
+UNIT(40)      TYPE C,        "事業単位
+BUDAT_C(20)   TYPE C,        "仕訳取引計上日
+MONAT_C(40)   TYPE C,        "期間
+CPUDT_C(20)   TYPE C,        "仕訳入力日
+USNAM_C(40)   TYPE C,        "仕訳作成者
+GENSEN(40)    TYPE C,        "仕訳取引源泉
+SGTXT_C(200)  TYPE C,        "適用
+OTHER01(50)   TYPE C,        "その他１
+OTHER02(50)   TYPE C,        "その他２
+OTHER03(50)   TYPE C,        "その他３
+END   OF TYP_FILE.
+
+* 出力用ファイル
+TYPES:BEGIN OF TYP_DATA,
+LINE(1000)    TYPE C,
+END   OF TYP_DATA.
+
+*** テーブル ***
+DATA: GT_BKPF_00   TYPE TABLE OF TYP_BKPF_00.
+DATA: GT_BSEG_DMY  TYPE TABLE OF TYP_BSEG_00.
+
+*** 変数
+DATA: GV_CNT    TYPE I.
+DATA: GV_GOUKEI TYPE GLT0-HSLVT.
+
+*** 固定値 ***
+* テキスト：補助元帳
+CONSTANTS: CST_HOJO_AR(04)   TYPE C VALUE '債権',
+CST_HOJO_AP(04)   TYPE C VALUE '債務'.
+
+* テキスト：他システム
+CONSTANTS: CST_SDMM_URI(04)   TYPE C VALUE '売上',
+CST_SDMM_GEN(04)   TYPE C VALUE '原価',
+CST_SDMM_SYO(04)   TYPE C VALUE '商品',
+CST_SDMM_NYU(04)   TYPE C VALUE '入仮'.
+
+*** 選択パラメータ ***
+PARAMETERS    : P_BUKRS  TYPE BKPF-BUKRS DEFAULT 'C001'
+OBLIGATORY.
+SELECT-OPTIONS: S_BELNR  FOR  BSEG-BELNR.
+SELECT-OPTIONS: S_BUDAT  FOR  BKPF-BUDAT NO-EXTENSION
+OBLIGATORY.
+SELECT-OPTIONS: S_CPUDT  FOR  BKPF-CPUDT NO-EXTENSION.
+PARAMETERS    : P_FILE   TYPE RLGRAP-FILENAME LOWER CASE
+OBLIGATORY.
+
+INITIALIZATION.
+
+
+START-OF-SELECTION.
+
+PERFORM GET_BKPF.
+
+IF NOT GT_BKPF_00[] IS INITIAL.
+PERFORM MAKE_RECORD.
+ELSE.
+MESSAGE S400(Z1) WITH '対象データが存在しません'.
+STOP.
+ENDIF.
+
+END-OF-SELECTION.
+
+PERFORM WRITE_LOG.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_BKPF
+*&---------------------------------------------------------------------*
+*       伝票ヘッダの取得
+*----------------------------------------------------------------------*
+FORM GET_BKPF.
+
+SELECT BUKRS        "会社コード
+BELNR        "伝票番号
+GJAHR        "会計年度
+BLART        "伝票タイプ
+BUDAT        "転記日付
+MONAT        "会計期間
+CPUDT        "登録日
+USNAM        "登録者ID
+FROM BKPF INTO TABLE GT_BKPF_00
+WHERE BUKRS =  P_BUKRS
+AND BELNR IN S_BELNR
+AND BUDAT IN S_BUDAT
+AND CPUDT IN S_CPUDT.
+
+ENDFORM.                    " GET_BKPF
+*&---------------------------------------------------------------------*
+*&      Form  make_record
+*&---------------------------------------------------------------------*
+*       レコード作成
+*----------------------------------------------------------------------*
+FORM MAKE_RECORD.
+
+DATA: LW_BKPF  TYPE TYP_BKPF_00.
+DATA: LW_BSEG  TYPE TYP_BSEG_00.
+DATA: LW_FILE  TYPE TYP_FILE.
+DATA: LW_DATA  TYPE TYP_DATA.
+DATA: LT_BSEG  TYPE TABLE OF  TYP_BSEG_00.
+
+* テキストモードでファイルをオープン
+OPEN DATASET P_FILE FOR OUTPUT IN TEXT MODE.
+
+*>伝票ヘッダ毎の処理
+LOOP AT GT_BKPF_00 INTO LW_BKPF.
+*-> 明細レコードを取得
+PERFORM GET_BSEG USING LW_BKPF
+CHANGING LT_BSEG[].
+*-> 明細レコード毎の処理
+LOOP AT LT_BSEG INTO LW_BSEG.
+*-->  出力レコードの編集
+PERFORM EDIT_RECORD USING LW_BKPF
+LW_BSEG
+CHANGING LW_FILE.
+*-->  CSVレコードの作成
+PERFORM EDIT_CSV USING LW_FILE
+CHANGING LW_DATA.
+*-->  レコードの書き出し
+TRANSFER LW_DATA TO P_FILE.
+*      WRITE:/ LW_DATA.
+GV_CNT = GV_CNT + 1.
+ENDLOOP.
+ENDLOOP.
+
+* ファイルをクローズ
+CLOSE DATASET P_FILE.
+
+ENDFORM.                    " make_record
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSEG
+*&---------------------------------------------------------------------*
+*       伝票明細の取得
+*----------------------------------------------------------------------*
+FORM GET_BSEG USING VALUE(PW_BKPF) TYPE TYP_BKPF_00
+CHANGING VALUE(PT_BSEG) LIKE GT_BSEG_DMY[].
+
+REFRESH: PT_BSEG.
+
+SELECT BUKRS        "会社コード
+BELNR        "伝票番号
+GJAHR        "会計年度
+KOART        "勘定タイプ
+SHKZG        "貸借フラグ
+GSBER        "事業領域
+DMBTR        "国内通貨額
+SGTXT        "明細テキスト
+KOSTL        "原価センタ
+HKONT        "G/L勘定コード
+PRCTR        "利益センタ
+FROM BSEG INTO TABLE PT_BSEG
+WHERE BUKRS = PW_BKPF-BUKRS
+AND BELNR = PW_BKPF-BELNR
+AND GJAHR = PW_BKPF-GJAHR.
+
+ENDFORM.                    " GET_BSEG
+
+*&---------------------------------------------------------------------*
+*&      Form  edit_record
+*&---------------------------------------------------------------------*
+*       出力レコードの編集
+*----------------------------------------------------------------------*
+FORM EDIT_RECORD USING VALUE(PW_BKPF)  TYPE TYP_BKPF_00
+VALUE(PW_BSEG)  TYPE TYP_BSEG_00
+CHANGING VALUE(PW_FILE)  TYPE TYP_FILE.
+
+DATA: LV_DMBTR   TYPE BSEG-DMBTR.
+DATA: LV_DMBTR_C TYPE TYP_FILE-DMBTR_C.
+
+CLEAR: PW_FILE.
+
+* 項目の単純コピー(from ヘッダ)
+PW_FILE-BELNR_C = PW_BKPF-BELNR.     "仕訳番号
+PW_FILE-MONAT_C = PW_BKPF-MONAT.     "期間
+PW_FILE-USNAM_C = PW_BKPF-USNAM.     "仕訳作成者
+
+* 項目の単純コピー(from 明細)
+PW_FILE-HKONT_C = PW_BSEG-HKONT.      "科目コード
+PW_FILE-SGTXT_C = PW_BSEG-SGTXT.      "適用
+PW_FILE-UNIT    = PW_BSEG-PRCTR.      "事業単位
+
+* 日付編集項目
+WRITE PW_BKPF-BUDAT TO PW_FILE-BUDAT_C
+USING EDIT MASK '____/__/__'.  "仕訳取引計上日
+
+
+WRITE PW_BKPF-CPUDT TO PW_FILE-CPUDT_C
+USING EDIT MASK '____/__/__'.  "仕訳入力日
+
+* 仕訳取引源泉
+CASE PW_BSEG-KOART.
+WHEN 'K'.
+PW_FILE-GENSEN = CST_HOJO_AP.  "債務
+WHEN 'D'.
+PW_FILE-GENSEN = CST_HOJO_AR.  "債権
+WHEN OTHERS.
+CASE PW_BKPF-BLART.
+WHEN 'RV'.
+CASE PW_BSEG-HKONT.
+WHEN '0004101001'.
+PW_FILE-GENSEN = CST_SDMM_URI. "売上
+WHEN '0004101002'.
+PW_FILE-GENSEN = CST_SDMM_URI. "売上
+WHEN OTHERS.
+ENDCASE.
+WHEN 'WL'.
+CASE PW_BSEG-HKONT.
+WHEN '0001110001'.
+PW_FILE-GENSEN = CST_SDMM_SYO. "商品
+WHEN '0005110001'.
+PW_FILE-GENSEN = CST_SDMM_GEN. "原価
+WHEN '0005110002'.
+PW_FILE-GENSEN = CST_SDMM_GEN. "原価
+WHEN OTHERS.
+ENDCASE.
+WHEN 'WE'.
+CASE PW_BSEG-HKONT.
+WHEN '0001110001'.
+PW_FILE-GENSEN = CST_SDMM_SYO. "商品
+WHEN '0002190000'.
+PW_FILE-GENSEN = CST_SDMM_NYU. "入仮
+WHEN OTHERS.
+ENDCASE.
+WHEN 'RE'.
+CASE PW_BSEG-HKONT.
+WHEN '0002190000'.
+PW_FILE-GENSEN = CST_SDMM_NYU. "入仮
+WHEN OTHERS.
+ENDCASE.
+WHEN OTHERS.
+ENDCASE.
+ENDCASE.
+
+IF PW_BSEG-SHKZG = 'H'.
+LV_DMBTR = PW_BSEG-DMBTR * -1.
+ELSE.
+LV_DMBTR = PW_BSEG-DMBTR.
+ENDIF.
+
+** 金額項目
+* 合計額に加算
+GV_GOUKEI = GV_GOUKEI + LV_DMBTR.
+WRITE LV_DMBTR TO LV_DMBTR_C  CURRENCY 'JPY' NO-GROUPING.
+
+* 貸方なら前マイナス編集
+PERFORM EDIT_MINUS USING LV_DMBTR_C
+CHANGING PW_FILE-DMBTR_C.
+
+ENDFORM.                    " edit_record
+
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_CSV
+*&---------------------------------------------------------------------*
+*       CSV編集
+*----------------------------------------------------------------------*
+FORM EDIT_CSV USING VALUE(PW_FILE) TYPE TYP_FILE
+CHANGING VALUE(PW_DATA) TYPE TYP_DATA.
+
+CLEAR: PW_DATA.
+
+CONCATENATE PW_FILE-BELNR_C       "仕訳番号
+PW_FILE-HKONT_C       "科目コード
+PW_FILE-DMBTR_C       "金額
+PW_FILE-UNIT          "事業単位
+PW_FILE-BUDAT_C       "仕訳取引計上日
+PW_FILE-MONAT_C       "期間
+PW_FILE-CPUDT_C       "仕訳入力日
+PW_FILE-USNAM_C       "仕訳作成者
+PW_FILE-GENSEN        "仕訳取引源泉
+PW_FILE-SGTXT_C       "適用
+PW_FILE-OTHER01       "その他１
+PW_FILE-OTHER02       "その他２
+PW_FILE-OTHER03       "その他３
+INTO PW_DATA SEPARATED BY ','.
+
+ENDFORM.                    " EDIT_CSV
+
+*&---------------------------------------------------------------------*
+*&      Form  write_log
+*&---------------------------------------------------------------------*
+*       ログ出力
+*----------------------------------------------------------------------*
+FORM WRITE_LOG.
+
+DATA: LV_GOUKEI(15)   TYPE C.
+DATA: LV_KENSUU(15)   TYPE C.
+
+WRITE GV_GOUKEI TO LV_GOUKEI CURRENCY 'JPY'.
+LV_KENSUU = GV_CNT.
+
+WRITE: /    'レコード件数：',
+20 LV_KENSUU,
+35 '件'.
+WRITE: /    '合 計 金 額 ：',
+20 LV_GOUKEI,
+35 '円'.
+
+ENDFORM.                    " write_log
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_MINUS
+*&---------------------------------------------------------------------*
+*       マイナス編集
+*----------------------------------------------------------------------*
+FORM EDIT_MINUS USING VALUE(PV_BEFORE) TYPE TYP_FILE-DMBTR_C
+CHANGING VALUE(PV_AFTER)  TYPE TYP_FILE-DMBTR_C.
+
+DATA: LV_LEN     TYPE I.
+DATA: LV_SHIFT     TYPE I.
+
+CONDENSE PV_BEFORE NO-GAPS.
+LV_LEN   = STRLEN( PV_BEFORE ).
+LV_SHIFT = LV_LEN - 1.
+
+IF PV_BEFORE+LV_SHIFT  = '-'.
+PV_AFTER(01)         = '-'.
+PV_AFTER+1(LV_SHIFT) = PV_BEFORE(LV_SHIFT).
+ELSE.
+PV_AFTER             = PV_BEFORE.
+ENDIF.
+
+ENDFORM.                    " EDIT_MINUS

@@ -1,0 +1,1828 @@
+*----------------------------------------------------------------------*
+* 2003/03/17 プログラム名称変更                                        *
+*  支払依頼表                                                          *
+*    機能：請求データ、仕入データと、買掛管理データより、支払依頼表を  *
+*          作成する                                                    *
+*          作成時点での情報から作成するため、データに変化があった場合  *
+*          は、同一の条件で実行しても出力が変わる可能性がある          *
+*          大量の未決済明細が存在する場合、動作が遅くなる              *
+*          単一の購買組織、締日での実行のみ対応                        *
+*          （複数の購買組織がある場合は前月残高が正しく把握できない）  *
+*          購買グループ別の情報は把握できない                          *
+*          ALVの機能で帳票を作成する                                   *
+*          会社コード、仕入先コード、プラント、締日を指定可能          *
+*          改頁条件により、ヘッダに表示される項目が自動で変更される    *
+*          （ただし、会社、プラント、締日のみ）                        *
+*          出力構造として、YK01424010を使用している                    *
+*          ヘッダ名称は、プログラム中で設定している                    *
+*    作成：2002/04/30 KURANO                                           *
+*    変更：2002/05/18 KURANO 締日の初期値設定                          *
+*    変更：2002/05/21 KURANO 締日の初期値設定（修正）                  *
+*    変更：2002/05/27 KURANO 残高差異の修正                            *
+*    変更：2002/05/30 KURANO 前月残高の変更                            *
+*                            購買組織のパラメタ化                      *
+*                            購買グループの使用中止                    *
+*                            項目名称変更                              *
+*                            期日支払額の変更                          *
+*                            検索条件（仕入先マスタ）の追加            *
+*                            計算式（支払額、残高差異）の計算式変更    *
+*    変更：2002/05/31 KURANO 買掛管理データの使用中止                  *
+*    変更：2002/05/31 KAJISA 仮修正の反映                              *
+*    変更：2002/11/12 KAJISA YK230の照合締日の読み込み条件を変更       *
+*    変更：2003/01/15 KAJISA T001Wの読み込み条件を修正                 *
+*    変更：2003/03/14 ABE    消費税対応                                *
+*    変更：2003/03/17 ABE    ﾌﾟﾛｸﾞﾗﾑ名称／ﾍｯﾀﾞ名称変更等               *
+*    変更：2003/03/18 ABE    アンマッチ対応                            *
+*                            入力ﾊﾟﾗﾒｰﾀ:前月残高/当月支払の削除        *
+*    変更：2003/03/31 ABE    支払依頼表正式作成                        *
+*                            構造:YK01424010を使用                     *
+*    変更：2009/08/06 HAYASHI 税コード機能の削除                       *
+*　                           税コードを伝票明細ごとに取得　           *
+*----------------------------------------------------------------------*
+REPORT YK014240
+LINE-SIZE 255
+LINE-COUNT 65.
+
+* 使用テーブル
+TABLES YK210. "請求データ
+TABLES YK230. "仕入データ
+TABLES YK410. "支払予定データ
+TABLES LFA1.  "仕入先マスタ (一般セクション)
+TABLES T001.  "会社コード
+TABLES T001W. "プラント/支店
+TABLES BSIK.  "会計管理: 仕入先の二次索引
+TABLES BSAK.  "会計管理: 仕入先の二次索引 (決済明細)
+
+* グローバル変数
+* 2003/03/31 MOD-S
+*DATA I_REPORT LIKE STANDARD TABLE OF YK01423010 WITH HEADER LINE.
+DATA I_REPORT LIKE STANDARD TABLE OF YK01424010 WITH HEADER LINE.
+* 2003/03/31 MOD-E
+DATA W_WERKS TYPE XFELD.
+DATA W_BUKRS TYPE XFELD.
+DATA W_ZFBDT TYPE XFELD.
+DATA W_NINNI(14) TYPE C VALUE '%'.              "2003/01/15 ADD
+DATA W_NAME1 LIKE T001W-NAME1.                  "2003/01/15 ADD
+* 2003/03/14 ADD-S
+DATA W_MWDAT LIKE BSEG-WRBTR.            "税額
+* 2003/03/14 ADD-E
+* 選択画面
+PARAMETERS P_BUKRS LIKE YK230-BUKRS MEMORY ID BUK. "会社コード
+SELECT-OPTIONS S_LIFNR FOR YK230-LIFNR. "仕入先コード
+SELECT-OPTIONS S_WERKS FOR YK230-WERKS MEMORY ID WRK. "プラント
+PARAMETERS P_ZFBDT LIKE YK230-ZFBDT OBLIGATORY. "締日
+* 2003/03/18 DEL-S
+*SELECT-OPTIONS S_HKONT1 FOR BSIK-HKONT. "前月残高
+*SELECT-OPTIONS S_HKONT2 FOR BSIK-HKONT. "当月支払
+* 2003/03/18 DEL-E
+PARAMETERS P_EKORG LIKE LFM1-EKORG DEFAULT '1000'.
+PARAMETERS P_BYPASS TYPE CHAR01. "バッファをバイパス
+
+*2009/08/06 削除:選択画面の税コード廃止
+** 2003/03/14 ADD-S
+*PARAMETERS P_MWSKZ LIKE BSIK-MWSKZ.     "税コード
+** 2003/03/14 ADD-E
+
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+PERFORM F_CHECK.
+
+START-OF-SELECTION.
+
+* 2003/03/14 DEL-S
+*  PERFORM f_zenzan_get.   "前月残高⇒(前月未請求残)
+*  PERFORM f_shiharai_get. "当月支払
+* 2003/03/14 DEL-E
+* 2003/03/17 MOD-S
+*  PERFORM F_SHIIRE_GET.   "仕入合計
+PERFORM F_SHIIRE_GET.   "当月仕入合計
+* 2003/03/17 MOD-E
+PERFORM F_SEIKYU_GET.   "請求合計
+* 2003/03/17 MOD-S
+*  PERFORM F_ZENKEI_GET.   "前月計上額
+*  PERFORM F_JIKEI_GET.    "次月計上額
+PERFORM F_ZENKEI_GET.   "前月計上
+PERFORM F_JIKEI_GET.    "次月計上
+* 2003/03/17 MOD-E
+PERFORM F_TOUMISEI_GET. "当月未請求残
+* 2003/03/17 MOD-S
+*  PERFORM F_MISEIKYU_GET. "当回未請求
+PERFORM F_MISEIKYU_GET. "前月以前未請求
+* 2003/03/17 MOD-E
+PERFORM F_ZENMISHI_GET. "前月未請求支払（繰越請求額）
+* 2003/03/17 MOD-S
+*  PERFORM F_TYOSEI_GET.   "調整額
+*  PERFORM F_YOTEI_GET.    "支払予定額（支払予定より集計）
+PERFORM F_TYOSEI_GET.   "要確認額
+PERFORM F_YOTEI_GET.    "支払依頼額
+* 2003/03/17 MOD-E
+* 2003/03/14 DEL-S
+*  PERFORM f_kijitu_get.   "期日支払額
+*  PERFORM f_touzan_get.   "当月残高
+* 2003/03/14 DEL-E
+PERFORM F_DATA_SUM.     "集計と名称と計算
+PERFORM F_ALV_OUT.      "ALV出力
+
+*---------------------------------------------------------------------*
+*       FORM f_zenzan_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*FORM f_zenzan_get.
+** ローカル変数定義
+*  DATA w_date LIKE sy-datum.
+*  RANGES r_zuonr FOR bsik-zuonr.
+*  TYPES: BEGIN OF st_bsik,
+*           bukrs LIKE bsik-bukrs,
+*           lifnr LIKE bsik-lifnr,
+*           zuonr LIKE bsik-zuonr,
+*           waers LIKE bsik-waers,
+*           werks LIKE rseg-werks,
+*           belnr LIKE bsik-belnr,
+*           gjahr LIKE bsik-gjahr,
+*           awtyp LIKE bkpf-awtyp,
+*           awkey LIKE bkpf-awkey,
+*           shkzg LIKE bsik-shkzg,
+*           wrbtr LIKE bsik-wrbtr,
+*         END OF st_bsik.
+*  DATA i_bsik TYPE STANDARD TABLE OF st_bsik WITH HEADER LINE.
+*  DATA w_weark LIKE t001w-werks.
+*
+** 前回締日の計算
+*  CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+*       EXPORTING
+*            day_in            = p_zfbdt
+*       IMPORTING
+*            last_day_of_month = w_date  "締日の当月の月末日
+*       EXCEPTIONS
+*            day_in_no_date    = 1
+*            OTHERS            = 2.
+*  IF sy-subrc <> 0.
+*    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+*  ENDIF.
+*  IF w_date <> p_zfbdt.  "締日が月末日でない場合
+*    w_date+6(2) = '01'.  "締日の当月の月初
+*    w_date = w_date - 1. "締日の前月の月末
+*    w_date+6(2) = p_zfbdt+6(2).
+*  ELSE.
+*    w_date+6(2) = '01'.  "締日の当月の月初
+*    w_date = w_date - 1. "締日の前月の月末
+*  ENDIF.
+*
+** プラント名から検索条件を作成
+*  REFRESH r_zuonr.
+*  r_zuonr-option = 'EQ'.
+*  r_zuonr-sign = 'I'.
+*  r_zuonr-low = space.
+*  r_zuonr-high = ''.
+*  APPEND r_zuonr.
+*  SELECT        * FROM  t001w
+*         WHERE  werks IN s_werks.
+*    r_zuonr-low = t001w-name1.
+*    APPEND r_zuonr.
+*  ENDSELECT.
+*
+** 未決済明細検索
+* SELECT s~bukrs s~lifnr s~zuonr s~waers s~shkzg s~wrbtr k~awtyp k~awkey
+*                        FROM   bsik AS s JOIN bkpf AS k
+*                          ON   s~bukrs  = k~bukrs AND
+*                               s~gjahr  = k~gjahr AND
+*                               s~belnr  = k~belnr
+*                        INTO CORRESPONDING FIELDS OF TABLE i_bsik
+*                        WHERE  s~bukrs  = p_bukrs   "指定された会社
+*                        AND    s~lifnr IN s_lifnr   "指定された仕入先
+*                        AND    s~budat <= w_date    "前回締日以前に転記
+*                        AND    s~hkont IN s_hkont1. "前月残高勘定コード
+** 決済明細検索
+* SELECT s~bukrs s~lifnr s~zuonr s~waers s~shkzg s~wrbtr k~awtyp k~awkey
+*                        FROM   bsak AS s JOIN bkpf AS k
+*                          ON   s~bukrs  = k~bukrs AND
+*                               s~gjahr  = k~gjahr AND
+*                               s~belnr  = k~belnr
+*                        APPENDING CORRESPONDING FIELDS OF TABLE i_bsik
+*                        WHERE  s~bukrs  = p_bukrs   "指定された会社
+*                        AND    s~lifnr IN s_lifnr   "指定された仕入先
+*                        AND    s~budat <= w_date    "前回締日以前に転記
+*                        AND    s~augdt  > w_date    "前回締日の後で決済
+*                        AND    s~hkont IN s_hkont1. "前月残高勘定コード
+** プラントの判定
+*  SORT i_bsik BY zuonr.
+*  LOOP AT i_bsik.
+*    IF NOT i_bsik-zuonr IS iNITIAL.                     "2003/01/15 ADD
+*      CONCATENATE i_bsik-zuonr(16) W_NINNI INTO W_NAME1."2003/01/15 ADD
+*    ELSE.                                               "2003/01/15 ADD
+*      CLEAR  W_NAME1.                                   "2003/01/15 ADD
+*    ENDIF.                                              "2003/01/15 ADD
+*    CASE i_bsik-awtyp.
+*      WHEN 'BKPF'. "会計転記：買掛金/支払依頼
+*        SELECT SINGLE werks
+*               INTO   i_bsik-werks
+*               FROM   t001w
+**              WHERE  name1  = i_bsik-zuonr.          "2003/01/15 MOD
+*              WHERE  name1 LIKE W_NAME1.              "2003/01/15 MOD
+*        IF sy-subrc <> 0. "プラントコードで検索してみる
+*          SELECT SINGLE werks
+*                 INTO   i_bsik-werks
+*                 FROM   t001w
+**                 WHERE  werks  = i_bsik-zuonr.       "2003/01/15 MOD
+*                  WHERE  WERKS LIKE W_NAME1.          "2003/01/15 MOD
+*        ENDIF.
+*      WHEN 'RMRP'. "購買転記：入庫請求仮/買掛金
+*        SELECT SINGLE werks
+*               FROM   rseg
+*               INTO   i_bsik-werks
+*               WHERE  belnr  = i_bsik-awkey+0(10)
+*               AND    gjahr  = i_bsik-awkey+10(4).
+*    ENDCASE.
+*    IF i_bsik-werks IN s_werks. "対象のプラントか？
+*      MODIFY i_bsik.
+*    ELSE. "対象外は削除
+*      DELETE i_bsik.
+*    ENDIF.
+*  ENDLOOP.
+*
+** レポートデータ作成
+*  LOOP AT i_bsik.
+*    CLEAR i_report.
+*    i_report-bukrs = i_bsik-bukrs.    "会社コード
+*    i_report-lifnr = i_bsik-lifnr.    "仕入先コード
+*    i_report-werks = i_bsik-werks.    "プラント
+*    i_report-ekorg = p_ekorg.         "購買組織
+*    i_report-ekgrp = ''.              "購買グループ
+*    i_report-zfbdt = p_zfbdt.         "締日
+*    i_report-waers = i_bsik-waers.    "通貨コード
+*    IF i_bsik-shkzg = 'H'. "貸方正
+*      i_report-zenzan = i_bsik-wrbtr. "前月残高
+*    ELSE.
+*      i_report-zenzan = i_bsik-wrbtr * -1.
+*    ENDIF.
+*    APPEND i_report.
+*  ENDLOOP.
+*
+*ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_touzan_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*FORM f_touzan_get.
+** ローカル変数定義
+*  DATA w_date LIKE sy-datum.
+*  RANGES r_zuonr FOR bsik-zuonr.
+*  TYPES: BEGIN OF st_bsik,
+*           bukrs LIKE bsik-bukrs,
+*           lifnr LIKE bsik-lifnr,
+*           zuonr LIKE bsik-zuonr,
+*           waers LIKE bsik-waers,
+*           werks LIKE rseg-werks,
+*           belnr LIKE bsik-belnr,
+*           gjahr LIKE bsik-gjahr,
+*           awtyp LIKE bkpf-awtyp,
+*           awkey LIKE bkpf-awkey,
+*           shkzg LIKE bsik-shkzg,
+*           wrbtr LIKE bsik-wrbtr,
+*         END OF st_bsik.
+*  DATA i_bsik TYPE STANDARD TABLE OF st_bsik WITH HEADER LINE.
+*  DATA w_weark LIKE t001w-werks.
+*
+** 前回締日の計算
+*  CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+*       EXPORTING
+*            day_in            = p_zfbdt
+*       IMPORTING
+*            last_day_of_month = w_date  "締日の当月の月末日
+*       EXCEPTIONS
+*            day_in_no_date    = 1
+*            OTHERS            = 2.
+*  IF sy-subrc <> 0.
+*    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+*  ENDIF.
+*  IF w_date <> p_zfbdt.  "締日が月末日でない場合
+*    w_date+6(2) = '01'.  "締日の当月の月初
+*    w_date = w_date - 1. "締日の前月の月末
+*    w_date+6(2) = p_zfbdt+6(2).
+*  ELSE.
+*    w_date+6(2) = '01'.  "締日の当月の月初
+*    w_date = w_date - 1. "締日の前月の月末
+*  ENDIF.
+*
+** プラント名から検索条件を作成
+*  REFRESH r_zuonr.
+*  r_zuonr-option = 'EQ'.
+*  r_zuonr-sign = 'I'.
+*  r_zuonr-low = space.
+*  r_zuonr-high = ''.
+*  APPEND r_zuonr.
+*  SELECT        * FROM  t001w
+*         WHERE  werks IN s_werks.
+*    r_zuonr-low = t001w-name1.
+*    APPEND r_zuonr.
+*  ENDSELECT.
+*
+** 未決済明細検索
+* SELECT s~bukrs s~lifnr s~zuonr s~waers s~shkzg s~wrbtr k~awtyp k~awkey
+*                        FROM   bsik AS s JOIN bkpf AS k
+*                          ON   s~bukrs  = k~bukrs AND
+*                               s~gjahr  = k~gjahr AND
+*                               s~belnr  = k~belnr
+*                        INTO CORRESPONDING FIELDS OF TABLE i_bsik
+*                        WHERE  s~bukrs  = p_bukrs   "指定された会社
+*                        AND    s~lifnr IN s_lifnr   "指定された仕入先
+*                        AND    s~budat <= p_zfbdt   "締日以前に転記
+*                        AND    s~hkont IN s_hkont1. "前月残高勘定コード
+** 決済明細検索
+* SELECT s~bukrs s~lifnr s~zuonr s~waers s~shkzg s~wrbtr k~awtyp k~awkey
+*                        FROM   bsak AS s JOIN bkpf AS k
+*                          ON   s~bukrs  = k~bukrs AND
+*                               s~gjahr  = k~gjahr AND
+*                               s~belnr  = k~belnr
+*                        APPENDING CORRESPONDING FIELDS OF TABLE i_bsik
+*                        WHERE  s~bukrs  = p_bukrs   "指定された会社
+*                        AND    s~lifnr IN s_lifnr   "指定された仕入先
+*                        AND    s~budat <= p_zfbdt   "締日以前に転記
+*                        AND    s~augdt  > p_zfbdt   "締日の後で決済
+*                        AND    s~hkont IN s_hkont1. "前月残高勘定コード
+** プラントの判定
+*  SORT i_bsik BY zuonr.
+*  LOOP AT i_bsik.
+*    IF NOT i_bsik-zuonr IS iNITIAL.                     "2003/01/15 ADD
+*      CONCATENATE i_bsik-zuonr(16) W_NINNI INTO W_NAME1."2003/01/15 ADD
+*    ELSE.                                               "2003/01/15 ADD
+*      CLEAR  W_NAME1.                                   "2003/01/15 ADD
+*    ENDIF.                                              "2003/01/15 ADD
+*    CASE i_bsik-awtyp.
+*      WHEN 'BKPF'. "会計転記：買掛金/支払依頼
+*        SELECT SINGLE werks
+*               INTO   i_bsik-werks
+*               FROM   t001w
+**               WHERE  name1  = i_bsik-zuonr.        "2003/01/15 MOD
+*               WHERE  name1 LIKE W_NAME1.            "2003/01/15 MOD
+*        IF sy-subrc <> 0. "プラントコードで検索してみる
+*          SELECT SINGLE werks
+*                 INTO   i_bsik-werks
+*                 FROM   t001w
+**                 WHERE  werks  = i_bsik-zuonr.      "2003/01/15 MOD
+*               WHERE  WERKS LIKE W_NAME1.            "2003/01/15 MOD
+*        ENDIF.
+*      WHEN 'RMRP'. "購買転記：入庫請求仮/買掛金
+*        SELECT SINGLE werks
+*               FROM   rseg
+*               INTO   i_bsik-werks
+*               WHERE  belnr  = i_bsik-awkey+0(10)
+*               AND    gjahr  = i_bsik-awkey+10(4).
+*    ENDCASE.
+*    IF i_bsik-werks IN s_werks. "対象のプラントか？
+*      MODIFY i_bsik.
+*    ELSE. "対象外は削除
+*      DELETE i_bsik.
+*    ENDIF.
+*  ENDLOOP.
+*
+** レポートデータ作成
+*  LOOP AT i_bsik.
+*    CLEAR i_report.
+*    i_report-bukrs = i_bsik-bukrs.    "会社コード
+*    i_report-lifnr = i_bsik-lifnr.    "仕入先コード
+*    i_report-werks = i_bsik-werks.    "プラント
+*    i_report-ekorg = p_ekorg.         "購買組織
+*    i_report-ekgrp = ''.              "購買グループ
+*    i_report-zfbdt = p_zfbdt.         "締日
+*    i_report-waers = i_bsik-waers.    "通貨コード
+*    IF i_bsik-shkzg = 'H'. "貸方正
+*      i_report-touzan = i_bsik-wrbtr. "当月残高
+*    ELSE.
+*      i_report-touzan = i_bsik-wrbtr * -1.
+*    ENDIF.
+*    APPEND i_report.
+*  ENDLOOP.
+*
+*ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_shiharai_get                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*FORM f_shiharai_get.
+** ローカル変数定義
+*  DATA w_date LIKE sy-datum.
+*  RANGES r_zuonr FOR bsik-zuonr.
+*  TYPES: BEGIN OF st_bsik,
+*           bukrs LIKE bsik-bukrs,
+*           lifnr LIKE bsik-lifnr,
+*           zuonr LIKE bsik-zuonr,
+*           waers LIKE bsik-waers,
+*           werks LIKE rseg-werks,
+*           belnr LIKE bsik-belnr,
+*           gjahr LIKE bsik-gjahr,
+*           awtyp LIKE bkpf-awtyp,
+*           awkey LIKE bkpf-awkey,
+*           shkzg LIKE bsik-shkzg,
+*           wrbtr LIKE bsik-wrbtr,
+*         END OF st_bsik.
+*  DATA i_bsik TYPE STANDARD TABLE OF st_bsik WITH HEADER LINE.
+*  DATA w_weark LIKE t001w-werks.
+*
+** 前回締日の計算
+*  CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+*       EXPORTING
+*            day_in            = p_zfbdt
+*       IMPORTING
+*            last_day_of_month = w_date  "締日の当月の月末日
+*       EXCEPTIONS
+*            day_in_no_date    = 1
+*            OTHERS            = 2.
+*  IF sy-subrc <> 0.
+*    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+*            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+*  ENDIF.
+*  IF w_date <> p_zfbdt.  "締日が月末日でない場合
+*    w_date+6(2) = '01'.  "締日の当月の月初
+*    w_date = w_date - 1. "締日の前月の月末
+*    w_date+6(2) = p_zfbdt+6(2).
+*  ELSE.
+*    w_date+6(2) = '01'.  "締日の当月の月初
+*    w_date = w_date - 1. "締日の前月の月末
+*  ENDIF.
+*
+** プラント名から検索条件を作成
+*  REFRESH r_zuonr.
+*  r_zuonr-option = 'EQ'.
+*  r_zuonr-sign = 'I'.
+*  r_zuonr-low = space.
+*  r_zuonr-high = ''.
+*  APPEND r_zuonr.
+*  SELECT        * FROM  t001w
+*         WHERE  werks IN s_werks.
+*    r_zuonr-low = t001w-name1.
+*    APPEND r_zuonr.
+*  ENDSELECT.
+*
+** 決済明細検索
+* SELECT s~bukrs s~lifnr s~zuonr s~waers s~shkzg s~wrbtr k~awtyp k~awkey
+*                        FROM   bsak AS s JOIN bkpf AS k
+*                          ON   s~bukrs  = k~bukrs AND
+*                               s~gjahr  = k~gjahr AND
+*                               s~belnr  = k~belnr
+*                        INTO CORRESPONDING FIELDS OF TABLE i_bsik
+*                        WHERE  s~bukrs  = p_bukrs     "指定された会社
+*                        AND    s~lifnr IN s_lifnr     "指定された仕入先
+**                AND    s~budat <= p_zfbdt   "締日以前に転記
+*                       AND    s~augdt  > w_date     "前回締日の後で決済
+*                       AND    s~augdt <= p_zfbdt    "当回締日の前に決済
+*                     AND NOT ( s~augbl = s~belnr  "計上と決済が同じ伝票
+*                        AND    s~augdt    = s~budat ) "でないこと
+*                       AND    s~hkont IN s_hkont2.  "当月支払勘定コード
+** プラントの判定
+*  SORT i_bsik BY zuonr.
+*  LOOP AT i_bsik.
+*    IF NOT i_bsik-zuonr IS iNITIAL.                     "2003/01/15 ADD
+*      CONCATENATE i_bsik-zuonr(16) W_NINNI INTO W_NAME1."2003/01/15 ADD
+*    ELSE.                                               "2003/01/15 ADD
+*      CLEAR W_NAME1.                                    "2003/01/15 ADD
+*    ENDIF.                                              "2003/01/15 ADD
+*    CASE i_bsik-awtyp.
+*      WHEN 'BKPF'. "会計転記：買掛金/支払依頼
+*        SELECT SINGLE werks
+*               INTO   i_bsik-werks
+*               FROM   t001w
+**               WHERE  name1  = i_bsik-zuonr.         "2003/01/15 MOD
+*                WHERE  name1 LIKE W_NAME1.            "2003/01/15 MOD
+*        IF sy-subrc <> 0. "プラントコードで検索してみる
+*          SELECT SINGLE werks
+*                 INTO   i_bsik-werks
+*                 FROM   t001w
+**                 WHERE  werks  = i_bsik-zuonr.       "2003/01/15 MOD
+*                WHERE  WERKS LIKE W_NAME1.            "2003/01/15 MOD
+*        ENDIF.
+*      WHEN 'RMRP'. "購買転記：入庫請求仮/買掛金
+*        SELECT SINGLE werks
+*               FROM   rseg
+*               INTO   i_bsik-werks
+*               WHERE  belnr  = i_bsik-awkey+0(10)
+*               AND    gjahr  = i_bsik-awkey+10(4).
+*    ENDCASE.
+*    IF i_bsik-werks IN s_werks. "対象のプラントか？
+*      MODIFY i_bsik.
+*    ELSE. "対象外は削除
+*      DELETE i_bsik.
+*    ENDIF.
+*  ENDLOOP.
+*
+** レポートデータ作成
+*  LOOP AT i_bsik.
+*    CLEAR i_report.
+*    i_report-bukrs = i_bsik-bukrs.    "会社コード
+*    i_report-lifnr = i_bsik-lifnr.    "仕入先コード
+*    i_report-werks = i_bsik-werks.    "プラント
+*    i_report-ekorg = p_ekorg.         "購買組織
+*    i_report-ekgrp = ''.              "購買グループ
+*    i_report-zfbdt = p_zfbdt.         "締日
+*    i_report-waers = i_bsik-waers.    "通貨コード
+*    IF i_bsik-shkzg = 'H'. "貸方正
+*      i_report-shiharai = i_bsik-wrbtr. "前月残高
+*    ELSE.
+*      i_report-shiharai = i_bsik-wrbtr * -1.
+*    ENDIF.
+*    APPEND i_report.
+*  ENDLOOP.
+*
+*ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_shiire_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_SHIIRE_GET.
+* ローカル変数定義
+TYPES: BEGIN OF ST_YK230,
+BUKRS LIKE YK230-BUKRS,
+LIFNR LIKE YK230-LIFNR,
+WERKS LIKE YK230-WERKS,
+EKORG LIKE YK230-EKORG,
+EKGRP LIKE YK230-EKGRP,
+ZFBDT LIKE YK230-ZFBDT,
+WAERS LIKE YK230-WAERS,
+KNETXAMT LIKE YK230-KNETXAMT,
+END OF ST_YK230.
+DATA I_YK230 TYPE STANDARD TABLE OF ST_YK230 WITH HEADER LINE.
+
+* 仕入データ検索
+REFRESH I_YK230.
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT WAERS SUM( KNETXAMT )
+INTO   TABLE I_YK230
+FROM   YK230
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+AND    ZFBDT  = P_ZFBDT "当月発生の仕入
+GROUP BY LIFNR WERKS EKORG EKGRP BUKRS ZFBDT WAERS.
+
+* レポートデータ作成
+LOOP AT I_YK230.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK230-BUKRS.     "会社コード
+I_REPORT-LIFNR = I_YK230-LIFNR.     "仕入先コード
+I_REPORT-WERKS = I_YK230-WERKS.     "プラント
+I_REPORT-EKORG = I_YK230-EKORG.     "購買組織
+I_REPORT-EKGRP = ''.                "購買グループ
+I_REPORT-ZFBDT = I_YK230-ZFBDT.     "締日
+I_REPORT-WAERS = I_YK230-WAERS.     "通貨コード
+* 2003/03/17 MOD-S
+*    I_REPORT-SHIIRE = I_YK230-KNETXAMT. "仕入合計
+I_REPORT-SHIIRE = I_YK230-KNETXAMT. "当月仕入合計
+* 2003/03/17 MOD-E
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_seikyu_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_SEIKYU_GET.
+* ローカル変数定義
+TYPES: BEGIN OF ST_YK210,
+BUKRS LIKE YK210-BUKRS,
+LIFNR LIKE YK210-LIFNR,
+WERKS LIKE YK210-WERKS,
+EKORG LIKE YK210-EKORG,
+EKGRP LIKE YK210-EKGRP,
+ZFBDT LIKE YK210-ZFBDT,
+WAERS LIKE YK210-WAERS,
+KNETXAMT LIKE YK210-KNETXAMT,
+END OF ST_YK210.
+DATA I_YK210 TYPE STANDARD TABLE OF ST_YK210 WITH HEADER LINE.
+
+* 請求データ検索
+REFRESH I_YK210.
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT WAERS SUM( KNETXAMT )
+INTO   TABLE I_YK210
+FROM   YK210
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+* 2003/03/14 MOD-S
+**2002/10/23 本番仮修正反映                                        1
+**\         AND    zfbdt  = p_zfbdt "当月発生の請求
+*         AND    zfbdt  <= p_zfbdt "当月以前発生の請求
+*         AND  ( zfbdt2 >= p_zfbdt "当月に照合の請求
+*         OR     zfbdt2  = 0  )    "未照合の請求
+**2002/10/23 END
+AND    ZFBDT  = P_ZFBDT "当月発生の請求
+* 2003/03/14 MOD-E
+AND    DELFLG <> 'X'    "削除されていないもの
+GROUP BY LIFNR WERKS EKORG EKGRP BUKRS ZFBDT WAERS.
+
+* レポートデータ作成
+LOOP AT I_YK210.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK210-BUKRS.     "会社コード
+I_REPORT-LIFNR = I_YK210-LIFNR.     "仕入先コード
+I_REPORT-WERKS = I_YK210-WERKS.     "プラント
+I_REPORT-EKORG = I_YK210-EKORG.     "購買組織
+I_REPORT-EKGRP = ''.                "購買グループ
+*2002/10/23 本番仮修正反映                                        2
+*\    i_report-zfbdt = i_yk210-zfbdt.     "締日
+I_REPORT-ZFBDT = P_ZFBDT.           "締日
+*2002/10/23 END
+I_REPORT-WAERS = I_YK210-WAERS.     "通貨コード
+I_REPORT-SEIKYU = I_YK210-KNETXAMT. "請求合計
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_zenkei_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_ZENKEI_GET.
+* ローカル変数定義
+TYPES: BEGIN OF ST_YK230,
+BUKRS LIKE YK230-BUKRS,
+LIFNR LIKE YK230-LIFNR,
+WERKS LIKE YK230-WERKS,
+EKORG LIKE YK230-EKORG,
+EKGRP LIKE YK230-EKGRP,
+ZFBDT LIKE YK230-ZFBDT,
+ZFBDT2 LIKE YK230-ZFBDT2,     "照合締日 2002/10/24 ADD
+WAERS LIKE YK230-WAERS,
+KNITXAMT LIKE YK230-KNITXAMT, "税抜金額
+KNETXAMT LIKE YK230-KNETXAMT, "税込金額
+PIDAMT LIKE YK230-PIDAMT,     "消込金額 2002/10/23 ADD
+BEYAMT LIKE YK230-BEYAMT,     "今回請求額
+END OF ST_YK230.
+DATA I_YK230 TYPE STANDARD TABLE OF ST_YK230 WITH HEADER LINE.
+
+* 仕入データ検索
+REFRESH I_YK230.
+*  SELECT bukrs lifnr werks ekorg ekgrp zfbdt waers      "2002/10/24 MOD
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT ZFBDT2 WAERS"2002/10/24 MOD
+KNITXAMT KNETXAMT PIDAMT BEYAMT
+INTO   TABLE I_YK230
+FROM   YK230
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+AND    ZFBDT  = P_ZFBDT "当月の仕入だが
+AND    ZFBDT2 =< P_ZFBDT "当月以前に照合済
+*        AND    zfbdt2 < p_zfbdt "前月以前に照合済
+AND  ( KEKKBN = '4'     "照合済
+* 2003/03/18 ADD-S
+OR     KEKKBN = '3'     "アンマッチ
+* 2003/03/18 ADD-E
+OR     KEKKBN = '5' ) . "部分照合
+
+* レポートデータ作成
+LOOP AT I_YK230.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK230-BUKRS.     "会社コード
+I_REPORT-LIFNR = I_YK230-LIFNR.     "仕入先コード
+I_REPORT-WERKS = I_YK230-WERKS.     "プラント
+I_REPORT-EKORG = I_YK230-EKORG.     "購買組織
+I_REPORT-EKGRP = ''.                "購買グループ
+I_REPORT-ZFBDT = I_YK230-ZFBDT.     "締日
+I_REPORT-WAERS = I_YK230-WAERS.     "通貨コード
+IF I_YK230-ZFBDT2  = P_ZFBDT.       "2002/10/24 ADD
+I_REPORT-ZENKEI = ( I_YK230-PIDAMT - I_YK230-BEYAMT )
+* I_YK230-KNETXAMT
+/ I_YK230-KNITXAMT.
+*2002/10/24 ADD ADD START
+ELSE.
+* 2003/03/17 MOD-S
+*      I_REPORT-ZENKEI = I_YK230-KNETXAMT  "前月計上額
+I_REPORT-ZENKEI = I_YK230-KNETXAMT  "前月計上
+* 2003/03/17 MOD-E
+* 2003/03/14 MOD-S
+*                      * i_yk230-beyamt
+* I_YK230-PIDAMT
+* 2003/03/14 MOD-E
+/ I_YK230-KNITXAMT.
+ENDIF.
+*2002/10/24 ADD ADD END
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_jikei_get                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_JIKEI_GET.
+* ローカル変数定義
+*2009/08/06 MOD:税コード追加
+DATA LO_MWSKZ LIKE RSEG-MWSKZ.  "税コード
+
+TYPES: BEGIN OF ST_YK230,
+BUKRS LIKE YK230-BUKRS,
+LIFNR LIKE YK230-LIFNR,
+WERKS LIKE YK230-WERKS,
+EKORG LIKE YK230-EKORG,
+EKGRP LIKE YK230-EKGRP,
+ZFBDT LIKE YK230-ZFBDT,
+KEKKBN LIKE YK230-KEKKBN,
+WAERS LIKE YK230-WAERS,
+KNITXAMT LIKE YK230-KNITXAMT, "税抜金額
+KNETXAMT LIKE YK230-KNETXAMT, "税込金額
+BEYAMT LIKE YK230-BEYAMT,     "今回請求額
+*2009/08/06 MOD:伝票番号・伝票明細追加
+BELNR LIKE YK230-BELNR,
+BUZEI LIKE YK230-BUZEI,
+
+END OF ST_YK230.
+DATA I_YK230 TYPE STANDARD TABLE OF ST_YK230 WITH HEADER LINE.
+
+* 仕入データ検索
+*2009/08/06 MOD:取得項目に伝票番号・伝票明細追加
+REFRESH I_YK230.
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT KEKKBN WAERS
+KNITXAMT KNETXAMT BEYAMT BELNR BUZEI
+INTO   TABLE I_YK230
+FROM   YK230
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+AND    ZFBDT  > P_ZFBDT  "次月以降に計上だが
+AND    ZFBDT2 = P_ZFBDT. "当月支払
+
+* レポートデータ作成
+LOOP AT I_YK230.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK230-BUKRS.      "会社コード
+I_REPORT-LIFNR = I_YK230-LIFNR.      "仕入先コード
+I_REPORT-WERKS = I_YK230-WERKS.      "プラント
+I_REPORT-EKORG = I_YK230-EKORG.      "購買組織
+I_REPORT-EKGRP = ''.                 "購買グループ
+I_REPORT-ZFBDT = P_ZFBDT.            "締日
+I_REPORT-WAERS = I_YK230-WAERS.      "通貨コード
+IF I_YK230-KEKKBN = '4'.             "照合時は税込金額
+* 2003/03/17 MOD-S
+*      I_REPORT-JIKEI = I_YK230-KNETXAMT. "次月計上額
+I_REPORT-JIKEI = I_YK230-KNETXAMT. "次月計上
+* 2003/03/17 MOD-E
+* 2003/03/18 MOD-S
+*    ELSEIF I_YK230-KEKKBN = '5'.         "部分照合時は今回請求より計算
+ELSEIF I_YK230-KEKKBN = '3'          "部分照合時は今回請求より計算
+OR I_YK230-KEKKBN = '5'.
+
+*2009/08/06 MOD:
+*RSEGテーブルの税コードを、伝票番号・伝票明細を経由して取得
+SELECT SINGLE MWSKZ
+INTO LO_MWSKZ
+FROM RSEG
+WHERE BELNR = I_YK230-BELNR
+AND BUZEI = I_YK230-BUZEI.
+
+* 2003/03/18 MOD-E
+* 2003/03/14 MOD-S
+*      I_REPORT-JIKEI = I_YK230-KNETXAMT  "次月計上額
+*                      * I_YK230-BEYAMT
+*                      / I_YK230-KNITXAMT.
+CLEAR W_MWDAT.
+PERFORM CALCULATE_TAX USING    I_YK230-WAERS    "税額処理
+I_YK230-BEYAMT
+*2009/08/06税コード追加
+LO_MWSKZ
+CHANGING W_MWDAT.
+I_REPORT-JIKEI = I_YK230-BEYAMT + W_MWDAT.    "次月計上
+* 2003/03/14 MOD-E
+ENDIF.
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_toumisei_get                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_TOUMISEI_GET.
+* ローカル変数定義
+*2009/08/06 MOD:税コード追加
+DATA LO_MWSKZ LIKE RSEG-MWSKZ.  "税コード
+
+TYPES: BEGIN OF ST_YK230,
+BUKRS LIKE YK230-BUKRS,
+LIFNR LIKE YK230-LIFNR,
+WERKS LIKE YK230-WERKS,
+EKORG LIKE YK230-EKORG,
+EKGRP LIKE YK230-EKGRP,
+ZFBDT LIKE YK230-ZFBDT,
+KEKKBN LIKE YK230-KEKKBN,
+WAERS LIKE YK230-WAERS,
+KNITXAMT LIKE YK230-KNITXAMT, "税抜金額
+KNETXAMT LIKE YK230-KNETXAMT, "税込金額
+UPYAMT LIKE YK230-UPYAMT, "未請求額
+* 2003/03/18 ADD-S
+PIDAMT LIKE YK230-PIDAMT, "消込金額
+*2009/08/06 MOD:伝票番号・伝票明細追加
+BELNR LIKE YK230-BELNR,
+BUZEI LIKE YK230-BUZEI,
+* 2003/03/18 ADD-E
+END OF ST_YK230.
+DATA I_YK230 TYPE STANDARD TABLE OF ST_YK230 WITH HEADER LINE.
+
+* 仕入データ検索
+*2009/08/06 MOD:取得項目に伝票番号・伝票明細追加
+REFRESH I_YK230.
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT KEKKBN WAERS
+* 2003/03/18 MOD-S
+*         KNITXAMT KNETXAMT UPYAMT
+KNITXAMT KNETXAMT UPYAMT PIDAMT BELNR BUZEI
+
+* 2003/03/18 MOD-E
+INTO   TABLE I_YK230
+FROM   YK230
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+* 2003/03/14 MOD-S
+*         AND    zfbdt <= p_zfbdt   "当月以前に計上
+**2002/10/23 本番仮修正反映                                        1
+**\         AND    zfbdt2  > p_zfbdt. "当月以降に照合 "2002/06/05 MOD
+*         AND  ( zfbdt2  = 0          "現在未照合
+*          OR    zfbdt2  > p_zfbdt    "当月以降に照合
+**         OR  ( zfbdt2  = p_zfbdt    "当月照合で部分請求  "2002/11/12
+*          OR  ( zfbdt2  <= p_zfbdt    "当月照合で部分請求 "2002/11/12
+*         AND    kekkbn  = '5'   ) ). "次の照合後に帳票を出すと問題あり
+**2002/10/23 END
+**        AND  ( kekkbn  = '1'     "未請求
+**        OR     kekkbn  = '5' ).  "部分請求
+AND    ZFBDT = P_ZFBDT   "当月計上
+AND  ( KEKKBN  = '1'     "未請求
+* 2003/03/18 ADD-S
+OR     KEKKBN  = '3'     "アンマッチ
+* 2003/03/18 ADD-E
+OR     KEKKBN  = '5' ).  "部分請求
+* 2003/03/14 MOD-S
+
+* レポートデータ作成
+LOOP AT I_YK230.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK230-BUKRS.         "会社コード
+I_REPORT-LIFNR = I_YK230-LIFNR.         "仕入先コード
+I_REPORT-WERKS = I_YK230-WERKS.         "プラント
+I_REPORT-EKORG = I_YK230-EKORG.         "購買組織
+I_REPORT-EKGRP = ''.                    "購買グループ
+I_REPORT-ZFBDT = P_ZFBDT.               "締日
+I_REPORT-WAERS = I_YK230-WAERS.         "通貨コード
+* 2003/03/18 MOD-S
+*    IF I_YK230-KEKKBN = '5'.
+IF ( I_YK230-KEKKBN = '1' AND I_YK230-PIDAMT > 0 ) OR
+( I_YK230-KEKKBN = '3' ) OR
+( I_YK230-KEKKBN = '5' ).
+
+*2009/08/06 MOD:
+*RSEGテーブルの税コードを、伝票番号・伝票明細を経由して取得
+SELECT SINGLE MWSKZ
+INTO LO_MWSKZ
+FROM RSEG
+WHERE BELNR = I_YK230-BELNR
+AND BUZEI = I_YK230-BUZEI.
+* 2003/03/18 MOD-E
+* 2003/03/14 MOD-S
+*      I_REPORT-TOUMISEI = I_YK230-KNETXAMT  "当月未請求残
+*                        * I_YK230-UPYAMT    " = 税込 / 税抜 * 未請求
+*                        / I_YK230-KNITXAMT.
+CLEAR W_MWDAT.
+PERFORM CALCULATE_TAX USING    I_YK230-WAERS    "税額処理
+I_YK230-UPYAMT
+*2009/08/06税コード追加
+LO_MWSKZ
+CHANGING W_MWDAT.
+I_REPORT-TOUMISEI = I_YK230-UPYAMT + W_MWDAT.
+* 2003/03/14 MOD-E
+ELSE.
+I_REPORT-TOUMISEI = I_YK230-KNETXAMT. "当月未請求残←税込金額
+ENDIF.
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_miseikyu_get                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_MISEIKYU_GET.
+* ローカル変数定義
+*2009/08/06 MOD:税コード追加
+DATA LO_MWSKZ LIKE RSEG-MWSKZ.  "税コード
+
+TYPES: BEGIN OF ST_YK230,
+BUKRS LIKE YK230-BUKRS,
+LIFNR LIKE YK230-LIFNR,
+WERKS LIKE YK230-WERKS,
+EKORG LIKE YK230-EKORG,
+EKGRP LIKE YK230-EKGRP,
+ZFBDT LIKE YK230-ZFBDT,
+KEKKBN LIKE YK230-KEKKBN,
+WAERS LIKE YK230-WAERS,
+KNITXAMT LIKE YK230-KNITXAMT, "税抜金額
+KNETXAMT LIKE YK230-KNETXAMT, "税込金額
+UPYAMT LIKE YK230-UPYAMT, "未請求額
+* 2003/03/18 ADD-S
+PIDAMT LIKE YK230-PIDAMT, "消込金額
+*2009/08/06 MOD:伝票番号・伝票明細追加
+BELNR LIKE YK230-BELNR,
+BUZEI LIKE YK230-BUZEI,
+* 2003/03/18 ADD-E
+END OF ST_YK230.
+DATA I_YK230 TYPE STANDARD TABLE OF ST_YK230 WITH HEADER LINE.
+
+* 仕入データ検索
+REFRESH I_YK230.
+*2009/08/06 MOD:取得項目に伝票番号・伝票明細追加
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT KEKKBN WAERS
+* 2003/03/18 MOD-S
+*         KNITXAMT KNETXAMT UPYAMT
+KNITXAMT KNETXAMT UPYAMT PIDAMT BELNR BUZEI
+* 2003/03/18 MOD-E
+INTO   TABLE I_YK230
+FROM   YK230
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+* 2003/03/14 ADD-S
+*         AND    zfbdt  = p_zfbdt  "当月計上
+*2002/10/23 本番仮修正反映                                        1
+**\         AND  ( zfbdt2  > p_zfbdt "当月以降に照合するか
+**\         OR     zfbdt2 = 0 ).     "未照合
+*         AND  ( zfbdt2  > p_zfbdt "当月以降に照合するか
+*         OR     zfbdt2  = 0       "未照合
+*         OR   ( zfbdt2  = p_zfbdt "当月一部請求
+*         AND    upyamt  > 0 ) ).  "次の照合後は問題あり
+**2002/10/23 END
+**        AND    kekkbn <> '4'.    "照合済でない
+AND    ZFBDT <  P_ZFBDT   "前月以前に計上
+AND    ( KEKKBN = '1'     "未請求
+* 2003/03/18 MOD-S
+*         AND      KEKKBN = '5' ).  "部分請求
+OR       KEKKBN = '3'     "アンマッチ
+OR       KEKKBN = '5' ).  "部分請求
+* 2003/03/18 MOD-E
+* 2003/03/14 ADD-E
+
+* レポートデータ作成
+LOOP AT I_YK230.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK230-BUKRS.         "会社コード
+I_REPORT-LIFNR = I_YK230-LIFNR.         "仕入先コード
+I_REPORT-WERKS = I_YK230-WERKS.         "プラント
+I_REPORT-EKORG = I_YK230-EKORG.         "購買組織
+I_REPORT-EKGRP = ''.                    "購買グループ
+I_REPORT-ZFBDT = P_ZFBDT.               "締日
+I_REPORT-WAERS = I_YK230-WAERS.         "通貨コード
+* 2003/03/18 MOD-S
+*    IF I_YK230-KEKKBN = '5'.
+IF ( I_YK230-KEKKBN = '1' AND I_YK230-PIDAMT > 0 ) OR
+( I_YK230-KEKKBN = '3' ) OR
+( I_YK230-KEKKBN = '5' ).
+
+*2009/08/06 MOD:
+*RSEGテーブルの税コードを、伝票番号・伝票明細を経由して取得
+SELECT SINGLE MWSKZ
+INTO LO_MWSKZ
+FROM RSEG
+WHERE BELNR = I_YK230-BELNR
+AND BUZEI = I_YK230-BUZEI.
+* 2003/03/18 MOD-E
+* 2003/03/14 MOD-S
+*      I_REPORT-MISEIKYU = I_YK230-KNETXAMT  "当回未請求
+*                        * I_YK230-UPYAMT    " = 税込 / 税抜 * 未請求
+*                        / I_YK230-KNITXAMT.
+CLEAR W_MWDAT.
+PERFORM CALCULATE_TAX USING    I_YK230-WAERS      "税額処理
+I_YK230-UPYAMT
+*2009/08/06税コード追加
+LO_MWSKZ
+CHANGING W_MWDAT.
+I_REPORT-MISEIKYU = I_YK230-UPYAMT + W_MWDAT.  "前月以前未請求
+* 2003/03/14 MOD-S
+ELSE.
+* 2003/03/17 MOD-S
+*      I_REPORT-MISEIKYU = I_YK230-KNETXAMT. "当回未請求←税込金額
+I_REPORT-MISEIKYU = I_YK230-KNETXAMT. "前月以前未請求
+* 2003/03/17 MOD-E
+ENDIF.
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_zenmishi_get                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_ZENMISHI_GET.
+* ローカル変数定義
+*2009/08/06 MOD:税コード追加
+DATA LO_MWSKZ LIKE RSEG-MWSKZ.  "税コード
+
+TYPES: BEGIN OF ST_YK230,
+BUKRS LIKE YK230-BUKRS,
+LIFNR LIKE YK230-LIFNR,
+WERKS LIKE YK230-WERKS,
+EKORG LIKE YK230-EKORG,
+EKGRP LIKE YK230-EKGRP,
+ZFBDT LIKE YK230-ZFBDT,
+KEKKBN LIKE YK230-KEKKBN,
+WAERS LIKE YK230-WAERS,
+KNITXAMT LIKE YK230-KNITXAMT, "税抜金額
+KNETXAMT LIKE YK230-KNETXAMT, "税込金額
+BEYAMT LIKE YK230-BEYAMT,     "今回請求額
+*2009/08/06 MOD:伝票番号・伝票明細追加
+BELNR LIKE YK230-BELNR,
+BUZEI LIKE YK230-BUZEI,
+END OF ST_YK230.
+DATA I_YK230 TYPE STANDARD TABLE OF ST_YK230 WITH HEADER LINE.
+
+* 仕入データ検索
+REFRESH I_YK230.
+*2009/08/06 MOD:取得項目に伝票番号・伝票明細追加
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT KEKKBN WAERS
+KNITXAMT KNETXAMT BEYAMT BELNR BUZEI
+INTO   TABLE I_YK230
+FROM   YK230
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+AND    ZFBDT  < P_ZFBDT  "当月以前に計上
+AND    ZFBDT2 = P_ZFBDT. "当月照合
+
+* レポートデータ作成
+LOOP AT I_YK230.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK230-BUKRS.         "会社コード
+I_REPORT-LIFNR = I_YK230-LIFNR.         "仕入先コード
+I_REPORT-WERKS = I_YK230-WERKS.         "プラント
+I_REPORT-EKORG = I_YK230-EKORG.         "購買組織
+I_REPORT-EKGRP = ''.                    "購買グループ
+I_REPORT-ZFBDT = P_ZFBDT.               "締日
+I_REPORT-WAERS = I_YK230-WAERS.         "通貨コード
+IF I_YK230-KNITXAMT = I_YK230-BEYAMT.   "１度で照合した場合
+I_REPORT-ZENMISHI = I_YK230-KNETXAMT. "前月未請求支払
+ELSE.                                   "部分照合をした場合
+
+*2009/08/06 MOD:
+*RSEGテーブルの税コードを、伝票番号・伝票明細を経由して取得
+SELECT SINGLE MWSKZ
+INTO LO_MWSKZ
+FROM RSEG
+WHERE BELNR = I_YK230-BELNR
+AND BUZEI = I_YK230-BUZEI.
+
+* 2003/03/14 MOD-S
+*      I_REPORT-ZENMISHI = I_YK230-KNETXAMT  "前月未請求支払
+*                        * I_YK230-BEYAMT
+*                        / I_YK230-KNITXAMT.
+CLEAR W_MWDAT.
+PERFORM CALCULATE_TAX USING    I_YK230-WAERS      "税額処理
+I_YK230-BEYAMT
+*2009/08/06税コード追加
+LO_MWSKZ
+CHANGING W_MWDAT.
+I_REPORT-ZENMISHI = I_YK230-BEYAMT + W_MWDAT.
+* 2003/03/14 MOD-E
+ENDIF.
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_tyosei_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_TYOSEI_GET.
+* ローカル変数定義
+
+*2009/08/06 MOD:税コード追加
+DATA LO_MWSKZ LIKE RSEG-MWSKZ.  "税コード
+
+TYPES: BEGIN OF ST_YK210,
+BUKRS LIKE YK210-BUKRS,
+LIFNR LIKE YK210-LIFNR,
+WERKS LIKE YK210-WERKS,
+EKORG LIKE YK210-EKORG,
+EKGRP LIKE YK210-EKGRP,
+ZFBDT LIKE YK210-ZFBDT,
+WAERS LIKE YK210-WAERS,
+KNETXAMT LIKE YK210-KNETXAMT,
+END OF ST_YK210.
+DATA I_YK210 TYPE STANDARD TABLE OF ST_YK210 WITH HEADER LINE.
+TYPES: BEGIN OF ST_YK230,
+BUKRS LIKE YK230-BUKRS,
+LIFNR LIKE YK230-LIFNR,
+WERKS LIKE YK230-WERKS,
+EKORG LIKE YK230-EKORG,
+EKGRP LIKE YK230-EKGRP,
+ZFBDT LIKE YK230-ZFBDT,
+WAERS LIKE YK230-WAERS,
+KNITXAMT LIKE YK230-KNITXAMT, "税抜金額
+KNETXAMT LIKE YK230-KNETXAMT, "税込金額
+BEYAMT LIKE YK230-BEYAMT,     "今回請求額
+*2009/08/06 MOD:伝票番号・伝票明細追加
+BELNR LIKE YK230-BELNR,
+BUZEI LIKE YK230-BUZEI,
+
+END OF ST_YK230.
+DATA I_YK230 TYPE STANDARD TABLE OF ST_YK230 WITH HEADER LINE.
+
+* 請求データ検索
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT WAERS SUM( KNETXAMT )
+INTO   TABLE I_YK210
+FROM   YK210
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+*2002/10/23 本番仮修正反映                                        1
+*\         AND    zfbdt  = p_zfbdt  "当月分の請求
+AND    ZFBDT2 = P_ZFBDT  "当月照合
+*        AND    zfbdt  <= p_zfbdt "当月以前発生の請求
+*        AND  ( zfbdt2 >= p_zfbdt "当月に照合の請求
+*        OR     zfbdt2  = 0  )    "未照合の請求
+*2002/10/23 END
+AND    DELFLG <> 'X'
+GROUP BY LIFNR WERKS EKORG EKGRP BUKRS ZFBDT WAERS.
+
+* レポートデータ作成　その１
+LOOP AT I_YK210.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK210-BUKRS.     "会社コード
+I_REPORT-LIFNR = I_YK210-LIFNR.     "仕入先コード
+I_REPORT-WERKS = I_YK210-WERKS.     "プラント
+I_REPORT-EKORG = I_YK210-EKORG.     "購買組織
+I_REPORT-EKGRP = ''.                "購買グループ
+*2002/10/23 本番仮修正反映                                        2
+*\    i_report-zfbdt = i_yk210-zfbdt.     "締日
+I_REPORT-ZFBDT = P_ZFBDT.           "締日
+*2002/10/23 END
+I_REPORT-WAERS = I_YK210-WAERS.     "通貨コード
+* 2003/03/17 MOD-S
+*    I_REPORT-TYOSEI = I_YK210-KNETXAMT. "調整額＋
+I_REPORT-TYOSEI = I_YK210-KNETXAMT. "要確認額＋
+* 2003/03/17 MOD-E
+APPEND I_REPORT.
+ENDLOOP.
+
+* 仕入データ検索
+REFRESH I_YK230.
+*2009/08/06 MOD:取得項目に伝票番号・伝票明細追加
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT WAERS
+KNITXAMT KNETXAMT BEYAMT BELNR BUZEI
+INTO   TABLE I_YK230
+FROM   YK230
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+AND    ZFBDT2 = P_ZFBDT. "当月照合の仕入
+
+* レポートデータ作成
+LOOP AT I_YK230.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK230-BUKRS.            "会社コード
+I_REPORT-LIFNR = I_YK230-LIFNR.            "仕入先コード
+I_REPORT-WERKS = I_YK230-WERKS.            "プラント
+I_REPORT-EKORG = I_YK230-EKORG.            "購買組織
+I_REPORT-EKGRP = ''.                       "購買グループ
+I_REPORT-ZFBDT = P_ZFBDT.                  "締日
+I_REPORT-WAERS = I_YK230-WAERS.            "通貨コード
+IF I_YK230-KNITXAMT = I_YK230-BEYAMT.      "１度で照合した場合
+I_REPORT-TYOSEI = I_YK230-KNETXAMT * -1. "調整－
+ELSE.                                      "部分照合をした場合
+*2009/08/06 MOD:
+*RSEGテーブルの税コードを、伝票番号・伝票明細を経由して取得
+SELECT SINGLE MWSKZ
+INTO LO_MWSKZ
+FROM RSEG
+WHERE BELNR = I_YK230-BELNR
+AND BUZEI = I_YK230-BUZEI.
+* 2003/03/14 MOD-S
+*      I_REPORT-TYOSEI = I_YK230-KNETXAMT       "調整－
+*                      * I_YK230-BEYAMT
+*                      / I_YK230-KNITXAMT
+*                      * -1.
+CLEAR W_MWDAT.
+PERFORM CALCULATE_TAX USING    I_YK230-WAERS    "税額処理
+I_YK230-BEYAMT
+*2009/08/06税コード追加
+LO_MWSKZ
+CHANGING W_MWDAT.
+I_REPORT-TYOSEI = ( I_YK230-BEYAMT + W_MWDAT ) * -1.
+* 2003/03/14 MOD-E
+ENDIF.
+APPEND I_REPORT.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_yotei_get                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_YOTEI_GET.
+* 2003/03/14 MOD-S
+** ローカル変数定義
+*  TYPES: BEGIN OF st_yk410,
+*           bukrs LIKE yk410-bukrs,
+*           lifnr LIKE yk410-lifnr,
+*           werks LIKE yk410-werks,
+*           ekorg LIKE yk410-ekorg,
+*           ekgrp LIKE yk410-ekgrp,
+*           zfbdt LIKE yk410-zfbdt,
+*           waers LIKE yk410-waers,
+*           payamt LIKE yk410-payamt,
+*         END OF st_yk410.
+*  DATA i_yk410 TYPE STANDARD TABLE OF st_yk410 WITH HEADER LINE.
+*
+** 支払予定データ検索
+*  SELECT bukrs lifnr werks ekorg ekgrp zfbdt waers SUM( payamt )
+*         INTO   TABLE i_yk410
+*         FROM   yk410
+*         WHERE  lifnr IN s_lifnr
+*         AND    werks IN s_werks
+*         AND    ekorg  = p_ekorg
+*         AND    bukrs  = p_bukrs
+*         AND    zfbdt  = p_zfbdt  "当月締めの支払予定
+*         AND    delflg <> 'X'
+*         GROUP by lifnr werks ekorg ekgrp bukrs zfbdt waers.
+*
+** レポートデータ作成
+*  LOOP AT i_yk410.
+*    CLEAR i_report.
+*    i_report-bukrs = i_yk410-bukrs.  "会社コード
+*    i_report-lifnr = i_yk410-lifnr.  "仕入先コード
+*    i_report-werks = i_yk410-werks.  "プラント
+*    i_report-ekorg = i_yk410-ekorg.  "購買組織
+*    i_report-ekgrp = ''.             "購買グループ
+*    i_report-zfbdt = i_yk410-zfbdt.  "締日
+*    i_report-waers = i_yk410-waers.  "通貨コード
+*    i_report-yotei = i_yk410-payamt. "支払予定額
+*    APPEND i_report.
+*  ENDLOOP.
+*
+* ローカル変数定義
+TYPES: BEGIN OF ST_YK210,
+BUKRS LIKE YK210-BUKRS,
+LIFNR LIKE YK210-LIFNR,
+WERKS LIKE YK210-WERKS,
+EKORG LIKE YK210-EKORG,
+EKGRP LIKE YK210-EKGRP,
+ZFBDT LIKE YK210-ZFBDT,
+WAERS LIKE YK210-WAERS,
+KNETXAMT LIKE YK210-KNETXAMT,
+END OF ST_YK210.
+DATA I_YK210 TYPE STANDARD TABLE OF ST_YK210 WITH HEADER LINE.
+
+* 請求データ検索
+REFRESH I_YK210.
+SELECT BUKRS LIFNR WERKS EKORG EKGRP ZFBDT WAERS SUM( KNETXAMT )
+INTO   TABLE I_YK210
+FROM   YK210
+WHERE  LIFNR IN S_LIFNR
+AND    WERKS IN S_WERKS
+AND    EKORG  = P_EKORG
+AND    BUKRS  = P_BUKRS
+AND    ZFBDT2 = P_ZFBDT  "当月に照合の請求
+AND    DELFLG <> 'X'     "削除されていないもの
+GROUP BY LIFNR WERKS EKORG EKGRP BUKRS ZFBDT WAERS.
+
+* レポートデータ作成
+LOOP AT I_YK210.
+CLEAR I_REPORT.
+I_REPORT-BUKRS = I_YK210-BUKRS.     "会社コード
+I_REPORT-LIFNR = I_YK210-LIFNR.     "仕入先コード
+I_REPORT-WERKS = I_YK210-WERKS.     "プラント
+I_REPORT-EKORG = I_YK210-EKORG.     "購買組織
+I_REPORT-EKGRP = ''.                "購買グループ
+I_REPORT-ZFBDT = P_ZFBDT.           "締日
+I_REPORT-WAERS = I_YK210-WAERS.     "通貨コード
+I_REPORT-YOTEI = I_YK210-KNETXAMT.  "請求合計
+APPEND I_REPORT.
+ENDLOOP.
+* 2003/03/14 MOD-E
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_kijitu_get                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*FORM f_kijitu_get.
+** ローカル変数定義
+*  TYPES: BEGIN OF st_yk410,
+*           bukrs LIKE yk410-bukrs,
+*           lifnr LIKE yk410-lifnr,
+*           werks LIKE yk410-werks,
+*           ekorg LIKE yk410-ekorg,
+*           ekgrp LIKE yk410-ekgrp,
+*           zfbdt LIKE yk410-zfbdt,
+*           waers LIKE yk410-waers,
+*           payamt LIKE yk410-payamt,
+*         END OF st_yk410.
+*  DATA i_yk410 TYPE STANDARD TABLE OF st_yk410 WITH HEADER LINE.
+*  DATA w_paydat LIKE yk410-paydat.
+*  DATA w_date LIKE sy-datum.
+*
+** 支払予定データ検索
+*  SELECT bukrs lifnr werks ekorg ekgrp zfbdt waers SUM( payamt )
+*         INTO   TABLE i_yk410
+*         FROM   yk410
+*         WHERE  lifnr  IN s_lifnr
+*         AND    werks  IN s_werks
+*         AND    ekorg   = p_ekorg
+*         AND    bukrs   = p_bukrs
+*         AND    zfbdt   < p_zfbdt "締日が締日以前
+*         AND    paydat  > p_zfbdt "支払日が締日より後
+*         AND    delflg <> 'X'
+*         GROUP by lifnr werks ekorg ekgrp bukrs zfbdt waers.
+*
+** レポートデータ作成
+*  LOOP AT i_yk410.
+*    CLEAR i_report.
+*    i_report-bukrs = i_yk410-bukrs.   "会社コード
+*    i_report-lifnr = i_yk410-lifnr.   "仕入先コード
+*    i_report-werks = i_yk410-werks.   "プラント
+*    i_report-ekorg = i_yk410-ekorg.   "購買組織
+*    i_report-ekgrp = ''.              "購買グループ
+**   i_report-zfbdt = i_yk410-zfbdt.   "締日
+*    i_report-zfbdt = p_zfbdt.         "締日
+*    i_report-waers = i_yk410-waers.   "通貨コード
+*    i_report-kijitu = i_yk410-payamt. "期日支払額
+*    APPEND i_report.
+*  ENDLOOP.
+*
+*ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_data_sum                                               *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_DATA_SUM.
+* ローカル変数
+* 2003/03/31 MOD-S
+*  DATA I_REPORT_SUM TYPE STANDARD TABLE OF YK01423010 WITH HEADER LINE.
+DATA I_REPORT_SUM TYPE STANDARD TABLE OF YK01424010 WITH HEADER LINE.
+* 2003/03/31 MOD-E
+
+* 集計
+SORT I_REPORT BY LIFNR WERKS EKORG EKGRP BUKRS ZFBDT WAERS.
+LOOP AT I_REPORT.
+MOVE-CORRESPONDING I_REPORT TO I_REPORT_SUM.
+COLLECT I_REPORT_SUM.
+ENDLOOP.
+
+* 名称と計算
+REFRESH I_REPORT.
+LOOP AT I_REPORT_SUM.
+*   名称
+SELECT SINGLE NAME1 SORTL
+FROM   LFA1
+INTO   (I_REPORT_SUM-NAME1,I_REPORT_SUM-SORTL)
+WHERE  LIFNR  = I_REPORT_SUM-LIFNR.
+* 2003/03/17 MOD-S
+**   支払予定額（計算による）
+*    I_REPORT_SUM-YOTEI2 = I_REPORT_SUM-SHIIRE    "仕入合計
+*                        - I_REPORT_SUM-ZENKEI    "前月計上額
+*                        + I_REPORT_SUM-JIKEI     "次月計上額
+*   支払依頼額（計算による）
+I_REPORT_SUM-YOTEI2 = I_REPORT_SUM-SHIIRE    "当月仕入合計
+- I_REPORT_SUM-ZENKEI    "前月計上
++ I_REPORT_SUM-JIKEI     "次月計上
+* 2003/03/17 MOD-E
+* 2003/03/14 MOD-S
+*                        - i_report_sum-miseikyu  "当回未請求
+- I_REPORT_SUM-TOUMISEI  "当月未請求
+* 2003/03/14 MOD-E
++ I_REPORT_SUM-ZENMISHI  "繰越請求額
+* 2003/03/17 MOD-S
+*                        + I_REPORT_SUM-TYOSEI.   "調整額
++ I_REPORT_SUM-TYOSEI.   "要確認額
+* 2003/03/17 MOD-E
+*   残高差異
+* 2003/03/14 MOD-S
+*    i_report_sum-sai = i_report_sum-zenzan   "前月残高
+*                     - i_report_sum-shiharai "当月支払
+*                     + i_report_sum-shiire   "仕入合計
+**                    - i_report_sum-zenkei   "前月計上額
+*                     + i_report_sum-jikei    "次月計上額
+*                     - i_report_sum-miseikyu "当回未請求
+*                     + i_report_sum-tyosei   "調整額
+*                     - i_report_sum-yotei2   "支払予定額（計算値を使用
+*                     - i_report_sum-kijitu.  "期日支払額
+I_REPORT_SUM-SAI = I_REPORT_SUM-SEIKYU   "請求合計
+- I_REPORT_SUM-YOTEI.   "実際支払依頼額
+* 2003/03/14 MOD-E
+* 2003/03/13 ADD-S
+I_REPORT-ZENZAN = 0.   "前月未請求残（0円出力）
+* 2003/03/13 ADD-E
+*   編集と保存
+MOVE-CORRESPONDING I_REPORT_SUM TO I_REPORT.
+APPEND I_REPORT.
+ENDLOOP.
+FREE I_REPORT_SUM.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_alv_out                                                *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_ALV_OUT.
+* ローカル変数
+TYPE-POOLS: SLIS.
+DATA T_EVENT TYPE SLIS_T_EVENT.
+DATA W_EVENT TYPE SLIS_ALV_EVENT.
+DATA T_FLDCAT TYPE SLIS_T_FIELDCAT_ALV.
+DATA W_FLDCAT TYPE SLIS_FIELDCAT_ALV.
+DATA W_LAYOUT TYPE SLIS_LAYOUT_ALV.
+DATA W_PRINT TYPE SLIS_PRINT_ALV.
+DATA W_REPID LIKE SY-REPID.
+* 2003/03/31 MOD-S
+*  DATA W_TABNAME LIKE DD02L-TABNAME VALUE 'YK01423010'.
+DATA W_TABNAME LIKE DD02L-TABNAME VALUE 'YK01424010'.
+* 2003/03/31 MOD-E
+
+* ALVパラメタ設定
+W_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+W_PRINT-NO_PRINT_LISTINFOS = 'X'.
+W_REPID = SY-REPID.
+
+* 可能イベントの取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE     = 0
+IMPORTING
+ET_EVENTS       = T_EVENT
+EXCEPTIONS
+LIST_TYPE_WRONG = 1
+OTHERS          = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+READ TABLE T_EVENT WITH KEY NAME = 'TOP_OF_PAGE' INTO W_EVENT.
+W_EVENT-FORM = 'TOP_OF_PAGE'.
+MODIFY T_EVENT FROM W_EVENT INDEX SY-TABIX.
+READ TABLE T_EVENT WITH KEY NAME = 'TOP_OF_LIST' INTO W_EVENT.
+W_EVENT-FORM = 'TOP_OF_LIST'.
+MODIFY T_EVENT FROM W_EVENT INDEX SY-TABIX.
+READ TABLE T_EVENT WITH KEY NAME = 'CALLER_EXIT' INTO W_EVENT.
+W_EVENT-FORM = 'CALLER_EXIT'.
+MODIFY T_EVENT FROM W_EVENT INDEX SY-TABIX.
+DELETE T_EVENT WHERE FORM = SPACE.
+
+* 項目カタログの作成
+CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+EXPORTING
+I_PROGRAM_NAME         = W_REPID
+I_STRUCTURE_NAME       = W_TABNAME
+CHANGING
+CT_FIELDCAT            = T_FLDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+LOOP AT T_FLDCAT INTO W_FLDCAT.
+CASE W_FLDCAT-FIELDNAME.
+WHEN 'NAME1'.
+W_FLDCAT-REPTEXT_DDIC = '仕入先名'.
+W_FLDCAT-SELTEXT_L = '仕入先名'.
+W_FLDCAT-SELTEXT_M = '仕入先名'.
+W_FLDCAT-SELTEXT_S = '仕入先名'.
+WHEN 'SORTL'.
+W_FLDCAT-REPTEXT_DDIC = '仕入先カナ名'.
+W_FLDCAT-SELTEXT_L = '仕入先カナ名'.
+W_FLDCAT-SELTEXT_M = '仕入先カナ名'.
+W_FLDCAT-SELTEXT_S = '仕入先カナ'.
+WHEN 'ZENZAN'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '前月残高'.
+*        W_FLDCAT-SELTEXT_L = '前月残高'.
+*        W_FLDCAT-SELTEXT_M = '前月残高'.
+*        W_FLDCAT-SELTEXT_S = '前月残高'.
+W_FLDCAT-REPTEXT_DDIC = '前月未請求残'.
+W_FLDCAT-SELTEXT_L = '前月未請求残'.
+W_FLDCAT-SELTEXT_M = '前月未請求残'.
+W_FLDCAT-SELTEXT_S = '前月未請求残'.
+* 2003/03/17 MOD-E
+* 2003/03/14 DEL-S
+*      WHEN 'SHIHARAI'.
+*        w_fldcat-reptext_ddic = '当月支払'.
+*        w_fldcat-seltext_l = '当月支払'.
+*        w_fldcat-seltext_m = '当月支払'.
+*        w_fldcat-seltext_s = '当月支払'.
+* 2003/03/14 DEL-E
+WHEN 'SEIKYU'.
+W_FLDCAT-REPTEXT_DDIC = '請求合計'.
+W_FLDCAT-SELTEXT_L = '請求合計'.
+W_FLDCAT-SELTEXT_M = '請求合計'.
+W_FLDCAT-SELTEXT_S = '請求合計'.
+WHEN 'SHIIRE'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '仕入合計'.
+*        W_FLDCAT-SELTEXT_L = '仕入合計'.
+*        W_FLDCAT-SELTEXT_M = '仕入合計'.
+*        W_FLDCAT-SELTEXT_S = '仕入合計'.
+W_FLDCAT-REPTEXT_DDIC = '当月仕入合計'.
+W_FLDCAT-SELTEXT_L = '当月仕入合計'.
+W_FLDCAT-SELTEXT_M = '当月仕入合計'.
+W_FLDCAT-SELTEXT_S = '当月仕入合計'.
+* 2003/03/17 MOD-E
+WHEN 'ZENKEI'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '前月計上額'.
+*        W_FLDCAT-SELTEXT_L = '前月計上額'.
+*        W_FLDCAT-SELTEXT_M = '前月計上額'.
+*        W_FLDCAT-SELTEXT_S = '前月計上額'.
+W_FLDCAT-REPTEXT_DDIC = '前月計上'.
+W_FLDCAT-SELTEXT_L = '前月計上'.
+W_FLDCAT-SELTEXT_M = '前月計上'.
+W_FLDCAT-SELTEXT_S = '前月計上'.
+* 2003/03/17 MOD-E
+WHEN 'JIKEI'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '次月計上額'.
+*        W_FLDCAT-SELTEXT_L = '次月計上額'.
+*        W_FLDCAT-SELTEXT_M = '次月計上額'.
+*        W_FLDCAT-SELTEXT_S = '次月計上額'.
+W_FLDCAT-REPTEXT_DDIC = '次月計上'.
+W_FLDCAT-SELTEXT_L = '次月計上'.
+W_FLDCAT-SELTEXT_M = '次月計上'.
+W_FLDCAT-SELTEXT_S = '次月計上'.
+* 2003/03/17 MOD-E
+WHEN 'TOUMISEI'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '当月未請求残'.
+*        W_FLDCAT-SELTEXT_L = '当月未請求残'.
+*        W_FLDCAT-SELTEXT_M = '当月未請求残'.
+*        W_FLDCAT-SELTEXT_S = '当月未請求残'.
+W_FLDCAT-REPTEXT_DDIC = '当月未請求'.
+W_FLDCAT-SELTEXT_L = '当月未請求'.
+W_FLDCAT-SELTEXT_M = '当月未請求'.
+W_FLDCAT-SELTEXT_S = '当月未請求'.
+* 2003/03/17 MOD-E
+WHEN 'ZENMISHI'. "前月以前未請求当月支払
+W_FLDCAT-REPTEXT_DDIC = '繰越請求額'.
+W_FLDCAT-SELTEXT_L = '繰越請求額'.
+W_FLDCAT-SELTEXT_M = '繰越請求額'.
+W_FLDCAT-SELTEXT_S = '繰越請求額'.
+WHEN 'TYOSEI'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '調整額'.
+*        W_FLDCAT-SELTEXT_L = '調整額'.
+*        W_FLDCAT-SELTEXT_M = '調整額'.
+*        W_FLDCAT-SELTEXT_S = '調整額'.
+W_FLDCAT-REPTEXT_DDIC = '要確認額'.
+W_FLDCAT-SELTEXT_L = '要確認額'.
+W_FLDCAT-SELTEXT_M = '要確認額'.
+W_FLDCAT-SELTEXT_S = '要確認額'.
+* 2003/03/17 MOD-E
+WHEN 'YOTEI'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '(支払予定額)'.
+*        W_FLDCAT-SELTEXT_L = '(支払予定額)'.
+*        W_FLDCAT-SELTEXT_M = '(支払予定額)'.
+*        W_FLDCAT-SELTEXT_S = '(支払予定額)'.
+W_FLDCAT-REPTEXT_DDIC = '支払依頼額'.
+W_FLDCAT-SELTEXT_L = '支払依頼額'.
+W_FLDCAT-SELTEXT_M = '支払依頼額'.
+W_FLDCAT-SELTEXT_S = '支払依頼額'.
+* 2003/03/17 MOD-E
+WHEN 'YOTEI2'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '支払金額'.
+*        W_FLDCAT-SELTEXT_L = '支払金額'.
+*        W_FLDCAT-SELTEXT_M = '支払金額'.
+*        W_FLDCAT-SELTEXT_S = '支払金額'.
+W_FLDCAT-REPTEXT_DDIC = '計算上支払依頼額'.
+W_FLDCAT-SELTEXT_L = '計算上支払依頼額'.
+W_FLDCAT-SELTEXT_M = '計算上支払依頼額'.
+W_FLDCAT-SELTEXT_S = '計算上支払依頼額'.
+* 2003/03/17 MOD-E
+* 2003/03/14 DEL-S
+*      WHEN 'KIJITU'.
+*        w_fldcat-reptext_ddic = '期日支払額'.
+*        w_fldcat-seltext_l = '期日支払額'.
+*        w_fldcat-seltext_m = '期日支払額'.
+*        w_fldcat-seltext_s = '期日支払額'.
+* 2003/03/14 DEL-E
+WHEN 'SAI'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '残高差異'.
+*        W_FLDCAT-SELTEXT_L = '残高差異'.
+*        W_FLDCAT-SELTEXT_M = '残高差異'.
+*        W_FLDCAT-SELTEXT_S = '残高差異'.
+W_FLDCAT-REPTEXT_DDIC = '未処理額'.
+W_FLDCAT-SELTEXT_L = '未処理額'.
+W_FLDCAT-SELTEXT_M = '未処理額'.
+W_FLDCAT-SELTEXT_S = '未処理額'.
+* 2003/03/17 MOD-E
+WHEN 'MISEIKYU'.
+* 2003/03/17 MOD-S
+*        W_FLDCAT-REPTEXT_DDIC = '当回未請求'.
+*        W_FLDCAT-SELTEXT_L = '当回未請求'.
+*        W_FLDCAT-SELTEXT_M = '当回未請求'.
+*        W_FLDCAT-SELTEXT_S = '当回未請求'.
+W_FLDCAT-REPTEXT_DDIC = '前月以前未請求'.
+W_FLDCAT-SELTEXT_L = '前月以前未請求'.
+W_FLDCAT-SELTEXT_M = '前月以前未請求'.
+W_FLDCAT-SELTEXT_S = '前月以前未請求'.
+* 2003/03/17 MOD-E
+* 2003/03/14 DEL-S
+*      WHEN 'TOUZAN'.
+*        w_fldcat-reptext_ddic = '当月残高'.
+*        w_fldcat-seltext_l = '当月残高'.
+*        w_fldcat-seltext_m = '当月残高'.
+*        w_fldcat-seltext_s = '当月残高'.
+* 2003/03/14 DEL-E
+ENDCASE.
+MODIFY T_FLDCAT FROM W_FLDCAT.
+ENDLOOP.
+
+* レポート表示
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM = W_REPID
+IT_FIELDCAT        = T_FLDCAT
+I_SAVE             = 'A'
+IT_EVENTS          = T_EVENT
+IS_LAYOUT          = W_LAYOUT
+IS_PRINT           = W_PRINT
+I_BYPASSING_BUFFER = P_BYPASS
+TABLES
+T_OUTTAB           = I_REPORT
+EXCEPTIONS
+PROGRAM_ERROR      = 1
+OTHERS             = 2.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM top_of_page                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM TOP_OF_PAGE.
+* 2003/03/17 MOD-S
+*  WRITE: /001 '買掛管理表',
+WRITE: /001 '支払依頼表',
+* 2003/03/17 MOD-E
+068 'Page.', SY-PAGNO.
+IF W_ZFBDT = 'X'. "締日で改頁する場合
+WRITE: /001 '締日    ', P_ZFBDT,
+051 '作成日時', SY-DATUM, SY-UZEIT.
+ELSE.
+WRITE: /051 '作成日時', SY-DATUM, SY-UZEIT.
+ENDIF.
+IF W_BUKRS = 'X'. "会社コードで改頁する場合
+CLEAR T001.
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS  = I_REPORT-BUKRS.
+WRITE: /001 '会社    ', I_REPORT-BUKRS, T001-BUTXT.
+ENDIF.
+IF W_WERKS = 'X'. "プラントで改頁する場合
+CLEAR T001W.
+SELECT SINGLE * FROM  T001W
+WHERE  WERKS  = I_REPORT-WERKS.
+WRITE: /001 'プラント', I_REPORT-WERKS, T001W-NAME1.
+ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM caller_exit                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM CALLER_EXIT USING RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+* TOP_OF_PAGEで出力テーブルの項目を使用する場合に必要
+RS_DATA-CALLBACK_HEADER_TRANSPORT = 'FILITEXTS_TEXT_TRANSPORT'.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM top_of_list                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM TOP_OF_LIST.
+* ローカル変数
+DATA T_SORT TYPE SLIS_T_SORTINFO_ALV.
+DATA W_SORT TYPE SLIS_SORTINFO_ALV.
+
+* レポート開始時のレイアウトを取得
+CALL FUNCTION 'REUSE_ALV_LIST_LAYOUT_INFO_GET'
+IMPORTING
+ET_SORT       = T_SORT
+EXCEPTIONS
+NO_INFOS      = 1
+PROGRAM_ERROR = 2
+OTHERS        = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+LOOP AT T_SORT INTO W_SORT WHERE GROUP = '*'.
+CASE W_SORT-FIELDNAME.
+WHEN 'WERKS'.
+W_WERKS = 'X'.
+WHEN 'BUKRS'.
+W_BUKRS = 'X'.
+WHEN 'ZFBDT'.
+W_ZFBDT = 'X'.
+ENDCASE.
+ENDLOOP.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  f_check
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM F_CHECK.
+* ローカル変数
+DATA W_CNT LIKE SY-DBCNT.
+
+* 会社コード
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS  = P_BUKRS.
+IF SY-SUBRC <> 0.
+MESSAGE E401(Y1) WITH '会社コードがありません' P_BUKRS.
+ENDIF.
+* 締日
+DESCRIBE TABLE S_LIFNR LINES W_CNT. "2002/05/21 MOD
+IF W_CNT = 1 AND P_ZFBDT IS INITIAL.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+I_CORD         = S_LIFNR-LOW
+I_EKORG        = P_EKORG
+I_DAY          = SY-DATUM
+IMPORTING
+E_ZFBDT_OLD    = P_ZFBDT
+EXCEPTIONS
+NO_GET_T052    = 1
+NO_GOOD_GETDAY = 2
+NO_GET_ZTERM   = 3
+OTHERS         = 4.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " f_check
+*&---------------------------------------------------------------------*
+*&      Form  CALCULATE_TAX
+*&---------------------------------------------------------------------*
+*       税額処理
+*----------------------------------------------------------------------*
+*      -->P_WRBTR  税抜金額
+*      <--P_WMWST  税額
+*----------------------------------------------------------------------*
+FORM CALCULATE_TAX USING    P_WAERS
+P_WRBTR
+*MOD20090806:税コード追加
+P_MWSKZ
+CHANGING P_WMWST.
+DATA: I_MWDAT LIKE STANDARD TABLE OF RTAX1U15 WITH HEADER LINE,
+W_WRBTR LIKE BSEG-WRBTR.
+CLEAR W_WRBTR.
+W_WRBTR = P_WRBTR.
+* 税額計算
+CALL FUNCTION 'CALCULATE_TAX_FROM_NET_AMOUNT'
+EXPORTING
+I_BUKRS = P_BUKRS  "会社コード
+I_MWSKZ = P_MWSKZ  "税コード
+I_WAERS = P_WAERS  "通貨コード
+I_WRBTR = W_WRBTR  "金額
+TABLES
+T_MWDAT = I_MWDAT.
+IF SY-SUBRC = 0.
+READ TABLE I_MWDAT INDEX 1.
+P_WMWST = I_MWDAT-WMWST.          "税額
+ELSE.
+CLEAR:  I_MWDAT,P_WMWST.
+REFRESH I_MWDAT.
+ENDIF.
+ENDFORM.                    " CALCULATE_TAX

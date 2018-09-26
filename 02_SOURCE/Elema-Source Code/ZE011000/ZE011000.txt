@@ -1,0 +1,655 @@
+************************************************************************
+* [プログラム名]
+*   ZE011000       発注テキスト更新
+*
+* [処理概要]
+*   ・EDI対象の発注データを取得し、明細テキスト「EDI備考(ID：F05)」を
+*     チェックする。その結果、スペースだった場合、受注伝票より「得意先」
+*     「出荷先」を取得して｢EDI備考｣へセットする。
+*  [改定履歴]
+*　YYYY/MM/DD  Programar         Description
+*  2002/02/07  PSD K.Usami        新規開発
+*  2002/06/20  PSD T.SAITOH       再移送
+*  2002.09.04  購買情報のテキストが10桁の場合:8桁にする。
+*  2003/10/02  DMC K.ABE          "F05"更新時に存在チェックの追加
+*  2008/03/07  DMC S.KURATA       "F05"が複数行存在した場合の編集修正
+*　2009/10/14　SOLFIS R.HATA      処理対象取引先絞込み追加
+************************************************************************
+REPORT  ZE011000                      .
+************************************************************************
+* TYPES
+************************************************************************
+* Add 2009/10/14 --->
+tables : nast .
+* Add 2009/10/14 <---
+* メッセージステータス型
+TYPES: BEGIN OF TYP_NAST,
+OBJKY      TYPE NAST-OBJKY,      " 対象キー
+END   OF TYP_NAST.
+* 購買伝票明細型
+TYPES: BEGIN OF TYP_EKPO,
+EBELN      TYPE EKPO-EBELN,      " 購買伝票
+EBELP      TYPE EKPO-EBELP,      " 明細
+END   OF TYP_EKPO.
+* 販売ビジネスデータ型
+TYPES: BEGIN OF TYP_EKKN,
+VBELN       TYPE EKKN-VBELN,     " 販売管理伝票
+VBELP       TYPE EKKN-VBELP,     " 販売伝票明細
+END   OF TYP_EKKN.
+* 販売伝票：取引先型
+TYPES: BEGIN OF TYP_VBPA,
+KUNNR       TYPE VBPA-KUNNR,     " 得意先コード
+END   OF TYP_VBPA.
+***********************************************************************
+* DATA
+***********************************************************************
+* システム項目変数
+DATA: G_REPID                 TYPE SY-REPID,        " プログラムＩＤ
+G_DATUM                 TYPE SY-DATUM,        " システム日付
+G_UZEIT                 TYPE SY-UZEIT.        " システム時刻
+
+* メッセージステータス内部テーブル
+DATA: GF_NAST    TYPE          TYP_NAST,
+GT_NAST    LIKE TABLE OF GF_NAST.
+
+* 購買伝票明細内部テーブル
+DATA: GF_EKPO    TYPE          TYP_EKPO,
+GT_EKPO    LIKE TABLE OF GF_EKPO.
+
+*販売ビジネスデータ構造
+DATA: GF_EKKN    TYPE TYP_EKKN.
+
+* 販売伝票：取引先構造
+DATA: GF_JVBPA    TYPE TYP_VBPA.
+DATA: GF_SVBPA    TYPE TYP_VBPA.
+DATA: GF_VBPA     TYPE TYP_VBPA.
+
+* 出力レコード内部テーブル
+DATA: GF_WRITE     TYPE          ZELIST_V01,
+GT_WRITE     LIKE TABLE OF GF_WRITE.
+DATA: GF_DATA(145) TYPE C.
+* 対象データ存在チェックフラグ
+DATA: OK_FLG(1) TYPE C VALUE 0,
+ERR_FLG(1) TYPE C VALUE 0.
+
+DATA:ENDUSER(08) TYPE C.
+
+* 汎用モジュール'READ_TEXT'用
+DATA: W_NAME LIKE THEAD-TDNAME,
+ITAB_NAME LIKE TABLE OF TLINE,
+WA_NAME LIKE TLINE.
+
+* 汎用モジュール'CREATE_TEXT'用
+DATA: W_FNAME LIKE THEAD-TDNAME,
+ITAB_FNAME LIKE TABLE OF TLINE,
+WA_FNAME LIKE TLINE,
+E_FLG(1) TYPE C VALUE 0.
+DATA:KEKKA TYPE I,
+RCODE(1).
+*---------------------------------------------------------------------
+* 定数宣言
+*---------------------------------------------------------------------
+CONSTANTS:   CNS_NAST(4)     TYPE C VALUE 'NAST',
+CNS_EKPO(4)     TYPE C VALUE 'EKPO',
+CNS_EKKN(4)     TYPE C VALUE 'EKKN',
+CNS_VBPA(4)     TYPE C VALUE 'VBPA'.
+************************************************************************
+** 選択画面定義
+************************************************************************
+PARAMETERS:  P_NACHA TYPE NAST-NACHA DEFAULT 6. "送信媒体
+* Add 2009/10/14 --->
+Select-Options : S_PARNR For NAST-PARNR .
+* Add 2009/10/14 <---
+************************************************************************
+* AT SELECTION-SCREEN
+************************************************************************
+AT SELECTION-SCREEN.
+* システム項目用変数設定
+G_REPID = SY-REPID.   " プログラムＩＤ取得
+* 入力チェック処理
+IF P_NACHA = ' '.
+MESSAGE S006(Z1) WITH TEXT-002. "送信媒体
+STOP.
+ENDIF.
+************************************************************************
+** START-OF-SELECTION
+************************************************************************
+START-OF-SELECTION.
+
+*2008/03/07 ADD START
+DATA:CNT_TEXT    TYPE I.
+*2008/03/07 ADD END
+
+* ①対象データ読込処理
+PERFORM FRM_GET_DATA.
+*---ソート処理
+SORT GT_EKPO ASCENDING BY EBELN.
+
+* ②ループ処理
+CLEAR:KEKKA,RCODE.
+LOOP AT GT_EKPO INTO GF_EKPO.
+CLEAR: ERR_FLG.
+REFRESH: ITAB_NAME,
+ITAB_FNAME.
+CLEAR:ITAB_FNAME.
+*--(1)汎用モジュール'READ_TEXT'の呼び出し
+* Edit 2003.08.27 >>>
+*    PERFORM frm_read_text.
+PERFORM FRM_READ_TEXT USING 'F02' .
+* Edit 2003.08.27 <<<
+*--(2)発注テキストのチェック
+IF SY-SUBRC = 0."対象データありの場合
+LOOP AT ITAB_NAME INTO WA_NAME
+WHERE TDLINE <> ' '.
+EXIT.
+ENDLOOP.
+***2002.09.04 add >>>
+IF SY-SUBRC = 0.
+***2003.07.28 ADD >>
+*        PERFORM CHECK_STRLEN USING WA_NAME-TDLINE KEKKA RCODE.
+* 2003/10/02 MOD-S:"F05"存在チェック
+PERFORM FRM_READ_TEXT USING 'F05'.
+IF SY-SUBRC <> 0.    "F05テキストが存在しない場合は登録
+*
+IF WA_NAME-TDLINE+0(02) = '00' AND
+WA_NAME-TDLINE+8(01) <> SPACE.
+*          IF RCODE <> 'X'.
+*            enduser = wa_NAME-TDLINE+KEKKA(08).
+ENDUSER = WA_NAME-TDLINE+02(08).
+*            wa_NAME-TDLINE+0(KEKKA) = space.
+WA_NAME-TDLINE+0(10) = SPACE.
+***2003.07.28 ADD <<<
+WA_FNAME-TDLINE+0(10) = ENDUSER.
+APPEND WA_FNAME TO ITAB_FNAME.
+PERFORM UPDATE_TEXT.
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ELSE.
+WA_FNAME-TDLINE = WA_NAME-TDLINE.
+APPEND WA_FNAME TO ITAB_FNAME.
+PERFORM UPDATE_TEXT.
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ENDIF.
+*
+ELSE.    "F05テキストが存在する場合は上書きしない
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ENDIF.
+* 2003/10/02 MOD-E
+* Add 2003.08.27 >>>
+ELSE .
+PERFORM FRM_READ_TEXT USING 'F05' .
+IF SY-SUBRC = 0."対象データありの場合
+LOOP AT ITAB_NAME INTO WA_NAME
+WHERE TDLINE <> ' '.
+EXIT.
+ENDLOOP.
+*    **2002.09.04 add >>>
+IF SY-SUBRC = 0.
+*    **2003.07.28 ADD >>
+*            PERFORM CHECK_STRLEN USING WA_NAME-TDLINE KEKKA RCODE.
+IF WA_NAME-TDLINE+0(02) = '00' AND
+WA_NAME-TDLINE+8(01) <> SPACE.
+*            IF RCODE <> 'X'.
+*              enduser = wa_NAME-TDLINE+KEKKA(08).
+ENDUSER = WA_NAME-TDLINE+02(08).
+*              wa_NAME-TDLINE+0(KEKKA) = space.
+WA_NAME-TDLINE+0(10) = SPACE.
+*    **2003.07.28 ADD <<<
+WA_FNAME-TDLINE+0(10) = ENDUSER.
+APPEND WA_FNAME TO ITAB_FNAME.
+*2008/03/07 ADD START
+*             F05テキストが複数行設定されている場合、
+*             ２ﾚｺｰﾄﾞ目以降はそのまま
+CLEAR CNT_TEXT.
+DESCRIBE TABLE ITAB_NAME LINES CNT_TEXT.
+IF NOT CNT_TEXT IS INITIAL.
+LOOP AT ITAB_NAME INTO WA_NAME FROM 2.
+APPEND WA_NAME TO ITAB_FNAME.
+ENDLOOP.
+ENDIF.
+*2008/03/07 ADD END
+PERFORM UPDATE_TEXT.
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ELSE.
+WA_FNAME-TDLINE = WA_NAME-TDLINE.
+APPEND WA_FNAME TO ITAB_FNAME.
+*2008/03/07 ADD START
+*             F05テキストが複数行設定されている場合、
+*             ２ﾚｺｰﾄﾞ目以降はそのまま
+CLEAR CNT_TEXT.
+DESCRIBE TABLE ITAB_NAME LINES CNT_TEXT.
+IF NOT CNT_TEXT IS INITIAL.
+LOOP AT ITAB_NAME INTO WA_NAME FROM 2.
+APPEND WA_NAME TO ITAB_FNAME.
+ENDLOOP.
+ENDIF.
+*2008/03/07 ADD END
+PERFORM UPDATE_TEXT.
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ENDIF.
+ENDIF.
+ENDIF .
+* Add 2003.08.27 <<<
+ENDIF.
+* Add 2003.08.27 >>>
+ELSE .
+PERFORM FRM_READ_TEXT USING 'F05' .
+IF SY-SUBRC = 0."対象データありの場合
+LOOP AT ITAB_NAME INTO WA_NAME
+WHERE TDLINE <> ' '.
+EXIT.
+ENDLOOP.
+*  **2002.09.04 add >>>
+IF SY-SUBRC = 0.
+*  **2003.07.28 ADD >>
+*          PERFORM CHECK_STRLEN USING WA_NAME-TDLINE KEKKA RCODE.
+IF WA_NAME-TDLINE+0(02) = '00' AND
+WA_NAME-TDLINE+8(01) <> SPACE.
+*          IF RCODE <> 'X'.
+*            enduser = wa_NAME-TDLINE+KEKKA(08).
+*            wa_NAME-TDLINE+0(KEKKA) = space.
+ENDUSER = WA_NAME-TDLINE+02(08).
+WA_NAME-TDLINE+0(10) = SPACE.
+*  **2003.07.28 ADD <<<
+WA_FNAME-TDLINE+0(10) = ENDUSER.
+APPEND WA_FNAME TO ITAB_FNAME.
+*2008/03/07 ADD START
+*           F05テキストが複数行設定されている場合、
+*           ２ﾚｺｰﾄﾞ目以降はそのまま
+CLEAR CNT_TEXT.
+DESCRIBE TABLE ITAB_NAME LINES CNT_TEXT.
+IF NOT CNT_TEXT IS INITIAL.
+LOOP AT ITAB_NAME INTO WA_NAME FROM 2.
+APPEND WA_NAME TO ITAB_FNAME.
+ENDLOOP.
+ENDIF.
+*2008/03/07 ADD END
+PERFORM UPDATE_TEXT.
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ELSE.
+WA_FNAME-TDLINE = WA_NAME-TDLINE.
+APPEND WA_FNAME TO ITAB_FNAME.
+*2008/03/07 ADD START
+*           F05テキストが複数行設定されている場合、
+*           ２ﾚｺｰﾄﾞ目以降はそのまま
+CLEAR CNT_TEXT.
+DESCRIBE TABLE ITAB_NAME LINES CNT_TEXT.
+IF NOT CNT_TEXT IS INITIAL.
+LOOP AT ITAB_NAME INTO WA_NAME FROM 2.
+APPEND WA_NAME TO ITAB_FNAME.
+ENDLOOP.
+ENDIF.
+*2008/03/07 ADD END
+PERFORM UPDATE_TEXT.
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ENDIF.
+ENDIF.
+ENDIF .
+* Add 2003.08.27 <<<
+ENDIF.
+***2002.09.04 add <<<
+*--(3) 受注伝票データ取得処理
+PERFORM FRM_GET_JDATA.
+IF ERR_FLG = 1.
+WA_FNAME-TDLINE = SPACE.
+APPEND WA_FNAME TO ITAB_FNAME.
+PERFORM UPDATE_TEXT.
+CLEAR:WA_FNAME,WA_NAME,ENDUSER.
+CONTINUE.
+ELSEIF OK_FLG <> 1.
+CONTINUE.
+ENDIF.
+*--(4)発注テキスト更新処理
+PERFORM FRM_UPDATE.
+*--(5)出力レコード追加
+APPEND GF_WRITE TO GT_WRITE.
+
+ENDLOOP.
+
+*---対象データ存在チェック
+IF OK_FLG <> 1.
+*   MESSAGE i811(Z1).
+*   STOP.
+ENDIF.
+
+* ③結果出力処理
+PERFORM FRM_OUTPUT.
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_data
+*&---------------------------------------------------------------------*
+*       対象データ読込処理
+*----------------------------------------------------------------------*
+FORM FRM_GET_DATA.
+* NASTより対象となるEDI発注データ取得
+SELECT
+OBJKY
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST
+FROM NAST
+WHERE KAPPL = 'EF'
+AND   KSCHL = 'NEU'
+* Add 2009/10/14 --->
+and   PARNR IN S_PARNR
+* Add 2009/10/14 <---
+AND   NACHA = P_NACHA
+AND   VSTAT = '0'.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE I811(Z1).
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID CNS_NAST SY-SUBRC.
+ENDCASE.
+
+* EKPOより明細番号取得
+SELECT
+EBELN
+EBELP
+INTO CORRESPONDING FIELDS OF TABLE GT_EKPO
+FROM EKPO
+FOR ALL ENTRIES IN GT_NAST
+WHERE EBELN = GT_NAST-OBJKY+0(10)
+AND   LOEKZ = SPACE.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE I811(Z1).
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID CNS_EKPO SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_get_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_jdata
+*&---------------------------------------------------------------------*
+*       受注伝票データ取得処理
+*----------------------------------------------------------------------*
+FORM FRM_GET_JDATA.
+
+SELECT SINGLE
+VBELN
+VBELP
+INTO CORRESPONDING FIELDS OF GF_EKKN
+FROM EKKN
+WHERE EBELN = GF_EKPO-EBELN
+AND   EBELP = GF_EKPO-EBELP
+AND   ZEKKN = '1'.
+
+CASE SY-SUBRC.
+WHEN 4.    " 対象データなし
+ERR_FLG = 1.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID CNS_EKKN SY-SUBRC.
+WHEN 0.
+SELECT SINGLE
+KUNNR
+INTO CORRESPONDING FIELDS OF GF_JVBPA
+FROM VBPA
+WHERE VBELN = GF_EKKN-VBELN
+AND   POSNR = '000000'
+AND   PARVW = 'AG'.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+ERR_FLG = 1.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID CNS_VBPA SY-SUBRC.
+ENDCASE.
+
+SELECT SINGLE
+KUNNR
+INTO CORRESPONDING FIELDS OF GF_SVBPA
+FROM VBPA
+WHERE VBELN = GF_EKKN-VBELN
+AND   POSNR = '000000'
+AND   PARVW = 'WE'.
+
+CASE SY-SUBRC.
+WHEN 0.
+OK_FLG = 1.
+WHEN 4.    " 対象データなし
+ERR_FLG = 1.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID CNS_VBPA SY-SUBRC.
+ENDCASE.
+
+ENDCASE.
+
+ENDFORM.                    " frm_get_jdata
+*&---------------------------------------------------------------------*
+*&      Form  frm_update
+*&---------------------------------------------------------------------*
+*       発注テキスト更新処理
+*----------------------------------------------------------------------*
+FORM FRM_UPDATE.
+REFRESH:ITAB_FNAME.
+CONCATENATE
+GF_EKPO-EBELN
+GF_EKPO-EBELP
+INTO W_NAME.
+*
+*CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+*  EXPORTING
+*    INPUT         = GF_JVBPA-KUNNR
+*  IMPORTING
+*    OUTPUT        = GF_JVBPA-KUNNR          .
+*
+*CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+*  EXPORTING
+*    INPUT         = GF_SVBPA-KUNNR
+* IMPORTING
+*   OUTPUT        = GF_SVBPA-KUNNR          .
+*
+* ｢EDI備考」パラメータ設定
+IF GF_JVBPA-KUNNR+0(2) = '00'.
+WA_FNAME-TDLINE+0(10)  = GF_JVBPA-KUNNR+2(8).
+ELSE.
+WA_FNAME-TDLINE+0(10)  = GF_JVBPA-KUNNR.
+ENDIF.
+WA_FNAME-TDLINE+10(3)  = '   '.
+WA_FNAME-TDLINE+13(10) = GF_SVBPA-KUNNR.
+APPEND WA_FNAME TO ITAB_FNAME.
+
+* 汎用モジュール'CREATE_TEXT'の呼び出し
+PERFORM FRM_CREATE_TEXT USING W_NAME ITAB_FNAME.
+
+* 出力レコードの設定
+IF SY-SUBRC = 0.
+READ TABLE ITAB_FNAME INTO WA_FNAME INDEX 1.
+GF_WRITE-EBELN = GF_EKPO-EBELN.
+GF_WRITE-EBELP = GF_EKPO-EBELP.
+GF_WRITE-BIKOU = WA_FNAME-TDLINE.
+ELSE.
+GF_WRITE-EBELN = GF_EKPO-EBELN.
+GF_WRITE-EBELP = GF_EKPO-EBELP.
+GF_WRITE-BIKOU = TEXT-001.
+ENDIF.
+
+ENDFORM.                    " frm_update
+*&---------------------------------------------------------------------*
+*&      Form  frm_output
+*&---------------------------------------------------------------------*
+*       結果出力処理
+*----------------------------------------------------------------------*
+FORM FRM_OUTPUT.
+
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+*   I_INTERFACE_CHECK              = ' '
+*   I_BYPASSING_BUFFER             =
+*   I_BUFFER_ACTIVE                = ' '
+I_CALLBACK_PROGRAM             = G_REPID       "レポートID
+*   I_CALLBACK_PF_STATUS_SET       = ' '
+*   I_CALLBACK_USER_COMMAND        = ' '
+I_STRUCTURE_NAME               = 'ZELIST_V01'  "構造
+*   IS_LAYOUT                      =
+*   IT_FIELDCAT                    =
+*   IT_EXCLUDING                   =
+*   IT_SPECIAL_GROUPS              =
+*   IT_SORT                        =
+*   IT_FILTER                      =
+*   IS_SEL_HIDE                    =
+*   I_DEFAULT                      = 'X'
+*   I_SAVE                         = ' '
+*   IS_VARIANT                     =
+*   IT_EVENTS                      =
+*   IT_EVENT_EXIT                  =
+*   IS_PRINT                       =
+*   IS_REPREP_ID                   =
+*   I_SCREEN_START_COLUMN          = 0
+*   I_SCREEN_START_LINE            = 0
+*   I_SCREEN_END_COLUMN            = 0
+*   I_SCREEN_END_LINE              = 0
+* IMPORTING
+*   E_EXIT_CAUSED_BY_CALLER        =
+*   ES_EXIT_CAUSED_BY_USER         =
+TABLES
+T_OUTTAB                       = GT_WRITE      "データの受取TBL
+* EXCEPTIONS
+*   PROGRAM_ERROR                  = 1
+*   OTHERS                         = 2
+.
+IF SY-SUBRC <> 0.
+MESSAGE A001(Z1) WITH 'REUSE_ALV_LIST_DISPLAY' SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " frm_output
+*&---------------------------------------------------------------------*
+*&      Form  frm_read_text
+*&---------------------------------------------------------------------*
+*       汎用モジュール'READ_TEXT'
+*----------------------------------------------------------------------*
+* Edit 2003.08.27 >>>
+*FORM frm_read_text.
+
+FORM FRM_READ_TEXT USING P_ID .
+* Edit 2003.08.27 <<<
+REFRESH:ITAB_NAME.
+CONCATENATE
+GF_EKPO-EBELN
+GF_EKPO-EBELP
+INTO W_NAME.
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+*   CLIENT                        = SY-MANDT
+***2003.02.17 DEL >>>
+*     ID                            = 'F05'
+***2003.02.17 DEL <<<
+* Edit 2003.08.27 >>>
+****2003.02.17 EDIT >>>
+*      ID                            = 'F02'
+****2003.02.17 EDIT <<<
+ID                            = P_ID
+* Edit 2003.08.27 <<<
+LANGUAGE                      = 'J'
+NAME                          = W_NAME
+OBJECT                        = 'EKPO'
+*   ARCHIVE_HANDLE                = 0
+*   LOCAL_CAT                     = ' '
+* IMPORTING
+*   HEADER                        =
+TABLES
+LINES                         = ITAB_NAME
+EXCEPTIONS
+ID                            = 1
+LANGUAGE                      = 2
+NAME                          = 3
+NOT_FOUND                     = 4
+OBJECT                        = 5
+REFERENCE_CHECK               = 6
+WRONG_ACCESS_TO_ARCHIVE       = 7
+OTHERS                        = 8
+.
+IF SY-SUBRC <> 0 AND SY-SUBRC <> 4.
+MESSAGE A001(Z1) WITH 'READ_TEXT' SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " frm_read_text
+*&---------------------------------------------------------------------*
+*&      Form  frm_create_text
+*&---------------------------------------------------------------------*
+*       汎用モジュール'CREATE_TEXT'
+*----------------------------------------------------------------------*
+*      -->P_W_FNAME P_ITAB_FNAME text
+*----------------------------------------------------------------------*
+FORM FRM_CREATE_TEXT USING    P_W_NAME P_ITAB_FNAME.
+CALL FUNCTION 'CREATE_TEXT'
+EXPORTING
+FID               = 'F05'
+FLANGUAGE         = 'J'
+FNAME             = W_NAME
+FOBJECT           = 'EKPO'
+*   SAVE_DIRECT       = 'X'
+*   FFORMAT           = '*'
+TABLES
+FLINES            = ITAB_FNAME
+EXCEPTIONS
+NO_INIT           = 1
+NO_SAVE           = 2
+OTHERS            = 3
+.
+
+ENDFORM.                    " frm_create_text
+*&---------------------------------------------------------------------*
+*       発注テキスト更新処理  2002/08/30 add
+*----------------------------------------------------------------------*
+FORM UPDATE_TEXT.
+
+CONCATENATE
+GF_EKPO-EBELN
+GF_EKPO-EBELP
+INTO W_NAME.
+* 汎用モジュール'CREATE_TEXT'の呼び出し
+PERFORM FRM_CREATE_TEXT USING W_NAME ITAB_FNAME.
+
+* 出力レコードの設定
+IF SY-SUBRC = 0.
+READ TABLE ITAB_FNAME INTO WA_FNAME INDEX 1.
+GF_WRITE-EBELN = GF_EKPO-EBELN.
+GF_WRITE-EBELP = GF_EKPO-EBELP.
+GF_WRITE-BIKOU = WA_FNAME-TDLINE.
+ELSE.
+GF_WRITE-EBELN = GF_EKPO-EBELN.
+GF_WRITE-EBELP = GF_EKPO-EBELP.
+GF_WRITE-BIKOU = TEXT-001.
+ENDIF.
+
+ENDFORM.
+**********************************************************************
+***
+**********************************************************************
+FORM CHECK_STRLEN USING P_CHAR P_OUT P_RC.
+DATA:CHARLOOP TYPE I,
+CHECK TYPE I,
+MOJI(1) TYPE C.
+DATA:E_STRLEN TYPE I.
+CLEAR:CHARLOOP,CHECK,MOJI,E_STRLEN.
+*文字長を調べる
+CHARLOOP = STRLEN( P_CHAR ).
+*文字の長さ分ループする
+DO.
+IF E_STRLEN >= CHARLOOP.
+P_RC = 'X'.
+EXIT.
+ENDIF.
+***区切り文字スペースだったら>>>
+MOJI = P_CHAR+E_STRLEN(1).
+IF MOJI = ' '.
+P_OUT = E_STRLEN + 1.
+EXIT.
+ENDIF.
+
+E_STRLEN = E_STRLEN + 1.
+ENDDO.
+ENDFORM.

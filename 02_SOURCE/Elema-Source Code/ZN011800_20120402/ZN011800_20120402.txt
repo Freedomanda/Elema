@@ -1,0 +1,1349 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN011800                                                    *
+*&         入金実績一覧（売上）                                        *
+*&---------------------------------------------------------------------*
+*&  機能     : 指定した入金日の入金実績をALV表示する
+*&
+*&  作成日   : 2012/03/13
+*&  作成者   : S.TAKIKAWA(SOLFIS)
+*&  変更履歴 : 2012/03/27 K.KAJISA(SOLFIS)
+*&  変更内容 : パフォーマンス対策
+*&---------------------------------------------------------------------*
+REPORT ZN011800
+NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID YN01.
+*----------------------------------------------------------------------*
+*   構造/テーブル定義
+*----------------------------------------------------------------------*
+* 一覧出力データ取得用(BSID/BSAD共通)
+TYPES:BEGIN OF TYP_BSXX,
+BUKRS      TYPE BUKRS,     "会社コード
+KUNNR      TYPE KUNNR,     "得意先コード
+AUGDT      TYPE AUGDT,     "決済日付
+AUGBL      TYPE AUGBL,     "決済伝票番号
+GJAHR      TYPE GJAHR,     "会計年度
+BELNR      TYPE BELNR_D,   "会計伝票番号
+BUZEI      TYPE BUZEI,     "会計伝票内の明細番号
+*      BUDAT      TYPE BUDAT,     "伝票の転記日付
+*      WAERS      TYPE WAERS,     "通貨コード
+*      BLART      TYPE BLART,     "伝票タイプ
+SHKZG      TYPE SHKZG,     "借方/貸方フラグ
+WRBTR      TYPE WRBTR,     "伝票通貨額
+SGTXT      TYPE SGTXT,     "明細テキスト
+*test
+BUDAT      TYPE BUDAT,     "伝票の転記日付
+WAERS      TYPE WAERS,     "通貨コード
+BLART      TYPE BLART,     "伝票タイプ
+*test
+END   OF TYP_BSXX,
+T_TYP_BSXX   TYPE STANDARD TABLE OF TYP_BSXX.
+
+* 得意先マスタデータ取得用
+TYPES:BEGIN OF TYP_KNA1,
+KUNNR      TYPE KUNNR,     "得意先コード
+NAME1      TYPE NAME1,     "名称
+END   OF TYP_KNA1,
+T_TYP_KNA1   TYPE STANDARD TABLE OF TYP_KNA1.
+* ALV一覧用
+TYPES:BEGIN OF TYP_OUTPUT,
+BUKRS       TYPE BUKRS,     "会社コード
+KUNNR       TYPE KUNNR,     "得意先コード
+NAME1       TYPE NAME1,     "得意先名称
+BUDAT       TYPE BUDAT,     "入金日
+N_TYPE      TYPE CHAR2,     "入金方法
+N_TYPE_NAME TYPE CHAR20,   "入金方法名
+WAERS       TYPE WAERS,     "通貨
+WRBTR       TYPE WRBTR,     "金額
+ZUMI        TYPE CHAR2,     "消込
+SGTXT       TYPE SGTXT,     "明細テキスト
+GJAHR       TYPE GJAHR,     "会計年度
+BELNR       TYPE BELNR_D,   "伝票番号
+BUZEI       TYPE BUZEI,     "明細
+FURI        TYPE CHAR1,     "振替
+BLART       TYPE BLART,     "伝票タイプ
+AUGDT       TYPE AUGDT,     "決済日付
+AUGBL       TYPE AUGBL,     "決済伝票番号
+END   OF TYP_OUTPUT,
+T_TYP_OUTPUT  TYPE STANDARD TABLE OF TYP_OUTPUT.
+* FBダミー得意先から決済得意先を取得
+TYPES:BEGIN OF TYP_BSAD_FB_CHANGE,
+KUNNR      TYPE KUNNR,     "得意先コード
+AUGDT      TYPE AUGDT,     "決済日付
+AUGBL      TYPE AUGBL,     "決済伝票番号
+WRBTR      TYPE WRBTR,     "金額
+END   OF TYP_BSAD_FB_CHANGE.
+* BSAD削除チェック用
+TYPES:BEGIN OF TYP_BKPF,
+BELNR      TYPE BELNR_D,   "会計伝票番号
+GJAHR      TYPE GJAHR,     "会計年度
+*
+BUDAT      TYPE BUDAT,     "伝票の転記日付
+WAERS      TYPE WAERS,     "通貨コード
+BLART      TYPE BLART,     "伝票タイプ
+*
+END   OF TYP_BKPF.
+
+* テーブルデータ型
+TYPES:T_R_KUNNR     TYPE STANDARD TABLE OF BAPI_RANGESKUNNR,
+T_R_BLART     TYPE STANDARD TABLE OF RANGE_C2.
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+DATA:T_OUTPUT      TYPE T_TYP_OUTPUT,   "ALV一覧用
+T_R_BLA_5     TYPE T_R_BLART,      "伝票タイプ-振替用
+T_KNA1        TYPE T_TYP_KNA1,     "得意先名称取得用
+*    BSID取得用
+T_BSID_FB     TYPE T_TYP_BSXX,     "FB振替
+T_BSID_NOTFB  TYPE T_TYP_BSXX,     "FB振替外
+T_BSID_BILL   TYPE T_TYP_BSXX,     "手形
+T_BSID_OTHER  TYPE T_TYP_BSXX,     "その他
+T_BSID_CHANGE TYPE T_TYP_BSXX,     "振替
+*    BSAD取得用
+T_BSAD_FB     TYPE T_TYP_BSXX,     "FB振替
+T_BSAD_NOTFB  TYPE T_TYP_BSXX,     "FB振替外
+T_BSAD_BILL   TYPE T_TYP_BSXX,     "手形
+T_BSAD_OTHER  TYPE T_TYP_BSXX,     "その他
+T_BSAD_CHANGE TYPE T_TYP_BSXX.     "振替
+* PGID退避用
+DATA: G_PGID     TYPE SYCPROG.
+* ALV出力用
+TYPE-POOLS SLIS.
+DATA: W_LAYOUT      TYPE SLIS_LAYOUT_ALV,     "ALV出力レイアウト
+W_FIELDCAT    TYPE SLIS_FIELDCAT_ALV,   "ALV出力項目設定
+T_FIELDCAT    TYPE SLIS_T_FIELDCAT_ALV, "ALV出力項目設定
+W_REPID       TYPE SY-REPID,            "ALV出力用：プログラムID
+W_EDISVARIANT TYPE DISVARIANT,          "ALV出力バリアント
+T_EVENT       TYPE SLIS_T_EVENT,        "イベント
+W_EVENT       LIKE LINE OF T_EVENT,
+T_HEAD        TYPE SLIS_T_LISTHEADER,   "ヘッダ
+W_HEAD        LIKE LINE OF T_HEAD,
+W_PRINT       TYPE SLIS_PRINT_ALV.
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_ON         TYPE C     VALUE 'X',
+C_SAVE(1)    TYPE C     VALUE 'A',         " SAVE機能ON
+C_SIGN       TYPE CHAR1 VALUE 'E',
+C_OPTION     TYPE CHAR2 VALUE 'EQ'.
+*----------------------------------------------------------------------*
+*   テーブル定義(選択画面用)
+*----------------------------------------------------------------------*
+TABLES:BSID.
+*----------------------------------------------------------------------*
+*   選択画面
+*----------------------------------------------------------------------*
+* データ選択
+SELECTION-SCREEN:BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+PARAMETERS    :P_BUKRS  TYPE BUKRS OBLIGATORY   "会社コード
+MEMORY ID BUK.
+SELECT-OPTIONS:P_BUDAT FOR BSID-BUDAT        "入金日
+OBLIGATORY.
+SELECT-OPTIONS:P_KUNNR FOR BSID-KUNNR.       "得意先(支払人)
+SELECT-OPTIONS:P_WAERS FOR BSID-WAERS        "通貨コード
+NO INTERVALS.
+
+SELECTION-SCREEN:BEGIN OF BLOCK BL01 WITH FRAME TITLE TEXT-002.
+SELECTION-SCREEN:BEGIN OF LINE,
+POSITION 3.
+*   振込(FB)
+PARAMETERS:P_C_FB TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 5(10) TEXT-006 FOR FIELD P_C_FB.
+*   振込(FB外)
+PARAMETERS:P_C_FBG TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 18(10) TEXT-007 FOR FIELD P_C_FBG.
+*   手形
+PARAMETERS:P_C_TEGA TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 31(10) TEXT-008 FOR FIELD P_C_TEGA.
+*   その他
+PARAMETERS:P_C_ETC TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 44(10) TEXT-009 FOR FIELD P_C_ETC.
+SELECTION-SCREEN:END   OF LINE.
+SELECTION-SCREEN END   OF BLOCK BL01.
+
+* 未消込のみ
+SELECTION-SCREEN:BEGIN OF LINE,
+COMMENT 3(10) TEXT-015 FOR FIELD P_C_MI,
+POSITION 18.
+PARAMETERS:P_C_MI  TYPE C AS CHECKBOX.
+SELECTION-SCREEN:END   OF LINE.
+* 振替を表示
+SELECTION-SCREEN:BEGIN OF LINE,
+COMMENT 3(10) TEXT-016 FOR FIELD P_C_CNG,
+POSITION 18.
+PARAMETERS:P_C_CNG TYPE C AS CHECKBOX.
+SELECTION-SCREEN:END   OF LINE.
+SELECTION-SCREEN:END   OF BLOCK BL1.
+
+* 処理オプション
+SELECTION-SCREEN:BEGIN OF BLOCK BL2 WITH FRAME TITLE TEXT-003.
+* ALVバリアント項目
+PARAMETERS    :P_VARI   TYPE SLIS_VARI.
+SELECTION-SCREEN:END   OF BLOCK BL2.
+
+* システム項目
+SELECTION-SCREEN:BEGIN OF BLOCK BL3 WITH FRAME TITLE TEXT-004.
+SELECT-OPTIONS:P_DUMMY FOR BSID-KUNNR             "ダミー得意先
+NO INTERVALS OBLIGATORY.
+* 入金伝票タイプ
+SELECTION-SCREEN:BEGIN OF BLOCK BL02 WITH FRAME TITLE TEXT-005.
+SELECT-OPTIONS:S_BLA_1  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "振込(FB)　
+SELECT-OPTIONS:S_BLA_2  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "振込(FB外)　
+SELECT-OPTIONS:S_BLA_3  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "手形入金　
+SELECT-OPTIONS:S_BLA_4  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "その他入金　
+SELECTION-SCREEN END   OF BLOCK BL02.
+SELECTION-SCREEN:END   OF BLOCK BL3.
+*----------------------------------------------------------------------*
+*  INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+TYPE-POOLS:SSCR.
+*---選択画面の複数入力ボタン制御
+PERFORM BUTTON_CONTROL.
+*----------------------------------------------------------------------*
+*  AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON P_BUKRS.
+DATA:LW_BUKRS.
+* 会社コード入力値チェック
+CLEAR LW_BUKRS.
+SELECT SINGLE BUKRS
+INTO LW_BUKRS
+FROM T001
+WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD P_BUKRS.
+MESSAGE E750 WITH P_BUKRS.
+ENDIF.
+
+AT SELECTION-SCREEN ON BLOCK BL01.
+* 処理対象入金方法チェック
+IF  P_C_FB    IS INITIAL  "FB入金
+AND P_C_FBG   IS INITIAL  "FB入金外
+AND P_C_TEGA  IS INITIAL  "手形
+AND P_C_ETC   IS INITIAL. "その他
+* 全部未入力ならエラー
+*   入金方法を選択してください
+SET CURSOR FIELD P_C_FB.
+MESSAGE E935.
+ENDIF.
+*----------------------------------------------------------------------*
+*    バリアント検索ヘルプ
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VARI.
+PERFORM VARIANT_F4_HELP  CHANGING P_VARI.
+*----------------------------------------------------------------------*
+*    ALVヘッダをつける場合
+*----------------------------------------------------------------------*
+TOP-OF-PAGE.
+PERFORM HEADER_WRITE.
+*----------------------------------------------------------------------*
+*  START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 初期化処理
+PERFORM INIT_SYORI.
+* BSIDデータ取得
+PERFORM GET_BSID.
+* BSADデータ取得
+PERFORM GET_BSAD.
+* その他データ取得
+PERFORM GET_OTHER_DATA.
+* データ編集
+PERFORM EDIT_ALV.
+CHECK NOT T_OUTPUT IS INITIAL.
+* ALVリスト出力
+PERFORM OUTPUT_ALV.
+
+*&---------------------------------------------------------------------*
+*&      Form  BUTTON_CONTROL
+*&---------------------------------------------------------------------*
+*       選択画面の複数ボタン制御
+*----------------------------------------------------------------------*
+FORM BUTTON_CONTROL.
+DATA:L_WA_RES        TYPE SSCR_RESTRICT,
+L_WA_OPT_LIST   TYPE SSCR_OPT_LIST,
+L_WA_ASS        TYPE SSCR_ASS.
+DATA:OPTL TYPE SSCR_OPT_LIST.
+* 単一指定のみ可能
+L_WA_OPT_LIST-NAME       = 'JUST_EQ'.
+L_WA_OPT_LIST-OPTIONS-EQ = 'X'.
+APPEND L_WA_OPT_LIST TO L_WA_RES-OPT_LIST_TAB.
+
+L_WA_ASS-KIND    = 'S'.
+L_WA_ASS-SG_MAIN = 'I'.
+L_WA_ASS-OP_MAIN = 'JUST_EQ'.
+
+* 通貨コード
+L_WA_ASS-NAME    = 'P_WAERS'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* ダミー得意先
+L_WA_ASS-NAME    = 'P_DUMMY'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 入金伝票タイプ-FB
+L_WA_ASS-NAME    = 'S_BLA_1'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 入金伝票タイプ-FB外
+L_WA_ASS-NAME    = 'S_BLA_2'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 入金伝票タイプ-手形
+L_WA_ASS-NAME    = 'S_BLA_3'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 入金伝票タイプ-その他
+L_WA_ASS-NAME    = 'S_BLA_4'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 実行
+CALL FUNCTION 'SELECT_OPTIONS_RESTRICT'
+EXPORTING
+RESTRICTION = L_WA_RES.
+
+ENDFORM.                    " BUTTON_CONTROL
+*&---------------------------------------------------------------------*
+*&      Form  VARIANT_F4_HELP
+*&---------------------------------------------------------------------*
+*       バリアント検索ヘルプ
+*----------------------------------------------------------------------*
+*      <--P_P_VARI  検索ヘルプで選択されたバリアント名
+*----------------------------------------------------------------------*
+FORM VARIANT_F4_HELP CHANGING P_P_VARI.
+DATA:
+LW_DISVARIANT TYPE DISVARIANT.
+
+CLEAR:
+LW_DISVARIANT,
+P_P_VARI.
+
+LW_DISVARIANT-REPORT = SY-REPID.
+
+CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+EXPORTING
+IS_VARIANT         = LW_DISVARIANT
+I_SAVE             = C_SAVE
+I_DISPLAY_VIA_GRID = C_ON
+IMPORTING
+ES_VARIANT         = LW_DISVARIANT
+EXCEPTIONS
+NOT_FOUND          = 1
+PROGRAM_ERROR      = 2
+OTHERS             = 3.
+
+IF SY-SUBRC = 0.
+P_P_VARI = LW_DISVARIANT-VARIANT.
+ENDIF.
+
+ENDFORM.                    " VARIANT_F4_HELP
+*&---------------------------------------------------------------------*
+*&      Form  HEADER_WRITE
+*&---------------------------------------------------------------------*
+*       ALVヘッダ編集
+*----------------------------------------------------------------------*
+FORM HEADER_WRITE.
+DATA:LW_WORK   TYPE CHAR100,
+LW_PAGNO(4) TYPE C.
+*--- タイトル
+PERFORM SET_HEADER USING 'H' '入金実績一覧（売上）' SPACE.
+
+*--- ページ
+CLEAR: LW_WORK,LW_PAGNO.
+LW_PAGNO = SY-PAGNO.
+CONDENSE LW_PAGNO.
+CONCATENATE 'ページ　：'
+LW_PAGNO
+INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+*--- 処理日付
+CLEAR LW_WORK.
+CONCATENATE '処理日付：'
+SY-DATUM+0(4) '/'
+SY-DATUM+4(2) '/'
+SY-DATUM+6(2)
+INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+*--- 処理時刻
+CLEAR LW_WORK.
+CONCATENATE '処理時刻：'
+SY-UZEIT+0(2) ':'
+SY-UZEIT+2(2) ':'
+SY-UZEIT+4(2)
+INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+*--- ユーザID
+CLEAR LW_WORK.
+CONCATENATE 'ユーザID：' SY-UNAME INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+
+
+*--- 入金日(選択画面の画面表示されているデータをヘッダに出力)
+READ TABLE P_BUDAT INDEX 1.
+PERFORM EDIT_HEADER_DATE    USING P_BUDAT-LOW
+P_BUDAT-HIGH
+TEXT-013
+CHANGING LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK '<<実行条件>>'.
+CLEAR:LW_WORK.
+
+*--- 入金方法
+* 振込(FB)
+IF P_C_FB = C_ON.
+LW_WORK = TEXT-006.
+ENDIF.
+* 振込(FB外)
+IF P_C_FBG = C_ON.
+IF LW_WORK IS INITIAL.
+LW_WORK = TEXT-007.
+ELSE.
+CONCATENATE LW_WORK TEXT-007
+INTO LW_WORK SEPARATED BY '／'.
+ENDIF.
+ENDIF.
+* 手形
+IF P_C_TEGA = C_ON.
+IF LW_WORK IS INITIAL.
+LW_WORK = TEXT-008.
+ELSE.
+CONCATENATE LW_WORK TEXT-008
+INTO LW_WORK SEPARATED BY '／'.
+ENDIF.
+ENDIF.
+* その他
+IF P_C_ETC = C_ON.
+IF LW_WORK IS INITIAL.
+LW_WORK = TEXT-009.
+ELSE.
+CONCATENATE LW_WORK TEXT-009
+INTO LW_WORK SEPARATED BY '／'.
+ENDIF.
+ENDIF.
+CONCATENATE TEXT-014 LW_WORK
+INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+CLEAR:LW_WORK.
+
+* ヘッダ出力
+CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+EXPORTING
+IT_LIST_COMMENTARY       = T_HEAD.
+
+CLEAR:T_HEAD.
+
+ENDFORM.                    " HEADER_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_HEADER_DATE
+*&---------------------------------------------------------------------*
+*       画面出力用文言の編集
+*----------------------------------------------------------------------*
+*      -->P_LW_FROM    レンジテーブルFROM値
+*      -->P_LW_TO      レンジテーブルTO値
+*      <--P_LW_WORK    編集した文言
+*----------------------------------------------------------------------*
+FORM EDIT_HEADER_DATE USING    P_LW_FROM
+P_LW_TO
+P_TEXT
+CHANGING P_LW_WORK.
+DATA:LW_FROM_D TYPE DATUM,        "FROM値 日付属性
+LW_TO_D   TYPE DATUM,        "TO値 日付属性
+LW_FROM   TYPE CHAR10,       "FROM YYYY/MM/DD出力用
+LW_TO     TYPE CHAR10.       "TO YYYY/MM/DD出力用
+
+* 日付属性に設定しなおす
+LW_FROM_D = P_LW_FROM.
+LW_TO_D   = P_LW_TO.
+* FROM値
+IF NOT LW_FROM_D IS INITIAL.
+WRITE LW_FROM_D TO LW_FROM.
+ENDIF.
+* TO値
+IF NOT LW_TO_D IS INITIAL.
+WRITE LW_TO_D TO LW_TO.
+ENDIF.
+
+* YYYY/MM/DD ～ YYYY/MM/DD
+IF  NOT LW_FROM IS INITIAL
+AND NOT LW_TO   IS INITIAL.
+CONCATENATE P_TEXT LW_FROM TEXT-012 LW_TO
+INTO P_LW_WORK.
+ENDIF.
+* YYYY/MM/DDのみ
+IF  NOT LW_FROM IS INITIAL
+AND     LW_TO   IS INITIAL.
+CONCATENATE P_TEXT LW_FROM
+INTO P_LW_WORK.
+ENDIF.
+* ～ YYYY/MM/DD
+IF      LW_FROM IS INITIAL
+AND NOT LW_TO   IS INITIAL.
+CONCATENATE P_TEXT TEXT-012 LW_TO
+INTO P_LW_WORK.
+ENDIF.
+* 初期値
+IF   LW_FROM IS INITIAL
+AND  LW_TO   IS INITIAL.
+P_LW_WORK = P_TEXT.
+ENDIF.
+
+ENDFORM.                    " EDIT_HEADER_DATE
+*&---------------------------------------------------------------------*
+*&      Form  SET_HEADER
+*&---------------------------------------------------------------------*
+*       ヘッダ編集
+*----------------------------------------------------------------------*
+*      -->L_TYP    タイプ
+*      -->L_INFO   編集内容2
+*      -->L_KEY    編集内容1
+*----------------------------------------------------------------------*
+FORM SET_HEADER  USING     L_TYP
+L_INFO
+L_KEY.
+CLEAR W_HEAD.
+W_HEAD-TYP  = L_TYP.
+W_HEAD-KEY = L_KEY.
+W_HEAD-INFO = L_INFO.
+APPEND W_HEAD TO T_HEAD.
+
+ENDFORM.                    " SET_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  INIT_SYORI
+*&---------------------------------------------------------------------*
+*       初期化処理
+*----------------------------------------------------------------------*
+FORM INIT_SYORI.
+DATA:LW_R_BLA_5   TYPE RANGE_C2.
+
+CLEAR:T_OUTPUT, T_BSID_FB, T_BSID_NOTFB, T_BSID_BILL,
+T_BSID_OTHER, T_BSID_CHANGE, T_BSAD_FB, T_BSAD_NOTFB,
+T_BSAD_BILL, T_BSAD_OTHER, T_BSAD_CHANGE, T_KNA1, T_R_BLA_5.
+
+LW_R_BLA_5-SIGN   = C_SIGN.
+LW_R_BLA_5-OPTION = C_OPTION.
+* 伝票タイプ-振替用レンジテーブル作成
+LOOP AT S_BLA_1.
+LW_R_BLA_5-LOW    = S_BLA_1-LOW.
+APPEND LW_R_BLA_5 TO T_R_BLA_5.
+ENDLOOP.
+LOOP AT S_BLA_2.
+LW_R_BLA_5-LOW    = S_BLA_2-LOW.
+APPEND LW_R_BLA_5 TO T_R_BLA_5.
+ENDLOOP.
+LOOP AT S_BLA_3.
+LW_R_BLA_5-LOW    = S_BLA_3-LOW.
+APPEND LW_R_BLA_5 TO T_R_BLA_5.
+ENDLOOP.
+LOOP AT S_BLA_4.
+LW_R_BLA_5-LOW    = S_BLA_4-LOW.
+APPEND LW_R_BLA_5 TO T_R_BLA_5.
+ENDLOOP.
+
+* 'RV'以外
+LW_R_BLA_5-LOW    = 'RV'.
+APPEND LW_R_BLA_5 TO T_R_BLA_5.
+
+SORT T_R_BLA_5.
+DELETE ADJACENT DUPLICATES FROM T_R_BLA_5 COMPARING ALL FIELDS.
+
+ENDFORM.                    " INIT_SYORI
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSID
+*&---------------------------------------------------------------------*
+*       BSIDデータ取得
+*----------------------------------------------------------------------*
+FORM GET_BSID.
+
+* 振込FBが処理対象の場合
+IF P_C_FB = C_ON.
+PERFORM SELECT_BSID    USING P_DUMMY[]      "ダミー得意先
+S_BLA_1[]      "伝票タイプ
+CHANGING T_BSID_FB.
+ENDIF.
+* 振込FB外が処理対象の場合
+IF P_C_FBG = C_ON.
+PERFORM SELECT_BSID    USING P_KUNNR[]      "得意先
+S_BLA_2[]      "伝票タイプ
+CHANGING T_BSID_NOTFB.
+ENDIF.
+* 手形が処理対象の場合
+IF P_C_TEGA = C_ON.
+PERFORM SELECT_BSID    USING P_KUNNR[]      "得意先
+S_BLA_3[]      "伝票タイプ
+CHANGING T_BSID_BILL.
+ENDIF.
+* その他が処理対象の場合
+IF P_C_ETC = C_ON.
+PERFORM SELECT_BSID    USING P_KUNNR[]      "得意先
+S_BLA_4[]      "伝票タイプ
+CHANGING T_BSID_OTHER.
+ENDIF.
+* 振替を表示が処理対象の場合
+IF P_C_CNG = C_ON.
+PERFORM SELECT_BSID    USING P_KUNNR[]      "得意先
+T_R_BLA_5      "伝票タイプ
+CHANGING T_BSID_CHANGE.
+ENDIF.
+
+ENDFORM.                    " GET_BSID
+*&---------------------------------------------------------------------*
+*&      Form  SELECT_BSID
+*&---------------------------------------------------------------------*
+*       BSIDよりデータ取得
+*----------------------------------------------------------------------*
+*      -->P_KUNNR         取得対象の得意先
+*      -->P_BLAART        取得対象の伝票タイプ
+*      <--P_BSID          取得データ内部テーブル
+*----------------------------------------------------------------------*
+FORM SELECT_BSID USING    P_R_KUNNR  TYPE T_R_KUNNR
+P_R_BLART  TYPE T_R_BLART
+CHANGING P_T_BSID   TYPE T_TYP_BSXX.
+
+SELECT BUKRS                 "会社コード
+KUNNR                "得意先コード
+AUGDT                 "決済日付
+AUGBL                 "決済伝票番号
+GJAHR                 "会計年度
+BELNR                 "会計伝票番号
+BUZEI                 "会計伝票内の明細番号
+SHKZG                 "借方/貸方フラグ
+WRBTR                 "伝票通貨額
+SGTXT                 "明細テキスト
+BUDAT                 "伝票の転記日付
+WAERS                 "通貨コード
+BLART                 "伝票タイプ
+INTO TABLE P_T_BSID
+FROM BSID
+WHERE BUKRS =  P_BUKRS      "会社コード
+AND KUNNR IN P_R_KUNNR    "得意先コード
+AND UMSKS =  SPACE        "特殊仕訳取引タイプ
+AND UMSKZ =  SPACE        "特殊仕訳コード
+AND BUDAT IN P_BUDAT      "伝票の転記日付
+AND WAERS IN P_WAERS      "通貨コード
+AND BLART IN P_R_BLART.   "伝票タイプ
+
+ENDFORM.                    " SELECT_BSID
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSAD
+*&---------------------------------------------------------------------*
+*       BSADデータ取得
+*----------------------------------------------------------------------*
+FORM GET_BSAD.
+
+* 未決済のみ表示の場合は、BSADデータは不要
+CHECK P_C_MI IS INITIAL.
+
+* 振込FBが処理対象の場合
+IF P_C_FB = C_ON.
+PERFORM SELECT_BSAD    USING P_DUMMY[]      "ダミー得意先
+S_BLA_1[]      "伝票タイプ
+CHANGING T_BSAD_FB.
+PERFORM EDIT_FB     CHANGING T_BSAD_FB.
+ENDIF.
+* 振込FB外が処理対象の場合
+IF P_C_FBG = C_ON.
+PERFORM SELECT_BSAD    USING P_KUNNR[]      "得意先
+S_BLA_2[]      "伝票タイプ
+CHANGING T_BSAD_NOTFB.
+ENDIF.
+* 手形が処理対象の場合
+IF P_C_TEGA = C_ON.
+PERFORM SELECT_BSAD    USING P_KUNNR[]      "得意先
+S_BLA_3[]      "伝票タイプ
+CHANGING T_BSAD_BILL.
+ENDIF.
+* その他が処理対象の場合
+IF P_C_ETC = C_ON.
+PERFORM SELECT_BSAD    USING P_KUNNR[]      "得意先
+S_BLA_4[]      "伝票タイプ
+CHANGING T_BSAD_OTHER.
+ENDIF.
+
+ENDFORM.                    " GET_BSAD
+*&---------------------------------------------------------------------*
+*&      Form  SELECT_BSAD
+*&---------------------------------------------------------------------*
+*       BSADよりデータ取得
+*----------------------------------------------------------------------*
+*      -->P_KUNNR         取得対象の得意先
+*      -->P_BLAART        取得対象の伝票タイプ
+*      <--P_BSID          取得データ内部テーブル
+*----------------------------------------------------------------------*
+FORM SELECT_BSAD USING    P_R_KUNNR  TYPE T_R_KUNNR
+P_R_BLART  TYPE T_R_BLART
+CHANGING P_T_BSID   TYPE T_TYP_BSXX.
+DATA:LT_BKPF    TYPE STANDARD TABLE OF TYP_BKPF,
+LW_BKPF    TYPE TYP_BKPF.
+DATA:LW_BSAD    TYPE TYP_BSXX.
+
+SELECT BELNR
+GJAHR
+BUDAT
+WAERS
+BLART
+INTO TABLE LT_BKPF
+FROM BKPF
+WHERE BUKRS = P_BUKRS
+AND BSTAT = SPACE        "伝票スタータス
+AND BUDAT IN P_BUDAT     "転記日付
+AND BLART IN P_R_BLART   "伝票タイプ
+AND STBLG =  SPACE       "反対仕訳伝票番号
+AND WAERS IN P_WAERS.    "通貨コード
+
+DELETE ADJACENT DUPLICATES FROM LT_BKPF.
+
+CHECK NOT LT_BKPF[] IS INITIAL.
+
+SELECT BUKRS                 "会社コード
+KUNNR                 "得意先コード
+AUGDT                 "決済日付
+AUGBL                 "決済伝票番号
+GJAHR                 "会計年度
+BELNR                 "会計伝票番号
+BUZEI                 "会計伝票内の明細番号
+*         BUDAT                 "伝票の転記日付
+*         WAERS                 "通貨コード
+*         BLART                 "伝票タイプ
+SHKZG                 "借方/貸方フラグ
+WRBTR                 "伝票通貨額
+SGTXT                 "明細テキスト
+INTO TABLE P_T_BSID
+FROM BSEG
+FOR  ALL ENTRIES IN LT_BKPF
+WHERE BELNR =  LT_BKPF-BELNR "会計伝票番号
+AND BUKRS =  P_BUKRS       "会社コード
+AND GJAHR =  LT_BKPF-GJAHR "会計年度
+AND KOART =  'D'
+AND KUNNR IN P_R_KUNNR     "得意先コード
+AND UMSKS =  SPACE         "特殊仕訳取引タイプ
+AND UMSKZ =  SPACE         "特殊仕訳コード
+*     AND BUDAT IN P_BUDAT       "伝票の転記日付
+*     AND WAERS IN P_WAERS       "通貨コード
+*     AND BLART IN P_R_BLART.    "伝票タイプ
+.
+
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+
+LOOP AT P_T_BSID INTO LW_BSAD.
+CLEAR:LW_BKPF.
+READ TABLE LT_BKPF INTO LW_BKPF WITH KEY BELNR = LW_BSAD-BELNR
+GJAHR = LW_BSAD-GJAHR.
+IF SY-SUBRC = 0.
+LW_BSAD-BUDAT = LW_BKPF-BUDAT.
+LW_BSAD-WAERS = LW_BKPF-WAERS.
+LW_BSAD-BLART = LW_BSAD-BLART.
+ENDIF.
+MODIFY P_T_BSID FROM LW_BSAD.
+ENDLOOP.
+
+** 削除済みデータのチェック
+*  CHECK NOT P_T_BSID[] IS INITIAL.
+*  SELECT BELNR
+*         GJAHR
+*    INTO TABLE LT_BKPF
+*    FROM BKPF
+*         FOR ALL ENTRIES IN P_T_BSID
+*   WHERE BUKRS = P_T_BSID-BUKRS
+*     AND BELNR = P_T_BSID-BELNR
+*     AND GJAHR = P_T_BSID-GJAHR
+*     AND STBLG <> SPACE.
+
+* 取得したデータは削除されている会計伝票なので、内部テーブルより削除
+*  IF SY-SUBRC = 0.
+*    LOOP AT LT_BKPF INTO LW_BKPF.
+*      DELETE P_T_BSID
+*             WHERE BELNR = LW_BKPF-BELNR
+*               AND GJAHR = LW_BKPF-GJAHR.
+*    ENDLOOP.
+*  ENDIF.
+
+ENDFORM.                    " SELECT_BSAD
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_FB
+*&---------------------------------------------------------------------*
+*       振込FB決済済みデータ-ダミー得意先の変換
+*----------------------------------------------------------------------*
+*      <--P_T_BSAD_FB    振込FBのBSADデータ
+*----------------------------------------------------------------------*
+FORM EDIT_FB CHANGING P_T_BSAD_FB  TYPE T_TYP_BSXX.
+DATA:LT_BSAD_CHANGE  TYPE STANDARD TABLE OF TYP_BSAD_FB_CHANGE,
+LW_BSAD_CHANGE  TYPE TYP_BSAD_FB_CHANGE,
+LT_BSAD_FB      TYPE T_TYP_BSXX,
+LW_BSAD_FB      TYPE TYP_BSXX.
+
+CHECK NOT P_T_BSAD_FB[] IS INITIAL.
+LT_BSAD_FB[] = P_T_BSAD_FB[].
+CLEAR:P_T_BSAD_FB.
+SELECT KUNNR           "得意先コード
+* 2012/03/28 MOD START
+*         AUGDT           "決済日付
+*         AUGBL           "決済伝票番号
+*         WRBTR           "伝票通貨額
+IBUDAT
+IBELNER
+IWRBTR
+* 2012/03/28 MOD END
+INTO TABLE LT_BSAD_CHANGE
+* 2012/03/28 MOD START
+*    FROM BSAD
+*         FOR ALL ENTRIES IN LT_BSAD_FB
+*   WHERE BUKRS =  LT_BSAD_FB-BUKRS      "会社コード
+*     AND KUNNR <> LT_BSAD_FB-KUNNR      "得意先コード
+*     AND AUGDT =  LT_BSAD_FB-AUGDT      "決済日付
+*     AND AUGBL =  LT_BSAD_FB-AUGBL.     "決済伝票番号
+FROM ZN005
+FOR ALL ENTRIES IN LT_BSAD_FB
+WHERE BUKRS   = P_BUKRS
+AND KUNNR   <> LT_BSAD_FB-KUNNR       "得意先コード
+AND IBUDAT  =  LT_BSAD_FB-AUGDT       "決済日付
+AND IBELNER =  LT_BSAD_FB-AUGBL.      "決済伝票番号
+* 2012/03/28 MOD END
+IF SY-SUBRC = 0.
+SORT LT_BSAD_CHANGE BY AUGDT AUGBL WRBTR DESCENDING.
+LOOP AT LT_BSAD_FB INTO LW_BSAD_FB.
+*     決済日付/決済伝票番号で金額が一番大きいデータの得意先に入替
+READ TABLE LT_BSAD_CHANGE INTO LW_BSAD_CHANGE
+WITH KEY AUGDT = LW_BSAD_FB-AUGDT
+AUGBL = LW_BSAD_FB-AUGBL.
+*     取得できた場合はダミー得意先を決済した得意先に変更
+IF SY-SUBRC = 0.
+LW_BSAD_FB-KUNNR = LW_BSAD_CHANGE-KUNNR.
+ENDIF.
+*     得意先が、選択画面の得意先条件に合致している場合は出力対象
+IF LW_BSAD_FB-KUNNR IN P_KUNNR.
+APPEND LW_BSAD_FB TO P_T_BSAD_FB.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " EDIT_FB
+*&---------------------------------------------------------------------*
+*&      Form  GET_OTHER_DATA
+*&---------------------------------------------------------------------*
+*       その他データ取得
+*----------------------------------------------------------------------*
+FORM GET_OTHER_DATA.
+
+DATA:LT_BSXX   TYPE T_TYP_BSXX.
+
+* 取得した全データを纏める
+APPEND LINES OF T_BSID_FB     TO LT_BSXX.
+APPEND LINES OF T_BSID_NOTFB  TO LT_BSXX.
+APPEND LINES OF T_BSID_BILL   TO LT_BSXX.
+APPEND LINES OF T_BSID_OTHER  TO LT_BSXX.
+APPEND LINES OF T_BSID_CHANGE TO LT_BSXX.
+APPEND LINES OF T_BSAD_FB     TO LT_BSXX.
+APPEND LINES OF T_BSAD_NOTFB  TO LT_BSXX.
+APPEND LINES OF T_BSAD_BILL   TO LT_BSXX.
+APPEND LINES OF T_BSAD_OTHER  TO LT_BSXX.
+APPEND LINES OF T_BSAD_CHANGE TO LT_BSXX.
+SORT LT_BSXX BY KUNNR.
+DELETE ADJACENT DUPLICATES FROM LT_BSXX COMPARING KUNNR.
+* 出力対象の得意先の名称を一括取得
+CHECK NOT LT_BSXX[] IS INITIAL.
+SELECT KUNNR
+NAME1
+INTO TABLE T_KNA1
+FROM KNA1
+FOR ALL ENTRIES IN LT_BSXX
+WHERE KUNNR = LT_BSXX-KUNNR.
+
+IF SY-SUBRC = 0.
+SORT T_KNA1.
+ENDIF.
+
+ENDFORM.                    " GET_OTHER_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ALV
+*&---------------------------------------------------------------------*
+*       データ編集
+*----------------------------------------------------------------------*
+FORM EDIT_ALV.
+
+* 振込FB-BSID
+PERFORM MAKE_OUTPUT_DATA    USING T_BSID_FB
+'01'         "入金方法
+TEXT-006     "入金方法名
+TEXT-010     "決済
+SPACE.       "振替
+* 振込FB-BSAD
+PERFORM MAKE_OUTPUT_DATA    USING T_BSAD_FB
+'01'         "入金方法
+TEXT-006     "入金方法名
+TEXT-011     "決済
+SPACE.       "振替
+* 振込FB外-BSID
+PERFORM MAKE_OUTPUT_DATA    USING T_BSID_NOTFB
+'02'         "入金方法
+TEXT-007     "入金方法名
+TEXT-010     "決済
+SPACE.       "振替
+* 振込FB外-BSAD
+PERFORM MAKE_OUTPUT_DATA    USING T_BSAD_NOTFB
+'02'         "入金方法
+TEXT-007     "入金方法名
+TEXT-011     "決済
+SPACE.       "振替
+* 手形-BSID
+PERFORM MAKE_OUTPUT_DATA    USING T_BSID_BILL
+'03'         "入金方法
+TEXT-008     "入金方法名
+TEXT-010     "決済
+SPACE.       "振替
+* 手形-BSAD
+PERFORM MAKE_OUTPUT_DATA    USING T_BSAD_BILL
+'03'         "入金方法
+TEXT-008     "入金方法名
+TEXT-011     "決済
+SPACE.       "振替
+* その他-BSID
+PERFORM MAKE_OUTPUT_DATA    USING T_BSID_OTHER
+'04'         "入金方法
+TEXT-009     "入金方法名
+TEXT-010     "決済
+SPACE.       "振替
+* その他-BSAD
+PERFORM MAKE_OUTPUT_DATA    USING T_BSAD_OTHER
+'04'         "入金方法
+TEXT-009     "入金方法名
+TEXT-011     "決済
+SPACE.       "振替
+* 振替-BSID
+PERFORM MAKE_OUTPUT_DATA    USING T_BSID_CHANGE
+'04'         "入金方法
+TEXT-009     "入金方法名
+TEXT-010     "決済
+C_ON.        "振替
+* 振替-BSAD
+PERFORM MAKE_OUTPUT_DATA    USING T_BSAD_CHANGE
+'04'         "入金方法
+TEXT-009     "入金方法名
+TEXT-011     "決済
+C_ON.        "振替
+* 出力対象データのチェック
+IF T_OUTPUT[] IS INITIAL.
+MESSAGE S762.
+EXIT.
+ENDIF.
+
+* 一覧出力データのソート
+SORT T_OUTPUT BY BUDAT      "入金日
+KUNNR      "得意先
+N_TYPE     "入金方法
+FURI       "振替
+GJAHR      "会計年度
+BELNR.     "伝票番号
+
+ENDFORM.                    " EDIT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       一覧出力データ編集
+*----------------------------------------------------------------------*
+*      -->P_T_BSXX           BSID/BSADデータ
+*      -->P_N_TYPE           入金方法
+*      -->P_N_TYPE_NAME      入金方法名
+*      -->P_ZUMI             決済
+*      -->P_FURI             振替
+*----------------------------------------------------------------------*
+FORM MAKE_OUTPUT_DATA USING    P_T_BSXX      TYPE T_TYP_BSXX
+P_N_TYPE      TYPE CHAR2
+P_N_TYPE_NAME TYPE CHAR20
+P_ZUMI        TYPE CHAR2
+P_FURI        TYPE CHAR1.
+DATA:LW_T_BSXX   TYPE TYP_BSXX,
+LW_OUTPUT   TYPE TYP_OUTPUT,
+LW_KNA1     TYPE TYP_KNA1.
+
+* BSID/BSADデータをループし、一覧出力用データを編集
+LOOP AT P_T_BSXX INTO LW_T_BSXX.
+CLEAR:LW_OUTPUT, LW_KNA1.
+READ TABLE T_KNA1 INTO LW_KNA1
+WITH KEY KUNNR = LW_T_BSXX-KUNNR
+BINARY SEARCH.
+LW_OUTPUT-BUKRS = LW_T_BSXX-BUKRS.           "会社コード
+LW_OUTPUT-KUNNR = LW_T_BSXX-KUNNR.           "得意先コード
+LW_OUTPUT-NAME1 = LW_KNA1-NAME1.             "得意先名称
+LW_OUTPUT-BUDAT = LW_T_BSXX-BUDAT.           "入金日
+LW_OUTPUT-N_TYPE = P_N_TYPE.                 "入金方法
+LW_OUTPUT-N_TYPE_NAME = P_N_TYPE_NAME.       "入金方法名
+LW_OUTPUT-WAERS = LW_T_BSXX-WAERS.           "通貨
+IF LW_T_BSXX-SHKZG = 'S'.
+LW_OUTPUT-WRBTR = LW_T_BSXX-WRBTR * -1.    "金額
+ELSE.
+LW_OUTPUT-WRBTR = LW_T_BSXX-WRBTR.
+ENDIF.
+LW_OUTPUT-ZUMI = P_ZUMI.                     "消込
+LW_OUTPUT-SGTXT = LW_T_BSXX-SGTXT.           "明細テキスト
+LW_OUTPUT-GJAHR = LW_T_BSXX-GJAHR.           "会計年度
+LW_OUTPUT-BELNR = LW_T_BSXX-BELNR.           "伝票番号
+LW_OUTPUT-BUZEI = LW_T_BSXX-BUZEI.           "明細
+LW_OUTPUT-FURI  = P_FURI.                    "振替
+LW_OUTPUT-BLART = LW_T_BSXX-BLART.           "伝票タイプ
+LW_OUTPUT-AUGDT = LW_T_BSXX-AUGDT.           "決済日付
+LW_OUTPUT-AUGBL = LW_T_BSXX-AUGBL.           "決済伝票番号
+
+APPEND LW_OUTPUT TO T_OUTPUT.
+ENDLOOP.
+
+ENDFORM.                    " MAKE_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       ALVリスト出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_ALV.
+
+* 項目属性編集
+PERFORM ALV_SET_FIELDCAT.
+* その他編集
+PERFORM ALV_LAYOUT.
+* ALV一覧出力
+PERFORM ALV_CALL.
+
+ENDFORM.                    " OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  ALV_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       項目属性編集
+*----------------------------------------------------------------------*
+FORM ALV_SET_FIELDCAT.
+DATA:L_COL      TYPE I.               "カラム位置
+
+* PGID退避
+G_PGID = SY-REPID.
+
+* カラム位置の初期化
+L_COL = 0.
+
+* 項目名を編集する
+PERFORM SET_FIELDCAT USING 'BUKRS'          "項目ID
+TEXT-F01         "項目テキスト(短)
+TEXT-F01         "項目テキスト(中)
+TEXT-F01         "項目テキスト(長)
+4                "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+4                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'KUNNR'          "項目ID
+TEXT-F02         "項目テキスト(短)
+TEXT-F02         "項目テキスト(中)
+TEXT-F02         "項目テキスト(長)
+10               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'NAME1'          "項目ID
+TEXT-F03         "項目テキスト(短)
+TEXT-F03         "項目テキスト(中)
+TEXT-F03         "項目テキスト(長)
+35               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+35               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'BUDAT'          "項目ID
+TEXT-F04         "項目テキスト(短)
+TEXT-F04         "項目テキスト(中)
+TEXT-F04         "項目テキスト(長)
+10               "出力データ長
+'DATS'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'N_TYPE'         "項目ID
+TEXT-F05         "項目テキスト(短)
+TEXT-F05         "項目テキスト(中)
+TEXT-F05         "項目テキスト(長)
+10               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'N_TYPE_NAME'    "項目ID
+TEXT-F06         "項目テキスト(短)
+TEXT-F06         "項目テキスト(中)
+TEXT-F06         "項目テキスト(長)
+20               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+20               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'WAERS'          "項目ID
+TEXT-F07         "項目テキスト(短)
+TEXT-F07         "項目テキスト(中)
+TEXT-F07         "項目テキスト(長)
+5                "出力データ長
+'CUKY'           "データ型
+SPACE            "数値データ型
+5                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'WRBTR'          "項目ID
+TEXT-F08         "項目テキスト(短)
+TEXT-F08         "項目テキスト(中)
+TEXT-F08         "項目テキスト(長)
+16               "出力データ長
+'CURR'           "データ型
+'P'              "数値データ型
+16               "数値データ長
+'WAERS'          "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'ZUMI'           "項目ID
+TEXT-F09         "項目テキスト(短)
+TEXT-F09         "項目テキスト(中)
+TEXT-F09         "項目テキスト(長)
+4                "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+4                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'SGTXT'          "項目ID
+TEXT-F10         "項目テキスト(短)
+TEXT-F10         "項目テキスト(中)
+TEXT-F10         "項目テキスト(長)
+10               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'GJAHR'          "項目ID
+TEXT-F11         "項目テキスト(短)
+TEXT-F11         "項目テキスト(中)
+TEXT-F11         "項目テキスト(長)
+4                "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+4                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'BELNR'          "項目ID
+TEXT-F12         "項目テキスト(短)
+TEXT-F12         "項目テキスト(中)
+TEXT-F12         "項目テキスト(長)
+10               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'BUZEI'          "項目ID
+TEXT-F13         "項目テキスト(短)
+TEXT-F13         "項目テキスト(中)
+TEXT-F13         "項目テキスト(長)
+3                "出力データ長
+'NUMC'           "データ型
+SPACE            "数値データ型
+3                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'FURI'           "項目ID
+TEXT-F14         "項目テキスト(短)
+TEXT-F14         "項目テキスト(中)
+TEXT-F14         "項目テキスト(長)
+4                "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+4                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'BLART'          "項目ID
+TEXT-F15         "項目テキスト(短)
+TEXT-F15         "項目テキスト(中)
+TEXT-F15         "項目テキスト(長)
+2                "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+2                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'AUGDT'          "項目ID
+TEXT-F16         "項目テキスト(短)
+TEXT-F16         "項目テキスト(中)
+TEXT-F16         "項目テキスト(長)
+10               "出力データ長
+'DATS'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'AUGBL'          "項目ID
+TEXT-F17         "項目テキスト(短)
+TEXT-F17         "項目テキスト(中)
+TEXT-F17         "項目テキスト(長)
+10               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+ENDFORM.                    " ALV_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       FIELD CATALOGの編集
+*----------------------------------------------------------------------*
+*      -->P_FIELDNAME     項目ID　　　　　　　　　　　　　　　　　必須　
+*      -->P_SELLDTEXT_S   項目テキスト(短)　　　　　　　　　　　　必須
+*      -->P_SELLDTEXT_S   項目テキスト(中)　　　　　　　　　　　　必須
+*      -->P_SELLDTEXT_S   項目テキスト(長)　　　　　　　　　　　　必須
+*      -->P_OUTPUTLEN     出力データ長(カンマ、小数点、符号含む)　必須
+*      -->P_DATATYPE      データ型    　　　　　　　　　　　　　　必須
+*      -->P_INTTYPE       数値データ型 　　　　　　　　　　　 金額のみ
+*      -->P_INTLEN        数値データ長                            必須
+*      -->P_CFIELD        金額項目の場合参照する通貨項目名    金額のみ
+*      -->P_COL　　　　　 カラム位置　　　　　　　　　　　　　　　必須
+*----------------------------------------------------------------------*
+FORM SET_FIELDCAT USING P_FIELDNAME   TYPE SLIS_FIELDCAT_ALV-FIELDNAME
+P_SELTEXT_S   TYPE ANY
+P_SELTEXT_M   TYPE ANY
+P_SELTEXT_L   TYPE ANY
+P_OUTPUTLEN   TYPE SLIS_FIELDCAT_ALV-OUTPUTLEN
+P_DATATYPE    TYPE SLIS_FIELDCAT_ALV-DATATYPE
+P_INTTYPE     TYPE SLIS_FIELDCAT_ALV-INTTYPE
+P_INTLEN      TYPE SLIS_FIELDCAT_ALV-INTLEN
+P_CFIELDNAME  TYPE SLIS_FIELDCAT_ALV-CFIELDNAME
+CHANGING P_COL         TYPE I.
+
+DATA:W_FIELDCAT TYPE SLIS_FIELDCAT_ALV.
+
+
+* カラム位置設定
+P_COL = P_COL + 1.
+
+* 見出し設定
+W_FIELDCAT-COL_POS    = P_COL.             "カラム位置
+W_FIELDCAT-FIELDNAME  = P_FIELDNAME.       "項目ID
+W_FIELDCAT-SELTEXT_S  = P_SELTEXT_S.       "項目テキスト(短)
+W_FIELDCAT-SELTEXT_M  = P_SELTEXT_M.       "項目テキスト(中)
+W_FIELDCAT-SELTEXT_L  = P_SELTEXT_L.       "項目テキスト(長)
+W_FIELDCAT-OUTPUTLEN  = P_OUTPUTLEN.       "出力データ長
+W_FIELDCAT-DATATYPE   = P_DATATYPE.        "データ型
+W_FIELDCAT-INTTYPE    = P_INTTYPE.         "数値のデータ型
+W_FIELDCAT-INTLEN     = P_INTLEN.          "データ長
+W_FIELDCAT-CFIELDNAME = P_CFIELDNAME.      "参照通貨
+
+
+APPEND W_FIELDCAT TO T_FIELDCAT.
+
+ENDFORM.                    " SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*       その他編集
+*----------------------------------------------------------------------*
+FORM ALV_LAYOUT.
+
+* プログラムID取得
+W_REPID = SY-REPID.
+* レイアウト設定
+*  W_LAYOUT-COLWIDTH_OPTIMIZE    = 'X'.  "ALV コントロール: 列幅の最適化
+W_LAYOUT-DETAIL_INITIAL_LINES = 'X'.
+W_LAYOUT-ZEBRA                = 'X'.
+W_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+
+* バリアント
+IF NOT P_VARI IS INITIAL.
+W_EDISVARIANT-REPORT  = G_PGID.
+W_EDISVARIANT-VARIANT = P_VARI.
+ENDIF.
+
+* ALV印刷時用 設定項目
+W_PRINT-NO_PRINT_LISTINFOS = 'X'.
+
+
+* 処理イベントの取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE           = 0
+IMPORTING
+ET_EVENTS             = T_EVENT.
+
+* イベント時にコールされるFORM名を設定
+CLEAR W_EVENT.
+READ TABLE T_EVENT INTO W_EVENT WITH KEY NAME = 'TOP_OF_PAGE'.
+IF SY-SUBRC = 0.
+W_EVENT-FORM = 'HEADER_WRITE'.
+MODIFY T_EVENT INDEX SY-TABIX FROM W_EVENT.
+ENDIF.
+* イベント時にコールされるFORM名を設定
+CLEAR W_EVENT.
+READ TABLE T_EVENT INTO W_EVENT WITH KEY NAME = 'USER_COMMAND'.
+IF SY-SUBRC = 0.
+W_EVENT-FORM = 'USER_COMMAND'.
+MODIFY T_EVENT INDEX SY-TABIX FROM W_EVENT.
+ENDIF.
+
+ENDFORM.                    " ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_CALL
+*&---------------------------------------------------------------------*
+*       ALV一覧出力
+*----------------------------------------------------------------------*
+FORM ALV_CALL.
+
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM      = W_REPID     "プログラム名
+IS_LAYOUT               = W_LAYOUT    "レイアウト定義
+IS_PRINT                = W_PRINT
+IT_FIELDCAT             = T_FIELDCAT  "構造定義
+I_DEFAULT               = 'X'
+I_SAVE                  = 'A'
+IS_VARIANT              = W_EDISVARIANT
+IT_EVENTS               = T_EVENT
+TABLES
+T_OUTTAB                = T_OUTPUT     "出力データ
+EXCEPTIONS
+PROGRAM_ERROR           = 1
+OTHERS                  = 2.
+
+IF SY-SUBRC <> 0.
+*-- ALV出力エラー
+MESSAGE S000 WITH 'システムエラーが発生しました'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " ALV_CALL
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND
+*&---------------------------------------------------------------------*
+*       ユーザコマンド
+*----------------------------------------------------------------------*
+FORM USER_COMMAND USING P_UCOMM  TYPE SYUCOMM
+P_INFO   TYPE SLIS_SELFIELD.
+DATA:LW_OUTPUT   TYPE TYP_OUTPUT.
+DATA:T_BDC   TYPE TABLE OF BDCDATA,
+W_BDC   TYPE BDCDATA.
+
+READ TABLE T_OUTPUT INTO LW_OUTPUT
+INDEX P_INFO-TABINDEX.
+CASE P_UCOMM.
+*   ダブルクリックの場合
+WHEN '&IC1'.
+IF NOT LW_OUTPUT-BELNR IS INITIAL.
+SET PARAMETER ID 'BLN' FIELD LW_OUTPUT-BELNR.
+SET PARAMETER ID 'GJR' FIELD LW_OUTPUT-GJAHR.
+CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.

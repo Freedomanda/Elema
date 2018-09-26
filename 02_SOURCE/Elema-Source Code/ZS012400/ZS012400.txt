@@ -1,0 +1,470 @@
+************************************************************************
+* [プログラム名]
+*   ZF012400        予算データ一括投入処理
+* [処理概要]
+* 予算バッファテーブル(ZSB002)から対象データを取り込み、
+* 予算テーブル(S901)の更新処理を行う。
+
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2009/10/01   SOLFIS HATA       粗利率計算のゼロ除算対応
+************************************************************************
+REPORT ZF012400 LINE-SIZE 255
+NO STANDARD PAGE HEADING
+MESSAGE-ID  Z1.
+* TABLES
+TABLES : ZSB002,
+TVKBT.
+
+* TYPES
+TYPES  : BEGIN OF TY_LOG,
+VKBUR  TYPE ZSB002-VKBUR,       "営業所
+VRSIO  TYPE ZSB002-VRSIO,       "予算バージョン
+BEZEI  TYPE TVKBT-BEZEI,        "営業所名
+TEXT(70)   TYPE C,              "エラー内容
+END OF   TY_LOG.
+
+* 内部テーブル
+DATA   : H_S901     LIKE S901,
+T_S901     LIKE TABLE OF S901,
+H_ZSB002   LIKE ZSB002,
+T_ZSB002   LIKE TABLE OF ZSB002,
+H_LOG      TYPE TY_LOG,
+T_LOG      TYPE TABLE OF TY_LOG.
+
+
+* 作業領域
+DATA   : W_INS      TYPE I,                 "S901登録件数
+W_ERR      TYPE I.                 "ERR件数
+
+* RANGES
+DATA   : R_SPMON LIKE RANGE OF S901-SPMON,  "分析期間編集用
+H_SPMON LIKE LINE  OF R_SPMON.
+
+* CONSTANTS
+CONSTANTS : C_PKUNAG LIKE S901-PKUNAG VALUE 'ZZZZZZZZZZ'.  "受注先
+
+
+*------------------------------------------------------------------*
+* SELECTION-SCREEN.
+*------------------------------------------------------------------*
+
+PARAMETERS : P_NEN(4)    TYPE N DEFAULT SY-DATUM(4) OBLIGATORY,
+P_VER       LIKE ZSB002-VRSIO   OBLIGATORY,
+P_ZVRSIO    LIKE ZSB002-ZVRSIO  OBLIGATORY.
+SELECT-OPTIONS
+S_VKBUR     FOR  TVKBT-VKBUR.
+SELECTION-SCREEN SKIP 1.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN       COMMENT 1(50) TEXT-004.
+SELECTION-SCREEN END   OF LINE.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN       COMMENT 3(50) TEXT-005.
+SELECTION-SCREEN END   OF LINE.
+
+
+*------------------------------------------------------------------*
+* AT SELECTION-SCREEN
+*------------------------------------------------------------------*
+AT SELECTION-SCREEN ON P_VER.
+*　文字のチェック
+IF P_VER CN '0123456789 '.
+MESSAGE E400 WITH 'バージョンに文字が含まれています'.
+ENDIF.
+IF P_VER = '000'.
+MESSAGE E400 WITH 'バージョン000は指定できません'.
+ENDIF.
+IF P_VER = '001' OR
+P_VER = '002'.
+ELSE.
+MESSAGE E400 WITH
+'バージョンは001、002のどちらかを入力してください'.
+ENDIF.
+AT SELECTION-SCREEN ON P_ZVRSIO.
+*　文字のチェック
+IF P_ZVRSIO CN '0123456789 '.
+MESSAGE E400 WITH '予算バージョンに文字が含まれています'.
+ENDIF.
+
+AT SELECTION-SCREEN ON S_VKBUR.
+* 営業所コード存在チェック
+PERFORM CHK_VKBUR.
+*------------------------------------------------------------------*
+* START-OF-SELECTION.
+*------------------------------------------------------------------*
+START-OF-SELECTION.
+PERFORM INT_SEC.
+PERFORM DATA_GET.
+PERFORM DATA_CHK.
+PERFORM DATA_INS.
+PERFORM LIST_OUT.
+
+*------------------------------------------------------------------*
+* END-OF-SELECTION.
+*------------------------------------------------------------------*
+END-OF-SELECTION.
+*------------------------------------------------------------------*
+* TOP-OF-PAGE.
+*------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  INT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM INT_SEC.
+DATA : LW_NEN(4) TYPE N.
+
+* 初期化
+CLEAR   :  H_SPMON,H_S901,H_ZSB002,W_INS,H_LOG,W_ERR.
+REFRESH :  R_SPMON,T_S901,T_ZSB002,T_LOG.
+
+* 年度編集
+LW_NEN = P_NEN + 1.       "来年
+H_SPMON-SIGN   = 'I'.
+H_SPMON-OPTION = 'BT'.
+CONCATENATE : P_NEN   '04' INTO H_SPMON-LOW,
+LW_NEN  '03' INTO H_SPMON-HIGH.
+APPEND H_SPMON TO R_SPMON.
+
+ENDFORM.                    " INT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  DATA_GET
+*&---------------------------------------------------------------------*
+*       データ取込
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM DATA_GET.
+
+*- データ取得
+SELECT * INTO TABLE T_ZSB002
+FROM ZSB002
+WHERE SPMON IN R_SPMON
+AND VKBUR  IN S_VKBUR
+AND ZVRSIO = P_ZVRSIO.
+
+
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH text-e02.
+"予算バッファテーブルに対象データがありません。
+STOP.
+ENDIF.
+
+ENDFORM.                    " DATA_GET
+
+*&---------------------------------------------------------------------*
+*&      Form  DATA_CHK
+*&---------------------------------------------------------------------*
+*       データチェック・編集
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM DATA_CHK.
+DATA : LH_SUM      LIKE S901,               "受注先'ZZ･･'ｻﾏﾘ用
+LT_SUM      LIKE TABLE OF S901,
+LH_DUM      LIKE S901,
+LW_ZSB001   LIKE ZSB001,             "存在ﾁｪｯｸ用
+LW_ZSB003   LIKE ZSB003.
+
+LOOP AT T_ZSB002 INTO H_ZSB002.
+*-  ZSB001 確定フラグチェック
+SELECT SINGLE * INTO LW_ZSB001
+FROM ZSB001
+WHERE SPMON  = H_ZSB002-SPMON
+AND VKBUR  = H_ZSB002-VKBUR
+AND ZVRSIO = H_ZSB002-ZVRSIO.
+IF SY-SUBRC = 0.                          "確定フラグチェック
+IF LW_ZSB001-ZFIXFLG = 'X'.
+ELSE.                                   "エラーログ書きだし
+PERFORM ERR_LOG USING H_ZSB002-SPMON
+H_ZSB002-VKBUR
+H_ZSB002-VRSIO
+TEXT-E01.
+"予算バッファ管理テーブルの確定処理がされていません。
+CONTINUE.
+ENDIF.
+ELSE.                                    "データなし
+PERFORM ERR_LOG USING H_ZSB002-SPMON
+H_ZSB002-VKBUR
+H_ZSB002-VRSIO
+TEXT-E02.
+"予算バッファテーブルに対象データがありません。
+CONTINUE.
+ENDIF.
+
+*-  主要顧客チェック
+SELECT SINGLE * INTO LW_ZSB003
+FROM ZSB003
+WHERE  GJAHR  = P_NEN
+AND  VKBUR  = H_ZSB002-VKBUR
+AND  PKUNAG = H_ZSB002-PKUNAG.
+IF SY-SUBRC = 0.
+* Add 2004/10/13 ---->
+If H_ZSB002-PKUNAG EQ C_PKUNAG .
+MOVE-CORRESPONDING H_ZSB002 TO LH_SUM.
+LH_SUM-VRSIO  = P_VER.  "選択画面のﾊﾞｰｼﾞｮﾝをｾｯﾄ
+LH_SUM-PKUNAG = C_PKUNAG.                  "'ZZZZZZZZZZ'固定
+APPEND LH_SUM TO LT_SUM.
+CLEAR  LH_SUM.
+Else .
+* Add 2004/10/13 <----
+MOVE-CORRESPONDING H_ZSB002 TO H_S901.     "テーブル項目
+H_S901-VRSIO = P_VER.  "選択画面のﾊﾞｰｼﾞｮﾝをｾｯﾄ
+APPEND H_S901 TO T_S901.
+CLEAR  H_S901.
+* Add 2004/10/13 ---->
+EndIf .
+* Add 2004/10/13 <----
+ELSE.                                        "受注先が無い場合
+MOVE-CORRESPONDING H_ZSB002 TO LH_SUM.
+LH_SUM-VRSIO  = P_VER.                     "選択画面のﾊﾞｰｼﾞｮﾝをｾｯﾄ
+LH_SUM-PKUNAG = C_PKUNAG.                  "'ZZZZZZZZZZ'固定
+APPEND LH_SUM TO LT_SUM.
+CLEAR  LH_SUM.
+ENDIF.
+ENDLOOP.
+
+*- 受注先'ZZZZZZZZZZ'をサマリ
+SORT LT_SUM BY SSOUR VRSIO SPMON SPTAG SPWOC SPBUP       "ｷｰ項目でｿｰﾄ
+VKORG VKBUR VKGRP PKUNAG PRODH MATNR.
+LOOP AT LT_SUM INTO LH_DUM.
+CLEAR LH_SUM.
+LH_SUM = LH_DUM.
+AT END OF MATNR.
+SUM.
+MOVE-CORRESPONDING LH_SUM TO H_S901.
+H_S901-NETWR = LH_DUM-NETWR.                             "正味額
+H_S901-WAVWR = LH_DUM-WAVWR.                             "原価
+
+H_S901-ZZARAIGAKU = LH_DUM-NETWR - LH_DUM-WAVWR.         "粗利
+* Add 2009.10.01 --->
+if h_s901-netwr ne 0 .
+* Add 2009.10.01 <---
+H_S901-ZZARAIRITU = H_S901-ZZARAIGAKU / H_S901-NETWR.    "粗利率
+* Add 2009.10.01 --->
+else .
+h_s901-zzarairitu = 0 .
+endif .
+* Add 2009.10.01 --->
+APPEND H_S901 TO T_S901.
+CLEAR  H_S901.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " DATA_CHK
+*&---------------------------------------------------------------------*
+*&      Form  ERR_LOG
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_SPMON  text
+*      -->P_VKBUR  text
+*      -->P_VRSIO  text
+*      -->P_BEZEI  text
+*      -->P_TEXTE01  text
+*----------------------------------------------------------------------*
+FORM ERR_LOG USING    P_SPMON
+P_VKBUR
+P_VRSIO
+P_TEXT.
+*  H_LOG-SPMON = P_SPMON.
+H_LOG-VKBUR = P_VKBUR.
+H_LOG-VRSIO = P_VRSIO.
+H_LOG-TEXT  = P_TEXT.
+APPEND H_LOG TO T_LOG.
+CLEAR  H_LOG.
+
+ENDFORM.                    " ERR_LOG
+*&---------------------------------------------------------------------*
+*&      Form  DATA_INS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM DATA_INS.
+* 一括DEL
+DELETE FROM S901 WHERE VRSIO = P_VER
+AND SPMON IN R_SPMON
+AND VKBUR IN S_VKBUR.
+
+* 一括INS
+INSERT S901 FROM TABLE T_S901.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+MESSAGE E401 WITH 'データ登録時にエラーが発生しました(S901)'
+SY-SUBRC.
+ENDIF.
+ENDFORM.                    " DATA_INS
+*&---------------------------------------------------------------------*
+*&      Form  LIST_OUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM LIST_OUT.
+DATA: LW_VKBUR  TYPE S901-VKBUR.
+
+* 営業所件数のカウント
+SORT T_S901 BY VKBUR.
+LOOP AT T_S901 INTO H_S901.
+IF LW_VKBUR <> H_S901-VKBUR.
+W_INS = W_INS + 1.
+ENDIF.
+LW_VKBUR = H_S901-VKBUR.
+ENDLOOP.
+
+* エラー営業所件数カウント
+SORT T_LOG BY VKBUR. CLEAR LW_VKBUR.
+LOOP AT T_LOG INTO H_LOG.
+IF LW_VKBUR <> H_LOG-VKBUR.
+W_ERR = W_ERR + 1.
+ENDIF.
+LW_VKBUR = H_LOG-VKBUR.
+ENDLOOP.
+
+
+* 処理結果出力
+
+* 正常終了営業所
+PERFORM WRITE_HEADER.
+
+CLEAR LW_VKBUR.
+SORT T_S901 BY VKBUR.
+LOOP AT T_S901 INTO H_S901.
+IF LW_VKBUR <> H_S901-VKBUR.
+SELECT SINGLE * FROM TVKBT WHERE VKBUR = H_S901-VKBUR.
+WRITE:/1  P_NEN,
+15 H_S901-VKBUR,
+25 P_ZVRSIO,
+45 TVKBT-BEZEI,
+60 TEXT-002.                "正常に登録されました
+ENDIF.
+LW_VKBUR = H_S901-VKBUR.
+ENDLOOP.
+IF T_S901[] IS INITIAL.
+WRITE:/1 TEXT-001.                   "更新対象データが存在しません。
+ENDIF.
+
+* エラー処理営業所
+PERFORM ERR_HEADER.
+
+SORT T_LOG BY VKBUR. CLEAR LW_VKBUR.
+LOOP AT T_LOG INTO H_LOG.
+IF LW_VKBUR <> H_LOG-VKBUR.
+SELECT SINGLE * FROM TVKBT WHERE VKBUR = H_LOG-VKBUR.
+WRITE:/1  P_NEN,
+15 H_LOG-VKBUR,
+25 P_ZVRSIO,
+45 TVKBT-BEZEI,
+60 H_LOG-TEXT.              "確定処理エラー内容
+ENDIF.
+LW_VKBUR = H_LOG-VKBUR.
+ENDLOOP.
+IF T_LOG[] IS INITIAL.
+WRITE:/1 TEXT-003.                   "エラーはありません。
+ENDIF.
+ENDFORM.                    " LIST_OUT
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_HEADER
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM WRITE_HEADER.
+WRITE:/1    '予算データ一括投入処理結果'.
+SKIP 2.
+
+WRITE :/1   '正常登録件数',
+35   W_INS, '支店',
+/1   'エラー件数',
+35   W_ERR, '支店'.
+SKIP 2.
+
+
+** TEST
+*  DATA TEST_INS TYPE I.
+*  DESCRIBE TABLE T_S901 LINES TEST_INS.
+*  WRITE:/1 '全登録件数',TEST_INS.
+** ENDTEST
+
+
+
+
+WRITE:/1      '正常終了した営業所'.
+WRITE :/1     '会計年度',
+15    '営業所',
+25    '予算バージョン',
+45    '営業所名',
+60    '処理結果'.
+ULINE.
+ENDFORM.                    " WRITE_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  CHK_VKBUR
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM CHK_VKBUR.
+DATA: LW_VKBUR LIKE TVKBT-VKBUR,
+F_ERR    TYPE C.
+CLEAR F_ERR.
+LOOP AT S_VKBUR.
+IF NOT S_VKBUR-LOW IS INITIAL.
+SELECT SINGLE VKBUR INTO LW_VKBUR
+FROM TVKBT
+WHERE SPRAS = SY-LANGU
+AND VKBUR = S_VKBUR-LOW.
+IF SY-SUBRC <> 0.
+F_ERR = 'X'.
+EXIT.
+ENDIF.
+ENDIF.
+IF NOT S_VKBUR-HIGH IS INITIAL.
+SELECT SINGLE VKBUR INTO LW_VKBUR
+FROM TVKBT
+WHERE SPRAS = SY-LANGU
+AND VKBUR = S_VKBUR-HIGH.
+IF SY-SUBRC <> 0.
+F_ERR = 'X'.
+EXIT.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+IF F_ERR = 'X'.
+MESSAGE E400 WITH '存在しない営業所コードが入力されています'.
+ENDIF.
+
+ENDFORM.                    " CHK_VKBUR
+*&---------------------------------------------------------------------*
+*&      Form  ERR_HEADER
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM ERR_HEADER.
+SKIP 2.
+WRITE:/1 'エラー終了した営業所'.
+WRITE :/1     '会計年度',
+15    '営業所',
+25    '予算バージョン',
+45    '営業所名',
+60    '処理結果'.
+ULINE.
+
+ENDFORM.                    " ERR_HEADER

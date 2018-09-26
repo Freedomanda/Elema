@@ -1,0 +1,2618 @@
+*&---------------------------------------------------------------------*
+*&  財務会計システム                                                   *
+*&      プログラム名称：商品有高帳作成処理                             *
+*&      プログラムＩＤ：ＹＦ０１０５１０                               *
+*&      作成者        ：穂満(TECNOS)    作成日        ：1999/03/30     *
+*&      更新者        ：穂満(TECNOS)    更新日        ：1999/04/22     *
+*&                    ：日下(BITS)      更新日        ：1999/07/21     *
+*&                      自動生成明細(MSEG)の対象外は在庫転送以外に改訂 *
+*&                    ：日下(BITS)      更新日        ：1999/08/23     *
+*&                      自動生成明細(MSEG)の対象外のロジックを前月分の *
+*&                      有高帳作成処理にも追加。                       *
+*&                      Ｘ－ＡＵＴＯのＳＥＬＥＣＴが前月分作成ロジック *
+*&                      からもれていた。                               *
+*&                      改頁なしオプション付で品目ブレーク時の改頁操作 *
+*&                      が不正（頁カウンタ値不正で１行のみの頁が印刷） *
+*&                     :NDSC            更新日          :2000/04/27    *
+*&                      価格条件単位で金額を割っていない。             *
+*&                     :NDSC            更新日          :2000/07/07    *
+*                       ﾊﾟﾗﾒｰﾀ'会社コード'の初期値を変更               *
+*2000.07.11             SCDにテーブル「S710」が存在しない為
+*                       →KONP-KSTBWに変更                 R.TOMOEDA
+*2000.10.31             4.6C対応(MBEW対応修正)             K.Kajisa
+*& 2012/09/12  ISID     ES-UP
+*&---------------------------------------------------------------------*
+*
+REPORT YF010510 MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+
+*-----------------------------------------------------------------------
+*- データ定義
+*-----------------------------------------------------------------------
+*- テーブル定義
+TABLES: MKPF,                             "入出庫伝票ヘッダ
+MSEG,                             "伝票セグメント：品目
+T001,                             "会社コード
+T009B,                            "会計年度バリアント（期間）
+MAKT,                             "品目テキスト
+MARC,                             "品目マスタ: C セグメント
+MARV,                             "品目管理レコード
+MBEW,                             "品目評価
+BKPF,                             "会計伝票ヘッダ
+KNA1,                             "得意先マスタ：一般
+LFA1,                             "仕入先マスタ（一般）
+T156T,                            "移動タイプテキスト
+T001W.                            "プラント／分岐
+*2000/10/31 ADD START
+TABLES MBEWH.                             "品目評価: 履歴
+*2000/10/31 ADD END
+*- 入力パラメータ定義(19990210変更)
+SELECTION-SCREEN SKIP 1.
+PARAMETERS:
+*2000/07/07 MOD START
+*  P_BUKRS    LIKE T001-BUKRS OBLIGATORY DEFAULT 'C001'.
+P_BUKRS    LIKE T001-BUKRS OBLIGATORY MEMORY ID BUK.
+*2000/07/07 MOD END
+*
+SELECTION-SCREEN SKIP 1.
+PARAMETERS:
+P_YYMM(06) TYPE C          OBLIGATORY.
+*
+SELECTION-SCREEN SKIP 1.
+SELECT-OPTIONS:
+S_MATNR    FOR MSEG-MATNR.
+*
+SELECTION-SCREEN SKIP 1.
+SELECT-OPTIONS:
+S_WERKS    FOR MSEG-WERKS.
+*
+SELECTION-SCREEN SKIP 1.
+*SELECTION-SCREEN COMMENT fmt name.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(20) TEXT-040.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS:
+P_CHECK    AS CHECKBOX.
+SELECTION-SCREEN END   OF LINE.
+*- 内部テーブル定義
+DATA: BEGIN OF ITAB_DETAIL OCCURS 0,
+WERKS    LIKE MSEG-WERKS,
+MATNR    LIKE MSEG-MATNR,
+BUDAT    LIKE MKPF-BUDAT,
+CPUTM    LIKE MKPF-CPUTM,
+BELNR    LIKE BKPF-BELNR,
+MBLNR    LIKE MKPF-MBLNR,
+AWSYS    LIKE MKPF-AWSYS,
+LIFNR    LIKE MSEG-LIFNR,
+KUNNR    LIKE MSEG-KUNNR,
+MENGE    LIKE MSEG-MENGE,
+DMBTR    LIKE MSEG-DMBTR,
+SHKZG    LIKE MSEG-SHKZG,
+BWART    LIKE MSEG-BWTAR,
+SOBKZ    LIKE MSEG-SOBKZ,
+KZBEW    LIKE MSEG-KZBEW,
+KZZUG    LIKE MSEG-KZZUG,
+KZVBR    LIKE MSEG-KZVBR,
+WAERS    LIKE MSEG-WAERS,
+*- modify start by homan 1998/12/04 -----------------------------------*
+LBKUM    LIKE MSEG-LBKUM,
+SALK3    LIKE MSEG-SALK3,
+LVORM    LIKE MARC-LVORM,
+*- modify end by homan 1998/12/04 -------------------------------------*
+END   OF ITAB_DETAIL.
+
+DATA: BEGIN OF YFPR0501,
+TEXT(08) TYPE C,
+SMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+SBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+SDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+ZMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+ZBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+ZDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+END OF YFPR0501.
+
+DATA: BEGIN OF YFPR0502,
+MM(02)   TYPE C,
+DD(02)   TYPE C,
+BELNR    LIKE MKPF-MBLNR,
+CODE     LIKE KNA1-KUNNR,
+TEXT     LIKE KNA1-NAME2,
+SMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+SBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+SDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+HMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+HBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+HDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+ZMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+ZBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+ZDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+END OF YFPR0502.
+*
+DATA: BEGIN OF YFPR0503,                  "明細総合計用
+SMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+SBWGRL   TYPE P,
+SDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+HMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+HBWGRL   TYPE P,
+HDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+END   OF YFPR0503.
+
+*- ワークエリア定義
+DATA: W_YEAR(04)     TYPE N,
+W_MONTH(02)    TYPE N,
+W_GJAHR        LIKE MKPF-MJAHR,
+W_BUDAT        LIKE MKPF-BUDAT,
+W_SYSDATE      LIKE SY-DATUM,
+W_SYSTIME      LIKE SY-UZEIT,
+W_WERKS_CD     LIKE MSEG-WERKS,
+W_WERKS_DET    LIKE MSEG-WERKS,
+W_WERKS_NM     LIKE T001W-NAME1,
+W_MATNR_CD(18) TYPE C,  "LIKE MSEG-MATNR,
+W_MATNR_DET    LIKE MSEG-MATNR,
+W_MATNR_NM     LIKE MAKT-MAKTX,
+W_KUNNR_NM     LIKE KNA1-NAME2,
+W_LIFNR_NM     LIKE LFA1-NAME2,
+W_MENGE_WK     LIKE S079-RWMENG,
+W_PREV_ZMENGE  LIKE MARA-NTGEW, "S079-RWMENG,
+W_PREV_ZBWGRL  LIKE BSEG-DMBTR, "KNA1-UMSAT,
+W_PREV_ZDMBTR  LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+W_LIN          TYPE P,
+W_PAGE(05)     TYPE N,
+W_LINE(03)     TYPE N,
+W_SMENGE_LS    LIKE MARA-NTGEW,"S079-RWMENG,
+W_SBWGRL_LS    LIKE BSEG-DMBTR, "KNA1-UMSAT,
+W_SDMBTR_LS    LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+W_HMENGE_LS    LIKE MARA-NTGEW,"S079-RWMENG,
+W_HBWGRL_LS    LIKE BSEG-DMBTR, "KNA1-UMSAT,
+W_HDMBTR_LS    LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+W_DATE         LIKE SY-DATUM,
+W_AWKEY        LIKE BKPF-AWKEY,
+W_SALFLG       TYPE C,
+W_NEWPAGE      TYPE C,
+W_CURRENT      TYPE C,
+W_PREV_YM(06)  TYPE C,
+W_CURR_YM(06)  TYPE C.
+*2000/10/31 ADD START
+DATA: W_G_FLG(01)    TYPE C,            "MBEWH情報ゲットフラグ
+W_L_YEAR(04)   TYPE N,            "前月用
+W_L_MONTH(02)  TYPE N.            "前月用
+*2000/10/31 ADD END
+*
+RANGES : S_BUDAT FOR MKPF-BUDAT,
+S_SOBKZ FOR MSEG-SOBKZ.
+*
+DATA:                                    "SELECT INTO
+*- MKPF
+MBLNR  LIKE MKPF-MBLNR,
+MJAHR  LIKE MKPF-MJAHR,
+BUDAT  LIKE MKPF-BUDAT,
+CPUTM  LIKE MKPF-CPUTM,
+AWSYS  LIKE MKPF-AWSYS,
+*- MSEG
+BWART  LIKE MSEG-BWART,
+XAUTO  LIKE MSEG-XAUTO, "1999/04/22 insert by homan
+MATNR  LIKE MSEG-MATNR,
+WERKS  LIKE MSEG-WERKS,
+SOBKZ  LIKE MSEG-SOBKZ,
+LIFNR  LIKE MSEG-LIFNR,
+KUNNR  LIKE MSEG-KUNNR,
+SHKZG  LIKE MSEG-SHKZG,
+WAERS  LIKE MSEG-WAERS,
+DMBTR  LIKE MSEG-DMBTR,
+MENGE  LIKE MSEG-MENGE,
+KZBEW  LIKE MSEG-KZBEW,
+KZVBR  LIKE MSEG-KZVBR,
+KZZUG  LIKE MSEG-KZZUG,
+LBKUM  LIKE MSEG-LBKUM,
+SALK3  LIKE MSEG-SALK3,
+*- MBEW
+VERPR  LIKE MBEW-VERPR,
+VMKUM  LIKE MBEW-VMKUM,
+VMVER  LIKE MBEW-VMVER,
+VMSAL  LIKE MBEW-VMSAL,
+VVMLB  LIKE MBEW-VVMLB,
+VVSAL  LIKE MBEW-VVSAL,
+*2000/10/31 ADD START
+*- MBEWH
+LBKUM_h LIKE MBEWH-LBKUM,
+SALK3_h like MBEWH-SALK3,
+*2000/10/31 END
+*- MARC
+LVORM  LIKE MARC-LVORM,
+*- BKPF
+BELNR  LIKE BKPF-BELNR,
+*- KNA1
+NAME1  LIKE KNA1-NAME1,
+NAME2  LIKE KNA1-NAME2.
+
+*- コンスタント定義
+DATA: C_DR(01)   TYPE C VALUE 'S',
+C_CR(01)   TYPE C VALUE 'H',
+C_SOBKZ(6) TYPE C VALUE ' EPOQW',
+C_453      LIKE MSEG-BWART VALUE '453', "売上返品-> 利用可能
+C_ON       LIKE MSEG-XAUTO VALUE 'X'.   "明細自動生成
+*&---------------------------------------------------------------------*
+*&   Event INITIALIZATION
+*&---------------------------------------------------------------------*
+INITIALIZATION.
+
+AT SELECTION-SCREEN.
+
+*- 初期処理
+PERFORM F99_DATA_INIT.
+
+*- 処理年月チェック
+PERFORM F99_YMD_CHECK.
+
+*- 抽出対象日付設定
+PERFORM F99_DAT_SET.                                  "BUDAT(BUDAT)
+
+*- 会社コードチェック
+PERFORM F99_BUKRS_CHECK USING P_BUKRS.
+
+*- 対象年月チェック
+PERFORM F99_CURR_PREV_CHECK USING P_BUKRS.
+
+*&---------------------------------------------------------------------*
+*&   Event START-OF-SELECTION
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+*- 入出庫伝票ヘッダ検索
+PERFORM F99_DATA_SELECT.
+
+*- insert start by homan 1999/01/08 -----------------------------------*
+* check w_lin <> 0.
+*- insert end by homan 1999/01/08 -------------------------------------*
+*
+SORT ITAB_DETAIL BY WERKS MATNR BUDAT CPUTM BELNR.
+*
+CLEAR : W_PAGE, W_LINE.
+*
+PERFORM F99_OMIT_DATA.
+*
+DESCRIBE TABLE ITAB_DETAIL LINES W_LIN.
+*
+CHECK W_LIN <> 0.
+*
+LOOP AT ITAB_DETAIL.            " where belnr <> 'OMIT'.
+*
+W_WERKS_DET = ITAB_DETAIL-WERKS.
+W_MATNR_DET = ITAB_DETAIL-MATNR.
+*
+IF P_CHECK = SPACE. "品目での改ページありの場合
+AT NEW WERKS.
+PERFORM F02_GET_WERKS_TEXT USING W_WERKS_DET.
+PERFORM F03_GET_MATNR_TEXT USING W_MATNR_DET.
+W_NEWPAGE = 'X'.
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+PERFORM F04_LAST_MONTH_LINE USING  W_MATNR_DET W_WERKS_DET.
+ENDAT.
+*
+AT NEW MATNR.
+IF W_NEWPAGE = SPACE.
+PERFORM F03_GET_MATNR_TEXT USING  W_MATNR_DET.
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+PERFORM F04_LAST_MONTH_LINE USING  W_MATNR_DET W_WERKS_DET.
+ELSE.
+W_NEWPAGE = SPACE.
+ENDIF.
+CLEAR : W_SMENGE_LS, W_SDMBTR_LS, W_HMENGE_LS, W_HDMBTR_LS.
+ENDAT.
+*
+CASE ITAB_DETAIL-BELNR.
+WHEN 'X'.    "該当データなし
+PERFORM F07_DETAIL_NOT.
+WHEN SPACE.  "出力対象外
+WHEN OTHERS. "明細行編集
+PERFORM F07_DETAIL_LINE.
+ENDCASE.
+*
+IF W_LINE => 45.
+AT END OF MATNR.
+PERFORM F08_PAGE_TOTAL USING TEXT-030. "次月繰越
+CONTINUE.
+ENDAT.
+PERFORM F08_PAGE_TOTAL USING TEXT-028. "次頁繰越
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+PERFORM F09_PREV_TOTAL.
+ENDIF.
+*
+AT END OF MATNR.
+PERFORM F08_PAGE_TOTAL USING TEXT-030. "次月繰越
+PERFORM F09_MATNR_TOTAL.
+ENDAT.
+ELSE.               "品目での改ページなしの場合
+AT NEW WERKS.
+PERFORM F02_GET_WERKS_TEXT USING W_WERKS_DET.
+W_NEWPAGE = 'X'.
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+ENDAT.
+*
+AT NEW MATNR.
+RESERVE 2 LINES.
+PERFORM F03_GET_MATNR_TEXT USING  W_MATNR_DET.
+WRITE : /001(018) W_MATNR_CD,
+019(024) W_MATNR_NM.
+PERFORM F04_LAST_MONTH_LINE USING  W_MATNR_DET W_WERKS_DET.
+*       W_LINE = W_LINE + 1.                               "19990823-DEL
+W_LINE = W_LINE + 2.                               "19990823-ADD
+CLEAR : W_SMENGE_LS,W_SDMBTR_LS,W_HMENGE_LS, W_HDMBTR_LS.
+ENDAT.
+*
+CASE ITAB_DETAIL-BELNR.
+WHEN 'X'.    "該当データなし
+WHEN SPACE.  "出力対象外
+WHEN OTHERS. "明細行編集
+PERFORM F07_DETAIL_LINE.
+ENDCASE.
+*
+AT END OF MATNR.
+PERFORM F18_PAGE_TOTAL USING TEXT-042. "次月繰越
+SKIP.
+W_LINE = W_LINE + 2.
+ENDAT.
+*
+IF W_LINE => 50.
+W_PAGE = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+*&---------------------------------------------------------------------*
+*&   Event END-OF-SELECTION
+*&---------------------------------------------------------------------*
+END-OF-SELECTION.
+*
+*- insert start by homan 1999/01/08 -----------------------------------*
+CHECK W_LIN = 0.
+
+W_PAGE = W_PAGE + 1.
+SKIP.
+WRITE /002(024) TEXT-032. "該当データなし
+*- insert end by homan 1999/01/08 -------------------------------------*
+*
+* WRITE  /001(170) SY-ULINE.
+* WRITE: /065(007) W_SMENGE_LS,
+*         073(011) W_SBWGRL_LS,
+*         083(015) W_SDMBTR_LS DECIMALS 0,
+*         101(007) W_HMENGE_LS,
+*         108(011) W_HBWGRL_LS,
+*         118(015) W_HDMBTR_LS DECIMALS 0.
+* WRITE  /001(170) SY-ULINE.
+
+*&---------------------------------------------------------------------*
+*&   Event TOP-OF-PAGE
+*&---------------------------------------------------------------------*
+TOP-OF-PAGE.
+*- １行目
+WRITE: /158(006) TEXT-002,             "ページ
+165(005) W_PAGE NO-ZERO.
+*- ２行目
+WRITE: /077(018) TEXT-007,             "商品有高帳
+138(010) TEXT-003,             "作成年月日
+148(004) W_SYSDATE+0(04),
+152(002) TEXT-004,             "年
+154(002) W_SYSDATE+4(02) NO-ZERO,
+156(002) TEXT-005,             "月
+158(002) W_SYSDATE+6(02) NO-ZERO,
+160(002) TEXT-006,             "日
+165(002) W_SYSTIME+0(02),
+167(001) ':',
+168(002) W_SYSTIME+2(02).
+*- ３行目
+WRITE: /002(014) TEXT-008,             "（移動平均法）
+017(004) W_YEAR,
+021(004) TEXT-001,             "年度
+162(008) TEXT-011.             "単位：円
+*- ４行目
+WRITE: /060(012) TEXT-009,             "（プラント：
+073(004) W_WERKS_CD,
+079(030) W_WERKS_NM,
+110(002) TEXT-010.             "）
+*- ５行目
+IF P_CHECK = SPACE.
+WRITE: /002(008) TEXT-012,
+010(018) W_MATNR_CD,
+029(040) W_MATNR_NM.
+ENDIF.
+*- ６行目
+* WRITE: /002(008) TEXT-013.
+*         028(040) W_TEXT_NM.
+*- ７行目
+WRITE: /001(170) SY-ULINE.
+*- ８行目
+WRITE: /002(004) TEXT-014,             "日付
+007(008) TEXT-015,             "元帳照合
+018(006) TEXT-016,             "コード
+029(026) TEXT-017,             "摘要
+*
+056(008) TEXT-018,             "受入数量
+069(008) TEXT-019,             "受入単価
+085(008) TEXT-020,             "受入金額
+*
+094(008) TEXT-021,             "払出数量
+107(008) TEXT-022,             "払出単価
+123(008) TEXT-023,             "払出金額
+*
+132(008) TEXT-024,             "残高数量
+145(008) TEXT-025,             "残高単価
+162(008) TEXT-026.             "残高金額
+*- ９行目
+WRITE: /001(170) SY-ULINE.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  F01_MAKE_DETAIL
+*&---------------------------------------------------------------------*
+FORM F01_MAKE_DETAIL.
+*
+ITAB_DETAIL-BWART = BWART.
+ITAB_DETAIL-WERKS = WERKS.
+ITAB_DETAIL-MATNR = MATNR.
+ITAB_DETAIL-CPUTM = CPUTM.
+ITAB_DETAIL-BUDAT = BUDAT.
+ITAB_DETAIL-MBLNR = MBLNR.
+ITAB_DETAIL-AWSYS = AWSYS.
+ITAB_DETAIL-SOBKZ = SOBKZ.
+ITAB_DETAIL-LIFNR = LIFNR.
+ITAB_DETAIL-KUNNR = KUNNR.
+ITAB_DETAIL-MENGE = MENGE.
+ITAB_DETAIL-DMBTR = DMBTR.
+ITAB_DETAIL-SHKZG = SHKZG.
+ITAB_DETAIL-KZBEW = KZBEW.
+ITAB_DETAIL-KZZUG = KZZUG.
+ITAB_DETAIL-KZVBR = KZVBR.
+ITAB_DETAIL-WAERS = WAERS.
+ITAB_DETAIL-KZZUG = KZZUG.
+ITAB_DETAIL-LBKUM = LBKUM.
+ITAB_DETAIL-SALK3 = SALK3.
+*
+APPEND ITAB_DETAIL.
+CLEAR  ITAB_DETAIL.
+
+ENDFORM.                    " F01_MAKE_DETAIL
+*&---------------------------------------------------------------------*
+*&      Form  F02_GET_WERKS_TEXT
+*&---------------------------------------------------------------------*
+FORM F02_GET_WERKS_TEXT USING P_WERKS.
+
+SELECT SINGLE * FROM T001W WHERE WERKS = P_WERKS.
+*
+IF SY-SUBRC = 0.
+W_WERKS_CD = P_WERKS.
+W_WERKS_NM = T001W-NAME1.
+ENDIF.
+
+ENDFORM.                    " F02_GET_WERKS_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  F03_GET_MATNR_TEXT
+*&---------------------------------------------------------------------*
+FORM F03_GET_MATNR_TEXT USING P_MATNR.
+
+SELECT SINGLE * FROM MAKT WHERE MATNR = P_MATNR
+AND   SPRAS = 'J'.
+*
+IF SY-SUBRC = 0.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+EXPORTING
+INPUT   = P_MATNR
+IMPORTING
+OUTPUT  = W_MATNR_CD
+EXCEPTIONS
+OTHERS  = 1.
+IF SY-SUBRC <> 0.
+MESSAGE E001(Y1) WITH TEXT-039 SY-SUBRC.
+ENDIF.
+W_MATNR_NM = MAKT-MAKTX.
+ENDIF.
+
+ENDFORM.                    " F03_GET_MATNR_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  F04_LAST_MONTH_LINE
+*&---------------------------------------------------------------------*
+FORM F04_LAST_MONTH_LINE USING P_MATNR P_WERKS.
+*
+YFPR0501-TEXT     = TEXT-027.
+*
+IF W_CURRENT = 'X'.
+*- 当月の場合
+CLEAR MBEW.
+*2000/10/31 MOD START
+*    SELECT SINGLE VERPR VMKUM VMSAL VMVER PEINH VMPEI
+*      INTO (VERPR,VMKUM,VMSAL,VMVER,MBEW-PEINH,MBEW-VMPEI)
+*                                    FROM MBEW
+*                                    WHERE MATNR = P_MATNR
+*                                    AND   BWKEY = P_WERKS
+*                                    AND   BWTAR = SPACE.
+*    IF SY-SUBRC = 0.
+CLEAR: W_G_FLG,MBEWH.
+SELECT SINGLE VERPR LBKUM SALK3 VMVER PEINH VMPEI
+INTO (VERPR,LBKUM_H,SALK3_H,VMVER,MBEW-PEINH,MBEW-VMPEI)
+FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+W_G_FLG = 'X'.
+SELECT SINGLE  LBKUM SALK3 INTO (LBKUM_H,SALK3_H)
+from MBEWH WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE
+AND   LFGJA = W_L_YEAR
+AND   LFMON = W_L_MONTH.
+VMKUM  = LBKUM_H.
+VMSAL  = SALK3_H.
+ENDIF.
+IF W_G_FLG = 'X'.
+*2000/10/31 MOD END
+YFPR0501-SMENGE = VMKUM.
+YFPR0501-SBWGRL = ( VMVER * 100 ) / MBEW-VMPEI.
+YFPR0501-SDMBTR = VMSAL * 100.
+IF YFPR0501-SBWGRL = 0.
+YFPR0501-SBWGRL = VERPR * 100.
+YFPR0501-SBWGRL = YFPR0501-SBWGRL / MBEW-PEINH.
+ENDIF.
+YFPR0501-ZMENGE = YFPR0501-SMENGE.
+YFPR0501-ZBWGRL = YFPR0501-SBWGRL.
+YFPR0501-ZDMBTR = YFPR0501-SDMBTR.
+ELSE.
+YFPR0501-SMENGE = 0.
+YFPR0501-SBWGRL = 0.
+YFPR0501-SDMBTR = 0.
+YFPR0501-ZMENGE = 0.
+YFPR0501-ZBWGRL = 0.
+YFPR0501-ZDMBTR = 0.
+ENDIF.
+*    ENDSELECT.
+ELSE.
+*- 前月の場合
+CLEAR MBEW.
+SELECT SINGLE VERPR VVMLB VVSAL PEINH
+INTO (VERPR,VVMLB,VVSAL,MBEW-PEINH)
+FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+YFPR0501-SMENGE = VVMLB.
+YFPR0501-SBWGRL = ( VVSAL * 100 ) / VVMLB.
+YFPR0501-SDMBTR = VVSAL * 100.
+IF YFPR0501-SBWGRL = 0.
+YFPR0501-SBWGRL = ( VERPR * 100 ) / MBEW-PEINH.
+ENDIF.
+YFPR0501-ZMENGE = YFPR0501-SMENGE.
+YFPR0501-ZBWGRL = YFPR0501-SBWGRL.
+YFPR0501-ZDMBTR = YFPR0501-SDMBTR.
+ELSE.
+YFPR0501-SMENGE = 0.
+YFPR0501-SBWGRL = 0.
+YFPR0501-SDMBTR = 0.
+YFPR0501-ZMENGE = 0.
+YFPR0501-ZBWGRL = 0.
+YFPR0501-ZDMBTR = 0.
+ENDIF.
+*   ENDSELECT.
+*
+ENDIF.
+
+*- 残高（数量／単価／金額）待避
+W_PREV_ZMENGE = YFPR0501-ZMENGE.
+W_PREV_ZBWGRL = YFPR0501-ZBWGRL.
+W_PREV_ZDMBTR = YFPR0501-ZDMBTR.
+*- insert by homan 99/03/30
+IF P_CHECK = SPACE.
+
+WRITE: /029(008) TEXT-027. "品目改ページありの場合
+ELSE.
+IF ITAB_DETAIL-BELNR = 'X'.
+WRITE:  045(008) TEXT-041. "品目改ページなしの場合
+ELSE.
+WRITE:  045(008) TEXT-041. "品目改ページなしの場合
+ENDIF.
+ENDIF.
+*- insert by homan 99/03/30
+WRITE:  057(008) YFPR0501-SMENGE DECIMALS 0,
+066(012) YFPR0501-SBWGRL,
+079(015) YFPR0501-SDMBTR DECIMALS 0,
+*
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+
+ENDFORM.                    " F04_LAST_MONTH_LINE
+*&---------------------------------------------------------------------*
+*&      Form  F07_DETAIL_LINE
+*&---------------------------------------------------------------------*
+FORM F07_DETAIL_LINE.
+*
+CLEAR : YFPR0502.
+*
+*- 日付設定
+YFPR0502-MM    = ITAB_DETAIL-BUDAT+4(02).
+YFPR0502-DD    = ITAB_DETAIL-BUDAT+6(02).
+*- 元帳照合設定
+YFPR0502-BELNR = ITAB_DETAIL-BELNR.
+*- コード／摘要
+CLEAR : YFPR0502-TEXT.
+IF ITAB_DETAIL-KUNNR <> SPACE.
+YFPR0502-CODE = ITAB_DETAIL-KUNNR.
+SELECT SINGLE NAME1 NAME2 INTO (NAME1,NAME2)
+FROM  KNA1
+WHERE KUNNR = ITAB_DETAIL-KUNNR.
+IF SY-SUBRC = 0.
+YFPR0502-TEXT = NAME1.
+ENDIF.
+ENDIF.
+*
+IF YFPR0502-TEXT = SPACE.
+SELECT SINGLE * FROM T156T WHERE SPRAS = 'J'
+AND   BWART = ITAB_DETAIL-BWART
+AND   SOBKZ = ITAB_DETAIL-SOBKZ
+AND   KZBEW = ITAB_DETAIL-KZBEW
+AND   KZZUG = ITAB_DETAIL-KZZUG
+AND   KZVBR = ITAB_DETAIL-KZVBR.
+IF SY-SUBRC = 0.
+YFPR0502-TEXT = T156T-BTEXT.
+ENDIF.
+ENDIF.
+*
+IF ITAB_DETAIL-LIFNR <> SPACE.
+YFPR0502-CODE = ITAB_DETAIL-LIFNR.
+SELECT SINGLE NAME1 NAME2 INTO (NAME1,NAME2)
+FROM  LFA1
+WHERE LIFNR = ITAB_DETAIL-LIFNR.
+IF SY-SUBRC = 0.
+YFPR0502-TEXT = NAME1.
+ENDIF.
+ENDIF.
+IF ITAB_DETAIL-SHKZG = C_DR.
+*- 受入（数量／単価／金額）設定
+*- modify start by homan 1998/12/04 -----------------------------------*
+IF   ( ITAB_DETAIL-LIFNR <> SPACE OR ITAB_DETAIL-KUNNR <> SPACE )
+AND  ( ITAB_DETAIL-KZZUG = SPACE                                )
+AND  ( ITAB_DETAIL-DMBTR = SPACE                                ).
+YFPR0502-SMENGE = ITAB_DETAIL-MENGE.
+IF ITAB_DETAIL-SALK3 <> 0.
+YFPR0502-SBWGRL = ITAB_DETAIL-LBKUM / ITAB_DETAIL-SALK3.
+ELSE.
+YFPR0502-SBWGRL = 0.
+ENDIF.
+YFPR0502-SDMBTR = ITAB_DETAIL-MENGE * YFPR0502-SBWGRL * 100.
+ELSE.
+YFPR0502-SMENGE = ITAB_DETAIL-MENGE.
+IF ITAB_DETAIL-MENGE <> 0.
+YFPR0502-SBWGRL = ITAB_DETAIL-DMBTR / ITAB_DETAIL-MENGE * 100.
+ELSE.
+YFPR0502-SBWGRL = 0.
+ENDIF.
+YFPR0502-SDMBTR = ITAB_DETAIL-DMBTR * 100.
+ENDIF.
+*   YFPR0502-SDMBTR = ITAB_DETAIL-DMBTR.
+*- 残高（数量／単価／金額）設定
+YFPR0502-ZMENGE = W_PREV_ZMENGE + ITAB_DETAIL-MENGE.
+IF YFPR0502-ZMENGE <> 0.
+YFPR0502-ZBWGRL = ( W_PREV_ZDMBTR +
+YFPR0502-SDMBTR ) / YFPR0502-ZMENGE.
+ELSE.
+YFPR0502-ZBWGRL = 0.
+ENDIF.
+*- modify end by homan 1998/12/04 -------------------------------------*
+
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+*   YFPR0502-ZDMBTR = YFPR0502-ZMENGE * YFPR0502-ZBWGRL.
+YFPR0502-ZDMBTR = W_PREV_ZDMBTR + YFPR0502-SDMBTR.
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+
+*- 明細総合計（数量／単価／金額）設定
+W_SMENGE_LS = W_SMENGE_LS + YFPR0502-SMENGE.
+W_SBWGRL_LS = W_SBWGRL_LS + YFPR0502-SBWGRL.
+W_SDMBTR_LS = W_SDMBTR_LS + YFPR0502-SDMBTR.
+ELSEIF  ITAB_DETAIL-SHKZG = C_CR.
+*- 払出（数量／単価／金額）設定
+*- modify start by homan 1998/12/04 -----------------------------------*
+IF   ( ITAB_DETAIL-LIFNR <> SPACE OR ITAB_DETAIL-KUNNR <> SPACE )
+AND  ( ITAB_DETAIL-KZZUG = SPACE                                )
+AND  ( ITAB_DETAIL-DMBTR = SPACE                                ).
+YFPR0502-HMENGE = ITAB_DETAIL-MENGE.
+IF ITAB_DETAIL-SALK3 <> 0.
+YFPR0502-HBWGRL = ITAB_DETAIL-LBKUM / ITAB_DETAIL-SALK3.
+ELSE.
+YFPR0502-HBWGRL = 0.
+ENDIF.
+YFPR0502-HDMBTR = ITAB_DETAIL-MENGE * YFPR0502-HBWGRL * 100.
+ELSE.
+YFPR0502-HMENGE = ITAB_DETAIL-MENGE.
+IF YFPR0502-HMENGE <> 0.
+YFPR0502-HBWGRL = ITAB_DETAIL-DMBTR / YFPR0502-HMENGE * 100.
+ELSE.
+YFPR0502-HBWGRL = 0.
+ENDIF.
+YFPR0502-HDMBTR = ITAB_DETAIL-DMBTR * 100.
+ENDIF.
+*- 残高（数量／単価／金額）設定
+YFPR0502-ZMENGE = W_PREV_ZMENGE - ITAB_DETAIL-MENGE.
+IF YFPR0502-ZMENGE <> 0.
+YFPR0502-ZBWGRL = ( W_PREV_ZDMBTR -
+YFPR0502-HDMBTR ) / YFPR0502-ZMENGE.
+ELSE.
+YFPR0502-ZBWGRL = 0.
+ENDIF.
+
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+*   YFPR0502-ZDMBTR = YFPR0502-ZMENGE * YFPR0502-ZBWGRL.
+YFPR0502-ZDMBTR = W_PREV_ZDMBTR - YFPR0502-HDMBTR.
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+
+*- 明細総合計（数量／単価／金額）設定
+W_HMENGE_LS = W_HMENGE_LS + YFPR0502-HMENGE.
+W_HBWGRL_LS = W_HBWGRL_LS + YFPR0502-HBWGRL.
+W_HDMBTR_LS = W_HDMBTR_LS + YFPR0502-HDMBTR.
+ENDIF.
+*- 残高（数量／単価／金額）待避
+W_PREV_ZMENGE = YFPR0502-ZMENGE.
+W_PREV_ZBWGRL = YFPR0502-ZBWGRL.
+W_PREV_ZDMBTR = YFPR0502-ZDMBTR.
+
+*
+WRITE:  /001(002) YFPR0502-MM,
+003(001) '.',
+004(002) YFPR0502-DD,
+007(010) YFPR0502-BELNR,
+018(010) YFPR0502-CODE,
+029(026) YFPR0502-TEXT.
+IF ITAB_DETAIL-SHKZG = C_DR.
+WRITE: 057(008) YFPR0502-SMENGE DECIMALS 0,
+066(012) YFPR0502-SBWGRL,
+079(015) YFPR0502-SDMBTR DECIMALS 0.
+ELSEIF  ITAB_DETAIL-SHKZG = C_CR.
+WRITE: 095(008) YFPR0502-HMENGE DECIMALS 0,
+104(012) YFPR0502-HBWGRL,
+117(015) YFPR0502-HDMBTR DECIMALS 0.
+ENDIF.
+WRITE:   133(008) YFPR0502-ZMENGE DECIMALS 0,
+142(012) YFPR0502-ZBWGRL,
+154(018) YFPR0502-ZDMBTR DECIMALS 0.
+W_LINE = W_LINE + 1.
+
+ENDFORM.                    " F07_DETAIL_LINE
+*&---------------------------------------------------------------------*
+*&      Form  F08_PAGE_TOTAL
+*&---------------------------------------------------------------------*
+FORM F08_PAGE_TOTAL USING P_TEXT.
+
+WRITE:  /029(008) P_TEXT,
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+
+ENDFORM.                    " F08_PAGE_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  F09_PREV_TOTAL
+*&---------------------------------------------------------------------*
+FORM F09_PREV_TOTAL.
+
+WRITE: /029(008) TEXT-029,             "前頁繰越
+057(008) W_PREV_ZMENGE DECIMALS 0,
+066(012) W_PREV_ZBWGRL,
+079(015) W_PREV_ZDMBTR DECIMALS 0,
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+
+ENDFORM.                    " F09_PREV_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  F99_DATA_INIT
+*&---------------------------------------------------------------------*
+FORM F99_DATA_INIT.
+
+CLEAR   : W_YEAR     , W_BUDAT    , S_BUDAT    , ITAB_DETAIL,
+W_CURR_YM  , W_PREV_YM  , W_CURRENT  , W_NEWPAGE  ,
+W_SMENGE_LS, W_SBWGRL_LS, W_SDMBTR_LS, W_GJAHR    ,
+W_HMENGE_LS, W_HBWGRL_LS, W_HDMBTR_LS, S_SOBKZ.
+
+REFRESH : S_BUDAT, S_SOBKZ, ITAB_DETAIL.
+
+W_SYSDATE  = SY-DATUM.
+W_SYSTIME  = SY-UZEIT.
+
+*- 特殊在庫区分のオミット
+DO.
+PERFORM F99_SOBKZ_MAKE.
+IF C_SOBKZ = SPACE.
+EXIT.
+ENDIF.
+ENDDO.
+
+ENDFORM.                    " F99_BUDAT_INIT
+*&---------------------------------------------------------------------*
+*&      Form  F99_BUKRS_CHECK
+*&---------------------------------------------------------------------*
+FORM F99_BUKRS_CHECK USING P_MSEG_BUKRS.
+*
+SELECT SINGLE * FROM  T001 WHERE BUKRS = P_MSEG_BUKRS.
+IF SY-SUBRC <> 0.
+MESSAGE E165(F5) WITH P_MSEG_BUKRS.
+ENDIF.
+*
+CALL FUNCTION 'DATE_TO_PERIOD_CONVERT'
+EXPORTING
+I_DATE         = S_BUDAT-LOW
+*            I_MONMIT       =
+I_PERIV        = T001-PERIV
+IMPORTING
+*           E_BUPER        =
+E_GJAHR        = W_GJAHR
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3
+OTHERS         = 4.
+
+* W_YEAR     = W_SYSDATE+0(04).
+W_YEAR     = W_GJAHR.
+
+ENDFORM.                    " F99_BUKRS_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F09_MATNR_TOTAL
+*&---------------------------------------------------------------------*
+FORM F09_MATNR_TOTAL.
+
+WRITE  /001(170) SY-ULINE.
+WRITE: /057(008) W_SMENGE_LS DECIMALS 0,
+079(015) W_SDMBTR_LS DECIMALS 0,
+095(008) W_HMENGE_LS DECIMALS 0,
+117(015) W_HDMBTR_LS DECIMALS 0.
+WRITE  /001(170) SY-ULINE.
+
+ENDFORM.                    " F09_MATNR_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  F99_SOBKZ_MAKE
+*&---------------------------------------------------------------------*
+FORM F99_SOBKZ_MAKE.
+
+S_SOBKZ-SIGN   = 'I'.
+S_SOBKZ-OPTION = 'EQ'.
+*
+S_SOBKZ-LOW = C_SOBKZ+0(1).
+APPEND S_SOBKZ.
+SHIFT C_SOBKZ.
+
+ENDFORM.                    " F99_SOBKZ_MAKE
+*&---------------------------------------------------------------------*
+*&      Form  F99_DAT_SET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_DAT_SET.
+*
+CONCATENATE    P_YYMM '01' INTO S_BUDAT-LOW.
+PERFORM F99_LAST_DAY_GET USING S_BUDAT-LOW S_BUDAT-HIGH.
+*
+S_BUDAT-SIGN   = 'I'.
+S_BUDAT-OPTION = 'BT'.
+*
+APPEND S_BUDAT.
+*
+ENDFORM.                    " F99_DAT_SET
+*&---------------------------------------------------------------------*
+*&      Form  F99_PREV_MONTH_GET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_PREV_MONTH_GET USING P_YMTMP P_RETDAT.
+DATA: L_YEAR(04)   TYPE N,
+L_MONTH(02)  TYPE N,
+L_YMDDAT     LIKE SY-DATUM.
+
+*- －１月
+CONCATENATE P_YMTMP '01' INTO L_YMDDAT.
+L_YMDDAT = L_YMDDAT - 1.
+*
+L_YEAR  = L_YMDDAT+0(04).
+L_MONTH = L_YMDDAT+4(02).
+CONCATENATE L_YEAR L_MONTH INTO P_RETDAT.
+*
+ENDFORM.                    " F99_PREV_MONTH_GET
+*&---------------------------------------------------------------------*
+*&      Form  F99_LAST_DAY_GET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_LAST_DAY_GET USING P_BUDAT_LOW P_BUDAT_HIGH.
+DATA: L_YEAR(04)   TYPE N,
+L_MONTH(02)  TYPE N,
+L_YMDDAT     LIKE SY-DATUM.
+*
+L_YEAR         = P_BUDAT_LOW+0(4).
+L_MONTH        = P_BUDAT_LOW+4(2).
+*
+L_MONTH        = L_MONTH + 1.
+IF L_MONTH > '12'.
+L_YEAR  = L_YEAR + 1.
+L_MONTH = '1'.
+ENDIF.
+*
+CONCATENATE    L_YEAR L_MONTH '01' INTO L_YMDDAT.
+S_BUDAT-HIGH = L_YMDDAT - 1.
+*
+ENDFORM.                    " F99_LAST_DAY_GET
+*&---------------------------------------------------------------------*
+*&      Form  F99_YMD_CHECK
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_YMD_CHECK.
+*
+CONCATENATE P_YYMM '01' INTO W_DATE.
+CALL FUNCTION 'DATE_CHECK_PLAUSIBILITY'
+EXPORTING
+DATE                      = W_DATE
+EXCEPTIONS
+PLAUSIBILITY_CHECK_FAILED = 1
+OTHERS                    = 2.
+*
+IF SY-SUBRC <> 0.
+MESSAGE E211(Y1).
+ENDIF.
+*
+ENDFORM.                    " F99_YMD_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F99_CURR_PREV_CHECK
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_CURR_PREV_CHECK USING P_MSEG_BUKRS.
+DATA : L_YEAR_H(04)  TYPE N,
+L_MONTH_H(02) TYPE N,
+L_YEAR_M(04)  TYPE N,    "当期用
+L_MONTH_M(02) TYPE N,    "当期用
+L_YEAR_L(04)  TYPE N,    "前月用
+L_MONTH_L(02) TYPE N.    "前月用
+*
+L_MONTH_H = P_YYMM+4(02).
+*
+SELECT * FROM T009B WHERE PERIV = T001-PERIV
+AND   BUMON = L_MONTH_H.
+ENDSELECT.
+*
+IF SY-SUBRC <> 0.
+MESSAGE E309(Y1) WITH TEXT-037 TEXT-033 T001-PERIV TEXT-034.
+ENDIF.
+*
+L_YEAR_H  = P_YYMM+0(04).
+L_YEAR_H  = L_YEAR_H + T009B-RELJR. "品目年
+L_MONTH_H = T009B-POPER.            "品目月
+*
+SELECT SINGLE * FROM  MARV WHERE BUKRS = P_MSEG_BUKRS.
+IF SY-SUBRC <> 0.
+MESSAGE E309(Y1) WITH TEXT-038 TEXT-033 P_MSEG_BUKRS TEXT-034.
+ENDIF.
+
+*- 当期
+L_YEAR_M  = MARV-LFGJA.
+L_MONTH_M = MARV-LFMON.
+*- 前期
+L_YEAR_L  = MARV-VMGJA.
+L_MONTH_L = MARV-VMMON.
+*2000/10/31 ADD START
+W_L_YEAR  = MARV-VMGJA.
+W_L_MONTH = MARV-VMMON.
+*2000/10/31 ADD END
+*
+* IF ( L_YEAR_H  = L_YEAR_M  OR L_YEAR_H  = L_YEAR_L  ) AND
+*    ( L_MONTH_H = L_MONTH_M OR L_MONTH_H = L_MONTH_L ).
+IF L_YEAR_H  = L_YEAR_M AND L_MONTH_H = L_MONTH_M.     "当月
+W_CURRENT = 'X'.
+ELSEIF L_YEAR_H  = L_YEAR_L AND L_MONTH_H = L_MONTH_L. "前月
+W_CURRENT = SPACE.
+ELSE.
+MESSAGE E309(Y1) WITH TEXT-031.
+ENDIF.
+*
+ENDFORM.                    " F99_CURR_PREV_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F99_DATA_SELECT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_DATA_SELECT.
+*
+IF W_CURRENT = 'X'.
+*- 当月の場合(BUDAT)
+SELECT   MBLNR MJAHR BUDAT CPUTM AWSYS
+INTO (MBLNR,MJAHR,BUDAT,CPUTM,AWSYS)
+FROM  MKPF
+WHERE BUDAT IN S_BUDAT.
+*-  伝票セグメント：品目検索
+*-  抽出項目の追加（xauto）  1999/04/22 insert by homan
+SELECT   BWART XAUTO MATNR WERKS SOBKZ LIFNR KUNNR SHKZG DMBTR
+MENGE KZBEW KZVBR KZZUG WAERS KZZUG LBKUM SALK3
+INTO (BWART,XAUTO,MATNR,WERKS,SOBKZ,LIFNR,KUNNR,SHKZG,DMBTR,
+MENGE,KZBEW,KZVBR,KZZUG,WAERS,KZZUG,LBKUM,SALK3)
+FROM  MSEG
+WHERE MBLNR =  MBLNR
+AND   MJAHR =  MJAHR
+AND   MATNR IN S_MATNR
+AND   WERKS IN S_WERKS
+AND   BUKRS =  P_BUKRS
+*              and   dmbtr >  '0'
+AND   BESTQ =  SPACE     "在庫カテゴリ  98/12/04 ins
+AND   SOBKZ IN S_SOBKZ   "特殊在庫区分  98/12/04 ins
+AND   BUSTW <> SPACE.    "金額登録ストリング 99/01/20 INS
+*- 1999/04/22 modify by homan start -----------------------------------*
+*       perform f01_make_detail.        "明細行作成    del
+*       IF XAUTO = C_ON.                              "ins->DEL-19990721
+IF XAUTO = C_ON  AND  BWART+00(01) <> '3'.    "ins-19990721
+*         skip.                                       "ins
+ELSE.                                         "ins
+PERFORM F01_MAKE_DETAIL.        "明細行作成  ins
+ENDIF.                                        "ins
+*- 1999/04/22 modify by homan end   -----------------------------------*
+ENDSELECT.
+ENDSELECT.
+*
+ELSE.
+*- 前月の場合(BUDAT)
+SELECT   MBLNR MJAHR BUDAT CPUTM AWSYS
+INTO (MBLNR,MJAHR,BUDAT,CPUTM,AWSYS)
+FROM  MKPF
+WHERE BUDAT IN S_BUDAT.
+*-  伝票セグメント：品目検索
+*     SELECT   BWART MATNR WERKS SOBKZ LIFNR KUNNR SHKZG DMBTR
+*              MENGE KZBEW KZVBR KZZUG WAERS KZZUG LBKUM SALK3
+*              INTO (BWART,MATNR,WERKS,SOBKZ,LIFNR,KUNNR,SHKZG,DMBTR,
+*                    MENGE,KZBEW,KZVBR,KZZUG,WAERS,KZZUG,LBKUM,SALK3)
+*-  抽出項目の追加（XAUTO）  1999/08/23 CORRECTED BY KUSAKA
+SELECT   BWART XAUTO MATNR WERKS SOBKZ LIFNR KUNNR SHKZG DMBTR
+MENGE KZBEW KZVBR KZZUG WAERS KZZUG LBKUM SALK3
+INTO (BWART,XAUTO,MATNR,WERKS,SOBKZ,LIFNR,KUNNR,SHKZG,DMBTR,
+MENGE,KZBEW,KZVBR,KZZUG,WAERS,KZZUG,LBKUM,SALK3)
+FROM  MSEG
+WHERE MBLNR =  MBLNR
+AND   MJAHR =  MJAHR
+AND   MATNR IN S_MATNR
+AND   WERKS IN S_WERKS
+AND   BUKRS =  P_BUKRS
+*              and   dmbtr >  '0'
+AND   BESTQ =  SPACE     "在庫カテゴリ  98/12/04 ins
+AND   SOBKZ IN S_SOBKZ   "特殊在庫区分  98/12/04 ins
+AND   BUSTW <> SPACE.    "金額登録ストリング 99/01/30 INS
+
+*       自動生成明細は処理バイパス（ただし、在庫転送は例外）
+IF XAUTO = C_ON  AND  BWART+00(01) <> '3'.         "19990823-ADD
+*         skip.                                            "19990823-ADD
+ELSE.                                              "19990823-ADD
+PERFORM F01_MAKE_DETAIL.        "明細行作成      "19990823-ADD
+ENDIF.                                             "19990823-ADD
+*       PERFORM F01_MAKE_DETAIL.        "明細行作成        "19990823-DEL
+ENDSELECT.
+ENDSELECT.
+*
+ENDIF.
+*
+DESCRIBE TABLE ITAB_DETAIL LINES W_LIN.
+*
+* CHECK W_LIN <> 0.
+*
+LOOP AT ITAB_DETAIL.
+CONCATENATE ITAB_DETAIL-MBLNR P_YYMM+0(04) INTO W_AWKEY.
+SELECT BELNR INTO (BELNR) FROM BKPF
+WHERE BUKRS = P_BUKRS
+AND   GJAHR = W_GJAHR
+AND   AWSYS = ITAB_DETAIL-AWSYS
+AND   AWKEY = W_AWKEY
+AND   AWTYP = 'MKPF'.
+ITAB_DETAIL-BELNR = BELNR.
+MODIFY ITAB_DETAIL.
+ENDSELECT.
+
+ENDLOOP.
+*
+SELECT MATNR WERKS LVORM INTO (MATNR,WERKS,LVORM) FROM MARC
+WHERE MATNR IN S_MATNR
+AND   WERKS IN S_WERKS.
+*
+READ TABLE ITAB_DETAIL WITH KEY MATNR = MATNR
+WERKS = WERKS.
+IF SY-SUBRC <> 0.
+CLEAR: W_SALFLG.
+PERFORM F99_SAL_CHECK USING MATNR WERKS W_SALFLG.
+IF W_SALFLG = SPACE AND LVORM = 'X'.
+*-    対象外
+ELSE.
+CLEAR ITAB_DETAIL.
+ITAB_DETAIL-MATNR = MATNR.
+ITAB_DETAIL-WERKS = WERKS.
+ITAB_DETAIL-BELNR = 'X'.
+APPEND ITAB_DETAIL.
+ENDIF.
+ENDIF.
+*
+ENDSELECT.
+
+ENDFORM.                    " F99_DATA_SELECT
+*&---------------------------------------------------------------------*
+*&      Form  F99_SAL_CHECK
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_SAL_CHECK USING P_MATNR P_WERKS P_SALFLG.
+*
+IF W_CURRENT = 'X'.
+*- 当月の場合
+*2000/10/31 MOD START
+*    SELECT SINGLE VMSAL INTO (VMSAL) FROM MBEW
+*                                     WHERE MATNR = P_MATNR
+*                                     AND   BWKEY = P_WERKS
+*                                     AND   BWTAR = SPACE.
+*    IF SY-SUBRC = 0 AND VMSAL <> 0.
+CLEAR: W_G_FLG, SALK3_H, VMSAL.
+SELECT SINGLE SALK3 INTO SALK3_H FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+W_G_FLG = 'X'.
+SELECT SINGLE  SALK3 INTO SALK3_H  FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE
+AND   LFGJA = W_L_YEAR
+AND   LFMON = W_L_MONTH.
+VMSAL  = SALK3_H.
+ENDIF.
+IF W_G_FLG = 'X' AND VMSAL <> 0.
+*2000/10/31 MOD END
+P_SALFLG = 'X'.
+ELSE.
+P_SALFLG = SPACE.
+ENDIF.
+ELSE.
+*- 前月の場合
+SELECT SINGLE VVSAL INTO (VVSAL) FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0 AND VVSAL <> 0.
+P_SALFLG = 'X'.
+ELSE.
+P_SALFLG = SPACE.
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " F99_SAL_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F07_DETAIL_NOT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F07_DETAIL_NOT.
+*
+WRITE /002(024) TEXT-032. "該当データなし
+*
+ENDFORM.                    " F07_DETAIL_NOT
+*&---------------------------------------------------------------------*
+*&      Form  F99_OMIT_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_OMIT_DATA.
+DATA : L_SMENGE LIKE MBEW-VMKUM,
+L_SBWGRL LIKE MBEW-VMSAV,
+L_SDMBTR LIKE MBEW-VMSAL.
+*
+LOOP AT ITAB_DETAIL WHERE BELNR = 'X'.
+IF W_CURRENT = 'X'.
+*- 当月の場合
+CLEAR MBEW.
+*2000/10/31 MOD START
+*      SELECT SINGLE VERPR VMKUM VMSAL VMVER PEINH VMPEI
+*             INTO (VERPR,VMKUM,VMSAL,VMVER,MBEW-PEINH,MBEW-VMPEI)
+*                                    FROM MBEW
+*                                    WHERE MATNR = ITAB_DETAIL-MATNR
+*                                    AND   BWKEY = ITAB_DETAIL-WERKS
+*                                    AND   BWTAR = SPACE.
+*     IF SY-SUBRC = 0.
+CLEAR: MBEWH,W_G_FLG.
+SELECT SINGLE VERPR LBKUM SALK3 VMVER PEINH VMPEI
+INTO (VERPR,LBKUM_H,SALK3_H,VMVER,MBEW-PEINH,MBEW-VMPEI)
+FROM MBEW
+WHERE MATNR = ITAB_DETAIL-MATNR
+AND   BWKEY = ITAB_DETAIL-WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+W_G_FLG = 'X'.
+SELECT SINGLE  LBKUM SALK3 INTO (LBKUM_H,SALK3_H)
+from MBEWH WHERE MATNR = ITAB_DETAIL-MATNR
+AND   BWKEY = ITAB_DETAIL-WERKS
+AND   BWTAR = SPACE
+AND   LFGJA = W_L_YEAR
+AND   LFMON = W_L_MONTH.
+VMKUM  = LBKUM_H.
+VMSAL  = SALK3_H.
+ENDIF.
+IF W_G_FLG = 'X'.
+*2000/10/31 MOD END
+L_SMENGE = VMKUM.
+L_SBWGRL = ( VMVER * 100 ) / MBEW-VMPEI.
+L_SDMBTR = VMSAL * 100.
+IF L_SBWGRL = 0.
+L_SBWGRL = ( VERPR * 100 ) / MBEW-PEINH.
+ENDIF.
+ELSE.
+L_SMENGE = 0.
+L_SBWGRL = 0.
+L_SDMBTR = 0.
+ENDIF.
+ELSE.
+*- 前月の場合
+SELECT SINGLE VERPR VVMLB VVSAL PEINH
+INTO (VERPR,VVMLB,VVSAL,MBEW-PEINH)
+FROM MBEW
+WHERE MATNR = ITAB_DETAIL-MATNR
+AND   BWKEY = ITAB_DETAIL-WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+L_SMENGE = VVMLB.
+L_SBWGRL = ( VVSAL * 100 ) / VVMLB.
+L_SDMBTR = VVSAL * 100.
+IF L_SBWGRL = 0.
+L_SBWGRL = ( VERPR * 100 ) / MBEW-PEINH.
+ENDIF.
+ELSE.
+L_SMENGE = 0.
+L_SBWGRL = 0.
+L_SDMBTR = 0.
+ENDIF.
+ENDIF.
+*-
+IF L_SMENGE = 0.
+ITAB_DETAIL-BELNR = 'OMIT'.
+MODIFY ITAB_DETAIL.
+ENDIF.
+*
+ENDLOOP.
+*
+DELETE ITAB_DETAIL WHERE BELNR = 'OMIT'.
+*
+
+ENDFORM.                    " F99_OMIT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F18_PAGE_TOTAL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F18_PAGE_TOTAL USING P_TEXT.
+*
+WRITE:  /045(008) P_TEXT,
+057(008) W_SMENGE_LS DECIMALS 0,
+079(015) W_SDMBTR_LS DECIMALS 0,
+095(008) W_HMENGE_LS DECIMALS 0,
+117(015) W_HDMBTR_LS DECIMALS 0,
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+*
+ENDFORM.                    " F18_PAGE_TOTAL
+*&---------------------------------------------------------------------*
+*&  財務会計システム                                                   *
+*&      プログラム名称：商品有高帳作成処理                             *
+*&      プログラムＩＤ：ＹＦ０１０５１０                               *
+*&      作成者        ：穂満(TECNOS)    作成日        ：1999/03/30     *
+*&      更新者        ：穂満(TECNOS)    更新日        ：1999/04/22     *
+*&                    ：日下(BITS)      更新日        ：1999/07/21     *
+*&                      自動生成明細(MSEG)の対象外は在庫転送以外に改訂 *
+*&                    ：日下(BITS)      更新日        ：1999/08/23     *
+*&                      自動生成明細(MSEG)の対象外のロジックを前月分の *
+*&                      有高帳作成処理にも追加。                       *
+*&                      Ｘ－ＡＵＴＯのＳＥＬＥＣＴが前月分作成ロジック *
+*&                      からもれていた。                               *
+*&                      改頁なしオプション付で品目ブレーク時の改頁操作 *
+*&                      が不正（頁カウンタ値不正で１行のみの頁が印刷） *
+*&                     :NDSC            更新日          :2000/04/27    *
+*&                      価格条件単位で金額を割っていない。             *
+*&                     :NDSC            更新日          :2000/07/07    *
+*                       ﾊﾟﾗﾒｰﾀ'会社コード'の初期値を変更               *
+*2000.07.11             SCDにテーブル「S710」が存在しない為
+*                       →KONP-KSTBWに変更                 R.TOMOEDA
+*2000.10.31             4.6C対応(MBEW対応修正)             K.Kajisa
+*& 2012/09/12  ISID     ES-UP
+*&---------------------------------------------------------------------*
+*
+REPORT YF010510 MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+
+*-----------------------------------------------------------------------
+*- データ定義
+*-----------------------------------------------------------------------
+*- テーブル定義
+TABLES: MKPF,                             "入出庫伝票ヘッダ
+MSEG,                             "伝票セグメント：品目
+T001,                             "会社コード
+T009B,                            "会計年度バリアント（期間）
+MAKT,                             "品目テキスト
+MARC,                             "品目マスタ: C セグメント
+MARV,                             "品目管理レコード
+MBEW,                             "品目評価
+BKPF,                             "会計伝票ヘッダ
+KNA1,                             "得意先マスタ：一般
+LFA1,                             "仕入先マスタ（一般）
+T156T,                            "移動タイプテキスト
+T001W.                            "プラント／分岐
+*2000/10/31 ADD START
+TABLES MBEWH.                             "品目評価: 履歴
+*2000/10/31 ADD END
+*- 入力パラメータ定義(19990210変更)
+SELECTION-SCREEN SKIP 1.
+PARAMETERS:
+*2000/07/07 MOD START
+*  P_BUKRS    LIKE T001-BUKRS OBLIGATORY DEFAULT 'C001'.
+P_BUKRS    LIKE T001-BUKRS OBLIGATORY MEMORY ID BUK.
+*2000/07/07 MOD END
+*
+SELECTION-SCREEN SKIP 1.
+PARAMETERS:
+P_YYMM(06) TYPE C          OBLIGATORY.
+*
+SELECTION-SCREEN SKIP 1.
+SELECT-OPTIONS:
+S_MATNR    FOR MSEG-MATNR.
+*
+SELECTION-SCREEN SKIP 1.
+SELECT-OPTIONS:
+S_WERKS    FOR MSEG-WERKS.
+*
+SELECTION-SCREEN SKIP 1.
+*SELECTION-SCREEN COMMENT fmt name.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(20) TEXT-040.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS:
+P_CHECK    AS CHECKBOX.
+SELECTION-SCREEN END   OF LINE.
+*- 内部テーブル定義
+DATA: BEGIN OF ITAB_DETAIL OCCURS 0,
+WERKS    LIKE MSEG-WERKS,
+MATNR    LIKE MSEG-MATNR,
+BUDAT    LIKE MKPF-BUDAT,
+CPUTM    LIKE MKPF-CPUTM,
+BELNR    LIKE BKPF-BELNR,
+MBLNR    LIKE MKPF-MBLNR,
+AWSYS    LIKE MKPF-AWSYS,
+LIFNR    LIKE MSEG-LIFNR,
+KUNNR    LIKE MSEG-KUNNR,
+MENGE    LIKE MSEG-MENGE,
+DMBTR    LIKE MSEG-DMBTR,
+SHKZG    LIKE MSEG-SHKZG,
+BWART    LIKE MSEG-BWTAR,
+SOBKZ    LIKE MSEG-SOBKZ,
+KZBEW    LIKE MSEG-KZBEW,
+KZZUG    LIKE MSEG-KZZUG,
+KZVBR    LIKE MSEG-KZVBR,
+WAERS    LIKE MSEG-WAERS,
+*- modify start by homan 1998/12/04 -----------------------------------*
+LBKUM    LIKE MSEG-LBKUM,
+SALK3    LIKE MSEG-SALK3,
+LVORM    LIKE MARC-LVORM,
+*- modify end by homan 1998/12/04 -------------------------------------*
+END   OF ITAB_DETAIL.
+
+DATA: BEGIN OF YFPR0501,
+TEXT(08) TYPE C,
+SMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+SBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+SDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+ZMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+ZBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+ZDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+END OF YFPR0501.
+
+DATA: BEGIN OF YFPR0502,
+MM(02)   TYPE C,
+DD(02)   TYPE C,
+BELNR    LIKE MKPF-MBLNR,
+CODE     LIKE KNA1-KUNNR,
+TEXT     LIKE KNA1-NAME2,
+SMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+SBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+SDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+HMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+HBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+HDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+ZMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+ZBWGRL   LIKE BSEG-DMBTR, "KNA1-UMSAT,
+ZDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+END OF YFPR0502.
+*
+DATA: BEGIN OF YFPR0503,                  "明細総合計用
+SMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+SBWGRL   TYPE P,
+SDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+HMENGE   LIKE MARA-NTGEW, "S079-RWMENG,
+HBWGRL   TYPE P,
+HDMBTR   LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+END   OF YFPR0503.
+
+*- ワークエリア定義
+DATA: W_YEAR(04)     TYPE N,
+W_MONTH(02)    TYPE N,
+W_GJAHR        LIKE MKPF-MJAHR,
+W_BUDAT        LIKE MKPF-BUDAT,
+W_SYSDATE      LIKE SY-DATUM,
+W_SYSTIME      LIKE SY-UZEIT,
+W_WERKS_CD     LIKE MSEG-WERKS,
+W_WERKS_DET    LIKE MSEG-WERKS,
+W_WERKS_NM     LIKE T001W-NAME1,
+W_MATNR_CD(18) TYPE C,  "LIKE MSEG-MATNR,
+W_MATNR_DET    LIKE MSEG-MATNR,
+W_MATNR_NM     LIKE MAKT-MAKTX,
+W_KUNNR_NM     LIKE KNA1-NAME2,
+W_LIFNR_NM     LIKE LFA1-NAME2,
+W_MENGE_WK     LIKE S079-RWMENG,
+W_PREV_ZMENGE  LIKE MARA-NTGEW, "S079-RWMENG,
+W_PREV_ZBWGRL  LIKE BSEG-DMBTR, "KNA1-UMSAT,
+W_PREV_ZDMBTR  LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+W_LIN          TYPE P,
+W_PAGE(05)     TYPE N,
+W_LINE(03)     TYPE N,
+W_SMENGE_LS    LIKE MARA-NTGEW,"S079-RWMENG,
+W_SBWGRL_LS    LIKE BSEG-DMBTR, "KNA1-UMSAT,
+W_SDMBTR_LS    LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+W_HMENGE_LS    LIKE MARA-NTGEW,"S079-RWMENG,
+W_HBWGRL_LS    LIKE BSEG-DMBTR, "KNA1-UMSAT,
+W_HDMBTR_LS    LIKE KONP-KSTBW, "S710-REWRTから変更  2000.07.11
+W_DATE         LIKE SY-DATUM,
+W_AWKEY        LIKE BKPF-AWKEY,
+W_SALFLG       TYPE C,
+W_NEWPAGE      TYPE C,
+W_CURRENT      TYPE C,
+W_PREV_YM(06)  TYPE C,
+W_CURR_YM(06)  TYPE C.
+*2000/10/31 ADD START
+DATA: W_G_FLG(01)    TYPE C,            "MBEWH情報ゲットフラグ
+W_L_YEAR(04)   TYPE N,            "前月用
+W_L_MONTH(02)  TYPE N.            "前月用
+*2000/10/31 ADD END
+*
+RANGES : S_BUDAT FOR MKPF-BUDAT,
+S_SOBKZ FOR MSEG-SOBKZ.
+*
+DATA:                                    "SELECT INTO
+*- MKPF
+MBLNR  LIKE MKPF-MBLNR,
+MJAHR  LIKE MKPF-MJAHR,
+BUDAT  LIKE MKPF-BUDAT,
+CPUTM  LIKE MKPF-CPUTM,
+AWSYS  LIKE MKPF-AWSYS,
+*- MSEG
+BWART  LIKE MSEG-BWART,
+XAUTO  LIKE MSEG-XAUTO, "1999/04/22 insert by homan
+MATNR  LIKE MSEG-MATNR,
+WERKS  LIKE MSEG-WERKS,
+SOBKZ  LIKE MSEG-SOBKZ,
+LIFNR  LIKE MSEG-LIFNR,
+KUNNR  LIKE MSEG-KUNNR,
+SHKZG  LIKE MSEG-SHKZG,
+WAERS  LIKE MSEG-WAERS,
+DMBTR  LIKE MSEG-DMBTR,
+MENGE  LIKE MSEG-MENGE,
+KZBEW  LIKE MSEG-KZBEW,
+KZVBR  LIKE MSEG-KZVBR,
+KZZUG  LIKE MSEG-KZZUG,
+LBKUM  LIKE MSEG-LBKUM,
+SALK3  LIKE MSEG-SALK3,
+*- MBEW
+VERPR  LIKE MBEW-VERPR,
+VMKUM  LIKE MBEW-VMKUM,
+VMVER  LIKE MBEW-VMVER,
+VMSAL  LIKE MBEW-VMSAL,
+VVMLB  LIKE MBEW-VVMLB,
+VVSAL  LIKE MBEW-VVSAL,
+*2000/10/31 ADD START
+*- MBEWH
+LBKUM_h LIKE MBEWH-LBKUM,
+SALK3_h like MBEWH-SALK3,
+*2000/10/31 END
+*- MARC
+LVORM  LIKE MARC-LVORM,
+*- BKPF
+BELNR  LIKE BKPF-BELNR,
+*- KNA1
+NAME1  LIKE KNA1-NAME1,
+NAME2  LIKE KNA1-NAME2.
+
+*- コンスタント定義
+DATA: C_DR(01)   TYPE C VALUE 'S',
+C_CR(01)   TYPE C VALUE 'H',
+C_SOBKZ(6) TYPE C VALUE ' EPOQW',
+C_453      LIKE MSEG-BWART VALUE '453', "売上返品-> 利用可能
+C_ON       LIKE MSEG-XAUTO VALUE 'X'.   "明細自動生成
+*&---------------------------------------------------------------------*
+*&   Event INITIALIZATION
+*&---------------------------------------------------------------------*
+INITIALIZATION.
+
+AT SELECTION-SCREEN.
+
+*- 初期処理
+PERFORM F99_DATA_INIT.
+
+*- 処理年月チェック
+PERFORM F99_YMD_CHECK.
+
+*- 抽出対象日付設定
+PERFORM F99_DAT_SET.                                  "BUDAT(BUDAT)
+
+*- 会社コードチェック
+PERFORM F99_BUKRS_CHECK USING P_BUKRS.
+
+*- 対象年月チェック
+PERFORM F99_CURR_PREV_CHECK USING P_BUKRS.
+
+*&---------------------------------------------------------------------*
+*&   Event START-OF-SELECTION
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+*- 入出庫伝票ヘッダ検索
+PERFORM F99_DATA_SELECT.
+
+*- insert start by homan 1999/01/08 -----------------------------------*
+* check w_lin <> 0.
+*- insert end by homan 1999/01/08 -------------------------------------*
+*
+SORT ITAB_DETAIL BY WERKS MATNR BUDAT CPUTM BELNR.
+*
+CLEAR : W_PAGE, W_LINE.
+*
+PERFORM F99_OMIT_DATA.
+*
+DESCRIBE TABLE ITAB_DETAIL LINES W_LIN.
+*
+CHECK W_LIN <> 0.
+*
+LOOP AT ITAB_DETAIL.            " where belnr <> 'OMIT'.
+*
+W_WERKS_DET = ITAB_DETAIL-WERKS.
+W_MATNR_DET = ITAB_DETAIL-MATNR.
+*
+IF P_CHECK = SPACE. "品目での改ページありの場合
+AT NEW WERKS.
+PERFORM F02_GET_WERKS_TEXT USING W_WERKS_DET.
+PERFORM F03_GET_MATNR_TEXT USING W_MATNR_DET.
+W_NEWPAGE = 'X'.
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+PERFORM F04_LAST_MONTH_LINE USING  W_MATNR_DET W_WERKS_DET.
+ENDAT.
+*
+AT NEW MATNR.
+IF W_NEWPAGE = SPACE.
+PERFORM F03_GET_MATNR_TEXT USING  W_MATNR_DET.
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+PERFORM F04_LAST_MONTH_LINE USING  W_MATNR_DET W_WERKS_DET.
+ELSE.
+W_NEWPAGE = SPACE.
+ENDIF.
+CLEAR : W_SMENGE_LS, W_SDMBTR_LS, W_HMENGE_LS, W_HDMBTR_LS.
+ENDAT.
+*
+CASE ITAB_DETAIL-BELNR.
+WHEN 'X'.    "該当データなし
+PERFORM F07_DETAIL_NOT.
+WHEN SPACE.  "出力対象外
+WHEN OTHERS. "明細行編集
+PERFORM F07_DETAIL_LINE.
+ENDCASE.
+*
+IF W_LINE => 45.
+AT END OF MATNR.
+PERFORM F08_PAGE_TOTAL USING TEXT-030. "次月繰越
+CONTINUE.
+ENDAT.
+PERFORM F08_PAGE_TOTAL USING TEXT-028. "次頁繰越
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+PERFORM F09_PREV_TOTAL.
+ENDIF.
+*
+AT END OF MATNR.
+PERFORM F08_PAGE_TOTAL USING TEXT-030. "次月繰越
+PERFORM F09_MATNR_TOTAL.
+ENDAT.
+ELSE.               "品目での改ページなしの場合
+AT NEW WERKS.
+PERFORM F02_GET_WERKS_TEXT USING W_WERKS_DET.
+W_NEWPAGE = 'X'.
+W_PAGE    = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+ENDAT.
+*
+AT NEW MATNR.
+RESERVE 2 LINES.
+PERFORM F03_GET_MATNR_TEXT USING  W_MATNR_DET.
+WRITE : /001(018) W_MATNR_CD,
+019(024) W_MATNR_NM.
+PERFORM F04_LAST_MONTH_LINE USING  W_MATNR_DET W_WERKS_DET.
+*       W_LINE = W_LINE + 1.                               "19990823-DEL
+W_LINE = W_LINE + 2.                               "19990823-ADD
+CLEAR : W_SMENGE_LS,W_SDMBTR_LS,W_HMENGE_LS, W_HDMBTR_LS.
+ENDAT.
+*
+CASE ITAB_DETAIL-BELNR.
+WHEN 'X'.    "該当データなし
+WHEN SPACE.  "出力対象外
+WHEN OTHERS. "明細行編集
+PERFORM F07_DETAIL_LINE.
+ENDCASE.
+*
+AT END OF MATNR.
+PERFORM F18_PAGE_TOTAL USING TEXT-042. "次月繰越
+SKIP.
+W_LINE = W_LINE + 2.
+ENDAT.
+*
+IF W_LINE => 50.
+W_PAGE = W_PAGE + 1.
+CLEAR W_LINE.
+NEW-PAGE.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+*&---------------------------------------------------------------------*
+*&   Event END-OF-SELECTION
+*&---------------------------------------------------------------------*
+END-OF-SELECTION.
+*
+*- insert start by homan 1999/01/08 -----------------------------------*
+CHECK W_LIN = 0.
+
+W_PAGE = W_PAGE + 1.
+SKIP.
+WRITE /002(024) TEXT-032. "該当データなし
+*- insert end by homan 1999/01/08 -------------------------------------*
+*
+* WRITE  /001(170) SY-ULINE.
+* WRITE: /065(007) W_SMENGE_LS,
+*         073(011) W_SBWGRL_LS,
+*         083(015) W_SDMBTR_LS DECIMALS 0,
+*         101(007) W_HMENGE_LS,
+*         108(011) W_HBWGRL_LS,
+*         118(015) W_HDMBTR_LS DECIMALS 0.
+* WRITE  /001(170) SY-ULINE.
+
+*&---------------------------------------------------------------------*
+*&   Event TOP-OF-PAGE
+*&---------------------------------------------------------------------*
+TOP-OF-PAGE.
+*- １行目
+WRITE: /158(006) TEXT-002,             "ページ
+165(005) W_PAGE NO-ZERO.
+*- ２行目
+WRITE: /077(018) TEXT-007,             "商品有高帳
+138(010) TEXT-003,             "作成年月日
+148(004) W_SYSDATE+0(04),
+152(002) TEXT-004,             "年
+154(002) W_SYSDATE+4(02) NO-ZERO,
+156(002) TEXT-005,             "月
+158(002) W_SYSDATE+6(02) NO-ZERO,
+160(002) TEXT-006,             "日
+165(002) W_SYSTIME+0(02),
+167(001) ':',
+168(002) W_SYSTIME+2(02).
+*- ３行目
+WRITE: /002(014) TEXT-008,             "（移動平均法）
+017(004) W_YEAR,
+021(004) TEXT-001,             "年度
+162(008) TEXT-011.             "単位：円
+*- ４行目
+WRITE: /060(012) TEXT-009,             "（プラント：
+073(004) W_WERKS_CD,
+079(030) W_WERKS_NM,
+110(002) TEXT-010.             "）
+*- ５行目
+IF P_CHECK = SPACE.
+WRITE: /002(008) TEXT-012,
+010(018) W_MATNR_CD,
+029(040) W_MATNR_NM.
+ENDIF.
+*- ６行目
+* WRITE: /002(008) TEXT-013.
+*         028(040) W_TEXT_NM.
+*- ７行目
+WRITE: /001(170) SY-ULINE.
+*- ８行目
+WRITE: /002(004) TEXT-014,             "日付
+007(008) TEXT-015,             "元帳照合
+018(006) TEXT-016,             "コード
+029(026) TEXT-017,             "摘要
+*
+056(008) TEXT-018,             "受入数量
+069(008) TEXT-019,             "受入単価
+085(008) TEXT-020,             "受入金額
+*
+094(008) TEXT-021,             "払出数量
+107(008) TEXT-022,             "払出単価
+123(008) TEXT-023,             "払出金額
+*
+132(008) TEXT-024,             "残高数量
+145(008) TEXT-025,             "残高単価
+162(008) TEXT-026.             "残高金額
+*- ９行目
+WRITE: /001(170) SY-ULINE.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  F01_MAKE_DETAIL
+*&---------------------------------------------------------------------*
+FORM F01_MAKE_DETAIL.
+*
+ITAB_DETAIL-BWART = BWART.
+ITAB_DETAIL-WERKS = WERKS.
+ITAB_DETAIL-MATNR = MATNR.
+ITAB_DETAIL-CPUTM = CPUTM.
+ITAB_DETAIL-BUDAT = BUDAT.
+ITAB_DETAIL-MBLNR = MBLNR.
+ITAB_DETAIL-AWSYS = AWSYS.
+ITAB_DETAIL-SOBKZ = SOBKZ.
+ITAB_DETAIL-LIFNR = LIFNR.
+ITAB_DETAIL-KUNNR = KUNNR.
+ITAB_DETAIL-MENGE = MENGE.
+ITAB_DETAIL-DMBTR = DMBTR.
+ITAB_DETAIL-SHKZG = SHKZG.
+ITAB_DETAIL-KZBEW = KZBEW.
+ITAB_DETAIL-KZZUG = KZZUG.
+ITAB_DETAIL-KZVBR = KZVBR.
+ITAB_DETAIL-WAERS = WAERS.
+ITAB_DETAIL-KZZUG = KZZUG.
+ITAB_DETAIL-LBKUM = LBKUM.
+ITAB_DETAIL-SALK3 = SALK3.
+*
+APPEND ITAB_DETAIL.
+CLEAR  ITAB_DETAIL.
+
+ENDFORM.                    " F01_MAKE_DETAIL
+*&---------------------------------------------------------------------*
+*&      Form  F02_GET_WERKS_TEXT
+*&---------------------------------------------------------------------*
+FORM F02_GET_WERKS_TEXT USING P_WERKS.
+
+SELECT SINGLE * FROM T001W WHERE WERKS = P_WERKS.
+*
+IF SY-SUBRC = 0.
+W_WERKS_CD = P_WERKS.
+W_WERKS_NM = T001W-NAME1.
+ENDIF.
+
+ENDFORM.                    " F02_GET_WERKS_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  F03_GET_MATNR_TEXT
+*&---------------------------------------------------------------------*
+FORM F03_GET_MATNR_TEXT USING P_MATNR.
+
+SELECT SINGLE * FROM MAKT WHERE MATNR = P_MATNR
+AND   SPRAS = 'J'.
+*
+IF SY-SUBRC = 0.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+EXPORTING
+INPUT   = P_MATNR
+IMPORTING
+OUTPUT  = W_MATNR_CD
+EXCEPTIONS
+OTHERS  = 1.
+IF SY-SUBRC <> 0.
+MESSAGE E001(Y1) WITH TEXT-039 SY-SUBRC.
+ENDIF.
+W_MATNR_NM = MAKT-MAKTX.
+ENDIF.
+
+ENDFORM.                    " F03_GET_MATNR_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  F04_LAST_MONTH_LINE
+*&---------------------------------------------------------------------*
+FORM F04_LAST_MONTH_LINE USING P_MATNR P_WERKS.
+*
+YFPR0501-TEXT     = TEXT-027.
+*
+IF W_CURRENT = 'X'.
+*- 当月の場合
+CLEAR MBEW.
+*2000/10/31 MOD START
+*    SELECT SINGLE VERPR VMKUM VMSAL VMVER PEINH VMPEI
+*      INTO (VERPR,VMKUM,VMSAL,VMVER,MBEW-PEINH,MBEW-VMPEI)
+*                                    FROM MBEW
+*                                    WHERE MATNR = P_MATNR
+*                                    AND   BWKEY = P_WERKS
+*                                    AND   BWTAR = SPACE.
+*    IF SY-SUBRC = 0.
+CLEAR: W_G_FLG,MBEWH.
+SELECT SINGLE VERPR LBKUM SALK3 VMVER PEINH VMPEI
+INTO (VERPR,LBKUM_H,SALK3_H,VMVER,MBEW-PEINH,MBEW-VMPEI)
+FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+W_G_FLG = 'X'.
+SELECT SINGLE  LBKUM SALK3 INTO (LBKUM_H,SALK3_H)
+from MBEWH WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE
+AND   LFGJA = W_L_YEAR
+AND   LFMON = W_L_MONTH.
+VMKUM  = LBKUM_H.
+VMSAL  = SALK3_H.
+ENDIF.
+IF W_G_FLG = 'X'.
+*2000/10/31 MOD END
+YFPR0501-SMENGE = VMKUM.
+YFPR0501-SBWGRL = ( VMVER * 100 ) / MBEW-VMPEI.
+YFPR0501-SDMBTR = VMSAL * 100.
+IF YFPR0501-SBWGRL = 0.
+YFPR0501-SBWGRL = VERPR * 100.
+YFPR0501-SBWGRL = YFPR0501-SBWGRL / MBEW-PEINH.
+ENDIF.
+YFPR0501-ZMENGE = YFPR0501-SMENGE.
+YFPR0501-ZBWGRL = YFPR0501-SBWGRL.
+YFPR0501-ZDMBTR = YFPR0501-SDMBTR.
+ELSE.
+YFPR0501-SMENGE = 0.
+YFPR0501-SBWGRL = 0.
+YFPR0501-SDMBTR = 0.
+YFPR0501-ZMENGE = 0.
+YFPR0501-ZBWGRL = 0.
+YFPR0501-ZDMBTR = 0.
+ENDIF.
+*    ENDSELECT.
+ELSE.
+*- 前月の場合
+CLEAR MBEW.
+SELECT SINGLE VERPR VVMLB VVSAL PEINH
+INTO (VERPR,VVMLB,VVSAL,MBEW-PEINH)
+FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+YFPR0501-SMENGE = VVMLB.
+YFPR0501-SBWGRL = ( VVSAL * 100 ) / VVMLB.
+YFPR0501-SDMBTR = VVSAL * 100.
+IF YFPR0501-SBWGRL = 0.
+YFPR0501-SBWGRL = ( VERPR * 100 ) / MBEW-PEINH.
+ENDIF.
+YFPR0501-ZMENGE = YFPR0501-SMENGE.
+YFPR0501-ZBWGRL = YFPR0501-SBWGRL.
+YFPR0501-ZDMBTR = YFPR0501-SDMBTR.
+ELSE.
+YFPR0501-SMENGE = 0.
+YFPR0501-SBWGRL = 0.
+YFPR0501-SDMBTR = 0.
+YFPR0501-ZMENGE = 0.
+YFPR0501-ZBWGRL = 0.
+YFPR0501-ZDMBTR = 0.
+ENDIF.
+*   ENDSELECT.
+*
+ENDIF.
+
+*- 残高（数量／単価／金額）待避
+W_PREV_ZMENGE = YFPR0501-ZMENGE.
+W_PREV_ZBWGRL = YFPR0501-ZBWGRL.
+W_PREV_ZDMBTR = YFPR0501-ZDMBTR.
+*- insert by homan 99/03/30
+IF P_CHECK = SPACE.
+
+WRITE: /029(008) TEXT-027. "品目改ページありの場合
+ELSE.
+IF ITAB_DETAIL-BELNR = 'X'.
+WRITE:  045(008) TEXT-041. "品目改ページなしの場合
+ELSE.
+WRITE:  045(008) TEXT-041. "品目改ページなしの場合
+ENDIF.
+ENDIF.
+*- insert by homan 99/03/30
+WRITE:  057(008) YFPR0501-SMENGE DECIMALS 0,
+066(012) YFPR0501-SBWGRL,
+079(015) YFPR0501-SDMBTR DECIMALS 0,
+*
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+
+ENDFORM.                    " F04_LAST_MONTH_LINE
+*&---------------------------------------------------------------------*
+*&      Form  F07_DETAIL_LINE
+*&---------------------------------------------------------------------*
+FORM F07_DETAIL_LINE.
+*
+CLEAR : YFPR0502.
+*
+*- 日付設定
+YFPR0502-MM    = ITAB_DETAIL-BUDAT+4(02).
+YFPR0502-DD    = ITAB_DETAIL-BUDAT+6(02).
+*- 元帳照合設定
+YFPR0502-BELNR = ITAB_DETAIL-BELNR.
+*- コード／摘要
+CLEAR : YFPR0502-TEXT.
+IF ITAB_DETAIL-KUNNR <> SPACE.
+YFPR0502-CODE = ITAB_DETAIL-KUNNR.
+SELECT SINGLE NAME1 NAME2 INTO (NAME1,NAME2)
+FROM  KNA1
+WHERE KUNNR = ITAB_DETAIL-KUNNR.
+IF SY-SUBRC = 0.
+YFPR0502-TEXT = NAME1.
+ENDIF.
+ENDIF.
+*
+IF YFPR0502-TEXT = SPACE.
+SELECT SINGLE * FROM T156T WHERE SPRAS = 'J'
+AND   BWART = ITAB_DETAIL-BWART
+AND   SOBKZ = ITAB_DETAIL-SOBKZ
+AND   KZBEW = ITAB_DETAIL-KZBEW
+AND   KZZUG = ITAB_DETAIL-KZZUG
+AND   KZVBR = ITAB_DETAIL-KZVBR.
+IF SY-SUBRC = 0.
+YFPR0502-TEXT = T156T-BTEXT.
+ENDIF.
+ENDIF.
+*
+IF ITAB_DETAIL-LIFNR <> SPACE.
+YFPR0502-CODE = ITAB_DETAIL-LIFNR.
+SELECT SINGLE NAME1 NAME2 INTO (NAME1,NAME2)
+FROM  LFA1
+WHERE LIFNR = ITAB_DETAIL-LIFNR.
+IF SY-SUBRC = 0.
+YFPR0502-TEXT = NAME1.
+ENDIF.
+ENDIF.
+IF ITAB_DETAIL-SHKZG = C_DR.
+*- 受入（数量／単価／金額）設定
+*- modify start by homan 1998/12/04 -----------------------------------*
+IF   ( ITAB_DETAIL-LIFNR <> SPACE OR ITAB_DETAIL-KUNNR <> SPACE )
+AND  ( ITAB_DETAIL-KZZUG = SPACE                                )
+AND  ( ITAB_DETAIL-DMBTR = SPACE                                ).
+YFPR0502-SMENGE = ITAB_DETAIL-MENGE.
+IF ITAB_DETAIL-SALK3 <> 0.
+YFPR0502-SBWGRL = ITAB_DETAIL-LBKUM / ITAB_DETAIL-SALK3.
+ELSE.
+YFPR0502-SBWGRL = 0.
+ENDIF.
+YFPR0502-SDMBTR = ITAB_DETAIL-MENGE * YFPR0502-SBWGRL * 100.
+ELSE.
+YFPR0502-SMENGE = ITAB_DETAIL-MENGE.
+IF ITAB_DETAIL-MENGE <> 0.
+YFPR0502-SBWGRL = ITAB_DETAIL-DMBTR / ITAB_DETAIL-MENGE * 100.
+ELSE.
+YFPR0502-SBWGRL = 0.
+ENDIF.
+YFPR0502-SDMBTR = ITAB_DETAIL-DMBTR * 100.
+ENDIF.
+*   YFPR0502-SDMBTR = ITAB_DETAIL-DMBTR.
+*- 残高（数量／単価／金額）設定
+YFPR0502-ZMENGE = W_PREV_ZMENGE + ITAB_DETAIL-MENGE.
+IF YFPR0502-ZMENGE <> 0.
+YFPR0502-ZBWGRL = ( W_PREV_ZDMBTR +
+YFPR0502-SDMBTR ) / YFPR0502-ZMENGE.
+ELSE.
+YFPR0502-ZBWGRL = 0.
+ENDIF.
+*- modify end by homan 1998/12/04 -------------------------------------*
+
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+*   YFPR0502-ZDMBTR = YFPR0502-ZMENGE * YFPR0502-ZBWGRL.
+YFPR0502-ZDMBTR = W_PREV_ZDMBTR + YFPR0502-SDMBTR.
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+
+*- 明細総合計（数量／単価／金額）設定
+W_SMENGE_LS = W_SMENGE_LS + YFPR0502-SMENGE.
+W_SBWGRL_LS = W_SBWGRL_LS + YFPR0502-SBWGRL.
+W_SDMBTR_LS = W_SDMBTR_LS + YFPR0502-SDMBTR.
+ELSEIF  ITAB_DETAIL-SHKZG = C_CR.
+*- 払出（数量／単価／金額）設定
+*- modify start by homan 1998/12/04 -----------------------------------*
+IF   ( ITAB_DETAIL-LIFNR <> SPACE OR ITAB_DETAIL-KUNNR <> SPACE )
+AND  ( ITAB_DETAIL-KZZUG = SPACE                                )
+AND  ( ITAB_DETAIL-DMBTR = SPACE                                ).
+YFPR0502-HMENGE = ITAB_DETAIL-MENGE.
+IF ITAB_DETAIL-SALK3 <> 0.
+YFPR0502-HBWGRL = ITAB_DETAIL-LBKUM / ITAB_DETAIL-SALK3.
+ELSE.
+YFPR0502-HBWGRL = 0.
+ENDIF.
+YFPR0502-HDMBTR = ITAB_DETAIL-MENGE * YFPR0502-HBWGRL * 100.
+ELSE.
+YFPR0502-HMENGE = ITAB_DETAIL-MENGE.
+IF YFPR0502-HMENGE <> 0.
+YFPR0502-HBWGRL = ITAB_DETAIL-DMBTR / YFPR0502-HMENGE * 100.
+ELSE.
+YFPR0502-HBWGRL = 0.
+ENDIF.
+YFPR0502-HDMBTR = ITAB_DETAIL-DMBTR * 100.
+ENDIF.
+*- 残高（数量／単価／金額）設定
+YFPR0502-ZMENGE = W_PREV_ZMENGE - ITAB_DETAIL-MENGE.
+IF YFPR0502-ZMENGE <> 0.
+YFPR0502-ZBWGRL = ( W_PREV_ZDMBTR -
+YFPR0502-HDMBTR ) / YFPR0502-ZMENGE.
+ELSE.
+YFPR0502-ZBWGRL = 0.
+ENDIF.
+
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+*   YFPR0502-ZDMBTR = YFPR0502-ZMENGE * YFPR0502-ZBWGRL.
+YFPR0502-ZDMBTR = W_PREV_ZDMBTR - YFPR0502-HDMBTR.
+*- 残高金額算出方法変更 1998/11/30 homan ------------------------------*
+
+*- 明細総合計（数量／単価／金額）設定
+W_HMENGE_LS = W_HMENGE_LS + YFPR0502-HMENGE.
+W_HBWGRL_LS = W_HBWGRL_LS + YFPR0502-HBWGRL.
+W_HDMBTR_LS = W_HDMBTR_LS + YFPR0502-HDMBTR.
+ENDIF.
+*- 残高（数量／単価／金額）待避
+W_PREV_ZMENGE = YFPR0502-ZMENGE.
+W_PREV_ZBWGRL = YFPR0502-ZBWGRL.
+W_PREV_ZDMBTR = YFPR0502-ZDMBTR.
+
+*
+WRITE:  /001(002) YFPR0502-MM,
+003(001) '.',
+004(002) YFPR0502-DD,
+007(010) YFPR0502-BELNR,
+018(010) YFPR0502-CODE,
+029(026) YFPR0502-TEXT.
+IF ITAB_DETAIL-SHKZG = C_DR.
+WRITE: 057(008) YFPR0502-SMENGE DECIMALS 0,
+066(012) YFPR0502-SBWGRL,
+079(015) YFPR0502-SDMBTR DECIMALS 0.
+ELSEIF  ITAB_DETAIL-SHKZG = C_CR.
+WRITE: 095(008) YFPR0502-HMENGE DECIMALS 0,
+104(012) YFPR0502-HBWGRL,
+117(015) YFPR0502-HDMBTR DECIMALS 0.
+ENDIF.
+WRITE:   133(008) YFPR0502-ZMENGE DECIMALS 0,
+142(012) YFPR0502-ZBWGRL,
+154(018) YFPR0502-ZDMBTR DECIMALS 0.
+W_LINE = W_LINE + 1.
+
+ENDFORM.                    " F07_DETAIL_LINE
+*&---------------------------------------------------------------------*
+*&      Form  F08_PAGE_TOTAL
+*&---------------------------------------------------------------------*
+FORM F08_PAGE_TOTAL USING P_TEXT.
+
+WRITE:  /029(008) P_TEXT,
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+
+ENDFORM.                    " F08_PAGE_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  F09_PREV_TOTAL
+*&---------------------------------------------------------------------*
+FORM F09_PREV_TOTAL.
+
+WRITE: /029(008) TEXT-029,             "前頁繰越
+057(008) W_PREV_ZMENGE DECIMALS 0,
+066(012) W_PREV_ZBWGRL,
+079(015) W_PREV_ZDMBTR DECIMALS 0,
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+
+ENDFORM.                    " F09_PREV_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  F99_DATA_INIT
+*&---------------------------------------------------------------------*
+FORM F99_DATA_INIT.
+
+CLEAR   : W_YEAR     , W_BUDAT    , S_BUDAT    , ITAB_DETAIL,
+W_CURR_YM  , W_PREV_YM  , W_CURRENT  , W_NEWPAGE  ,
+W_SMENGE_LS, W_SBWGRL_LS, W_SDMBTR_LS, W_GJAHR    ,
+W_HMENGE_LS, W_HBWGRL_LS, W_HDMBTR_LS, S_SOBKZ.
+
+REFRESH : S_BUDAT, S_SOBKZ, ITAB_DETAIL.
+
+W_SYSDATE  = SY-DATUM.
+W_SYSTIME  = SY-UZEIT.
+
+*- 特殊在庫区分のオミット
+DO.
+PERFORM F99_SOBKZ_MAKE.
+IF C_SOBKZ = SPACE.
+EXIT.
+ENDIF.
+ENDDO.
+
+ENDFORM.                    " F99_BUDAT_INIT
+*&---------------------------------------------------------------------*
+*&      Form  F99_BUKRS_CHECK
+*&---------------------------------------------------------------------*
+FORM F99_BUKRS_CHECK USING P_MSEG_BUKRS.
+*
+SELECT SINGLE * FROM  T001 WHERE BUKRS = P_MSEG_BUKRS.
+IF SY-SUBRC <> 0.
+MESSAGE E165(F5) WITH P_MSEG_BUKRS.
+ENDIF.
+*
+CALL FUNCTION 'DATE_TO_PERIOD_CONVERT'
+EXPORTING
+I_DATE         = S_BUDAT-LOW
+*            I_MONMIT       =
+I_PERIV        = T001-PERIV
+IMPORTING
+*           E_BUPER        =
+E_GJAHR        = W_GJAHR
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3
+OTHERS         = 4.
+
+* W_YEAR     = W_SYSDATE+0(04).
+W_YEAR     = W_GJAHR.
+
+ENDFORM.                    " F99_BUKRS_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F09_MATNR_TOTAL
+*&---------------------------------------------------------------------*
+FORM F09_MATNR_TOTAL.
+
+WRITE  /001(170) SY-ULINE.
+WRITE: /057(008) W_SMENGE_LS DECIMALS 0,
+079(015) W_SDMBTR_LS DECIMALS 0,
+095(008) W_HMENGE_LS DECIMALS 0,
+117(015) W_HDMBTR_LS DECIMALS 0.
+WRITE  /001(170) SY-ULINE.
+
+ENDFORM.                    " F09_MATNR_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  F99_SOBKZ_MAKE
+*&---------------------------------------------------------------------*
+FORM F99_SOBKZ_MAKE.
+
+S_SOBKZ-SIGN   = 'I'.
+S_SOBKZ-OPTION = 'EQ'.
+*
+S_SOBKZ-LOW = C_SOBKZ+0(1).
+APPEND S_SOBKZ.
+SHIFT C_SOBKZ.
+
+ENDFORM.                    " F99_SOBKZ_MAKE
+*&---------------------------------------------------------------------*
+*&      Form  F99_DAT_SET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_DAT_SET.
+*
+CONCATENATE    P_YYMM '01' INTO S_BUDAT-LOW.
+PERFORM F99_LAST_DAY_GET USING S_BUDAT-LOW S_BUDAT-HIGH.
+*
+S_BUDAT-SIGN   = 'I'.
+S_BUDAT-OPTION = 'BT'.
+*
+APPEND S_BUDAT.
+*
+ENDFORM.                    " F99_DAT_SET
+*&---------------------------------------------------------------------*
+*&      Form  F99_PREV_MONTH_GET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_PREV_MONTH_GET USING P_YMTMP P_RETDAT.
+DATA: L_YEAR(04)   TYPE N,
+L_MONTH(02)  TYPE N,
+L_YMDDAT     LIKE SY-DATUM.
+
+*- －１月
+CONCATENATE P_YMTMP '01' INTO L_YMDDAT.
+L_YMDDAT = L_YMDDAT - 1.
+*
+L_YEAR  = L_YMDDAT+0(04).
+L_MONTH = L_YMDDAT+4(02).
+CONCATENATE L_YEAR L_MONTH INTO P_RETDAT.
+*
+ENDFORM.                    " F99_PREV_MONTH_GET
+*&---------------------------------------------------------------------*
+*&      Form  F99_LAST_DAY_GET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_LAST_DAY_GET USING P_BUDAT_LOW P_BUDAT_HIGH.
+DATA: L_YEAR(04)   TYPE N,
+L_MONTH(02)  TYPE N,
+L_YMDDAT     LIKE SY-DATUM.
+*
+L_YEAR         = P_BUDAT_LOW+0(4).
+L_MONTH        = P_BUDAT_LOW+4(2).
+*
+L_MONTH        = L_MONTH + 1.
+IF L_MONTH > '12'.
+L_YEAR  = L_YEAR + 1.
+L_MONTH = '1'.
+ENDIF.
+*
+CONCATENATE    L_YEAR L_MONTH '01' INTO L_YMDDAT.
+S_BUDAT-HIGH = L_YMDDAT - 1.
+*
+ENDFORM.                    " F99_LAST_DAY_GET
+*&---------------------------------------------------------------------*
+*&      Form  F99_YMD_CHECK
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_YMD_CHECK.
+*
+CONCATENATE P_YYMM '01' INTO W_DATE.
+CALL FUNCTION 'DATE_CHECK_PLAUSIBILITY'
+EXPORTING
+DATE                      = W_DATE
+EXCEPTIONS
+PLAUSIBILITY_CHECK_FAILED = 1
+OTHERS                    = 2.
+*
+IF SY-SUBRC <> 0.
+MESSAGE E211(Y1).
+ENDIF.
+*
+ENDFORM.                    " F99_YMD_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F99_CURR_PREV_CHECK
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_CURR_PREV_CHECK USING P_MSEG_BUKRS.
+DATA : L_YEAR_H(04)  TYPE N,
+L_MONTH_H(02) TYPE N,
+L_YEAR_M(04)  TYPE N,    "当期用
+L_MONTH_M(02) TYPE N,    "当期用
+L_YEAR_L(04)  TYPE N,    "前月用
+L_MONTH_L(02) TYPE N.    "前月用
+*
+L_MONTH_H = P_YYMM+4(02).
+*
+SELECT * FROM T009B WHERE PERIV = T001-PERIV
+AND   BUMON = L_MONTH_H.
+ENDSELECT.
+*
+IF SY-SUBRC <> 0.
+MESSAGE E309(Y1) WITH TEXT-037 TEXT-033 T001-PERIV TEXT-034.
+ENDIF.
+*
+L_YEAR_H  = P_YYMM+0(04).
+L_YEAR_H  = L_YEAR_H + T009B-RELJR. "品目年
+L_MONTH_H = T009B-POPER.            "品目月
+*
+SELECT SINGLE * FROM  MARV WHERE BUKRS = P_MSEG_BUKRS.
+IF SY-SUBRC <> 0.
+MESSAGE E309(Y1) WITH TEXT-038 TEXT-033 P_MSEG_BUKRS TEXT-034.
+ENDIF.
+
+*- 当期
+L_YEAR_M  = MARV-LFGJA.
+L_MONTH_M = MARV-LFMON.
+*- 前期
+L_YEAR_L  = MARV-VMGJA.
+L_MONTH_L = MARV-VMMON.
+*2000/10/31 ADD START
+W_L_YEAR  = MARV-VMGJA.
+W_L_MONTH = MARV-VMMON.
+*2000/10/31 ADD END
+*
+* IF ( L_YEAR_H  = L_YEAR_M  OR L_YEAR_H  = L_YEAR_L  ) AND
+*    ( L_MONTH_H = L_MONTH_M OR L_MONTH_H = L_MONTH_L ).
+IF L_YEAR_H  = L_YEAR_M AND L_MONTH_H = L_MONTH_M.     "当月
+W_CURRENT = 'X'.
+ELSEIF L_YEAR_H  = L_YEAR_L AND L_MONTH_H = L_MONTH_L. "前月
+W_CURRENT = SPACE.
+ELSE.
+MESSAGE E309(Y1) WITH TEXT-031.
+ENDIF.
+*
+ENDFORM.                    " F99_CURR_PREV_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F99_DATA_SELECT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_DATA_SELECT.
+*
+IF W_CURRENT = 'X'.
+*- 当月の場合(BUDAT)
+SELECT   MBLNR MJAHR BUDAT CPUTM AWSYS
+INTO (MBLNR,MJAHR,BUDAT,CPUTM,AWSYS)
+FROM  MKPF
+WHERE BUDAT IN S_BUDAT.
+*-  伝票セグメント：品目検索
+*-  抽出項目の追加（xauto）  1999/04/22 insert by homan
+SELECT   BWART XAUTO MATNR WERKS SOBKZ LIFNR KUNNR SHKZG DMBTR
+MENGE KZBEW KZVBR KZZUG WAERS KZZUG LBKUM SALK3
+INTO (BWART,XAUTO,MATNR,WERKS,SOBKZ,LIFNR,KUNNR,SHKZG,DMBTR,
+MENGE,KZBEW,KZVBR,KZZUG,WAERS,KZZUG,LBKUM,SALK3)
+FROM  MSEG
+WHERE MBLNR =  MBLNR
+AND   MJAHR =  MJAHR
+AND   MATNR IN S_MATNR
+AND   WERKS IN S_WERKS
+AND   BUKRS =  P_BUKRS
+*              and   dmbtr >  '0'
+AND   BESTQ =  SPACE     "在庫カテゴリ  98/12/04 ins
+AND   SOBKZ IN S_SOBKZ   "特殊在庫区分  98/12/04 ins
+AND   BUSTW <> SPACE.    "金額登録ストリング 99/01/20 INS
+*- 1999/04/22 modify by homan start -----------------------------------*
+*       perform f01_make_detail.        "明細行作成    del
+*       IF XAUTO = C_ON.                              "ins->DEL-19990721
+IF XAUTO = C_ON  AND  BWART+00(01) <> '3'.    "ins-19990721
+*         skip.                                       "ins
+ELSE.                                         "ins
+PERFORM F01_MAKE_DETAIL.        "明細行作成  ins
+ENDIF.                                        "ins
+*- 1999/04/22 modify by homan end   -----------------------------------*
+ENDSELECT.
+ENDSELECT.
+*
+ELSE.
+*- 前月の場合(BUDAT)
+SELECT   MBLNR MJAHR BUDAT CPUTM AWSYS
+INTO (MBLNR,MJAHR,BUDAT,CPUTM,AWSYS)
+FROM  MKPF
+WHERE BUDAT IN S_BUDAT.
+*-  伝票セグメント：品目検索
+*     SELECT   BWART MATNR WERKS SOBKZ LIFNR KUNNR SHKZG DMBTR
+*              MENGE KZBEW KZVBR KZZUG WAERS KZZUG LBKUM SALK3
+*              INTO (BWART,MATNR,WERKS,SOBKZ,LIFNR,KUNNR,SHKZG,DMBTR,
+*                    MENGE,KZBEW,KZVBR,KZZUG,WAERS,KZZUG,LBKUM,SALK3)
+*-  抽出項目の追加（XAUTO）  1999/08/23 CORRECTED BY KUSAKA
+SELECT   BWART XAUTO MATNR WERKS SOBKZ LIFNR KUNNR SHKZG DMBTR
+MENGE KZBEW KZVBR KZZUG WAERS KZZUG LBKUM SALK3
+INTO (BWART,XAUTO,MATNR,WERKS,SOBKZ,LIFNR,KUNNR,SHKZG,DMBTR,
+MENGE,KZBEW,KZVBR,KZZUG,WAERS,KZZUG,LBKUM,SALK3)
+FROM  MSEG
+WHERE MBLNR =  MBLNR
+AND   MJAHR =  MJAHR
+AND   MATNR IN S_MATNR
+AND   WERKS IN S_WERKS
+AND   BUKRS =  P_BUKRS
+*              and   dmbtr >  '0'
+AND   BESTQ =  SPACE     "在庫カテゴリ  98/12/04 ins
+AND   SOBKZ IN S_SOBKZ   "特殊在庫区分  98/12/04 ins
+AND   BUSTW <> SPACE.    "金額登録ストリング 99/01/30 INS
+
+*       自動生成明細は処理バイパス（ただし、在庫転送は例外）
+IF XAUTO = C_ON  AND  BWART+00(01) <> '3'.         "19990823-ADD
+*         skip.                                            "19990823-ADD
+ELSE.                                              "19990823-ADD
+PERFORM F01_MAKE_DETAIL.        "明細行作成      "19990823-ADD
+ENDIF.                                             "19990823-ADD
+*       PERFORM F01_MAKE_DETAIL.        "明細行作成        "19990823-DEL
+ENDSELECT.
+ENDSELECT.
+*
+ENDIF.
+*
+DESCRIBE TABLE ITAB_DETAIL LINES W_LIN.
+*
+* CHECK W_LIN <> 0.
+*
+LOOP AT ITAB_DETAIL.
+CONCATENATE ITAB_DETAIL-MBLNR P_YYMM+0(04) INTO W_AWKEY.
+SELECT BELNR INTO (BELNR) FROM BKPF
+WHERE BUKRS = P_BUKRS
+AND   GJAHR = W_GJAHR
+AND   AWSYS = ITAB_DETAIL-AWSYS
+AND   AWKEY = W_AWKEY
+AND   AWTYP = 'MKPF'.
+ITAB_DETAIL-BELNR = BELNR.
+MODIFY ITAB_DETAIL.
+ENDSELECT.
+
+ENDLOOP.
+*
+SELECT MATNR WERKS LVORM INTO (MATNR,WERKS,LVORM) FROM MARC
+WHERE MATNR IN S_MATNR
+AND   WERKS IN S_WERKS.
+*
+READ TABLE ITAB_DETAIL WITH KEY MATNR = MATNR
+WERKS = WERKS.
+IF SY-SUBRC <> 0.
+CLEAR: W_SALFLG.
+PERFORM F99_SAL_CHECK USING MATNR WERKS W_SALFLG.
+IF W_SALFLG = SPACE AND LVORM = 'X'.
+*-    対象外
+ELSE.
+CLEAR ITAB_DETAIL.
+ITAB_DETAIL-MATNR = MATNR.
+ITAB_DETAIL-WERKS = WERKS.
+ITAB_DETAIL-BELNR = 'X'.
+APPEND ITAB_DETAIL.
+ENDIF.
+ENDIF.
+*
+ENDSELECT.
+
+ENDFORM.                    " F99_DATA_SELECT
+*&---------------------------------------------------------------------*
+*&      Form  F99_SAL_CHECK
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_SAL_CHECK USING P_MATNR P_WERKS P_SALFLG.
+*
+IF W_CURRENT = 'X'.
+*- 当月の場合
+*2000/10/31 MOD START
+*    SELECT SINGLE VMSAL INTO (VMSAL) FROM MBEW
+*                                     WHERE MATNR = P_MATNR
+*                                     AND   BWKEY = P_WERKS
+*                                     AND   BWTAR = SPACE.
+*    IF SY-SUBRC = 0 AND VMSAL <> 0.
+CLEAR: W_G_FLG, SALK3_H, VMSAL.
+SELECT SINGLE SALK3 INTO SALK3_H FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+W_G_FLG = 'X'.
+SELECT SINGLE  SALK3 INTO SALK3_H  FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE
+AND   LFGJA = W_L_YEAR
+AND   LFMON = W_L_MONTH.
+VMSAL  = SALK3_H.
+ENDIF.
+IF W_G_FLG = 'X' AND VMSAL <> 0.
+*2000/10/31 MOD END
+P_SALFLG = 'X'.
+ELSE.
+P_SALFLG = SPACE.
+ENDIF.
+ELSE.
+*- 前月の場合
+SELECT SINGLE VVSAL INTO (VVSAL) FROM MBEW
+WHERE MATNR = P_MATNR
+AND   BWKEY = P_WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0 AND VVSAL <> 0.
+P_SALFLG = 'X'.
+ELSE.
+P_SALFLG = SPACE.
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " F99_SAL_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F07_DETAIL_NOT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F07_DETAIL_NOT.
+*
+WRITE /002(024) TEXT-032. "該当データなし
+*
+ENDFORM.                    " F07_DETAIL_NOT
+*&---------------------------------------------------------------------*
+*&      Form  F99_OMIT_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F99_OMIT_DATA.
+DATA : L_SMENGE LIKE MBEW-VMKUM,
+L_SBWGRL LIKE MBEW-VMSAV,
+L_SDMBTR LIKE MBEW-VMSAL.
+*
+LOOP AT ITAB_DETAIL WHERE BELNR = 'X'.
+IF W_CURRENT = 'X'.
+*- 当月の場合
+CLEAR MBEW.
+*2000/10/31 MOD START
+*      SELECT SINGLE VERPR VMKUM VMSAL VMVER PEINH VMPEI
+*             INTO (VERPR,VMKUM,VMSAL,VMVER,MBEW-PEINH,MBEW-VMPEI)
+*                                    FROM MBEW
+*                                    WHERE MATNR = ITAB_DETAIL-MATNR
+*                                    AND   BWKEY = ITAB_DETAIL-WERKS
+*                                    AND   BWTAR = SPACE.
+*     IF SY-SUBRC = 0.
+CLEAR: MBEWH,W_G_FLG.
+SELECT SINGLE VERPR LBKUM SALK3 VMVER PEINH VMPEI
+INTO (VERPR,LBKUM_H,SALK3_H,VMVER,MBEW-PEINH,MBEW-VMPEI)
+FROM MBEW
+WHERE MATNR = ITAB_DETAIL-MATNR
+AND   BWKEY = ITAB_DETAIL-WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+W_G_FLG = 'X'.
+SELECT SINGLE  LBKUM SALK3 INTO (LBKUM_H,SALK3_H)
+from MBEWH WHERE MATNR = ITAB_DETAIL-MATNR
+AND   BWKEY = ITAB_DETAIL-WERKS
+AND   BWTAR = SPACE
+AND   LFGJA = W_L_YEAR
+AND   LFMON = W_L_MONTH.
+VMKUM  = LBKUM_H.
+VMSAL  = SALK3_H.
+ENDIF.
+IF W_G_FLG = 'X'.
+*2000/10/31 MOD END
+L_SMENGE = VMKUM.
+L_SBWGRL = ( VMVER * 100 ) / MBEW-VMPEI.
+L_SDMBTR = VMSAL * 100.
+IF L_SBWGRL = 0.
+L_SBWGRL = ( VERPR * 100 ) / MBEW-PEINH.
+ENDIF.
+ELSE.
+L_SMENGE = 0.
+L_SBWGRL = 0.
+L_SDMBTR = 0.
+ENDIF.
+ELSE.
+*- 前月の場合
+SELECT SINGLE VERPR VVMLB VVSAL PEINH
+INTO (VERPR,VVMLB,VVSAL,MBEW-PEINH)
+FROM MBEW
+WHERE MATNR = ITAB_DETAIL-MATNR
+AND   BWKEY = ITAB_DETAIL-WERKS
+AND   BWTAR = SPACE.
+IF SY-SUBRC = 0.
+L_SMENGE = VVMLB.
+L_SBWGRL = ( VVSAL * 100 ) / VVMLB.
+L_SDMBTR = VVSAL * 100.
+IF L_SBWGRL = 0.
+L_SBWGRL = ( VERPR * 100 ) / MBEW-PEINH.
+ENDIF.
+ELSE.
+L_SMENGE = 0.
+L_SBWGRL = 0.
+L_SDMBTR = 0.
+ENDIF.
+ENDIF.
+*-
+IF L_SMENGE = 0.
+ITAB_DETAIL-BELNR = 'OMIT'.
+MODIFY ITAB_DETAIL.
+ENDIF.
+*
+ENDLOOP.
+*
+DELETE ITAB_DETAIL WHERE BELNR = 'OMIT'.
+*
+
+ENDFORM.                    " F99_OMIT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F18_PAGE_TOTAL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM F18_PAGE_TOTAL USING P_TEXT.
+*
+WRITE:  /045(008) P_TEXT,
+057(008) W_SMENGE_LS DECIMALS 0,
+079(015) W_SDMBTR_LS DECIMALS 0,
+095(008) W_HMENGE_LS DECIMALS 0,
+117(015) W_HDMBTR_LS DECIMALS 0,
+133(008) W_PREV_ZMENGE DECIMALS 0,
+142(012) W_PREV_ZBWGRL,
+154(018) W_PREV_ZDMBTR DECIMALS 0.
+*
+ENDFORM.                    " F18_PAGE_TOTAL

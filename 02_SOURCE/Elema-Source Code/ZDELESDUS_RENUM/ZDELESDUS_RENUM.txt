@@ -1,0 +1,177 @@
+REPORT  zdelesdus_renum.
+
+*--------------------------------------------------------------------*
+* define types
+*--------------------------------------------------------------------*
+TYPE-POOLS icon.
+
+TYPES:
+type_v_icon TYPE c LENGTH 40,
+type_t_data TYPE SORTED TABLE OF esdus WITH NON-UNIQUE KEY uname action.
+
+TYPES:
+BEGIN OF type_s_outtab,
+icon    TYPE type_v_icon,
+uname   TYPE esdus-uname,
+action  TYPE esdus-action,
+element TYPE esdus-element,
+active  TYPE esdus-active,
+END OF type_s_outtab.
+
+TYPES:
+BEGIN OF type_s_uname,
+uname TYPE esdus-uname,
+END OF type_s_uname.
+
+TYPES:
+type_t_outtab TYPE STANDARD TABLE OF type_s_outtab WITH DEFAULT KEY,
+type_t_uname  TYPE SORTED TABLE OF   type_s_uname  WITH UNIQUE KEY uname.
+
+*--------------------------------------------------------------------*
+* define data objects
+*--------------------------------------------------------------------*
+DATA: lv_green     TYPE type_v_icon,
+lv_red       TYPE type_v_icon,
+lv_info      TYPE icont-quickinfo,
+lv_faulty    TYPE esdus-uname,
+lv_text      TYPE c LENGTH 50,
+ls_outtab    TYPE type_s_outtab,
+ls_esdus     TYPE esdus,
+ls_uname     TYPE type_s_uname,
+lt_data      TYPE type_t_data,
+lt_uname     TYPE type_t_uname,
+lt_outtab    TYPE type_t_outtab,
+lo_alv       TYPE REF TO cl_salv_table,
+lo_sort      TYPE REF TO cl_salv_sorts,
+lo_functions TYPE REF TO cl_salv_functions_list,
+lo_columns   TYPE REF TO cl_salv_columns,
+lo_alv_top   TYPE REF TO cl_salv_form_layout_grid.
+
+FIELD-SYMBOLS:
+<ls_data> TYPE esdus.
+*--------------------------------------------------------------------*
+* define screen elements
+*--------------------------------------------------------------------*
+SELECT-OPTIONS:
+so_uname FOR sy-uname OBLIGATORY.
+
+PARAMETERS:
+p_test AS CHECKBOX DEFAULT 'X'.
+
+
+START-OF-SELECTION.
+
+* pre-conditions
+IF so_uname IS INITIAL.
+RETURN.
+ENDIF.
+* create icons
+lv_info = 'Update successful'.                            "#EC *
+CALL FUNCTION 'ICON_CREATE'
+EXPORTING
+name                  = icon_green_light
+info                  = lv_info
+IMPORTING
+result                = lv_green
+EXCEPTIONS
+icon_not_found        = 0
+outputfield_too_short = 0
+OTHERS                = 0.
+lv_info = 'Update failed'.                                "#EC *
+CALL FUNCTION 'ICON_CREATE'
+EXPORTING
+name                  = icon_red_light
+info                  = lv_info
+IMPORTING
+result                = lv_red
+EXCEPTIONS
+icon_not_found        = 0
+outputfield_too_short = 0
+OTHERS                = 0.
+*--------------------------------------------------------------------*
+* data base fetch
+*--------------------------------------------------------------------*
+SELECT * FROM esdus INTO TABLE lt_data
+WHERE uname IN so_uname
+AND ( action LIKE 'MEPO%'                      "#EC *
+OR action LIKE 'MEOUT%'                     "#EC *
+OR action LIKE 'PurchaseOrder%'             "#EC *
+OR action LIKE 'PurchaseRequisition%'       "#EC *
+OR action LIKE 'OutlineAgreement%' ).       "#EC *
+*
+IF lines( lt_data ) GE 1.
+* prepare data for display
+LOOP AT lt_data ASSIGNING <ls_data>.
+CHECK <ls_data>-uname NE lv_faulty.
+READ TABLE lt_uname WITH TABLE KEY uname = <ls_data>-uname
+INTO lv_faulty.
+CHECK: sy-subrc GT 0,
+<ls_data>-element CP '*->'.                    "#EC *
+ls_esdus = <ls_data>.
+SHIFT:
+ls_esdus-action LEFT UP TO '/',                     "#EC *
+ls_esdus-action LEFT BY 1 PLACES.
+IF ls_esdus-action EQ ls_esdus-active.
+INSERT ls_uname INTO TABLE lt_uname.
+ENDIF.
+CLEAR: ls_esdus-element,
+ls_esdus-active.
+MOVE-CORRESPONDING ls_esdus TO ls_outtab.
+ls_outtab-icon = lv_green.
+INSERT ls_outtab INTO TABLE lt_outtab.
+ENDLOOP.
+ELSE.
+ls_outtab-icon  = lv_red.
+ls_outtab-uname = sy-uname.
+INSERT ls_outtab INTO TABLE lt_outtab.
+ENDIF.
+
+IF lines( lt_uname ) GE 1.
+lv_text = 'User with faulty ESDUS entries'.             "#EC *
+IF p_test IS INITIAL.
+LOOP AT lt_uname INTO ls_uname.
+DELETE FROM esdus WHERE uname = ls_uname-uname
+AND ( action LIKE 'MEPO%'                    "#EC *
+OR action LIKE 'MEOUT%'                   "#EC *
+OR action LIKE 'PurchaseOrder%'           "#EC *
+OR action LIKE 'PurchaseRequisition%'     "#EC *
+OR action LIKE 'OutlineAgreement%' ).     "#EC *
+ENDLOOP.
+ENDIF.
+ELSE.
+lv_text = 'No faulty ESDUS entries selected'.           "#EC *
+ENDIF.
+
+cl_salv_table=>factory( IMPORTING r_salv_table   = lo_alv
+CHANGING  t_table        = lt_outtab ).
+lo_functions = lo_alv->get_functions( ).
+lo_functions->set_default( abap_false ).
+lo_columns   = lo_alv->get_columns( ).
+lo_columns->set_optimize( abap_true ).
+lo_sort = lo_alv->get_sorts( ).
+lo_sort->add_sort( 'UNAME' ).                             "#EC *
+lo_sort->add_sort( 'ACTION' ).                            "#EC *
+CREATE OBJECT lo_alv_top
+EXPORTING
+columns = 2.
+IF p_test EQ abap_false.
+lo_alv_top->create_header_information(
+row      = 1
+column   = 1
+text     = 'Production Run'  "#EC *
+tooltip  = 'Run with Commit Work' ). "#EC *
+ELSE.
+lo_alv_top->create_header_information(
+row      = 1
+column   = 1
+text     = 'Test Run'        "#EC *
+tooltip  = 'Run without Commit Work' ). "#EC *
+ENDIF.
+lo_alv_top->create_header_information(
+row      = 2
+column   = 1
+text     = lv_text
+tooltip  = lv_text ).          "#EC *
+* output result
+lo_alv->set_top_of_list( lo_alv_top ).
+lo_alv->display( ).

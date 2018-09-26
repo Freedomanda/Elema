@@ -1,0 +1,2472 @@
+REPORT YF003100 MESSAGE-ID Y1
+NO STANDARD PAGE HEADING
+*                             LINE-SIZE   170　2005/04/07　DEL
+LINE-SIZE   190  "2005/04/17  ADD
+LINE-COUNT   58(0).
+*----------------------------------------------------------------------*
+*     ﾌﾟﾛｸﾞﾗﾑID : ZYF03100
+*     ﾌﾟﾛｸﾞﾗﾑ名 : 消費税精算書作成
+*     処理種別   : バッチ(ABAP/4)
+*     処理概要   : 会計伝票明細ﾃｰﾌﾞﾙより、指定された年月日のﾃﾞｰﾀを
+*               : 抽出する
+*               : 明細行に、仕入／売上別・勘定科目別・税タイプ別の
+*               : 本体額を出力する
+*               : 合計行に、本体額合計・税額・税込金額・税率を出力する
+*     入力      : 会社ｺｰﾄﾞ，会計期間，開始月，終了月
+*     出力      : 消費税精算書
+*     変更履歴　: 2004/03/04　税項目以外も出力
+*　　　　　　　　　　　　　　 科目合計出力
+*                 2005/04/07  勘定コードでの検索の追加、レイアウト変更
+*                 2005/11/09  DMC K.ONODA
+*                             新消費税精算書作成の対応
+*----------------------------------------------------------------------*
+*固定値定義
+CONSTANTS: C_UZEI0 LIKE BSEG-MWSKZ VALUE 'A0',   "仮受消費税０％
+C_UZEI5 LIKE BSEG-MWSKZ VALUE 'A1',   "仮受消費税５％
+C_UZEIS LIKE BSEG-MWSKZ VALUE 'A8',   "仮受消費税非入力
+C_UZEI9 LIKE BSEG-MWSKZ VALUE 'A9',   "輸出   2003/03/04
+C_HZEI0 LIKE BSEG-MWSKZ VALUE 'V0',   "仮払消費税０％
+C_HZEI5 LIKE BSEG-MWSKZ VALUE 'V1',   "仮払消費税５％
+C_HZEIS LIKE BSEG-MWSKZ VALUE 'V8',   "仮払消費税非入力
+C_HZEI9 LIKE BSEG-MWSKZ VALUE 'V9'.   "輸出    2003/03/04
+*2004/03/04 DEL START
+*           c_uzei3 LIKE bseg-mwskz VALUE 'A3',   "仮受消費税３％
+*           c_uzei8 LIKE bseg-mwskz VALUE 'A8',   "仮受消費税８％
+*           c_uzeis LIKE bseg-mwskz VALUE '1Z',   "仮受消費税非入力
+*           c_hzei3 LIKE bseg-mwskz VALUE 'V3',   "仮払消費税３％
+*           c_hzei8 LIKE bseg-mwskz VALUE 'V8',   "仮払消費税８％
+*           c_hzeis LIKE bseg-mwskz VALUE '2Z'.   "仮払消費税非入力
+*CONSTANTS: c_spras LIKE skat-spras VALUE 'J'.  "言語コード
+*2004/03/04 DEL END
+*テーブル定義
+TABLES:BKPF,                           "会計伝票ﾍｯﾀﾞｰ
+BSEG,                           "会計伝票明細
+T001,                           "会社コードマスタ
+SKAT.                           "総勘定元帳ﾏｽﾀ
+*2005/11/09 STRAT_DEL
+*       SKB1.                           "総勘定元帳マスタ (会社コード)
+*2005/11/09 END_DEL
+
+*内部テーブルＡ定義  会計伝票明細出力仕入ﾃﾞｰﾀﾃｰﾌﾞﾙ
+DATA: BEGIN OF T_MEISAIS OCCURS 10000.
+DATA: HKONT         LIKE BSEG-HKONT,   "勘定ｺｰﾄﾞ
+HONTAI_0(15)  TYPE P,            "課税対象外本体額
+*      hontai_3(15)  TYPE p,            "３％本体額 2004/03/04 DEL
+HONTAI_5(15)  TYPE P,            "５％本体額
+*      hontai_8(15)  TYPE p,            "８％本体額 2004/03/04 DEL
+*      hontai_s(15)  TYPE p,            "不課税本体額 2005/04/07 DEL
+HONTAI_HKA(15)  TYPE P,           "非課税本体額 2005/04/07 ADD
+HONTAI_HKB(15)  TYPE P,           "課税本体額 　2005/04/07 ADD
+HONTAI_T(15)  TYPE P.            "その他　2004/03/04
+DATA: END   OF T_MEISAIS.
+
+*内部テーブルＢ定義  会計伝票明細出力売上ﾃﾞｰﾀﾃｰﾌﾞﾙ
+DATA: BEGIN OF T_MEISAIU OCCURS 10000.
+DATA: HKONT         LIKE BSEG-HKONT,   "勘定ｺｰﾄﾞ
+HONTAI_0(15)  TYPE P,            "課税対象外本体額
+*      hontai_3(15)  TYPE p,            "３％本体額 2004/03/04 DEL
+HONTAI_5(15)  TYPE P,            "５％本体額
+*      hontai_8(15)  TYPE p,            "８％本体額 2004/03/04 DEL
+*      hontai_s(15)  TYPE p,            "不課税本体額 2005/04/07 DEL
+HONTAI_HKA(15)  TYPE P,          "非課税本体額 2005/04/07 ADD
+HONTAI_HKB(15)  TYPE P,          "輸出商品本体額 　2005/04/07 ADD
+HONTAI_T(15)  TYPE P.            "その他　2004/03/04
+DATA: END   OF T_MEISAIU.
+
+*内部テーブルＣ定義  仕入合計ﾃｰﾌﾞﾙ
+DATA: BEGIN OF T_GOKEIS,
+HONTAI_0(15)  TYPE P,            "課税対象外本体額合計
+*      hontai_3(15)  TYPE p,            "３％本体額合計 2004/03/04 DEL
+HONTAI_5(15)  TYPE P,            "５％本体額合計
+*      hontai_8(15)  TYPE p,            "８％本体額合計 2004/03/04 DEL
+*      hontai_s(15)  TYPE p,         "不課税本体額合計 2005/04/07 DEL
+HONTAI_HKA(15)  TYPE P,        "非課税本体額合計 2005/04/07 ADD
+HONTAI_HKB(15)  TYPE P,        "課税本体額合計　 2005/04/07 ADD
+HONTAI_T(15)  TYPE P,          "その他　2004/03/04
+ZEI_0(15)     TYPE P,            "課税対象外税額
+*      zei_3(15)     TYPE p,            "３％税額 2004/03/04 DEL
+ZEI_5(15)     TYPE P,            "５％税額
+*      zei_8(15)     TYPE p,           "８％税額 2004/03/04 DEL
+*      zei_s(15)     TYPE p,           "不課税税額 2005/04/07 DEL
+ZEI_HKA(15)   TYPE P,           "非課税経費 2005/04/07 ADD　
+ZEI_HKB(15)   TYPE P,           "輸入商品　 2005/04/07 ADD　 　
+ZEI_T(15)     TYPE P.            "その他　2004/03/04
+DATA: END   OF T_GOKEIS.
+
+*内部テーブルＤ定義  売上合計ﾃｰﾌﾞﾙ
+DATA: BEGIN OF T_GOKEIU,
+HONTAI_0(15)  TYPE P,            "課税対象外本体額合計
+*      hontai_3(15)  TYPE p,            "３％本体額合計 2004/03/04 DEL
+HONTAI_5(15)  TYPE P,            "５％本体額合計
+*      hontai_8(15)  TYPE p,            "８％本体額合計 2004/03/04 DEL
+*      hontai_s(15)  TYPE p,            "不課税本体額合計 2005/04/07 DEL
+HONTAI_HKA(15)  TYPE P,        "土地売却等本体額合計 2005/04/07 AD
+HONTAI_HKB(15)  TYPE P,        "輸出商品本体額合計 2005/04/07 ADD
+HONTAI_T(15)  TYPE P,           "その他　2004/03/04
+ZEI_0(15)     TYPE P,            "課税対象外税額
+*      zei_3(15)     TYPE p,            "３％税額 2004/03/04 DEL
+ZEI_5(15)     TYPE P,            "５％税額
+*      zei_8(15)     TYPE p,            "８％税額 2004/03/04 DEL
+*2005/04/07 M.SEIWA MOD_START
+*     zei_s(15)     TYPE p,            "不課税税額 2005/04/07 DEL
+ZEI_HKA(15)   TYPE P,           "土地売却等（非課税）　
+ZEI_HKB(15)   TYPE P,           "輸出商品　（免税）　 　
+*2005/04/07 M.SEIWA MOD_END
+ZEI_T(15)     TYPE P.            "その他　2004/03/04
+DATA: END   OF T_GOKEIU.
+
+*パラメータ定義
+*2005/11/09 STRAT_DEL
+*PARAMETERS: P_BUKRS(04),               "会社コード
+*            P_GJAHR(04)  TYPE N,       "会計年度
+*            P_FTUKI(02)  TYPE N,       "開始月
+*            P_TTUKI(02)  TYPE N.       "終了月
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+PARAMETERS: P_BUKRS(04) OBLIGATORY,               "会社コード
+P_GJAHR(04)  TYPE N OBLIGATORY,       "会計年度
+P_FTUKI(02)  TYPE N OBLIGATORY,       "開始月
+P_TTUKI(02)  TYPE N OBLIGATORY.       "終了月
+*2005/11/09 END_ADD
+*2005/04/07　M.SEIWA ADD_START
+SELECT-OPTIONS: S_HKONT FOR BSEG-HKONT.    "勘定コード
+*2005/04/07　M.SEIWA ADD_END
+*2005/11/09 STRAT_ADD
+SELECT-OPTIONS: S_SYUKEI FOR BSEG-HKONT.   "集計先その他勘定
+*2005/11/09 END_ADD
+SELECT-OPTIONS: S_HZEIAC FOR BSEG-HKONT,    "仮払消費税
+S_UZEIAC FOR BSEG-HKONT.    "仮受消費税
+*作業用データ定義
+DATA: W_TAISHO_YMD_F(08) TYPE C,       "転記日付(自)
+W_TAISHO_YMD_T(08) TYPE C,       "転記日付(至)
+W_GJAHR            LIKE P_GJAHR, "会計年(月末日取得用)
+W_POPER(03)        TYPE N,       "会計期間(月末日取得用)
+W_DATE             LIKE SY-DATUM,"月末年月日(月末日取得用)
+W_1ST_DATE         LIKE SY-DATUM,"第１会計期間期首日
+W_DMBTR(13)        TYPE P,       "国内通貨額
+W_HONTAI_0(15)     TYPE P,       "課税対象外本体額
+*      w_hontai_3(15)     TYPE p,       "３％本体額 2004/03/04 DEL
+W_HONTAI_5(15)     TYPE P,       "５％本体額
+*      w_hontai_8(15)     TYPE p,       "８％本体額 2004/03/04 DEL
+*     w_hontai_s(15)     TYPE p,       "不課税本体額 2005/04/07 DEL
+W_HONTAI_HKA(15)   TYPE P,       "非課税本体額 2005/04/07 ADD
+W_HONTAI_HKB(15)   TYPE P,       "課税本体額   2005/04/07 ADD
+W_HONTAI_T(15)     TYPE P,       "その他　2004/03/04
+W_HONTAI_SUM(15)   TYPE P,       "合計　　2004/03/04
+W_KIN(15)          TYPE P,       "編集対象金額
+W_ZEI(8)           TYPE P DECIMALS 5,    "編集対象税率
+W_CTR_LINE(3)      TYPE N,       "ラインカウント
+W_SYORI(6)         TYPE C,       "仕入 or 売上
+W_NENDO(4)         TYPE N,       "会計年度
+W_NEN_F(4)         TYPE N,       "出力編集用 年FROM
+W_NEN_T(4)         TYPE N,       "出力編集用 年TO
+W_TUKI_F(2)        TYPE N,       "出力編集用 月FROM
+W_TUKI_T(2)        TYPE N,       "出力編集用 月TO
+W_HI_F(2)          TYPE N,       "出力編集用 日FROM
+W_HI_T(2)          TYPE N,       "出力編集用 日TO
+W_ZEIGAKU(16)      TYPE P DECIMALS 7,    "税率切捨て用ﾜｰｸ
+W_HASU(6)          TYPE P DECIMALS 5,    "税率切捨て用ﾜｰｸ
+W_HKONT_OLD        LIKE BSEG-HKONT.      "OLD勘定科目
+
+*税率編集用ﾜｰｸ
+DATA: BEGIN OF W_ZEIOUT ,              "編集後フォーマット
+FUGO(1)  TYPE C ,                "  符号
+ZEI(9)   TYPE C ,                "  税率
+END   OF W_ZEIOUT .
+
+*2003/03/04 ADD SATRT
+TYPES : BEGIN OF TYP_BKPF,
+BELNR LIKE BKPF-BELNR,
+GJAHR LIKE BKPF-GJAHR,
+END OF TYP_BKPF.
+TYPES : BEGIN OF TYP_BSEG,
+BELNR LIKE BSEG-BELNR,  "伝票番号
+BUZEI LIKE BSEG-BUZEI,  "明細
+HKONT LIKE BSEG-HKONT,  "勘定コード
+DMBTR LIKE BSEG-DMBTR,  "国内通貨額
+MWSKZ LIKE BSEG-MWSKZ,  "税コード
+SHKZG LIKE BSEG-SHKZG,  "貸借フラグ
+END OF TYP_BSEG.
+*2005/11/09 STRAT_DEL
+*DATA: GW_BKPF TYPE TYP_BKPF,
+*2005/11/09 END_DEL
+DATA: GT_BKPF TYPE TABLE OF TYP_BKPF.
+DATA: GW_BSEG TYPE TYP_BSEG,
+GT_BSEG TYPE TABLE OF TYP_BSEG.
+
+DATA: BEGIN OF T_MEISAIT OCCURS 10000.
+DATA: HKONT         LIKE BSEG-HKONT,   "勘定ｺｰﾄﾞ
+HONTAI_0(15)  TYPE P,            "課税対象外本体額
+HONTAI_5(15)  TYPE P,            "５％本体額
+*     hontai_s(15)  TYPE p,            "不課税本体額"2005/04/07 DELE
+HONTAI_HKA(15)  TYPE P,          "非課税本体額"2005/04/07 ADD
+HONTAI_HKB(15)  TYPE P,          "免税本体額  "2005/04/07 ADD
+HONTAI_T(15)  TYPE P.            "その他
+DATA: END   OF T_MEISAIT.
+
+DATA: BEGIN OF T_GOKEIT,
+HONTAI_0(15)  TYPE P,            "課税対象外本体額合計
+HONTAI_5(15)  TYPE P,            "５％本体額合計
+*     hontai_s(15)  TYPE p,            "不課税本体額合計 2005/04/07 DELE
+HONTAI_HKA(15)  TYPE P,          "非課税本体額合計 2005/04/07 ADD
+HONTAI_HKB(15)  TYPE P,          "免税  本体額合計 2005/04/07 ADD
+HONTAI_T(15)  TYPE P,           "その他
+ZEI_0(15)     TYPE P,            "課税対象外税額
+ZEI_5(15)     TYPE P,            "５％税額
+*     zei_s(15)     TYPE p,           "不課税税額 2005/04/07 DEL
+ZEI_HKA(15)   TYPE P,           "非課税   　2005/04/07 ADD
+ZEI_HKB(15)   TYPE P,           "免税　　   2005/04/07 ADD
+ZEI_T(15)     TYPE P.            "その他
+DATA: END   OF T_GOKEIT.
+*2004/03/04 ADD END
+INCLUDE YF01NUMC.
+************************************************************************
+*  主処理                                                              *
+************************************************************************
+START-OF-SELECTION.
+
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS = P_BUKRS.
+
+W_HASU  =   1 / 100000.
+
+PERFORM TABLE-SAKUSEI.               "ﾃｰﾌﾞﾙ作成処理
+
+SORT  T_MEISAIS  BY  HKONT.          "仕入ﾃｰﾌﾞﾙ勘定ｺｰﾄﾞ順
+SORT  T_MEISAIU  BY  HKONT.          "売上ﾃｰﾌﾞﾙ勘定ｺｰﾄﾞ順
+SORT  T_MEISAIT  BY  HKONT.          "その他勘定ｺｰﾄﾞ順 2004/03/04
+
+PERFORM SHIRE-PRINT.                 "消費税精算書仕入出力
+
+PERFORM URIAGE-PRINT.                "消費税精算書売上出力
+
+PERFORM STA_PRINT.                   "その他出力　2004/03/04
+
+END-OF-SELECTION.
+
+*----------------------------------------------------------------------*
+*  内部ﾃｰﾌﾞﾙA･B作成処理                                                *
+*----------------------------------------------------------------------*
+FORM TABLE-SAKUSEI.
+
+CLEAR T_GOKEIS.                      "合計ﾃﾞｰﾀ初期化
+CLEAR T_GOKEIU.                      "合計ﾃﾞｰﾀ初期化
+
+* 第１会計期間期首日取得
+CALL FUNCTION 'FIRST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = P_GJAHR
+I_PERIV        = T001-PERIV
+I_POPER        = 001
+IMPORTING
+E_DATE         = W_1ST_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3
+OTHERS         = 4.
+
+IF  SY-SUBRC <>  0.
+*2005/11/09 STRAT_DEL
+*    MESSAGE A001  WITH  'FIRST_DAY_IN_PERIOD_GET' SY-SUBRC.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+MESSAGE S001 WITH 'FIRST_DAY_IN_PERIOD_GET' SY-SUBRC.
+STOP.
+*2005/11/09 END_ADD
+ENDIF.
+
+* 伝票の転記日付・年(自)の設定
+IF  P_FTUKI >= W_1ST_DATE+4(2).
+W_TAISHO_YMD_F+0(4) = P_GJAHR.
+ELSE.
+W_TAISHO_YMD_F+0(4) = P_GJAHR + 1.
+ENDIF.
+
+* 伝票の転記日付・年(至)の設定
+IF  P_TTUKI >= W_1ST_DATE+4(2).
+W_TAISHO_YMD_T+0(4) = P_GJAHR.
+W_POPER             = P_TTUKI - W_1ST_DATE+4(2) + 1.
+ELSE.
+W_TAISHO_YMD_T+0(4) = P_GJAHR + 1.
+W_POPER             = P_TTUKI - W_1ST_DATE+4(2) + 13.
+ENDIF.
+
+W_GJAHR             = P_GJAHR.
+W_TAISHO_YMD_F+4(2) = P_FTUKI.
+W_TAISHO_YMD_F+6(2) = '01'.
+W_TAISHO_YMD_T+4(2) = P_TTUKI.
+*                                          "月末日取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = W_GJAHR
+I_PERIV        = T001-PERIV
+I_POPER        = W_POPER
+IMPORTING
+E_DATE         = W_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+*2005/11/09 STRAT_DEL
+*  IF  SY-SUBRC  >  0.
+*    MESSAGE A008  WITH  'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+*  ENDIF.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+IF SY-SUBRC <> 0.
+MESSAGE S001 WITH 'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+STOP.
+ENDIF.
+*2005/11/09 END_ADD
+W_TAISHO_YMD_T+6(2) = W_DATE+6(2).
+
+*2004/03/04 DEL SATRT
+*  SELECT  * FROM BKPF
+*          WHERE  BUKRS = P_BUKRS AND
+*                 GJAHR = P_GJAHR AND
+**                BLART NE 'SI'   AND                   "97/09/11
+*                 BUDAT >= W_TAISHO_YMD_F AND
+*                 BUDAT <= W_TAISHO_YMD_T.
+*    SELECT  * FROM BSEG
+*          WHERE  BUKRS = P_BUKRS AND
+*                 BELNR = BKPF-BELNR AND
+*                 GJAHR = P_GJAHR.
+**                GJAHR = P_GJAHR AND
+**                MWSKZ >= '01' AND
+**                MWSKZ <= '99'.
+*2004/03/04 DEL END
+
+*2005/11/09 STRAT_ADD
+* 処理対象開始日と処理対象終了日を比較し、
+* 処理対象開始日が処理対象終了日よりも大きかった場合は、エラー表示
+IF W_TAISHO_YMD_F > W_TAISHO_YMD_T.
+MESSAGE S009 WITH '会計月(From～To)'.
+STOP.
+ENDIF.
+*2005/11/09 END_ADD
+
+*2003/03/04 ADD START
+*2005/11/09 STRAT_ADD
+* 会計伝票ヘッダの取得
+CLEAR:GT_BKPF.
+*2005/11/09 END_ADD
+SELECT BELNR GJAHR FROM BKPF
+INTO TABLE GT_BKPF
+WHERE  BUKRS = P_BUKRS AND
+GJAHR = P_GJAHR AND
+BUDAT >= W_TAISHO_YMD_F AND
+BUDAT <= W_TAISHO_YMD_T.
+*2005/11/09 STRAT_ADD
+* 会計伝票ヘッダの取得が出来ない場合
+IF SY-SUBRC <> 0.
+MESSAGE S012 WITH '会計伝票ヘッダ(BKPF)'.
+STOP.
+ENDIF.
+*2005/11/09 END_ADD
+
+*2005/11/09 STRAT_ADD
+* 会計伝票明細の取得
+CLEAR:GT_BSEG.
+*2005/11/09 END_ADD
+SELECT BELNR BUZEI HKONT DMBTR MWSKZ SHKZG FROM BSEG
+INTO TABLE GT_BSEG
+FOR ALL ENTRIES IN GT_BKPF
+WHERE BUKRS = P_BUKRS
+AND BELNR = GT_BKPF-BELNR
+AND GJAHR = GT_BKPF-GJAHR
+*2005/04/07　M.SEIWA ADD_START
+AND HKONT IN S_HKONT.           "勘定コード
+*2005/04/07　M.SEIWA ADD_END
+
+*2005/11/09 STRAT_ADD
+* 会計伝票明細の取得が出来ない場合
+IF SY-SUBRC <> 0.
+MESSAGE S012 WITH '会計伝票明細(BSEG)'.
+STOP.
+ENDIF.
+*2005/11/09 END_ADD
+LOOP AT GT_BSEG INTO GW_BSEG.
+*2004/03/04 ADD END
+*2005/11/09 STRAT_DEL
+*    SELECT SINGLE * FROM  SKB1
+*           WHERE  BUKRS       = P_BUKRS
+*           AND    SAKNR       = GW_BSEG-HKONT     .
+*2005/11/09 END_DEL
+*2004/03/04 DEL START
+*    IF skb1-mwskz = '*' OR
+*       skb1-mwskz = '+' OR
+*       skb1-mwskz = '-' OR
+*       bseg-hkont IN s_hzeiac OR
+*       bseg-hkont IN s_uzeiac.
+*      IF bseg-mwskz = c_hzei0 OR
+*         bseg-mwskz = c_hzei3 OR
+*         bseg-mwskz = c_hzei5 OR
+*         bseg-mwskz = c_hzei8 OR
+*         bseg-mwskz = c_hzeis.
+*        PERFORM shire-sakusei.
+*      ELSE.
+*        IF bseg-mwskz = c_uzei0 OR
+*           bseg-mwskz = c_uzei3 OR
+*           bseg-mwskz = c_uzei5 OR
+*           bseg-mwskz = c_uzei8 OR
+*           bseg-mwskz = c_uzeis.
+*          PERFORM uriage-sakusei.
+*        ENDIF.
+*      ENDIF.
+*    ENDIF.
+*2004/03/04 DEL END
+
+*2005/11/09 STRAT_DEL
+**2004/03/04 ADD START
+**税カテゴリ'-'仕入先　'+'得意先　'*'統制勘定で判断　なし　その他
+*    IF ( SKB1-MWSKZ = '-' ) OR ( GW_BSEG-HKONT IN S_HZEIAC ).
+*      PERFORM SHIRE-SAKUSEI.
+*    ELSEIF ( SKB1-MWSKZ = '+' ) OR ( GW_BSEG-HKONT IN S_UZEIAC ).
+*      PERFORM URIAGE-SAKUSEI.
+*    ELSEIF ( SKB1-MWSKZ = '*' ).
+*      IF ( SKB1-MITKZ = 'K' ).
+*        PERFORM SHIRE-SAKUSEI.
+*      ELSEIF ( SKB1-MITKZ = 'D' ).
+*        PERFORM URIAGE-SAKUSEI.
+*      ELSE.
+*        PERFORM SONOTA-SAKUSEI.
+*      ENDIF.
+*    ELSE.
+*      PERFORM SONOTA-SAKUSEI.
+*    ENDIF.
+**2004/03/04 ADD END
+*2005/11/09 END_DEL
+
+*2005/11/09 STRAT_ADD
+* 税コード(1桁目)が『V』でかつ『集計先その他勘定』と等しくない場合
+CASE GW_BSEG-MWSKZ+0(1).
+WHEN 'V'.
+IF S_SYUKEI IS INITIAL.
+PERFORM SHIRE-SAKUSEI.
+ELSE.
+IF NOT GW_BSEG-HKONT IN S_SYUKEI.
+PERFORM SHIRE-SAKUSEI.
+ELSE.
+PERFORM SONOTA-SAKUSEI.
+ENDIF.
+ENDIF.
+* 税コード(1桁目)が『A』でかつ『集計先その他勘定』と等しくない場合
+WHEN 'A'.
+IF S_SYUKEI IS INITIAL.
+PERFORM URIAGE-SAKUSEI.
+ELSE.
+IF NOT GW_BSEG-HKONT IN S_SYUKEI.
+PERFORM URIAGE-SAKUSEI.
+ELSE.
+PERFORM SONOTA-SAKUSEI.
+ENDIF.
+ENDIF.
+* 税コードが『SPACE』か『集計先その他勘定』と等しい場合
+WHEN OTHERS.
+PERFORM SONOTA-SAKUSEI.
+ENDCASE.
+CLEAR:GW_BSEG.
+*2005/11/09 END_ADD
+
+ENDLOOP.
+*    ENDSELECT.          "2003/03/04 DEL
+*  ENDSELECT.            "2003/03/04 DEL
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  仕入ﾃﾞｰﾀ作成                                                        *
+*----------------------------------------------------------------------*
+FORM SHIRE-SAKUSEI.
+* 借方／貸方ﾌﾗｸﾞが "H" の時ﾏｲﾅｽで集計する
+IF GW_BSEG-SHKZG = 'S'.
+W_DMBTR    = GW_BSEG-DMBTR * 100.
+ELSE.
+W_DMBTR    = GW_BSEG-DMBTR * -100.
+ENDIF.
+
+* 内部ﾃｰﾌﾞﾙAC仕入ﾃﾞｰﾀ作成
+PERFORM NAIBUAC-SAKUSEI.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  内部ﾃｰﾌﾞﾙAC仕入ﾃﾞｰﾀ作成                                             *
+*----------------------------------------------------------------------*
+FORM NAIBUAC-SAKUSEI.
+
+* 仮払消費税の勘定のときは明細に集計しない
+IF GW_BSEG-HKONT IN S_HZEIAC.
+*2005/11/09 STRAT_ADD
+CLEAR T_MEISAIS.
+T_MEISAIS-HKONT       =  GW_BSEG-HKONT.           "勘定ｺｰﾄﾞ
+*2005/11/09 END_DEL
+CASE  GW_BSEG-MWSKZ.
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEI0 OR C_UZEI0.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEI0.
+T_MEISAIS-HONTAI_0 =  W_DMBTR. "０％本体額
+*2005/11/09 END_ADD
+T_GOKEIS-ZEI_0 = T_GOKEIS-ZEI_0 + W_DMBTR. "０％
+*      WHEN c_hzei3.
+*        t_gokeis-zei_3     =  t_gokeis-zei_3
+*                            + w_dmbtr. "３％税額 2004/03/04 DEL
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEI5 OR C_UZEI5.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEI5.
+T_MEISAIS-HONTAI_5 =  W_DMBTR. "５％本体額
+*2005/11/09 END_ADD
+T_GOKEIS-ZEI_5 = T_GOKEIS-ZEI_5 + W_DMBTR. "５％税額
+*      WHEN c_hzei8.
+*        t_gokeis-zei_8     =  t_gokeis-zei_8
+*                            + w_dmbtr. "８％税額 2004/03/04 DEL
+*2005/04/07 DELE START 　
+*      WHEN c_hzeis OR c_hzei9 OR c_hzeis OR c_hzei9.
+*        t_gokeis-zei_s     =  t_gokeis-zei_s
+*                            + w_dmbtr. "不課税
+*2005/04/07 DELE END
+*2005/04/07 ADD START
+
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEIS OR C_HZEIS.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEIS.
+T_MEISAIS-HONTAI_HKA =  W_DMBTR. "非課税本体額
+*2005/11/09 END_ADD
+T_GOKEIS-ZEI_HKA     =  T_GOKEIS-ZEI_HKA
++ W_DMBTR. "非課税経費（非課税）
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEI9 OR C_HZEI9.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEI9.
+T_MEISAIS-HONTAI_HKB =  W_DMBTR. "課税本体額
+*2005/11/09 END_ADD
+T_GOKEIS-ZEI_HKB     =  T_GOKEIS-ZEI_HKB
++ W_DMBTR. "輸入商品（課税）
+*2005/04/07 ADD END
+WHEN OTHERS.
+*2005/11/09 STRAT_ADD
+T_MEISAIS-HONTAI_T =  W_DMBTR. "その他
+*2005/11/09 END_ADD
+T_GOKEIS-ZEI_T = T_GOKEIS-ZEI_T + W_DMBTR. "その他
+ENDCASE.
+*2005/11/09 STRAT_ADD
+APPEND T_MEISAIS.
+*2005/11/09 END_ADD
+ELSE.
+CLEAR T_MEISAIS.
+T_MEISAIS-HKONT = GW_BSEG-HKONT.           "勘定ｺｰﾄﾞ
+
+CASE  GW_BSEG-MWSKZ.
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEI0 OR C_UZEI0.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEI0.
+*2005/11/09 END_ADD
+T_MEISAIS-HONTAI_0 =  W_DMBTR. "０％本体額
+T_GOKEIS-HONTAI_0  =  T_GOKEIS-HONTAI_0
++ W_DMBTR. "０％本体額合計
+*      WHEN c_hzei3.
+*        t_meisais-hontai_3 =  w_dmbtr. "３％本体額
+*        t_gokeis-hontai_3  =  t_gokeis-hontai_3
+*                            + w_dmbtr. "３％本体額合計 2004/03/04 DEL
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEI5 OR C_UZEI5.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEI5.
+*2005/11/09 END_ADD
+T_MEISAIS-HONTAI_5 =  W_DMBTR. "５％本体額
+T_GOKEIS-HONTAI_5  =  T_GOKEIS-HONTAI_5
++ W_DMBTR. "５％本体額合計
+*      WHEN c_hzei8.
+*        t_meisais-hontai_8 =  w_dmbtr. "８％本体額
+*        t_gokeis-hontai_8  =  t_gokeis-hontai_8
+*                            + w_dmbtr. "８％本体額合計 2004/03/04 DEL
+*2005/04/07 DELE START
+*      WHEN c_hzeis OR c_hzei9 OR c_uzeis OR c_uzei9.
+*        t_meisais-hontai_s =  w_dmbtr. "不課税本体額
+*        t_gokeis-hontai_s  =  t_gokeis-hontai_s
+*                            + w_dmbtr. "不課税本体額合計
+*2005/04/07 DELE END
+*2005/04/07 ADD START
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEIS OR C_UZEIS.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEIS.
+*2005/11/09 END_ADD
+T_MEISAIS-HONTAI_HKA =  W_DMBTR. "非課税本体額
+T_GOKEIS-HONTAI_HKA  =  T_GOKEIS-HONTAI_HKA
++ W_DMBTR.   "非課税本体額合計
+*2005/11/09 STRAT_DEL
+*      WHEN C_HZEI9 OR C_UZEI9.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_HZEI9.
+*2005/11/09 END_ADD
+T_MEISAIS-HONTAI_HKB =  W_DMBTR. "課税本体額
+T_GOKEIS-HONTAI_HKB  =  T_GOKEIS-HONTAI_HKB
++ W_DMBTR.   "課税本体額合計
+*2005/04/07 ADD END
+WHEN OTHERS.
+T_MEISAIS-HONTAI_T =  W_DMBTR. "その他
+T_GOKEIS-HONTAI_T  =  T_GOKEIS-HONTAI_T
++ W_DMBTR. "その他合計
+ENDCASE.
+APPEND T_MEISAIS.
+
+ENDIF.
+ENDFORM.
+*----------------------------------------------------------------------*
+*  売上ﾃﾞｰﾀ作成                                                        *
+*----------------------------------------------------------------------*
+FORM URIAGE-SAKUSEI.
+
+* 借方／貸方ﾌﾗｸﾞが "S" の時ﾏｲﾅｽで集計する
+IF GW_BSEG-SHKZG = 'H'.
+W_DMBTR    = GW_BSEG-DMBTR * 100.
+ELSE.
+W_DMBTR    = GW_BSEG-DMBTR * -100.
+ENDIF.
+
+* 内部ﾃｰﾌﾞﾙBD売上ﾃﾞｰﾀ作成
+PERFORM NAIBUBD-SAKUSEI.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  内部ﾃｰﾌﾞﾙBD売上ﾃﾞｰﾀ作成                                             *
+*----------------------------------------------------------------------*
+FORM NAIBUBD-SAKUSEI.
+
+* 預り消費税の勘定のときは明細に集計しない
+IF GW_BSEG-HKONT IN S_UZEIAC.
+*2005/11/09 STRAT_ADD
+CLEAR T_MEISAIU.
+T_MEISAIU-HKONT       =  GW_BSEG-HKONT.           "勘定ｺｰﾄﾞ
+*2005/11/09 END_ADD
+CASE GW_BSEG-MWSKZ.
+*2005/11/09 STRAT_DEL
+*      WHEN C_UZEI0 OR C_HZEI0.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_UZEI0.
+T_MEISAIU-HONTAI_0 =  W_DMBTR. "０％本体額
+*2005/11/09 END_ADD
+T_GOKEIU-ZEI_0     =  T_GOKEIU-ZEI_0
++ W_DMBTR. "０％税額
+*      WHEN c_uzei3.
+*        t_gokeiu-zei_3     =  t_gokeiu-zei_3
+*                            + w_dmbtr. "３％税額 2004/03/04 DEL
+*2005/11/09 STRAT_DEL
+*      WHEN C_UZEI5 OR C_HZEI5.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_UZEI5.
+T_MEISAIU-HONTAI_5 =  W_DMBTR. "５％本体額
+*2005/11/09 END_ADD
+T_GOKEIU-ZEI_5     =  T_GOKEIU-ZEI_5
++ W_DMBTR. "５％税額
+*      WHEN c_uzei8.
+*        t_gokeiu-zei_8     =  t_gokeiu-zei_8
+*                            + w_dmbtr. "８％税額 2004/03/04 DEL
+*2005/04/07 DELE START 　
+*      WHEN  c_uzeis OR c_uzei9 OR c_hzeis OR c_hzei9.
+*        t_gokeiu-zei_s     =  t_gokeiu-zei_s
+*                            + w_dmbtr. "不課税税額
+*2005/04/07 DELE END
+*2005/04/07 ADD START
+*2005/11/09 STRAT_DEL
+*      WHEN  C_UZEIS OR C_HZEIS.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN  C_UZEIS.
+*2005/11/09 END_ADD
+T_MEISAIU-HONTAI_HKA =  W_DMBTR. "土地売却等本体額
+T_GOKEIU-ZEI_HKA     =  T_GOKEIU-ZEI_HKA
++ W_DMBTR.  "土地売却等（非課税）
+*2005/11/09 STRAT_DEL
+*      WHEN  C_UZEI9 OR C_HZEI9.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN  C_UZEI9.
+T_MEISAIU-HONTAI_HKB =  W_DMBTR. "輸出商品本体額
+*2005/11/09 END_ADD
+T_GOKEIU-ZEI_HKB     =  T_GOKEIU-ZEI_HKB
++ W_DMBTR. "輸出商品（免税）
+*2005/04/07 ADD END
+WHEN OTHERS.
+*2005/11/09 STRAT_ADD
+T_MEISAIU-HONTAI_T =  W_DMBTR. "その他
+*2005/11/09 END_ADD
+T_GOKEIU-ZEI_T     =  T_GOKEIU-ZEI_T
++ W_DMBTR. "その他
+ENDCASE.
+*2005/11/09 STRAT_ADD
+APPEND T_MEISAIU.
+*2005/11/09 END_ADD
+ELSE.
+CLEAR T_MEISAIU.
+T_MEISAIU-HKONT       =  GW_BSEG-HKONT.           "勘定ｺｰﾄﾞ
+CASE  GW_BSEG-MWSKZ.
+*2005/11/09 STRAT_DEL
+*      WHEN C_UZEI0 OR C_HZEI0.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_UZEI0.
+*2005/11/09 END_ADD
+T_MEISAIU-HONTAI_0 =  W_DMBTR. "０％本体額
+T_GOKEIU-HONTAI_0  =  T_GOKEIU-HONTAI_0
++ W_DMBTR. "０％本体額合計
+*      WHEN c_uzei3.
+*        t_meisaiu-hontai_3 =  w_dmbtr. "３％本体額
+*        t_gokeiu-hontai_3  =  t_gokeiu-hontai_3
+*                            + w_dmbtr. "３％本体額合計 2004/03/04 DEL
+*2005/11/09 STRAT_DEL
+*      WHEN C_UZEI5 OR C_HZEI5.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN C_UZEI5.
+*2005/11/09 END_ADD
+T_MEISAIU-HONTAI_5 =  W_DMBTR. "５％本体額
+T_GOKEIU-HONTAI_5  =  T_GOKEIU-HONTAI_5
++ W_DMBTR. "５％本体額合計
+*      WHEN c_uzei8.
+*        t_meisaiu-hontai_8 =  w_dmbtr. "８％本体額
+*        t_gokeiu-hontai_8  =  t_gokeiu-hontai_8
+*                            + w_dmbtr. "８％本体額合計 2004/03/04 DEL
+*2005/04/07 DEL
+*      WHEN  c_uzeis OR c_uzei9 OR c_hzeis OR c_hzei9 .
+*        t_meisaiu-hontai_s =  w_dmbtr. "不課税本体額
+*        t_gokeiu-hontai_s  =  t_gokeiu-hontai_s
+*                            + w_dmbtr. "不課税本体額合計
+*2005/04/07 DEL
+*2005/04/07 ADD
+*2005/11/09 STRAT_DEL
+*      WHEN  C_UZEIS OR C_HZEIS.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN  C_UZEIS.
+*2005/11/09 END_ADD
+T_MEISAIU-HONTAI_HKA =  W_DMBTR. "土地売却等本体額
+T_GOKEIU-HONTAI_HKA  =  T_GOKEIU-HONTAI_HKA
++ W_DMBTR.   "土地売却等本体額合計
+*2005/11/09 STRAT_DEL
+*      WHEN  C_UZEI9 OR C_HZEI9.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+WHEN  C_UZEI9.
+*2005/11/09 END_ADD
+T_MEISAIU-HONTAI_HKB =  W_DMBTR. "輸出商品本体額
+T_GOKEIU-HONTAI_HKB  =  T_GOKEIU-HONTAI_HKB
++ W_DMBTR.   "輸出商品本体額合計
+*2005/04/07 ADD
+WHEN OTHERS.
+T_MEISAIU-HONTAI_T =  W_DMBTR. "その他
+T_GOKEIU-HONTAI_T  =  T_GOKEIU-HONTAI_T
++ W_DMBTR. "その他合計
+ENDCASE.
+APPEND T_MEISAIU.
+
+ENDIF.
+ENDFORM.
+*----------------------------------------------------------------------*
+*  消費税精算書仕入出力                                                *
+*----------------------------------------------------------------------*
+FORM SHIRE-PRINT.
+*                                          "見出し編集
+PERFORM EDT_HEADER.
+PERFORM OUT_HEADER.
+
+W_HKONT_OLD = ''.                    "勘定科目oldの初期化
+
+LOOP AT T_MEISAIS.
+
+IF W_HKONT_OLD = T_MEISAIS-HKONT.
+W_HONTAI_0  =  W_HONTAI_0 +  T_MEISAIS-HONTAI_0.
+*      w_hontai_3  =  w_hontai_3 +  t_meisais-hontai_3. "2004/03/04 DEL
+W_HONTAI_5  =  W_HONTAI_5 +  T_MEISAIS-HONTAI_5.
+*      w_hontai_8  =  w_hontai_8 +  t_meisais-hontai_8. "2004/03/04 DEL
+*2005/04/07 MOD START
+*     w_hontai_s    =  w_hontai_s   +  t_meisais-hontai_s.
+W_HONTAI_HKA  =  W_HONTAI_HKA +  T_MEISAIS-HONTAI_HKA.
+W_HONTAI_HKB  =  W_HONTAI_HKB +  T_MEISAIS-HONTAI_HKB.
+*2005/04/07 MOD END
+W_HONTAI_T  =  W_HONTAI_T +  T_MEISAIS-HONTAI_T.      "2004/03/04
+ELSE.
+IF W_HKONT_OLD = ''.
+W_HKONT_OLD = T_MEISAIS-HKONT.
+W_HONTAI_0  = T_MEISAIS-HONTAI_0.
+*        w_hontai_3  = t_meisais-hontai_3.  "2004/03/04 DEL
+W_HONTAI_5  = T_MEISAIS-HONTAI_5.
+*        w_hontai_8  = t_meisais-hontai_8.  "2004/03/04 DEL
+*2005/04/07 MOD START
+*        w_hontai_s    = t_meisais-hontai_s.
+W_HONTAI_HKA  = T_MEISAIS-HONTAI_HKA.
+W_HONTAI_HKB  = T_MEISAIS-HONTAI_HKB.
+*2005/04/07 MOD END
+W_HONTAI_T  = T_MEISAIS-HONTAI_T.                   "2004/03/04
+ELSE.
+PERFORM SKAT_READ.
+IF  W_CTR_LINE  >=  50.        "見出し出力
+NEW-PAGE.
+PERFORM  OUT_HEADER.
+ENDIF.
+
+PERFORM  OUT_DETAIL.           "明細出力
+W_HKONT_OLD =  T_MEISAIS-HKONT.
+W_HONTAI_0  =  T_MEISAIS-HONTAI_0.
+*        w_hontai_3  =  t_meisais-hontai_3. "2004/03/04 DEL
+W_HONTAI_5  =  T_MEISAIS-HONTAI_5.
+*        w_hontai_8  =  t_meisais-hontai_8. "2004/03/04 DEL
+*2005/04/07 MOD START
+*       w_hontai_s    =  t_meisais-hontai_s.
+W_HONTAI_HKA  =  T_MEISAIS-HONTAI_HKA.
+W_HONTAI_HKB  =  T_MEISAIS-HONTAI_HKB.
+*2005/04/07 MOD END
+W_HONTAI_T  =  T_MEISAIS-HONTAI_T.                  "2004/03/04
+ENDIF.
+ENDIF.
+
+ENDLOOP.
+
+IF W_HKONT_OLD <> ''.
+PERFORM SKAT_READ.
+PERFORM OUT_DETAIL.                "明細出力
+ULINE.
+ENDIF.
+
+PERFORM OUT_GOKEIS.                  "合計出力(仕入用)
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  消費税精算書売上出力                                                *
+*----------------------------------------------------------------------*
+FORM URIAGE-PRINT.
+*                                          "見出し編集
+W_CTR_LINE  =  99.
+W_SYORI     =  '売上'.
+
+NEW-PAGE.
+* PERFORM out_header.                     "2005/04/07 DELE
+PERFORM OUT_HEADER_URI.                 "2005/04/07 ADD
+
+W_HKONT_OLD = ''.                    "勘定科目oldの初期化
+
+LOOP AT T_MEISAIU.
+
+IF W_HKONT_OLD = T_MEISAIU-HKONT.
+W_HONTAI_0  =  W_HONTAI_0 +  T_MEISAIU-HONTAI_0.
+*      w_hontai_3  =  w_hontai_3 +  t_meisaiu-hontai_3. "2004/03/04 DEL
+W_HONTAI_5  =  W_HONTAI_5 +  T_MEISAIU-HONTAI_5.
+*      w_hontai_8  =  w_hontai_8 +  t_meisaiu-hontai_8. "2004/03/04 DEL
+*2005/04/07 MOD START
+*       w_hontai_s    =  w_hontai_s   +  t_meisaiu-hontai_s.
+W_HONTAI_HKA  =  W_HONTAI_HKA +  T_MEISAIU-HONTAI_HKA.
+W_HONTAI_HKB  =  W_HONTAI_HKB +  T_MEISAIU-HONTAI_HKB.
+*2005/04/07 MOD END
+W_HONTAI_T  =  W_HONTAI_T +  T_MEISAIU-HONTAI_T.      "2004/03/04
+ELSE.
+IF W_HKONT_OLD = ''.
+W_HKONT_OLD = T_MEISAIU-HKONT.
+W_HONTAI_0  = T_MEISAIU-HONTAI_0.
+*        w_hontai_3  = t_meisaiu-hontai_3. "2004/03/04 DEL
+W_HONTAI_5  = T_MEISAIU-HONTAI_5.
+*        w_hontai_8  = t_meisaiu-hontai_8. "2004/03/04 DEL
+*2005/04/07 MOD START
+*       w_hontai_s    = t_meisaiu-hontai_s.
+W_HONTAI_HKA  = T_MEISAIU-HONTAI_HKA.
+W_HONTAI_HKB  = T_MEISAIU-HONTAI_HKB.
+*2005/04/07 MOD END
+W_HONTAI_T  = T_MEISAIU-HONTAI_T.                   "2004/03/04
+ELSE.
+PERFORM SKAT_READ.
+IF  W_CTR_LINE  >=  50.        "見出し出力
+NEW-PAGE.
+*         PERFORM out_header.                     "2005/04/07 DELE
+PERFORM OUT_HEADER_URI.                 "2005/04/07 ADD
+ENDIF.
+
+PERFORM  OUT_DETAIL.           "明細出力
+W_HKONT_OLD =  T_MEISAIU-HKONT.
+W_HONTAI_0  =  T_MEISAIU-HONTAI_0.
+*        w_hontai_3  =  t_meisaiu-hontai_3. "2004/03/04 DEL
+W_HONTAI_5  =  T_MEISAIU-HONTAI_5.
+*       w_hontai_8  =  t_meisaiu-hontai_8. "2004/03/04 DEL
+*2005/04/07 MOD START
+*       w_hontai_s    =  t_meisaiu-hontai_s.
+W_HONTAI_HKA  =  T_MEISAIU-HONTAI_HKA.
+W_HONTAI_HKB  =  T_MEISAIU-HONTAI_HKB.
+*2005/04/07 MOD END
+W_HONTAI_T  =  T_MEISAIU-HONTAI_T.                  "2004/03/04
+ENDIF.
+ENDIF.
+
+ENDLOOP.
+
+IF W_HKONT_OLD <> ''.
+PERFORM SKAT_READ.
+PERFORM OUT_DETAIL.
+ULINE.
+ENDIF.
+
+PERFORM OUT_GOKEIU.                  "合計出力(売上用)
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  総勘定元帳ﾏｽﾀ読込み                                                 *
+*----------------------------------------------------------------------*
+FORM SKAT_READ.
+
+SELECT  SINGLE * FROM SKAT
+WHERE  SPRAS = T001-SPRAS AND
+KTOPL = T001-KTOPL AND
+SAKNR = W_HKONT_OLD.
+IF  SY-SUBRC = 0.
+ELSE.
+SKAT-TXT50    =  ''.               "勘定科目名称
+ENDIF.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し編集処理                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_HEADER.
+*                                          "対象年度年月編集
+W_NENDO = P_GJAHR.
+W_SYORI = '仕入'.
+
+W_NEN_F       =  W_TAISHO_YMD_F+0(4).
+W_NEN_T       =  W_TAISHO_YMD_T+0(4).
+W_TUKI_F      =  W_TAISHO_YMD_F+4(2).
+W_TUKI_T      =  W_TAISHO_YMD_T+4(2).
+W_HI_F        =  W_TAISHO_YMD_F+6(2).
+W_HI_T        =  W_TAISHO_YMD_T+6(2).
+
+W_CTR_LINE      =  99.               "ワーク初期値設定
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し出力処理   ＜＜仕入＞＞
+*----------------------------------------------------------------------*
+FORM OUT_HEADER.
+*                                          "見出し編集
+* WRITE: /165 sy-pagno, 160 'ﾍﾟｰｼﾞ '.      "2005/04/07 DEL
+WRITE: /187 SY-PAGNO, 182 'ﾍﾟｰｼﾞ '.      "2005/04/07 ADD
+WRITE: /011 W_NENDO,
+015 '年度',
+077 '消費税精算書('.
+IF ( W_SYORI = 'その他' ).
+WRITE: 090 W_SYORI.
+ELSE.
+WRITE: 091 W_SYORI.
+ENDIF.
+WRITE:   096 ')',
+*2005/04/07 DEL START
+*          138 '作成年月日',
+*          148 sy-datum(4),
+*          152 '年',
+*          154 sy-datum+4(2) NO-ZERO,
+*          156 '月',
+*          158 sy-datum+6(2) NO-ZERO,
+*          160 '日',
+*          164 sy-uzeit(2),
+*          166 ':',
+*          167 sy-uzeit+2(2).
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+158 '作成年月日',
+168 SY-DATUM(4),
+172 '年',
+174 SY-DATUM+4(2) NO-ZERO,
+176 '月',
+178 SY-DATUM+6(2) NO-ZERO,
+180 '日',
+184 SY-UZEIT(2),
+186 ':',
+187 SY-UZEIT+2(2).
+*2005/04/07 ADD END
+
+WRITE: /076 '====================',
+*         162 '単位:円'.             "2005/04/07 DEL
+182 '単位:円'.             "2005/04/07 ADD
+
+WRITE: /071 '(',
+072 W_NEN_F NO-ZERO,
+076 '年',
+078 W_TUKI_F NO-ZERO,
+080 '月',
+082 W_HI_F NO-ZERO,
+084 '日～',
+088 W_NEN_T NO-ZERO,
+092 '年',
+094 W_TUKI_T NO-ZERO,
+096 '月',
+098 W_HI_T NO-ZERO,
+100 '日',
+102 ')'.
+SKIP.
+WRITE: /002 '勘定コード',
+013 '勘定科目名',
+*2003/11/7 DEL START
+*          080 '３％',
+*          101 '５％',
+*          122 '８％',
+*2003/11/7 DEL END
+**2003/11/7 MOD START
+*          080 '０％',
+*          101 '５％',
+*          120 '非課税',
+**2003/11/7 MOD END
+*          137 '課税対象外',
+*          162 '不課税'.
+*2005/04/07 DEL START
+*2004/03/04 ADD START
+*           080 '５％',
+*           101 '０％',
+*           120 '不課税',
+*           141 'その他',
+*           164 '合計'.
+*2004/03/04 ADD END
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+077 '国内仕入',
+099 '対象外',
+116 '非課税経費',
+138 '輸入商品',
+160 'その他',
+184 '合計'.
+
+WRITE: /078 '(課税)',
+098 '(不課税)',
+116 '(非課税)',
+139 '(課税)'.
+*2005/04/07 ADD END
+ULINE.
+
+W_CTR_LINE  =  7.                    "明細行カウントＵＰ
+
+ENDFORM.
+
+*2005/04/07　ADD_START
+*----------------------------------------------------------------------*
+*  見出し出力処理   ＜＜売上＞＞
+*----------------------------------------------------------------------*
+FORM OUT_HEADER_URI.
+*                                          "見出し編集
+WRITE: /187 SY-PAGNO, 182 'ﾍﾟｰｼﾞ '.      "2005/04/07 ADD
+
+WRITE: /011 W_NENDO,
+015 '年度',
+077 '消費税精算書('.
+IF ( W_SYORI = 'その他' ).
+WRITE: 090 W_SYORI.
+ELSE.
+WRITE: 091 W_SYORI.
+ENDIF.
+WRITE:   096 ')',
+158 '作成年月日',
+168 SY-DATUM(4),
+172 '年',
+174 SY-DATUM+4(2) NO-ZERO,
+176 '月',
+178 SY-DATUM+6(2) NO-ZERO,
+180 '日',
+184 SY-UZEIT(2),
+186 ':',
+187 SY-UZEIT+2(2).
+WRITE: /076 '====================',
+182 '単位:円'.
+WRITE: /071 '(',
+072 W_NEN_F NO-ZERO,
+076 '年',
+078 W_TUKI_F NO-ZERO,
+080 '月',
+082 W_HI_F NO-ZERO,
+084 '日～',
+088 W_NEN_T NO-ZERO,
+092 '年',
+094 W_TUKI_T NO-ZERO,
+096 '月',
+098 W_HI_T NO-ZERO,
+100 '日',
+102 ')'.
+SKIP.
+WRITE: /002 '勘定コード',
+013 '勘定科目名',
+077 '国内売上',
+099 '対象外',
+116 '土地売却等',
+138 '輸出商品',
+160 'その他',
+184 '合計'.
+
+WRITE: /078 '(課税)',
+098 '(不課税)',
+116 '(非課税)',
+139 '(免税)'.
+ULINE.
+
+W_CTR_LINE  =  7.                    "明細行カウントＵＰ
+
+ENDFORM.                    " out_header_uri
+*2005/04/07　ADD_END
+
+*2005/04/07　ADD_START
+*----------------------------------------------------------------------*
+*  見出し出力処理   ＜＜その他＞＞
+*----------------------------------------------------------------------*
+FORM OUT_HEADER_SONOTA.
+*                                          "見出し編集
+WRITE: /187 SY-PAGNO, 182 'ﾍﾟｰｼﾞ '.      "2005/04/07 ADD
+WRITE: /011 W_NENDO,
+015 '年度',
+077 '消費税精算書('.
+IF ( W_SYORI = 'その他' ).
+WRITE: 090 W_SYORI.
+ELSE.
+WRITE: 091 W_SYORI.
+ENDIF.
+WRITE:   096 ')',
+158 '作成年月日',
+168 SY-DATUM(4),
+172 '年',
+174 SY-DATUM+4(2) NO-ZERO,
+176 '月',
+178 SY-DATUM+6(2) NO-ZERO,
+180 '日',
+184 SY-UZEIT(2),
+186 ':',
+187 SY-UZEIT+2(2).
+WRITE: /076 '====================',
+182 '単位:円'.
+WRITE: /071 '(',
+072 W_NEN_F NO-ZERO,
+076 '年',
+078 W_TUKI_F NO-ZERO,
+080 '月',
+082 W_HI_F NO-ZERO,
+084 '日～',
+088 W_NEN_T NO-ZERO,
+092 '年',
+094 W_TUKI_T NO-ZERO,
+096 '月',
+098 W_HI_T NO-ZERO,
+100 '日',
+102 ')'.
+SKIP.
+WRITE: /002 '勘定コード',
+013 '勘定科目名',
+*2005/11/09 STRAT_DEL
+*          081 '課税',
+*          100 '不課税',
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+080 '課税',
+099 '不課税',
+*2005/11/09 END_ADD
+120 '非課税',
+142 '免税',
+160 'その他',
+184 '合計'.
+ULINE.
+
+W_CTR_LINE  =  7.                    "明細行カウントＵＰ
+
+ENDFORM.                    " out_header_sonota
+
+*2005/04/07　ADD_END
+
+*----------------------------------------------------------------------*
+*  明細出力処理                                                        *
+*----------------------------------------------------------------------*
+FORM OUT_DETAIL.
+WRITE: /002 W_HKONT_OLD,             "勘定コード
+013 SKAT-TXT50.              "勘定科目
+*2004/03/04 DEL START
+*  PERFORM yf01numc USING w_hontai_3 20 0.    "３％本体額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING w_hontai_5 20 0.    "５％本体額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING w_hontai_8 20 0.    "８％本体額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING w_hontai_0 20 0.    "課税対象外本体額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING w_hontai_s 20 0.    "不課税本体額
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 DEL END
+*2005/04/07 DEL START
+*2004/03/04 ADD START
+*  PERFORM yf01numc USING w_hontai_5 20 0.    "５％本体額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING w_hontai_0 20 0.    "０％
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING w_hontai_s 20 0.    "不課税
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING w_hontai_t 20 0.    "その他
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM cl_sum.
+*  PERFORM yf01numc USING w_hontai_sum 20 0.    "合計
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 ADD END
+**2005/04/07 DEL END
+*2005/04/07 ADD START
+PERFORM YF01NUMC USING W_HONTAI_5 20 0.    "
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING W_HONTAI_0 20 0.    "
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING W_HONTAI_HKA 20 0.  "
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING W_HONTAI_HKB 20 0.  "
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING W_HONTAI_T 20 0.    "その他
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM CL_SUM.
+PERFORM YF01NUMC USING W_HONTAI_SUM 20 0.  "合計
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+
+W_CTR_LINE  =  W_CTR_LINE  +  1.     "明細行カウントＵＰ
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  合計出力(仕入用)処理                                                *
+*----------------------------------------------------------------------*
+FORM OUT_GOKEIS.
+DATA:L_SUMH(15) TYPE P,
+L_SUMZ(15) TYPE P,
+L_SUMK(15) TYPE P.
+WRITE: /013 '本体額合計'.
+*2004/03/04 DEL START
+*  PERFORM yf01numc USING t_gokeis-hontai_3 20 0.     "３％本体合額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-hontai_5 20 0.     "５％本体合額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-hontai_8 20 0.     "８％本体合額
+**  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-hontai_0 20 0.    "課税対象外本体合額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-hontai_s 20 0.     "不課税本体合額
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 DEL END
+*2005/04/07 DEL START
+*2004/03/04 ADD START
+*  PERFORM yf01numc USING t_gokeis-hontai_5 20 0.     "５％本体合額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-hontai_0 20 0.     "０％本体合額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-hontai_s 20 0.     "不課税本体合額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-hontai_t 20 0.    "その他本体合額
+*
+*  l_sumh = t_gokeis-hontai_0 + t_gokeis-hontai_5 +
+*          t_gokeis-hontai_s + t_gokeis-hontai_t.
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING l_sumh 20 0.     "合計
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 ADD END
+*2005/04/07 DELE END
+*2005/04/07 ADD START
+PERFORM YF01NUMC USING T_GOKEIS-HONTAI_5 20 0.     "国内仕入本体合額
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-HONTAI_0 20 0.     "対象外本体合額
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-HONTAI_HKA 20 0.   "非課税経費本体合額
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-HONTAI_HKB 20 0.   "輸入商品本体合額
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-HONTAI_T 20 0.     "その他本体合額
+L_SUMH = T_GOKEIS-HONTAI_0 + T_GOKEIS-HONTAI_5 +
+T_GOKEIS-HONTAI_HKA + T_GOKEIS-HONTAI_HKB + T_GOKEIS-HONTAI_T.
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING L_SUMH 20 0.     "合計
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+
+SKIP.
+WRITE: /013 '税額'.
+*2004/03/04 DEL START
+*  PERFORM yf01numc USING t_gokeis-zei_3 20 0."３％税額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-zei_5 20 0."５％税額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-zei_8 20 0."８％税額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-zei_0 20 0."課税対象外税額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-zei_s 20 0."不課税税額
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 DEL END
+*2005/04/07 DEL START
+**2004/03/04 ADD START
+*  PERFORM yf01numc USING t_gokeis-zei_5 20 0."５％税額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-zei_0 20 0."０％税額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-zei_s 20 0."不課税税額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeis-zei_t 20 0."その他税額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*
+*  l_sumz = t_gokeis-zei_0 + t_gokeis-zei_5 + t_gokeis-zei_s
+*         + t_gokeis-zei_t.
+*
+*  PERFORM yf01numc USING l_sumz 20 0."合計
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+**2004/03/04 ADD END
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+PERFORM YF01NUMC USING T_GOKEIS-ZEI_5   20 0.  "国内仕入
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-ZEI_0   20 0.  "対象外
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-ZEI_HKA 20 0.  "非課税経費
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-ZEI_HKB 20 0.  "輸入商品
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIS-ZEI_T   20 0.  "その他税額
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+L_SUMZ = T_GOKEIS-ZEI_0    + T_GOKEIS-ZEI_5
++ T_GOKEIS-ZEI_HKA  + T_GOKEIS-ZEI_HKB + T_GOKEIS-ZEI_T.
+PERFORM YF01NUMC USING L_SUMZ           20 0.  "合計
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+SKIP.
+WRITE: /013 '税込金額'.
+*2004/03/04 DEL START
+*  w_kin = t_gokeis-hontai_3 + t_gokeis-zei_3.  "３％本体合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeis-hontai_5 + t_gokeis-zei_5.   "５％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeis-hontai_8 + t_gokeis-zei_8.   "８％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeis-hontai_0 + t_gokeis-zei_0. "課税対象外税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeis-hontai_s + t_gokeis-zei_s. "不課税税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 DEL END
+*2005/04/07 DEL START
+**2004/03/04 ADD START
+*  w_kin = t_gokeis-hontai_5 + t_gokeis-zei_5.   "５％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeis-hontai_0 + t_gokeis-zei_0.  "０％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeis-hontai_s + t_gokeis-zei_s.   "不課税税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeis-hontai_t + t_gokeis-zei_t. "その他税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  l_sumk = l_sumh + l_sumz.
+*  PERFORM yf01numc USING l_sumk 20 0.
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+**2004/03/04 ADD END
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+W_KIN = T_GOKEIS-HONTAI_5 + T_GOKEIS-ZEI_5.    "国内仕入税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIS-HONTAI_0 + T_GOKEIS-ZEI_0.    "対象外税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIS-HONTAI_HKA + T_GOKEIS-ZEI_HKA."非課税経費税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIS-HONTAI_HKB + T_GOKEIS-ZEI_HKB."土地売却等税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIS-HONTAI_T + T_GOKEIS-ZEI_T.    "その他税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+L_SUMK = L_SUMH + L_SUMZ.                      "合計
+PERFORM YF01NUMC USING L_SUMK 20 0.
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+SKIP.
+WRITE: /013 '税率'.
+*2004/03/04 DEL START
+*  IF  t_gokeis-hontai_3 = 0.
+*    w_zei = 0.
+*  ELSE.
+*    w_zei = t_gokeis-zei_3 / t_gokeis-hontai_3 * 100. "３％税率
+*    w_zeigaku = w_zei / 100 * t_gokeis-hontai_3.
+*    IF  t_gokeis-zei_3 < 0.
+*      IF  t_gokeis-zei_3 > w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ELSE.
+*      IF  t_gokeis-zei_3 < w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*  PERFORM zeihensyu.
+*  WRITE:  073  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  082  '％'.
+*2004/03/04 DEL END
+*●税率：国内仕入
+IF  T_GOKEIS-HONTAI_5 = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIS-ZEI_5 / T_GOKEIS-HONTAI_5 * 100. "５％税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIS-HONTAI_5.
+IF  T_GOKEIS-ZEI_5 < 0.
+IF  T_GOKEIS-ZEI_5 > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIS-ZEI_5 < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  073  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  082  '％'.
+*2004/03/04 DEL START
+*  IF  t_gokeis-hontai_8 = 0.
+*    w_zei = 0.
+*  ELSE.
+*    w_zei = t_gokeis-zei_8 / t_gokeis-hontai_8 * 100. "８％税率
+*    w_zeigaku = w_zei / 100 * t_gokeis-hontai_8.
+*    IF  t_gokeis-zei_8 < 0.
+*      IF  t_gokeis-zei_8 > w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ELSE.
+*      IF  t_gokeis-zei_8 < w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*  PERFORM zeihensyu.
+*  WRITE:  115  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  124  '％'.
+*2004/03/04 DEL END
+*●税率：対象外
+IF  T_GOKEIS-HONTAI_0 = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIS-ZEI_0 / T_GOKEIS-HONTAI_0 * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIS-HONTAI_0.
+IF  T_GOKEIS-ZEI_0 < 0.
+IF  T_GOKEIS-ZEI_0 > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIS-ZEI_0 < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+*2004/03/04 DEL START
+*  WRITE:  136  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  145  '％'.
+*2004/03/04 DEL END
+*2005/04/07 DELE START
+*2004/03/04 ADD START
+*  WRITE:  097  W_ZEIOUT USING EDIT MASK 'RR__________'.
+*  WRITE:  106  '％'.
+*2004/03/04 ADD END
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+WRITE:  094  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  103  '％'.
+*2005/04/07 ADD END
+*●税率：非課税経費　税率
+*2005/04/07 DEL START
+*  IF  t_gokeis-hontai_s = 0.
+*    w_zei = 0.
+*  ELSE.
+*    w_zei = t_gokeis-zei_s / t_gokeis-hontai_s * 100. "対象外税率
+*    w_zeigaku = w_zei / 100 * t_gokeis-hontai_s.
+*    IF  t_gokeis-zei_s < 0.
+*      IF  t_gokeis-zei_s > w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ELSE.
+*      IF  t_gokeis-zei_s < w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*  PERFORM zeihensyu.
+**2004/03/04 DEL START
+**  WRITE:  157  w_zeiout USING EDIT MASK 'RR__________'.
+**  WRITE:  166  '％'.
+**2004/03/04 DEL END
+**2004/03/04 ADD START
+*  WRITE:  115  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  124  '％'.
+*2005/04/07 DEL END
+*2005/04/07　ADD START
+IF  T_GOKEIS-HONTAI_HKA = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIS-ZEI_HKA / T_GOKEIS-HONTAI_HKA * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIS-HONTAI_HKA.
+IF  T_GOKEIS-ZEI_HKA < 0.
+IF  T_GOKEIS-ZEI_HKA > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIS-ZEI_HKA < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+
+WRITE:  115  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  124  '％'.
+
+*●税率：輸入商品
+IF  T_GOKEIS-HONTAI_HKB = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIS-ZEI_HKB / T_GOKEIS-HONTAI_HKB * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIS-HONTAI_HKB.
+IF  T_GOKEIS-ZEI_HKB < 0.
+IF  T_GOKEIS-ZEI_HKB > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIS-ZEI_HKB < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+
+WRITE:  135  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  144  '％'.
+
+*2005/04/07　ADD END
+
+*●税率：その他
+IF  T_GOKEIS-HONTAI_T = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIS-ZEI_T / T_GOKEIS-HONTAI_T * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIS-HONTAI_T.
+IF  T_GOKEIS-ZEI_T < 0.
+IF  T_GOKEIS-ZEI_T > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIS-ZEI_T < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+*2005/04/07 DEL START
+*  WRITE:  136  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  145  '％'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+WRITE:  155  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  164  '％'.
+*2005/04/07 ADD END
+
+*●税率：合計
+IF  L_SUMH = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = L_SUMZ / L_SUMH * 100.
+W_ZEIGAKU = W_ZEI / 100 * L_SUMH.
+IF  L_SUMZ < 0.
+IF  L_SUMZ > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  L_SUMZ < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+*2005/04/07 DEL START
+*  WRITE:  157  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  166  '％'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+WRITE:  177  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  186  '％'.
+*2005/04/07 ADD END
+*2004/03/04 ADD END
+ENDFORM.
+*----------------------------------------------------------------------*
+*  合計出力(売上用)処理                                                *
+*----------------------------------------------------------------------*
+FORM OUT_GOKEIU.
+DATA:L_SUMH(15) TYPE P,
+L_SUMZ(15) TYPE P,
+L_SUMK(15) TYPE P.
+
+WRITE: /013 '本体額合計'.
+*2004/03/04 DEL START
+*  PERFORM yf01numc USING t_gokeiu-hontai_3 20 0.     "３％本体合額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-hontai_5 20 0.     "５％本体合額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-hontai_8 20 0.     "８％本体合額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-hontai_0 20 0.    "課税対象外本体合額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-hontai_s 20 0.     "不課税本体合額
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 DEL END
+*2005/04/07 DEL START
+**2004/03/04 ADD START
+*  PERFORM yf01numc USING t_gokeiu-hontai_5 20 0.     "５％本体合額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-hontai_0 20 0.     "０％本体合額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-hontai_s 20 0.     "不課税本体合額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-hontai_t 20 0.    "その他本体合額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*
+*  l_sumh = t_gokeiu-hontai_0 + t_gokeiu-hontai_5 +
+*          t_gokeiu-hontai_s + t_gokeiu-hontai_t.
+*
+*  PERFORM yf01numc USING l_sumh 20 0.     "合計
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+**2004/03/04 ADD END
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+PERFORM YF01NUMC USING T_GOKEIU-HONTAI_5   20 0.
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-HONTAI_0   20 0.
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-HONTAI_HKA 20 0.
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-HONTAI_HKB 20 0.
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-HONTAI_T   20 0.
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+L_SUMH = T_GOKEIU-HONTAI_0 + T_GOKEIU-HONTAI_5 +
+T_GOKEIU-HONTAI_HKA + T_GOKEIU-HONTAI_HKB + T_GOKEIU-HONTAI_T.
+PERFORM YF01NUMC USING L_SUMH              20 0.
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+SKIP.
+WRITE: /013 '税額'.
+*2004/03/04 DEL START
+*  PERFORM yf01numc USING t_gokeiu-zei_3 20 0."３％税額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-zei_5 20 0."５％税額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-zei_8 20 0."８％税額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-zei_0 20 0."課税対象外税額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-zei_s 20 0."不課税税額
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 DEL END
+*2005/04/07 DEL START
+**2004/03/04 ADD START
+*  PERFORM yf01numc USING t_gokeiu-zei_5 20 0."５％税額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-zei_0 20 0."０％税額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-zei_s 20 0."不課税税額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeiu-zei_t 20 0."その他税額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*
+*  l_sumz = t_gokeiu-zei_0 + t_gokeiu-zei_5 + t_gokeiu-zei_s
+*        + t_gokeiu-zei_t.
+*
+*  PERFORM yf01numc USING l_sumz 20 0."合計
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+**2004/03/04 ADD END
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+PERFORM YF01NUMC USING T_GOKEIU-ZEI_5   20 0."国内売上  　税額
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-ZEI_0   20 0."対象外　　  税額
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-ZEI_HKA 20 0."土地売却等　税額
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-ZEI_HKB 20 0."輸出商品　　税額
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIU-ZEI_T   20 0."その他　　　税額
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+L_SUMZ = T_GOKEIU-ZEI_0 + T_GOKEIU-ZEI_5 + T_GOKEIU-ZEI_HKA
++ T_GOKEIU-ZEI_HKB + T_GOKEIU-ZEI_T.
+PERFORM YF01NUMC USING L_SUMZ           20 0."合計       税額
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+SKIP.
+WRITE: /013 '税込金額'.
+*2004/03/04 DEL START
+*  w_kin = t_gokeiu-hontai_3 + t_gokeiu-zei_3.  "３％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeiu-hontai_5 + t_gokeiu-zei_5.   "５％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeiu-hontai_8 + t_gokeiu-zei_8.   "８％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeiu-hontai_0 + t_gokeiu-zei_0. "課税対象外税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeiu-hontai_s + t_gokeiu-zei_s. "不課税税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2004/03/04 DEL END
+*2005/04/07 DEL START
+**2004/03/04 ADD START
+*  w_kin = t_gokeiu-hontai_5 + t_gokeiu-zei_5.   "５％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeiu-hontai_0 + t_gokeiu-zei_0.  "０％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeiu-hontai_s + t_gokeiu-zei_s.   "不課税税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeiu-hontai_t + t_gokeiu-zei_t. "その他税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  l_sumk = l_sumh + l_sumz.
+*  PERFORM yf01numc USING l_sumk 20 0.
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+**2004/03/04 ADD END
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+W_KIN = T_GOKEIU-HONTAI_5 + T_GOKEIU-ZEI_5.     "国内売上  税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIU-HONTAI_0 + T_GOKEIU-ZEI_0.     "対象外    税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIU-HONTAI_HKA + T_GOKEIU-ZEI_HKA. "土地売却等 税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIU-HONTAI_HKB + T_GOKEIU-ZEI_HKB. "輸出商品   税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIU-HONTAI_T + T_GOKEIU-ZEI_T.     "その他     税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+L_SUMK = L_SUMH + L_SUMZ.                       "合計　　　 税込合額
+PERFORM YF01NUMC USING L_SUMK 20 0.
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+SKIP.
+WRITE: /013 '税率'.
+*2004/03/04 DEL START
+*  IF  t_gokeiu-hontai_3 = 0.
+*    w_zei = 0.
+*  ELSE.
+*    w_zei = t_gokeiu-zei_3 / t_gokeiu-hontai_3 * 100. "３％税率
+*    w_zeigaku = w_zei / 100 * t_gokeiu-hontai_3.
+*    IF  t_gokeiu-zei_3 < 0.
+*      IF  t_gokeiu-zei_3 > w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ELSE.
+*      IF  t_gokeiu-zei_3 < w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*  PERFORM zeihensyu.
+*  WRITE:  073  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  082  '％'.
+*2004/03/04 DEL END
+*●税率：国内仕入　
+IF  T_GOKEIU-HONTAI_5 = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIU-ZEI_5 / T_GOKEIU-HONTAI_5 * 100. "５％税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIU-HONTAI_5.
+IF  T_GOKEIU-ZEI_5 < 0.
+IF  T_GOKEIU-ZEI_5 > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIU-ZEI_5 < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  073  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  082  '％'.
+
+*2004/03/04 DEL START
+*  IF  t_gokeiu-hontai_8 = 0.
+*    w_zei = 0.
+*  ELSE.
+*    w_zei = t_gokeiu-zei_8 / t_gokeiu-hontai_8 * 100. "８％税率
+*    w_zeigaku = w_zei / 100 * t_gokeiu-hontai_8.
+*    IF  t_gokeiu-zei_8 < 0.
+*      IF  t_gokeiu-zei_8 > w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ELSE.
+*      IF  t_gokeiu-zei_8 < w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*  PERFORM zeihensyu.
+*  WRITE:  115  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  124  '％'.
+*2004/03/04 DEL END
+*●税率：対象外
+
+IF  T_GOKEIU-HONTAI_0 = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIU-ZEI_0 / T_GOKEIU-HONTAI_0 * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIU-HONTAI_0.
+IF  T_GOKEIU-ZEI_0 < 0.
+IF  T_GOKEIU-ZEI_0 > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIU-ZEI_0 < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+* 2004/03/04 DEL START
+*  WRITE:  136  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  145  '％'.
+*2004/03/04 DEL END
+*2004/03/04 ADD START
+WRITE:  094  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  103  '％'.
+*2004/03/04 ADD END
+
+*2005/04/07 DLE START
+*IF  t_gokeis-hontai_s = 0.
+*    w_zei = 0.
+*  ELSE.
+*    w_zei = t_gokeis-zei_s / t_gokeis-hontai_s * 100. "対象外税率
+*    w_zeigaku = w_zei / 100 * t_gokeis-hontai_s.
+*    IF  t_gokeis-zei_s < 0.
+*      IF  t_gokeis-zei_s > w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ELSE.
+*      IF  t_gokeis-zei_s < w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*  PERFORM zeihensyu.
+**2004/03/04 DEL START
+**  WRITE:  157  w_zeiout USING EDIT MASK 'RR__________'.
+**  WRITE:  166  '％'.
+**2004/03/04 DEL END
+**2004/03/04 ADD START
+*  WRITE:  115  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  124  '％'.
+*2005/04/07 DLE END
+
+*2005/04/07 ADD START
+*●税率：土地売却等
+IF  T_GOKEIU-HONTAI_HKA = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIU-ZEI_HKA / T_GOKEIU-HONTAI_HKA * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIU-HONTAI_HKA.
+IF  T_GOKEIU-ZEI_HKA < 0.
+IF  T_GOKEIU-ZEI_HKA > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIU-ZEI_HKA < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  115  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  124  '％'.
+
+*●税率：輸出商品
+IF  T_GOKEIU-HONTAI_HKB = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIU-ZEI_HKB / T_GOKEIU-HONTAI_HKB * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIU-HONTAI_HKB.
+IF  T_GOKEIU-ZEI_HKA < 0.
+IF  T_GOKEIU-ZEI_HKB > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIU-ZEI_HKB < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  135  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  144  '％'.
+*2005/04/07 ADD END
+
+*●税率：その他
+IF  T_GOKEIU-HONTAI_T = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIU-ZEI_T / T_GOKEIU-HONTAI_T * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIU-HONTAI_T.
+IF  T_GOKEIU-ZEI_T < 0.
+IF  T_GOKEIU-ZEI_T > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIU-ZEI_T < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+*2005/04/07 DEL START
+*  WRITE:  136  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  145  '％'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+WRITE:  155  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  164  '％'.
+*2005/04/07 ADD END
+
+*●税率：合計
+IF  L_SUMH = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = L_SUMZ / L_SUMH * 100.
+W_ZEIGAKU = W_ZEI / 100 * L_SUMH.
+IF  L_SUMZ < 0.
+IF  L_SUMZ > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  L_SUMZ < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+*2005/04/07 DEL START
+*  WRITE:  157  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  166  '％'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+WRITE:  177  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  186  '％'.
+*2005/04/07 ADD END
+*2004/03/04 ADD END
+ENDFORM.
+*----------------------------------------------------------------------
+*  税率編集処理
+*----------------------------------------------------------------------
+FORM ZEIHENSYU.
+
+CLEAR W_ZEIOUT.                      "編集後フォーマットクリア
+
+IF W_ZEI < 0 .                       "負の値の場合
+MOVE '-' TO W_ZEIOUT-FUGO .        "  -セット
+W_ZEI    =  W_ZEI * -1 .           "　絶対値セット
+ELSE .                               "正の値の場合
+MOVE ' ' TO  W_ZEIOUT-FUGO .       "  符号クリア
+ENDIF .
+
+MOVE W_ZEI  TO  W_ZEIOUT-ZEI.
+
+CONDENSE W_ZEIOUT NO-GAPS .
+ENDFORM .
+*&---------------------------------------------------------------------*
+*&  その他の科目集計
+*&---------------------------------------------------------------------*
+FORM SONOTA-SAKUSEI.
+* 借方／貸方ﾌﾗｸﾞが "H" の時ﾏｲﾅｽで集計する
+IF GW_BSEG-SHKZG = 'S'.
+W_DMBTR    = GW_BSEG-DMBTR * 100.
+ELSE.
+W_DMBTR    = GW_BSEG-DMBTR * -100.
+ENDIF.
+
+* 内部ﾃｰﾌﾞﾙAC仕入ﾃﾞｰﾀ作成
+PERFORM NAIBUAT-SAKUSEI.
+
+ENDFORM.                    " sonota-sakusei
+*&---------------------------------------------------------------------*
+*& 内部テーブルその他作成
+*&---------------------------------------------------------------------*
+FORM NAIBUAT-SAKUSEI.
+T_MEISAIT-HKONT       =  GW_BSEG-HKONT.           "勘定ｺｰﾄﾞ
+* 預り消費税の勘定のときは明細に集計しない
+IF ( GW_BSEG-HKONT IN S_UZEIAC ) OR ( GW_BSEG-HKONT IN S_HZEIAC ).
+*2005/11/09 STRAT_DEL
+*    CASE  GW_BSEG-MWSKZ.
+*      WHEN C_UZEI0 OR C_HZEI0.
+*        T_GOKEIT-ZEI_0     =  T_GOKEIT-ZEI_0
+*                            + W_DMBTR. "０％税額
+*      WHEN C_UZEI5 OR C_HZEI5.
+*        T_GOKEIT-ZEI_5     =  T_GOKEIT-ZEI_5
+*                            + W_DMBTR. "５％税額
+**2005/04/07 M.SEIWA MOD_START
+**      WHEN  c_uzeis OR c_uzei9 OR c_hzeis OR c_hzei9.
+**        t_gokeit-zei_s     =  t_gokeit-zei_s
+**                            + w_dmbtr. "不課税税額
+*      WHEN  C_UZEIS OR C_HZEIS .
+*        T_GOKEIT-ZEI_HKA     =  T_GOKEIT-ZEI_HKA
+*                            + W_DMBTR. "非課税
+*      WHEN  C_UZEI9 OR C_HZEI9.
+*        T_GOKEIT-ZEI_HKB     =  T_GOKEIT-ZEI_HKB
+*                            + W_DMBTR. "免税
+**2005/04/07 M.SEIWA MOD_START
+*      WHEN OTHERS.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+T_MEISAIT-HONTAI_T =  W_DMBTR. "その他
+*2005/11/09 END_ADD
+T_GOKEIT-ZEI_T     =  T_GOKEIT-ZEI_T.
+*2005/11/09 STRAT_DEL
+*    ENDCASE.
+*2005/11/09 END_DEL
+*2005/11/09 STRAT_ADD
+APPEND T_MEISAIT.
+*2005/11/09 END_ADD
+ELSE.
+CLEAR T_MEISAIT.
+T_MEISAIT-HKONT       =  GW_BSEG-HKONT.           "勘定ｺｰﾄﾞ
+*2005/11/09 STRAT_DEL
+*    CASE  GW_BSEG-MWSKZ.
+*      WHEN C_UZEI0 OR C_HZEI0.
+*        T_MEISAIT-HONTAI_0 =  W_DMBTR. "０％本体額
+*        T_GOKEIT-HONTAI_0  =  T_GOKEIT-HONTAI_0
+*                            + W_DMBTR. "０％本体額合計
+*      WHEN C_UZEI5 OR C_HZEI5.
+*        T_MEISAIT-HONTAI_5 =  W_DMBTR. "５％本体額
+*        T_GOKEIT-HONTAI_5  =  T_GOKEIT-HONTAI_5
+*                            + W_DMBTR. "５％本体額合計
+**2005/04/07 DELE START
+**      WHEN  c_uzeis OR c_uzei9 OR c_hzeis OR c_hzei9 .
+**        t_meisait-hontai_s =  w_dmbtr. "不課税本体額
+**        t_gokeit-hontai_s  =  t_gokeit-hontai_s
+**                            + w_dmbtr. "不課税本体額合計
+**2005/04/07 DELE END
+**2005/04/07 ADD START
+*      WHEN  C_UZEIS OR C_HZEIS.
+*        T_MEISAIT-HONTAI_HKA =  W_DMBTR. "非課税本体額
+*        T_GOKEIT-HONTAI_HKA  =  T_GOKEIT-HONTAI_HKA
+*                            + W_DMBTR.   "非課税本体額合計
+*      WHEN  C_UZEI9 OR C_HZEI9 .
+*        T_MEISAIT-HONTAI_HKB =  W_DMBTR. "免税本体額
+*        T_GOKEIT-HONTAI_HKB  =  T_GOKEIT-HONTAI_HKB
+*                            + W_DMBTR.   "免税本体額合計
+**2005/04/07 ADD END
+*      WHEN OTHERS.
+*2005/11/09 END_DEL
+T_MEISAIT-HONTAI_T =  W_DMBTR. "その他
+T_GOKEIT-HONTAI_T  =  T_GOKEIT-HONTAI_T
++ W_DMBTR. "その他合計
+*2005/11/09 STRAT_DEL
+*    ENDCASE.
+*2005/11/09 END_DEL
+APPEND T_MEISAIT.
+ENDIF.
+ENDFORM.                    " naibuat-sakusei
+*&---------------------------------------------------------------------*
+*& 科目合計計算
+*&---------------------------------------------------------------------*
+FORM CL_SUM.
+*2005/04/07 MOD START
+* w_hontai_sum = w_hontai_0 + w_hontai_5 + w_hontai_s + w_hontai_t.
+W_HONTAI_SUM = W_HONTAI_0 + W_HONTAI_5
++ W_HONTAI_HKA + W_HONTAI_HKB + W_HONTAI_T.
+*2005/04/07 MOD END
+ENDFORM.                    " cl_sum
+*&---------------------------------------------------------------------*
+*& その他出力
+*&---------------------------------------------------------------------*
+FORM STA_PRINT.
+*                                          "見出し編集
+W_CTR_LINE  =  99.
+W_SYORI     =  'その他'.
+
+NEW-PAGE.
+*  PERFORM out_header.                    "2005/04/07 DELE
+PERFORM OUT_HEADER_SONOTA.              "2005/04/07 ADD
+
+W_HKONT_OLD = ''.                    "勘定科目oldの初期化
+
+LOOP AT T_MEISAIT.
+
+IF W_HKONT_OLD = T_MEISAIT-HKONT.
+W_HONTAI_0  =  W_HONTAI_0 +  T_MEISAIT-HONTAI_0.
+W_HONTAI_5  =  W_HONTAI_5 +  T_MEISAIT-HONTAI_5.
+*2005/04/07 MOD_START
+*     w_hontai_s    =  w_hontai_s   +  t_meisait-hontai_s.
+W_HONTAI_HKA  =  W_HONTAI_HKA +  T_MEISAIT-HONTAI_HKA.
+W_HONTAI_HKB  =  W_HONTAI_HKB +  T_MEISAIT-HONTAI_HKB.
+*2005/04/07 MOD_END
+W_HONTAI_T  =  W_HONTAI_T +  T_MEISAIT-HONTAI_T.
+ELSE.
+IF W_HKONT_OLD = ''.
+W_HKONT_OLD = T_MEISAIT-HKONT.
+W_HONTAI_0  = T_MEISAIT-HONTAI_0.
+W_HONTAI_5  = T_MEISAIT-HONTAI_5.
+*2005/04/07 MOD_START
+*       w_hontai_s    = t_meisait-hontai_s.
+W_HONTAI_HKA  = T_MEISAIT-HONTAI_HKA.
+W_HONTAI_HKB  = T_MEISAIT-HONTAI_HKB.
+*2005/04/07 MOD_END
+W_HONTAI_T  = T_MEISAIT-HONTAI_T.
+ELSE.
+PERFORM SKAT_READ.
+IF  W_CTR_LINE  >=  50.        "見出し出力
+NEW-PAGE.
+*         PERFORM out_header.                    "2005/04/07 DELE
+PERFORM OUT_HEADER_SONOTA.             "2005/04/07 ADD
+ENDIF.
+
+PERFORM  OUT_DETAIL.           "明細出力
+W_HKONT_OLD =  T_MEISAIT-HKONT.
+W_HONTAI_0  =  T_MEISAIT-HONTAI_0.
+W_HONTAI_5  =  T_MEISAIT-HONTAI_5.
+*2005/04/07 MOD_START
+*       w_hontai_s    =  t_meisait-hontai_s.
+W_HONTAI_HKA  =  T_MEISAIT-HONTAI_HKA.
+W_HONTAI_HKB  =  T_MEISAIT-HONTAI_HKB.
+*2005/04/07 MOD_END
+W_HONTAI_T  =  T_MEISAIT-HONTAI_T.                  "2004/03/04
+ENDIF.
+ENDIF.
+
+ENDLOOP.
+
+IF W_HKONT_OLD <> ''.
+PERFORM SKAT_READ.
+PERFORM OUT_DETAIL.                "明細出力
+ULINE.
+ENDIF.
+
+PERFORM OUT_GOKEIT.                  "合計出力(その他)
+ENDFORM.                    " sta_print
+*&---------------------------------------------------------------------*
+*&      Form  out_gokeit
+*&---------------------------------------------------------------------*
+FORM OUT_GOKEIT.
+DATA:L_SUMH(15) TYPE P,
+L_SUMZ(15) TYPE P,
+L_SUMK(15) TYPE P.
+
+WRITE: /013 '本体額合計'.
+*2005/04/07 DEL START
+*  PERFORM yf01numc USING t_gokeit-hontai_5 20 0.     "５％本体合額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeit-hontai_0 20 0.     "０％本体合額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeit-hontai_s 20 0.     "不課税本体合額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeit-hontai_t 20 0.    "その他本体合額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*
+*  l_sumh = t_gokeit-hontai_0 + t_gokeit-hontai_5 +
+*         t_gokeit-hontai_s + t_gokeit-hontai_t.
+*
+*  PERFORM yf01numc USING l_sumh 20 0.     "合計
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+PERFORM YF01NUMC USING T_GOKEIT-HONTAI_5   20 0.   "課税　   本体合額
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-HONTAI_0   20 0.   "不課税　 本体合計
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-HONTAI_HKA 20 0.   "非課税　 本体合額
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-HONTAI_HKB 20 0.   "免税　　 本体合額
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-HONTAI_T   20 0.   "その他   本体合額
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+
+L_SUMH = T_GOKEIT-HONTAI_0 + T_GOKEIT-HONTAI_5 +
+T_GOKEIT-HONTAI_HKA +  T_GOKEIT-HONTAI_HKB + T_GOKEIT-HONTAI_T.
+
+PERFORM YF01NUMC USING L_SUMH              20 0.    "合計     本体合計
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+**2005/04/07 ADD  END
+
+SKIP.
+WRITE: /013 '税額'.
+*2005/04/07  DEL START
+*PERFORM yf01numc USING t_gokeit-zei_5 20 0."５％税額
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeit-zei_0 20 0."０％税額
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeit-zei_s 20 0."不課税税額
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  PERFORM yf01numc USING t_gokeit-zei_t 20 0."その他税額
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  l_sumz = t_gokeit-zei_0 + t_gokeit-zei_5 + t_gokeit-zei_s
+*          + t_gokeit-zei_t.
+*  PERFORM yf01numc USING l_sumz 20 0."合計
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+PERFORM YF01NUMC USING T_GOKEIT-ZEI_5   20 0."課税　　税額
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-ZEI_0   20 0."不課税　税額
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-ZEI_HKA 20 0."非課税  税額
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-ZEI_HKB 20 0."免税    税額
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+PERFORM YF01NUMC USING T_GOKEIT-ZEI_T   20 0."その他  税額
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+
+L_SUMZ = T_GOKEIT-ZEI_0 + T_GOKEIT-ZEI_5 + T_GOKEIT-ZEI_HKA
++ T_GOKEIT-ZEI_HKB + T_GOKEIT-ZEI_T.
+
+PERFORM YF01NUMC USING L_SUMZ           20 0."合計    税額
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+SKIP.
+WRITE: /013 '税込金額'.
+*2005/04/07 DEL START
+*  w_kin = t_gokeit-hontai_5 + t_gokeit-zei_5.   "５％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  064  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeit-hontai_0 + t_gokeit-zei_0.  "０％税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  085  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeit-hontai_s + t_gokeit-zei_s.   "不課税税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  106  o_num USING EDIT MASK 'RR____________________'.
+*  w_kin = t_gokeit-hontai_t + t_gokeit-zei_t. "その他税込合額
+*  PERFORM yf01numc USING w_kin 20 0.
+*  WRITE:  127  o_num USING EDIT MASK 'RR____________________'.
+*  l_sumk = l_sumh + l_sumz.
+*  PERFORM yf01numc USING l_sumk 20 0.
+*  WRITE:  148  o_num USING EDIT MASK 'RR____________________'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+W_KIN = T_GOKEIT-HONTAI_5 + T_GOKEIT-ZEI_5.       "課税   税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  064  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIT-HONTAI_0 + T_GOKEIT-ZEI_0.       "不課税 税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  085  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIT-HONTAI_HKA + T_GOKEIT-ZEI_HKA.   "非課税 税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  106  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIT-HONTAI_HKB + T_GOKEIT-ZEI_HKB.   "免税   税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  126  O_NUM USING EDIT MASK 'RR____________________'.
+W_KIN = T_GOKEIT-HONTAI_T + T_GOKEIT-ZEI_T.       "その他 税込合額
+PERFORM YF01NUMC USING W_KIN 20 0.
+WRITE:  146  O_NUM USING EDIT MASK 'RR____________________'.
+
+L_SUMK = L_SUMH + L_SUMZ.
+
+PERFORM YF01NUMC USING L_SUMK 20 0.               "合計　税込合額
+WRITE:  168  O_NUM USING EDIT MASK 'RR____________________'.
+*2005/04/07 ADD END
+SKIP.
+WRITE: /013 '税率'.
+*●税率：課税
+IF  T_GOKEIT-HONTAI_0 = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIT-ZEI_0 / T_GOKEIT-HONTAI_0 * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIT-HONTAI_0.
+IF  T_GOKEIT-ZEI_0 < 0.
+IF  T_GOKEIT-ZEI_0 > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIT-ZEI_0 < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  073  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  082  '％'.
+PERFORM ZEIHENSYU.
+
+*●税率：不課税
+IF  T_GOKEIT-HONTAI_5 = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIT-ZEI_5 / T_GOKEIT-HONTAI_5 * 100. "５％税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIT-HONTAI_5.
+IF  T_GOKEIT-ZEI_5 < 0.
+IF  T_GOKEIT-ZEI_5 > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIT-ZEI_5 < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  094  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  103  '％'.
+
+*●税率：非課税
+*2005/04/07 DEL START
+* IF  t_gokeiu-hontai_s = 0.
+*    w_zei = 0.
+*  ELSE.
+*    w_zei = t_gokeit-zei_s / t_gokeit-hontai_s * 100. "対象外税率
+*    w_zeigaku = w_zei / 100 * t_gokeit-hontai_s.
+*    IF  t_gokeit-zei_s < 0.
+*      IF  t_gokeit-zei_s > w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ELSE.
+*      IF  t_gokeit-zei_s < w_zeigaku.
+*        w_zei = w_zei - w_hasu.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*  PERFORM zeihensyu.
+*  WRITE:  115  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  124  '％'.
+*2005/04/07 DEL START
+*2005/04/07 ADD START
+IF  T_GOKEIU-HONTAI_HKA = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIT-ZEI_HKA / T_GOKEIT-HONTAI_HKA * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIT-HONTAI_HKA.
+IF  T_GOKEIT-ZEI_HKA < 0.
+IF  T_GOKEIT-ZEI_HKA > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIT-ZEI_HKA < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  115  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  124  '％'.
+
+*●税率：免税
+IF  T_GOKEIU-HONTAI_HKB = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIT-ZEI_HKB / T_GOKEIT-HONTAI_HKB * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIT-HONTAI_HKB.
+IF  T_GOKEIT-ZEI_HKB < 0.
+IF  T_GOKEIT-ZEI_HKB > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIT-ZEI_HKB < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+WRITE:  135  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  144  '％'.
+*2005/04/07 ADD END
+*●税率：その他
+IF  T_GOKEIU-HONTAI_T = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = T_GOKEIT-ZEI_T / T_GOKEIT-HONTAI_T * 100. "対象外税率
+W_ZEIGAKU = W_ZEI / 100 * T_GOKEIT-HONTAI_T.
+IF  T_GOKEIT-ZEI_T < 0.
+IF  T_GOKEIT-ZEI_T > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  T_GOKEIT-ZEI_T < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+*2005/04/07 DEL START
+*  WRITE:  136  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  145  '％'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+WRITE:  155  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  164  '％'.
+*2005/04/07 ADD END
+*●税率：合計
+IF  L_SUMH = 0.
+W_ZEI = 0.
+ELSE.
+W_ZEI = L_SUMZ / L_SUMH * 100.
+W_ZEIGAKU = W_ZEI / 100 * L_SUMH.
+IF  L_SUMZ < 0.
+IF  L_SUMZ > W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ELSE.
+IF  L_SUMZ < W_ZEIGAKU.
+W_ZEI = W_ZEI - W_HASU.
+ENDIF.
+ENDIF.
+ENDIF.
+PERFORM ZEIHENSYU.
+*2005/04/07 DEL START
+*  WRITE:  157  w_zeiout USING EDIT MASK 'RR__________'.
+*  WRITE:  166  '％'.
+*2005/04/07 DEL END
+*2005/04/07 ADD START
+WRITE:  177  W_ZEIOUT USING EDIT MASK 'RR__________'.
+WRITE:  186  '％'.
+*2005/04/07 ADD END
+ENDFORM.                    " out_gokeit
+*2005/11/09 STRAT_DEL
+*2005/04/07 ADD START
+*----------------------------------------------------------------------*
+*  明細出力処理   <<売上>>
+*----------------------------------------------------------------------*
+*FORM OUT_DETAIL_URI.
+*  WRITE: /002 W_HKONT_OLD,                   "勘定コード
+*          013 SKAT-TXT50.                    "勘定科目
+*  PERFORM YF01NUMC USING W_HONTAI_5 20 0.    "国内売上（課税）
+*  WRITE:  068  O_NUM USING EDIT MASK 'RR____________________'.
+*  PERFORM YF01NUMC USING W_HONTAI_0 20 0.    "対象外（不課税）
+*  WRITE:  088  O_NUM USING EDIT MASK 'RR____________________'.
+*  PERFORM YF01NUMC USING W_HONTAI_HKA 20 0.  "土地売却等（非課税）
+*  WRITE:  109  O_NUM USING EDIT MASK 'RR____________________'.
+*  PERFORM YF01NUMC USING W_HONTAI_HKB 20 0.  "輸出商品（免税）
+*  WRITE:  130  O_NUM USING EDIT MASK 'RR____________________'.
+*  PERFORM YF01NUMC USING W_HONTAI_T 20 0.    "その他
+*  WRITE:  151  O_NUM USING EDIT MASK 'RR____________________'.
+*  PERFORM CL_SUM.
+*  PERFORM YF01NUMC USING W_HONTAI_SUM 20 0.  "合計
+*  WRITE:  173  O_NUM USING EDIT MASK 'RR____________________'.
+*  W_CTR_LINE  =  W_CTR_LINE  +  1.     "明細行カウントＵＰ
+*ENDFORM.                    " out_detail_uri
+*2005/04/07 ADD END
+*2005/11/09 END_DEL

@@ -1,0 +1,1218 @@
+************************************************************************
+* [プログラム名]
+*   ZM012100        帳簿棚卸一覧表(個別購買)
+*
+* [処理概要]
+*   ・部門長・管理経理部・税務署・監査法人・外部へ商品有り高を示す
+* [改定履歴]
+*　YYYY/MM/DD  Programar          Description
+*  2001/11/26  PSD K.Usami        新規開発
+*  2002/01/10  PSD k.usami        ALVヘッダー表示
+*  2002/02/07  PSD k.usami        仕様変更(抽出条件変更)
+*  2002/02/07  PSD k.usami        ALV一覧ステータス印刷拒否
+*  2002/02/19  PSD k.usami        仕様変更(対象テーブルの変更)
+*  2002/02/21  PSD M.Arai         表示項目追加(発注単価、伝票通貨)
+*  2002/03/07  PSD T.SAITOH       ユーザパラメータ選択画面初期値設定
+*  2002/05/09  PSD T.SAITOH       会計数値違い明確化文章表示
+*  2002/05/28  PSD K.ARAI         パフォーマンス対応
+*  2002/06/20  PSD T.SAITOH       再移送
+*  2002/08/08  カットオーバー
+*  2002/08/10  PSD T.SAITOH       単価の修正（CD上の仕入単価）
+*  2002/08/12  PSD T.SAITOH       発注単位の追加
+*                                 単価の設定方法変更
+*  2005/01/28  DMC K.ONODA        出荷済み･未出庫の数量を追加
+*  2006/03/02  DMC R.Hata         LB0509対応
+************************************************************************
+REPORT ZM012100 .
+************************************************************************
+* TYPES
+************************************************************************
+TYPE-POOLS SLIS.
+
+* 受注在庫データ型
+TYPES: BEGIN OF TYP_JUTYU,
+*--- 2002/02/19 PSD k.usami ADD ↓
+*         BWKEY     TYPE EBEW-BWKEY,      " 部門/評価レベル(プラント)
+*         VBELN     TYPE EBEW-VBELN,      " 受注番号
+*         POSNR     TYPE EBEW-POSNR,      " 明細番号
+*         VERPR     TYPE EBEW-VERPR,      " 仕入単価/移動平均原価
+*         LBKUM     TYPE EBEW-LBKUM,      " 評価在庫合計/評価在庫合計
+*         SALK3     TYPE EBEW-SALK3,      "評価在庫合計額/評価在庫合計額
+*         MATNR     TYPE EBEW-MATNR,      " 品目コード
+WERKS     TYPE MSKA-WERKS,      " 部門/評価レベル(プラント)
+VBELN     TYPE MSKA-VBELN,      " 受注番号
+POSNR     TYPE MSKA-POSNR,      " 明細番号
+KALAB     TYPE MSKA-KALAB,      " 評価在庫合計/評価在庫合計
+MATNR     TYPE MSKA-MATNR,      " 品目コード
+*--- 2002/02/19 PSD k.usami ADD ↑
+NAME1     TYPE T001W-NAME1,     " 部門名/プラントテキスト
+EKGRP     TYPE T024-EKGRP,      " 担当者/購買グループ
+EKNAM     TYPE T024-EKNAM,      " 担当者名/購買グループテキスト
+KUNNR     TYPE VBAK-KUNNR,      " 得意先/得意先コード
+BSTNK     TYPE VBAK-BSTNK,      " 得意先発注番号
+KNAME     TYPE KNA1-NAME1,      " 得意先名
+MAKTX     TYPE MAKT-MAKTX,      " 品目名
+MEINS     TYPE MARA-MEINS,      " 基本数量単位
+MSEH3     TYPE T006A-MSEH3,     " 単位/商用数量単位
+BUKRS     TYPE T001K-BUKRS,     " 会社コード
+WAERS     TYPE T001-WAERS,      " 仕入れ通貨/通貨コード
+END   OF TYP_JUTYU.
+
+* 品目の保管場所データ型
+TYPES: BEGIN OF TYP_TANABAN,
+LGPBE     TYPE MARD-LGPBE,      "棚番
+END   OF TYP_TANABAN.
+
+* 販売伝票フロー型
+TYPES: BEGIN OF TYP_HANBAI,
+VBELV     TYPE VBFA-VBELV,      " 選考伝票番号
+POSNV     TYPE VBFA-POSNV,      " 選考明細番号
+VBTYP_N   TYPE VBFA-VBTYP_N,    " 継続伝票カテゴリ
+VBELN     TYPE VBFA-VBELN,      " 後続伝票番号
+POSNN     TYPE VBFA-POSNN,      " 後続明細番号
+LIFNR     TYPE EKKO-LIFNR,      " 仕入先コード
+NAME1     TYPE LFA1-NAME1,      " 仕入先テキスト
+END   OF TYP_HANBAI.
+
+* 購買伝票別履歴型
+TYPES: BEGIN OF TYP_KOUBAI,
+EBELN     TYPE EKBE-EBELN,      " 発注伝票
+EBELP     TYPE EKBE-EBELP,      " 明細番号
+BWART     TYPE EKBE-BWART,      " 移動タイプ
+BLDAT     TYPE EKBE-BLDAT,      " 伝票日付
+END   OF TYP_KOUBAI.
+
+***********************************************************************
+* DATA
+***********************************************************************
+CONSTANTS: CNS_V TYPE C VALUE 'V'.
+
+* 受注在庫データ内部テーブル
+DATA: GF_JUTYU    TYPE          TYP_JUTYU,
+GT_JUTYU    LIKE TABLE OF GF_JUTYU.
+
+* 品目の保管場所データ内部テーブル
+DATA: GF_TANABAN TYPE TYP_TANABAN,
+GT_TANABAN  LIKE TABLE OF GF_TANABAN.
+
+* 販売伝票フロー内部テーブル
+DATA: GF_HANBAI   TYPE          TYP_HANBAI,
+GT_HANBAI   LIKE TABLE OF GF_HANBAI.
+
+* 購買伝票別履歴内部テーブル
+DATA: GF_KOUBAI    TYPE          TYP_KOUBAI,
+GT_KOUBAI    LIKE TABLE OF GF_KOUBAI.
+
+* 帳票出力用内部テーブル
+DATA: GF_WRITE    TYPE          ZMLIST_V21,
+GT_WRITE    LIKE TABLE OF GF_WRITE.
+
+* 選択画面用
+DATA: GF_WERKS LIKE T001W-WERKS,
+GF_EKGRP LIKE T024-EKGRP.
+
+*--- 2002/02/19 PSD k.usami ADD ↓
+* 仕入れ単価用
+DATA: GF_VERPR LIKE MBEW-VERPR.
+*--- 2002/02/19 PSD k.usami ADD ↑
+
+* 金額変換用
+*--- 2002/02/19 PSD k.usami ADD ↓
+*DATA: I_GF_JUTYU_VERPR(30) TYPE C,
+*      TURN_VERPR TYPE EBEW-VERPR,
+*      I_GF_JUTYU_SALK3(30) TYPE C,
+*      TURN_SALK3 TYPE EBEW-SALK3.
+DATA: I_GF_VERPR(30) TYPE C,
+TURN_VERPR     LIKE MBEW-VERPR.
+*--- 2002/02/19 PSD k.usami ADD ↑
+
+* コード変換用
+DATA: W_POSNR TYPE EBEW-POSNR."明細番号
+
+*ヘッダ用
+DATA: GF_HEADER TYPE ZMLIST_V21.
+*--- 2002/01/10 PSD k.usami ADD ↓
+DATA: GT_ALV     TYPE TABLE OF ZMLIST_V21
+WITH HEADER LINE.
+*--- 2002/01/10 PSD k.usami ADD ↑
+
+* ＡＢＡＰリストビューア用
+DATA: G_REPID     LIKE SY-REPID,            "レポートID
+GS_LAYOUT   TYPE SLIS_LAYOUT_ALV.     "レイアウト構造
+
+*--- REUSE_ALV_LIST_DISPLAY                ABAPリストビューア関連
+DATA: TOP_OF_PAGE TYPE SLIS_FORMNAME VALUE 'TOP_OF_PAGE'.
+
+* REUSE_ALV_EVENTS_GET 用
+DATA: GT_EVENT TYPE SLIS_T_EVENT.
+DATA: GS_EVENT TYPE SLIS_ALV_EVENT.
+*--- 2002/02/07 PSD k.usami ADD ↓
+DATA: GS_PRINT TYPE SLIS_PRINT_ALV.
+*--- 2002/02/07 PSD k.usami ADD ↑
+
+*---APPEND START PSD T.SAITOH 2002/03/31 仕入単価仕様変更対応---------*
+TYPES:BEGIN OF TYP_VBFA,
+VBELV TYPE MSKA-VBELN,
+POSNV TYPE MSKA-POSNR,
+VBELN TYPE VBFA-VBELN,
+POSNN TYPE VBFA-POSNN,
+END OF TYP_VBFA.
+
+TYPES:BEGIN OF TYP_EKPO,
+EBELN TYPE EKPO-EBELN,
+EBELP TYPE EKPO-EBELP,
+NETPR TYPE EKPO-NETPR,
+PEINH TYPE EKPO-PEINH,
+END OF TYP_EKPO.
+
+DATA:GT_VBFA TYPE TABLE OF TYP_VBFA,
+* MODIFY PSD K.ARAI 2002/05/28
+* ソートテーブルに変更（パフォーマンス対応）
+GT_EKPO TYPE SORTED TABLE OF TYP_EKPO
+WITH UNIQUE KEY  EBELN
+EBELP.
+*     GT_EKPO TYPE TABLE OF TYP_EKPO.
+* MODIFY END
+DATA:GF_VBFA TYPE TYP_VBFA,
+GF_EKPO TYPE TYP_EKPO.
+*---APPEND END   PSD T.SAITOH 2002/03/31 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/08/10 ---------------------------*
+* 単価の修正
+* 品目評価
+DATA: BEGIN OF GF_MBEW,
+MATNR TYPE MBEW-MATNR,"品目コード
+BWKEY TYPE MBEW-BWKEY,"評価レベル
+SALK3 TYPE MBEW-SALK3,"評価在庫合計額
+LBKUM TYPE MBEW-LBKUM,"評価在庫合計（数量）
+END OF GF_MBEW.
+*---APPEND END   PSD T.SAITOH 2002/08/10 ---------------------------*
+
+*--- 2005/01/28 DMC K.ONODA ADD ↓
+DATA: BEGIN OF TYP_LFIMG,
+LFIMG TYPE LIPS-LFIMG,   " 出荷数量実績 (販売単位)
+*  2006/03/31 ADD --->
+MEINS TYPE LIPS-MEINS ,
+VRKME TYPE LIPS-VRKME ,
+MATNR TYPE LIPS-MATNR ,
+*  2006/03/31 ADD --->
+END OF TYP_LFIMG.
+DATA: GF_LFIMG LIKE TYP_LFIMG.
+DATA: GT_LFIMG LIKE TABLE OF GF_LFIMG.
+*--- 2005/01/28 DMC K.ONODA ADD ↑
+***********************************************************************
+* 選択画面定義
+***********************************************************************
+*---MODIFY START PSD T.SAITOH 2002/03/07 ---------------------------*
+*SELECT-OPTIONS: pr_WERKS FOR GF_WERKS OBLIGATORY,  " 部門
+*                pr_EKGRP FOR GF_EKGRP,             " グループ
+SELECT-OPTIONS: PR_WERKS FOR GF_WERKS MEMORY ID WRK OBLIGATORY," 部門
+PR_EKGRP FOR GF_EKGRP MEMORY ID EKG,        " グループ
+*---MODIFY END   PSD T.SAITOH 2002/03/07 ---------------------------*
+
+* ↓ append 2002.02.25 psd m.arai 選択条件変更(品目コード追加)
+PR_MATNR FOR GF_JUTYU-MATNR.       " 品目コード
+* ↑
+* Add 2006.03.02--->
+SELECT-OPTIONS P_LGPBE FOR GF_TANABAN-LGPBE .
+* Add 2006.03.02<---
+
+
+***********************************************************************
+* START-OF-SELECTION
+***********************************************************************
+START-OF-SELECTION.
+* 対象データ抽出処理
+PERFORM FRM_GET_DATA.
+
+* 帳票出力用内部テーブル作成処理
+PERFORM FRM_MAKE_DATA.
+
+* 帳票出力処理
+PERFORM FRM_WRITE_DATA.
+************************************************************************
+* Form
+************************************************************************
+*&---------------------------------------------------------------------
+*&      Form  FRM_GET_data
+*&---------------------------------------------------------------------
+*       対象データ抽出処理
+*----------------------------------------------------------------------
+FORM FRM_GET_DATA.
+*--- 2002/02/07 PSD k.usami ADD ↓
+DATA: L_CNT_GT_HANBAI(8) TYPE N. " 販売伝票フロー内部TBL件数
+*--- 2002/02/07 PSD k.usami ADD ↑
+
+* 受注在庫データ内部TBL設定処理
+PERFORM FRM_SET_JUTYU.
+* 販売伝票フロー内部TBL設定処理
+PERFORM FRM_SET_HANBAI.
+*--- 2002/02/07 PSD k.usami ADD ↓
+DESCRIBE TABLE GT_HANBAI LINES L_CNT_GT_HANBAI.
+IF L_CNT_GT_HANBAI <> 0.
+*--- 2002/02/07 PSD k.usami ADD ↑
+* 購買伝票別履歴内部TBL設定処理
+PERFORM FRM_SET_KOUBAI.
+*--- 2002/02/07 PSD k.usami ADD ↓
+ENDIF.
+*--- 2002/02/07 PSD k.usami ADD ↑
+
+ENDFORM.                    " frm_get_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_jutyu
+*&---------------------------------------------------------------------*
+*       受注在庫データ内部TBL設定処理
+*----------------------------------------------------------------------*
+FORM FRM_SET_JUTYU.
+
+*部門/受注番号/明細番号/受注評価在庫数量
+*/品目コード/部門名/担当者/担当者名/得意先コード/得意先発注番号
+*/得意先テキスト/品目テキスト/基本数量単位/商用数量単位/会社コード
+*/通貨コード/棚番
+*--- 2002/02/19 PSD k.usami ADD ↓
+*  SELECT
+*    a~BWKEY a~VBELN a~POSNR a~VERPR a~LBKUM a~SALK3 a~MATNR
+*    b~NAME1
+*    c~EKGRP
+*    d~EKNAM
+*    e~KUNNR e~BSTNK
+*    f~NAME1
+*    g~MAKTX
+*    h~MEINS
+*    i~MSEH3
+*    j~BUKRS
+*    k~WAERS
+*    INTO TABLE GT_JUTYU
+*    FROM ( EBEW AS a INNER JOIN T001W       AS b
+*    ON a~BWKEY = b~WERKS )
+*                     INNER JOIN MARC        AS c
+*    ON a~BWKEY = c~WERKS AND
+*       a~MATNR = c~MATNR
+*                     INNER JOIN T024        AS d
+*    ON c~EKGRP = d~EKGRP
+*                     INNER JOIN VBAK        AS e
+*    ON a~VBELN = e~VBELN
+*                     INNER JOIN KNA1        AS f
+*    ON e~KUNNR = f~KUNNR
+*                     INNER JOIN MAKT        AS g
+*    ON a~MATNR = g~MATNR
+*                     INNER JOIN MARA        AS h
+*    ON g~MATNR = h~MATNR
+*                     INNER JOIN T006A       AS i
+*    ON h~MEINS = i~MSEHI
+*                     INNER JOIN T001K       AS j
+*    ON a~BWKEY = j~BWKEY
+*                     INNER JOIN T001        AS k
+*    ON j~BUKRS = k~BUKRS
+*    WHERE a~BWKEY IN pr_WERKS
+*    AND   c~EKGRP IN pr_EKGRP
+*    AND   a~LBKUM     <> 0
+*    AND   i~SPRAS     = 'JA'.
+SELECT
+A~WERKS A~VBELN A~POSNR A~KALAB A~MATNR
+B~NAME1
+C~EKGRP
+D~EKNAM
+E~KUNNR E~BSTNK
+F~NAME1
+G~MAKTX
+H~MEINS
+I~MSEH3
+J~BUKRS
+K~WAERS
+INTO TABLE GT_JUTYU
+FROM ( MSKA AS A INNER JOIN T001W       AS B
+ON A~WERKS = B~WERKS )
+INNER JOIN MARC        AS C
+ON A~WERKS = C~WERKS AND
+A~MATNR = C~MATNR
+INNER JOIN T024        AS D
+ON C~EKGRP = D~EKGRP
+INNER JOIN VBAK        AS E
+ON A~VBELN = E~VBELN
+INNER JOIN KNA1        AS F
+ON E~KUNNR = F~KUNNR
+INNER JOIN MAKT        AS G
+ON A~MATNR = G~MATNR
+INNER JOIN MARA        AS H
+ON G~MATNR = H~MATNR
+INNER JOIN T006A       AS I
+ON H~MEINS = I~MSEHI
+INNER JOIN T001K       AS J
+ON A~WERKS = J~BWKEY
+INNER JOIN T001        AS K
+ON J~BUKRS = K~BUKRS
+* ↓ modify 2002.02.25 psd m.arai 選択条件追加対応(品目コード)
+*    WHERE a~WERKS IN pr_WERKS
+WHERE A~MATNR IN PR_MATNR
+AND   A~WERKS IN PR_WERKS
+* ↑
+AND   C~EKGRP IN PR_EKGRP
+AND   A~KALAB     <> 0
+AND   I~SPRAS     = 'JA'.
+*--- 2002/02/19 PSD k.usami ADD ↑
+
+* エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE S600(Z1) WITH TEXT-003." 受注在庫データ
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH 'ZM012100' TEXT-003 '8'.
+ENDCASE.
+
+ENDFORM.                    " frm_set_jutyu
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_hanbai
+*&---------------------------------------------------------------------*
+*       販売伝票フロー内部TBL設定処理
+*----------------------------------------------------------------------*
+FORM FRM_SET_HANBAI.
+
+DATA : L_BANFN LIKE EBAN-BANFN.
+
+LOOP AT GT_JUTYU INTO GF_JUTYU.
+
+CLEAR : L_BANFN , GF_HANBAI.
+
+SELECT SINGLE BANFN FROM VBEP
+INTO L_BANFN
+WHERE VBELN = GF_JUTYU-VBELN
+AND POSNR = GF_JUTYU-POSNR
+AND ETENR = '0001'.
+
+GF_HANBAI-VBELV = GF_JUTYU-VBELN.
+GF_HANBAI-POSNV = GF_JUTYU-POSNR.
+GF_HANBAI-VBTYP_N = CNS_V.
+
+SELECT SINGLE EBELN EBELP FROM EKET
+INTO (GF_HANBAI-VBELN , GF_HANBAI-POSNN)
+WHERE BANFN = L_BANFN.
+
+SELECT SINGLE LIFNR FROM EKKO
+INTO GF_HANBAI-LIFNR
+WHERE EBELN = GF_HANBAI-VBELN.
+
+SELECT SINGLE NAME1 FROM LFA1
+INTO GF_HANBAI-NAME1
+WHERE LIFNR = GF_HANBAI-LIFNR.
+
+APPEND GF_HANBAI TO GT_HANBAI.
+
+ENDLOOP.
+**先行伝票番号/先行明細番号/継続伝票カテゴリ/継続伝票番号/継続明細番号
+**/仕入先勘定コード/仕入先テキスト
+*  SELECT
+*  a~vbelv a~posnv a~vbtyp_n a~vbeln a~posnn
+*  b~lifnr
+*  c~name1
+*  INTO CORRESPONDING FIELDS OF TABLE gt_hanbai
+*  FROM vbfa AS a INNER JOIN ekko       AS b
+*  ON a~vbeln = b~ebeln
+*                 INNER JOIN lfa1       AS c
+*  ON b~lifnr = c~lifnr
+*  FOR ALL ENTRIES IN gt_jutyu
+*  WHERE a~vbelv = gt_jutyu-vbeln "先行伝票番号=受注番号
+*  AND   a~posnv = gt_jutyu-posnr "先行明細番号=明細番号
+*  AND   a~vbtyp_n = cns_v." 継続伝票カテゴリ=購買発注
+
+* エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+*--- 2002/02/07 PSD k.usami ADD ↓
+*        MESSAGE s600(Z1) WITH text-004." 販売伝票フロー
+*        STOP.
+*--- 2002/02/07 PSD k.usami ADD ↑
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH 'ZM012100' TEXT-004 '8'.
+ENDCASE.
+
+ENDFORM.                    " frm_set_hanbai
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_koubai
+*&---------------------------------------------------------------------*
+*       購買伝票別履歴内部TBL設定処理
+*----------------------------------------------------------------------*
+FORM FRM_SET_KOUBAI.
+
+*発注伝票/明細番号/移動タイプ/伝票日付
+SELECT
+EBELN EBELP BWART BLDAT
+INTO CORRESPONDING FIELDS OF TABLE GT_KOUBAI
+FROM EKBE
+FOR ALL ENTRIES IN GT_HANBAI
+WHERE EBELN = GT_HANBAI-VBELN "発注番号=後続伝票番号
+AND   BWART = '101'." 移動タイプ=購買発注入庫
+
+* エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+*--- 2002/02/07 PSD k.usami ADD ↓
+*      MESSAGE s600(Z1) WITH text-005." 購買伝票別履歴
+*      STOP.
+*--- 2002/02/07 PSD k.usami ADD ↑
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH 'ZM012100' TEXT-005 '8'.
+ENDCASE.
+
+ENDFORM.                    " frm_set_LFA1
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_data
+*&---------------------------------------------------------------------*
+*       帳票出力用内部テーブル作成処理
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_DATA.
+
+*ソート処理
+*--- 2002/02/19 PSD k.usami ADD ↓
+*  SORT GT_JUTYU ASCENDING BY MATNR   "品目コード
+*                             BWKEY.  "部門/プラントコード
+SORT GT_JUTYU ASCENDING BY MATNR   "品目コード
+WERKS.  "部門/プラントコード
+*--- 2002/02/19 PSD k.usami ADD ↑
+
+* ① 受注在庫データ内部TBLループ処理
+LOOP AT GT_JUTYU INTO GF_JUTYU.
+CLEAR GF_WRITE.
+
+* (a)ヘッダ行：販売伝票フロー情報の設定
+PERFORM FRM_HEAD.
+
+* (b)明細行：販売伝票フロー情報の設定
+PERFORM FRM_MEISAI.
+
+ENDLOOP.
+
+* ② 対象データ存在チェック
+PERFORM FRM_CHECK_DATA.
+
+ENDFORM.                    " frm_make_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_head
+*&---------------------------------------------------------------------*
+*       ヘッダ行：販売伝票フロー情報の設定
+*----------------------------------------------------------------------*
+FORM FRM_HEAD.
+
+* ① 得意先,得意先名の設定
+*--- 得意先０サプレイス
+PERFORM FRM_ZERO_DEL CHANGING GF_JUTYU-KUNNR.
+
+GF_WRITE-KUNNR = GF_JUTYU-KUNNR.   " 得意先
+GF_WRITE-KNAME  = GF_JUTYU-KNAME." 得意先名
+
+* ② 部門,部門名,担当者,担当者名の設定
+*--- 2002/02/19 PSD k.usami ADD ↓
+*  GF_WRITE-WERKS = GF_JUTYU-BWKEY.  " 部門
+GF_WRITE-WERKS = GF_JUTYU-WERKS.  " 部門
+*--- 2002/02/19 PSD k.usami ADD ↑
+GF_WRITE-VNAME = GF_JUTYU-NAME1.   " 部門名
+GF_WRITE-EKGRP = GF_JUTYU-EKGRP.   " 担当者
+GF_WRITE-EKNAM = GF_JUTYU-EKNAM.   " 担当者名
+
+ENDFORM.                    " frm_head
+*&---------------------------------------------------------------------*
+*&      Form  frm_meisai
+*&---------------------------------------------------------------------*
+*       明細行：販売伝票フロー情報の設定
+*----------------------------------------------------------------------*
+FORM FRM_MEISAI.
+
+* ① 得意先,発注番号,受注番号,明細番号,品目コード,品目名,在庫数量,単位
+*   ,仕入通貨の設定
+**---明細番号０サプレイス
+W_POSNR = GF_JUTYU-POSNR.
+PERFORM FRM_ZERO_DEL CHANGING GF_JUTYU-POSNR.
+
+GF_WRITE-BSTNK = GF_JUTYU-BSTNK.   " 得意先発注番号
+GF_WRITE-VBELN = GF_JUTYU-VBELN.   " 受注番号
+GF_WRITE-POSNR = GF_JUTYU-POSNR.   " 明細番号
+GF_WRITE-MATNR = GF_JUTYU-MATNR.   " 品目コード
+GF_WRITE-MAKTX = GF_JUTYU-MAKTX.   " 品目名
+*--- 2002/02/19 PSD k.usami ADD ↓
+*  GF_WRITE-LBKUM = GF_JUTYU-LBKUM.  " 在庫数量
+GF_WRITE-LBKUM = GF_JUTYU-KALAB.  " 在庫数量
+*--- 2002/02/19 PSD k.usami ADD ↑
+GF_WRITE-MSEH3 = GF_JUTYU-MSEH3.   " 単位
+GF_WRITE-WAERS = GF_JUTYU-WAERS.  " 仕入通貨
+
+* ② 仕入れ単価,在庫金額の設定
+*---MODIFY START PSD T.SAITOH 2002/08/10 ---------------------------*
+**---MODIFY START PSD T.SAITOH 2002/03/31 仕入単価仕様変更対応--------*
+*  CLEAR:GT_VBFA, GF_VBFA, GT_EKPO, GF_EKPO.
+*  PERFORM FRM_SELECT_VBFA.
+*  PERFORM FRM_SELECT_EKPO.
+*  READ TABLE GT_EKPO INTO GF_EKPO
+*               WITH KEY EBELN = GF_VBFA-VBELN
+*                        EBELP = GF_VBFA-POSNN
+** APPEND PSD K.ARAI 2002/05/28
+*                        BINARY SEARCH.
+** APPEN END.
+*
+*  IF GF_EKPO-NETPR <> 0.
+**--- 2002/02/19 PSD k.usami ADD ↓
+**---仕入れ単価の変換
+*    I_GF_VERPR = 0.
+*
+*    CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+*         EXPORTING
+*              CURRENCY    = GF_JUTYU-WAERS
+**            SAP_AMOUNT  = GF_JUTYU-VERPR
+*              SAP_AMOUNT  = GF_EKPO-NETPR "購買伝票における正味額
+*         IMPORTING
+*              IDOC_AMOUNT = I_GF_VERPR.
+*
+*    TURN_VERPR = I_GF_VERPR."GF_VERPR
+*
+*    GF_WRITE-VERPR = TURN_VERPR / GF_EKPO-PEINH.
+*
+*  ELSE.
+*    GF_WRITE-VERPR = '0'.
+*  ENDIF.
+* 単価  GF_WRITE-VERPR = MBEW-SALK3 / MBEW-LBKUM -------------------*
+PERFORM FRM_SET_NETPR.
+
+
+*---MODIFY END   PSD T.SAITOH 2002/08/10 ---------------------------*
+
+*
+*  SELECT SINGLE
+*  VERPR
+*  INTO GF_VERPR
+*  FROM MBEW
+*  WHERE MATNR = GF_JUTYU-MATNR
+*  AND   BWKEY = GF_JUTYU-WERKS.
+** エラー処理
+*  CASE sy-subrc.
+*    WHEN 0.
+**---仕入れ単価の変換
+*      I_GF_VERPR = 0.
+*
+*      CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+*           EXPORTING
+*                CURRENCY    = GF_JUTYU-WAERS
+*                SAP_AMOUNT  = GF_VERPR
+*           IMPORTING
+*                IDOC_AMOUNT = I_GF_VERPR.
+*
+*      TURN_VERPR = I_GF_VERPR."GF_VERPR
+*
+*      GF_WRITE-VERPR = TURN_VERPR.   " 仕入単価
+*
+*    WHEN 4.    " 対象データなし
+*      GF_WRITE-VERPR = '0'.
+*    WHEN 8.    " システムエラー
+*      MESSAGE a603(Z1) WITH 'ZM012100' 'MBEW' '8'.
+*  ENDCASE.
+*---MODIFY END   PSD T.SAITOH 2002/03/31 ---------------------------*
+
+
+*---在庫金額の変換
+*--- 2002/02/19 PSD k.usami ADD ↓
+*  I_GF_JUTYU_SALK3 = 0.
+*
+*  CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+*       EXPORTING
+*            CURRENCY    = GF_JUTYU-WAERS
+*            SAP_AMOUNT  = GF_JUTYU-SALK3
+*       IMPORTING
+*            IDOC_AMOUNT = I_GF_JUTYU_SALK3.
+*
+*  TURN_SALK3 = I_GF_JUTYU_SALK3."GF_JUTYU_SALK3
+*
+*  GF_WRITE-SALK3 = TURN_SALK3 .   " 在庫金額
+
+GF_WRITE-SALK3 = GF_JUTYU-KALAB * GF_WRITE-VERPR. " 在庫金額
+*--- 2002/02/19 PSD k.usami ADD ↑
+
+* ③ 販売明細データ納入期日設定処理
+PERFORM FRM_KIJITU.
+
+* ④ 品目の保管場所データ内部TBLの設定処理
+PERFORM FRM_SET_HOKAN.
+
+* ⑤ 販売伝票フロー内部TBLループ処理
+SORT GT_HANBAI ASCENDING BY VBELN "後続伝票番号
+POSNN."後続明細番号
+
+LOOP AT GT_HANBAI INTO GF_HANBAI
+WHERE VBELV = GF_JUTYU-VBELN "先行伝票番号=受注番号
+AND  POSNV = W_POSNR."先行明細番号=明細番号
+
+* ↓ append 2002/02/22 psd m.arai 発注単価設定対応
+*     発注単価の設定
+PERFORM FRM_SET_HTANKA.
+* ↑
+
+*   (a) 仕入先コード,仕入先名抽出処理
+
+**---仕入先コード０サプレイス処理
+PERFORM FRM_ZERO_DEL CHANGING GF_HANBAI-LIFNR.
+IF SY-INDEX = 0.
+GF_WRITE-LIFNR = GF_HANBAI-LIFNR.  " 仕入先コード
+GF_WRITE-LNAME = GF_HANBAI-NAME1.  " 仕入先テキスト
+EXIT.
+ENDIF.
+
+ENDLOOP.
+
+* ⑥ 購買伝票別履歴内部TBLループ処理
+SORT GT_KOUBAI DESCENDING BY BLDAT." 入庫日
+*   (ア) 入庫日(伝票日付)抽出処理
+LOOP AT GT_KOUBAI INTO GF_KOUBAI
+WHERE  EBELN = GF_HANBAI-VBELN "発注番号=後続伝票番号
+AND   EBELP = GF_HANBAI-POSNN. "明細番号=後続明細番号
+
+IF SY-INDEX = 0.
+GF_WRITE-BLDAT = GF_KOUBAI-BLDAT.  " (入庫日)伝票日付
+EXIT.
+
+ENDIF.
+
+ENDLOOP.
+
+*--- 2005/01/28 DMC K.ONODA ADD ↓
+* 出荷済み･未出庫数量の取得
+PERFORM FRM_SET_LFIMG.
+*--- 2005/01/28 DMC K.ONODA ADD ↑
+* Add 2006.03.02--->
+IF GF_WRITE-LGPBE IN P_LGPBE .
+* Add 2006.03.02<---
+
+* ⑦ 帳票出力内部テーブルへの設定レコードの追加処理
+APPEND GF_WRITE TO GT_WRITE.
+* Add 2006.03.02--->
+ENDIF .
+* Add 2006.03.02<---
+
+ENDFORM.                    " frm_meisai
+*&---------------------------------------------------------------------*
+*&      Form  frm_kijitu
+*&---------------------------------------------------------------------*
+*       販売明細データ納入期日設定処理
+*----------------------------------------------------------------------*
+FORM FRM_KIJITU.
+
+SELECT SINGLE
+EDATU
+INTO CORRESPONDING FIELDS OF GF_WRITE
+FROM VBEP
+WHERE VBELN = GF_JUTYU-VBELN "販売伝票=受注番号
+AND   POSNR = W_POSNR "販売伝票明細=明細番号
+AND   ETENR = '0001'." 納入日程行=
+
+* エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+MESSAGE S600(Z1) WITH TEXT-007."販売明細データ
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH 'ZM012100' TEXT-007 '8'.
+ENDCASE.
+
+ENDFORM.                    " frm_kijitu
+*&---------------------------------------------------------------------*
+*&      Form  frm_hokan
+*&---------------------------------------------------------------------*
+*       品目の保管場所データ内部TBLの設定処理
+*----------------------------------------------------------------------*
+FORM FRM_SET_HOKAN.
+
+SELECT
+LGPBE
+INTO TABLE GT_TANABAN
+FROM MARD
+WHERE MATNR = GF_JUTYU-MATNR "品目コード=品目コード
+*--- 2002/02/19 PSD k.usami ADD ↓
+*    AND   WERKS = GF_JUTYU-BWKEY. "プラント=評価レベル(プラント)
+AND   WERKS = GF_JUTYU-WERKS. "プラント=評価レベル(プラント)
+*--- 2002/02/19 PSD k.usami ADD ↑
+
+* 対象データ件数取得
+DATA: N TYPE I.
+DESCRIBE TABLE GT_TANABAN LINES N.
+
+* 棚番設定処理/棚番チェック
+IF SY-SUBRC = 4 OR N = 1."対象データ0～1件
+LOOP AT GT_TANABAN INTO GF_TANABAN.
+GF_WRITE-LGPBE = GF_TANABAN-LGPBE.
+ENDLOOP.
+
+ELSEIF SY-SUBRC = 0 AND N > 1  .    " 対象データ2件以上
+LOOP AT GT_TANABAN INTO GF_TANABAN.
+GF_TANABAN-LGPBE = '****'.
+GF_WRITE-LGPBE = GF_TANABAN-LGPBE.
+ENDLOOP.
+
+*    MESSAGE s603(Z1) WITH text-008."品目の保管場所データ
+*    STOP.
+ENDIF.
+
+ENDFORM.                    " frm_hokan
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_data
+*&---------------------------------------------------------------------*
+*       対象データ存在チェック処理
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_DATA.
+
+IF GT_WRITE IS INITIAL.
+MESSAGE S600(Z1) WITH TEXT-006.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_check_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_ZERO_DEL
+*&---------------------------------------------------------------------*
+*       コード変換サブルーチン
+*----------------------------------------------------------------------*
+*      <--P_CODE  コード
+*----------------------------------------------------------------------*
+FORM FRM_ZERO_DEL CHANGING P_CODE.
+
+DATA: L_COUNT  TYPE I,        "ループ回数
+L_DOCUNT TYPE I.        "項目長
+
+CLEAR L_COUNT.
+
+*--- コード長を取得
+L_DOCUNT = STRLEN( P_CODE ).
+
+*--- コード変換ループ
+DO L_DOCUNT TIMES.
+IF P_CODE+L_COUNT(1) = '0'   OR
+P_CODE+L_COUNT(1) = SPACE.
+CLEAR P_CODE+L_COUNT(1).
+ELSE.
+P_CODE+L_COUNT(1) = P_CODE+L_COUNT(1).
+EXIT.
+ENDIF.
+L_COUNT = L_COUNT + 1.
+ENDDO.
+
+ENDFORM.                    " frm_ZERO_DEL
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_data
+*&---------------------------------------------------------------------*
+*       帳票出力処理
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_DATA.
+
+*--- 2002/01/10 PSD k.usami ADD ↓
+*--- 内部テーブル変換処理
+GT_ALV[] = GT_WRITE[].
+*--- 2002/01/10 PSD k.usami ADD ↑
+
+*--- ページ切り替え設定
+GS_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+
+*--- 2002/02/07 PSD k.usami ADD ↓
+*--- 一覧ステータス印刷拒否設定
+GS_PRINT-NO_PRINT_LISTINFOS = 'X'.
+*--- 2002/02/07 PSD k.usami ADD ↑
+
+*--- イベント取得処理
+PERFORM FRM_EVENT_GET.
+
+* 'REUSE_ALV_LIST_DISPLAY'用変数の設定
+G_REPID = SY-REPID.
+
+* リストの出力
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+*   I_INTERFACE_CHECK              = ' '
+*   I_BYPASSING_BUFFER             =
+*   I_BUFFER_ACTIVE                = ' '
+I_CALLBACK_PROGRAM             = G_REPID       "レポートID
+*   I_CALLBACK_PF_STATUS_SET       = ' '
+I_CALLBACK_TOP_OF_PAGE         = TOP_OF_PAGE    "TOP_OF_PAGE
+*   I_CALLBACK_USER_COMMAND        = ' '
+I_STRUCTURE_NAME               = 'ZMLIST_V21'  "構造
+IS_LAYOUT                      = GS_LAYOUT     "レイアウト設定
+*    IT_FIELDCAT                    = GT_FIELDCAT[] "カタログ設定
+*   IT_EXCLUDING                   =
+*   IT_SPECIAL_GROUPS              =
+*   IT_SORT                        =
+*   IT_FILTER                      =
+*   IS_SEL_HIDE                    =
+*   I_DEFAULT                      = ' '
+I_SAVE                         = 'A'           "レイアウト保存
+*   IS_VARIANT                     = G_VARIANT
+IT_EVENTS                      = GT_EVENT[]    "イベント設定
+*   IT_EVENT_EXIT                  =
+*--- 2002/02/07 PSD k.usami ADD ↓
+IS_PRINT                       = GS_PRINT      "印刷拒否設定
+*--- 2002/02/07 PSD k.usami ADD ↑
+*   IS_REPREP_ID                   =
+*   I_SCREEN_START_COLUMN          = 0
+*   I_SCREEN_START_LINE            = 0
+*   I_SCREEN_END_COLUMN            = 0
+*   I_SCREEN_END_LINE              = 0
+* IMPORTING
+*   E_EXIT_CAUSED_BY_CALLER        =
+*   ES_EXIT_CAUSED_BY_USER         =
+TABLES
+*--- 2002/01/10 PSD k.usami MOD ↓
+*    T_OUTTAB                       = GT_WRITE      "データの受取TBL
+T_OUTTAB                       = GT_ALV  " データの受取TBL
+*--- 2002/01/10 PSD k.usami MOD ↑
+* EXCEPTIONS
+*   PROGRAM_ERROR                  = 1
+*   OTHERS                         = 2
+.
+ENDFORM.                    " frm_write_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_event_get
+*&---------------------------------------------------------------------*
+*       イベント取得処理
+*----------------------------------------------------------------------*
+FORM FRM_EVENT_GET.
+
+* イベント取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE     = 0
+IMPORTING
+ET_EVENTS       = GT_EVENT
+EXCEPTIONS
+LIST_TYPE_WRONG = 1
+OTHERS          = 2.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+*--- 使用イベントに実行するサブルーチン名を設定
+LOOP AT GT_EVENT INTO GS_EVENT.
+*--- 2002/01/10 PSD K.Usami MOD ↓
+*    WHERE NAME = 'TOP_OF_PAGE'.
+*    GS_EVENT-FORM = 'FRM_TOP_OF_PAGE'.
+*    MODIFY GT_EVENT FROM GS_EVENT.
+CASE GS_EVENT-NAME.
+WHEN 'TOP_OF_PAGE'.
+GS_EVENT-FORM = 'FRM_TOP_OF_PAGE'.
+MODIFY GT_EVENT FROM GS_EVENT.
+WHEN 'CALLER_EXIT'.
+GS_EVENT-FORM = 'FRM_CALLER_EXIT'.
+MODIFY GT_EVENT FROM GS_EVENT.
+ENDCASE.
+*--- 2002/01/10 PSD K.Usami MOD ↑
+ENDLOOP.
+
+ENDFORM.                    " frm_event_get
+*&---------------------------------------------------------------------*
+*&    Form   TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+FORM FRM_TOP_OF_PAGE.
+
+DATA: L_SY-TABIX TYPE P.
+
+L_SY-TABIX = SY-TABIX.
+
+*  IF SY-PAGNO = 1.
+*    READ TABLE GT_WRITE INTO GF_HEADER INDEX 1.
+*    WRITE:    text-001.
+*    SKIP.
+*    WRITE: /  text-002,' ',GF_HEADER-WERKS,GF_HEADER-VNAME.
+*    WRITE: /  text-009,GF_HEADER-EKGRP,GF_HEADER-EKNAM.
+*
+*  ELSEIF SY-PAGNO >= 2.
+*    READ TABLE GT_WRITE INTO GF_HEADER INDEX L_SY-TABIX.
+*    WRITE:    text-001.
+*    SKIP.
+*    WRITE: /  text-002,' ',GF_HEADER-WERKS,GF_HEADER-VNAME.
+*    WRITE: /  text-009,GF_HEADER-EKGRP,GF_HEADER-EKNAM.
+*    ENDIF.
+
+IF SY-PAGNO = 1.
+READ TABLE GT_ALV INTO GF_HEADER INDEX 1.
+WRITE:    TEXT-001.
+WRITE : 100 '処理日付' ,
+SY-DATUM ,
+125 '処理時刻' ,
+SY-UZEIT .
+SKIP.
+WRITE: /  TEXT-002,' ',GT_ALV-WERKS,GT_ALV-VNAME.
+WRITE: /  TEXT-009,GT_ALV-EKGRP,GT_ALV-EKNAM.
+ELSEIF SY-PAGNO >= 2.
+READ TABLE GT_ALV INTO GF_HEADER INDEX L_SY-TABIX.
+WRITE:    TEXT-001.
+WRITE : 100 '処理日付' ,
+SY-DATUM ,
+125 '処理時刻' ,
+SY-UZEIT .
+SKIP.
+WRITE: /  TEXT-002,' ',GT_ALV-WERKS,GT_ALV-VNAME.
+WRITE: /  TEXT-009,GT_ALV-EKGRP,GT_ALV-EKNAM.
+ENDIF.
+*--- 2002/01/10 PSD k.usami MOD ↑
+*---APPEND START PSD T.SAITOH 2002/05/08 ---------------------------*
+* 会計数値違い明確化文章表示
+WRITE: 100 TEXT-010.
+*---APPEND END   PSD T.SAITOH 2002/05/08 ---------------------------*
+
+ENDFORM.
+************************************************************************
+* ALV CALLER_EXIT（ 2002/01/10 PSD k.usami ADD ）
+***********************************************************************
+FORM FRM_CALLER_EXIT USING RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+RS_DATA-CALLBACK_HEADER_TRANSPORT = 'FILITEXTS_TEXT_TRANSPORT'.
+ENDFORM.
+*--- 2002/01/10 PSD k.Usami MOD ↑
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_htanka
+*&---------------------------------------------------------------------*
+*       発注単価、伝票通貨の設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_HTANKA.
+
+DATA: BEGIN OF LF_EKPO,
+WAERS TYPE EKKO-WAERS,
+NETPR TYPE EKPO-NETPR,
+PEINH TYPE EKPO-PEINH,
+*---APPEND START PSD T.SAITOH 2002/08/11 ---------------------------*
+MEINS TYPE EKPO-MEINS,"発注単位
+*---APPEND END   PSD T.SAITOH 2002/08/11 ---------------------------*
+END   OF LF_EKPO.
+
+DATA: L_RET_NETPR(125) TYPE C.
+
+* 購買発注伝票取得
+SELECT SINGLE WAERS NETPR PEINH
+*---APPEND START PSD T.SAITOH 2002/08/11 ---------------------------*
+B~MEINS "発注単位
+*---APPEND END   PSD T.SAITOH 2002/08/11 ---------------------------*
+INTO CORRESPONDING FIELDS OF LF_EKPO
+FROM EKKO AS A INNER JOIN EKPO AS B
+ON   A~EBELN = B~EBELN
+WHERE A~EBELN = GF_HANBAI-VBELN
+AND   B~EBELP = GF_HANBAI-POSNN.
+
+* 正味額の価格変換
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY    = LF_EKPO-WAERS
+SAP_AMOUNT  = LF_EKPO-NETPR
+IMPORTING
+IDOC_AMOUNT = L_RET_NETPR.
+GF_WRITE-HVERPR = L_RET_NETPR.
+
+* 価格条件単位考慮
+IF LF_EKPO-PEINH <> 0.
+GF_WRITE-HVERPR = GF_WRITE-HVERPR / LF_EKPO-PEINH.
+ELSE.
+GF_WRITE-HVERPR = 0.
+ENDIF.
+
+* 通貨の設定
+GF_WRITE-DWAERS = LF_EKPO-WAERS.
+
+*---APPEND START PSD T.SAITOH 2002/08/11 ---------------------------*
+* 発注単位の追加
+WRITE LF_EKPO-MEINS TO GF_WRITE-MEINS.
+*---APPEND END   PSD T.SAITOH 2002/08/11 ---------------------------*
+
+ENDFORM.                    " frm_set_htanka
+*---APPEND START PSD T.SAITOH 2002/03/31 仕入単価仕様変更対応---------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_VBFA
+*&---------------------------------------------------------------------*
+*       VBFAからデータ取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_VBFA.
+SELECT VBELV POSNV VBELN POSNN
+FROM VBFA
+INTO CORRESPONDING FIELDS OF TABLE GT_VBFA
+WHERE VBELV = GF_JUTYU-VBELN
+AND POSNV = GF_JUTYU-POSNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'VBFA' SY-SUBRC.
+*      STOP.
+ENDCASE.
+
+
+ENDFORM.                    " FRM_SELECT_VBFA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_EKPO
+*&---------------------------------------------------------------------*
+*       EKPOからデータ取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_EKPO.
+DATA:L_EBELP TYPE EKPO-EBELP.
+
+LOOP AT GT_VBFA INTO GF_VBFA.
+
+L_EBELP = GF_VBFA-POSNN.
+
+SELECT SINGLE EBELN EBELP NETPR PEINH
+FROM EKPO
+INTO CORRESPONDING FIELDS OF GF_EKPO
+WHERE EBELN = GF_VBFA-VBELN
+AND EBELP = L_EBELP.
+
+* MODIFY PSD K.ARAI 2002/05/28
+INSERT GF_EKPO INTO TABLE GT_EKPO .
+*    APPEND GF_EKPO TO GT_EKPO.
+* MODIFY END
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'EKPO' SY-SUBRC.
+*      STOP.
+ENDCASE.
+ENDLOOP.
+
+ENDFORM.                    " FRM_SELECT_EKPO
+*---APPEND END   PSD T.SAITOH 2002/03/31 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_NETPR
+*&---------------------------------------------------------------------*
+*       単価の設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_NETPR.
+
+DATA : L_NETPR(9) TYPE P DECIMALS 2."単価
+
+CLEAR GF_MBEW.
+* データ取得
+SELECT SINGLE MATNR
+BWKEY
+SALK3 "評価在庫合計額
+LBKUM "評価在庫合計(数量)
+INTO CORRESPONDING FIELDS OF GF_MBEW
+FROM MBEW
+WHERE MATNR = GF_JUTYU-MATNR
+AND BWKEY = GF_JUTYU-WERKS.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4. " NO-DATA
+EXIT.
+WHEN 8. " SYSTEM ERROR
+MESSAGE A603(Z1) WITH SY-REPID 'MBEW' SY-SUBRC.
+ENDCASE.
+* 評価在庫合計額の価格変換
+PERFORM FRM_CHANGE_COST    USING    GF_JUTYU-WAERS
+GF_MBEW-SALK3
+CHANGING L_NETPR.
+* 単価計算
+CASE GF_MBEW-LBKUM.
+WHEN 0.
+GF_WRITE-VERPR = 0.
+WHEN OTHERS.
+GF_WRITE-VERPR =  L_NETPR / GF_MBEW-LBKUM.
+ENDCASE.
+
+ENDFORM.                    " FRM_SET_NETPR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHANGE_COST
+*&---------------------------------------------------------------------*
+*       金額変換処理
+*----------------------------------------------------------------------*
+*      -->P_TSUKACD  通貨コード
+*      -->P_KINGAKU  変換前金額
+*      <--P_HENKAN   変換後金額
+*----------------------------------------------------------------------*
+FORM FRM_CHANGE_COST    USING    P_TSUKACD
+P_KINGAKU
+CHANGING P_HENKAN.
+DATA : L_AMOUNT_DIS TYPE WMTO_S-AMOUNT,
+L_AMOUNT_INT TYPE WMTO_S-AMOUNT.
+L_AMOUNT_INT = P_KINGAKU.
+*--- 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+EXPORTING
+CURRENCY        = P_TSUKACD
+AMOUNT_INTERNAL = L_AMOUNT_INT
+IMPORTING
+AMOUNT_DISPLAY  = L_AMOUNT_DIS
+EXCEPTIONS
+INTERNAL_ERROR  = 1
+OTHERS          = 2.
+IF SY-SUBRC <> 1.
+P_HENKAN = L_AMOUNT_DIS.
+ENDIF.
+
+ENDFORM.                    " FRM_KINGAKU_HENKAN
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_LFIMG
+*&---------------------------------------------------------------------*
+*       出荷済み･未出庫数量の取得
+*----------------------------------------------------------------------*
+FORM FRM_SET_LFIMG.
+
+CLEAR:GT_LFIMG,GF_WRITE-LFIMG.
+*Mod 2005.09.22 --->
+SELECT LFIMG
+*  2006/03/31 ADD --->
+MEINS
+VRKME
+MATNR
+*  2006/03/31 ADD --->
+*  2006/03/31 MOD --->
+*    INTO TABLE GT_LFIMG
+INTO CORRESPONDING FIELDS OF TABLE GT_LFIMG
+*  2006/03/31 MOD --->
+FROM VBUP AS VB INNER JOIN LIPS AS LI
+*      ON VB~VBELN = LI~VGBEL
+*     AND VB~POSNR = LI~VGPOS
+ON VB~VBELN = LI~VBELN
+AND VB~POSNR = LI~POSNR
+*   WHERE VB~VBELN = GF_JUTYU-VBELN      " 受注番号
+*     AND VB~POSNR = GF_JUTYU-POSNR      " 明細番号
+*     AND VB~LFGSA = 'B'.                " 明細の全体出荷ステータス
+WHERE LI~VGBEL = GF_JUTYU-VBELN      " 受注番号
+AND LI~VGPOS = GF_JUTYU-POSNR      " 明細番号
+AND VB~WBSTA <> 'C'.               " 在庫移動ステータス
+
+
+
+
+*Mod 2005.09.22 --->
+
+* エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+LOOP AT GT_LFIMG INTO GF_LFIMG.
+* 2006/03/31 ADD --->
+IF GF_LFIMG-MEINS NE GF_LFIMG-VRKME .
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR              = GF_LFIMG-MATNR
+I_IN_ME              = GF_LFIMG-VRKME
+I_OUT_ME             = GF_LFIMG-MEINS
+I_MENGE              = GF_LFIMG-LFIMG
+IMPORTING
+E_MENGE              = GF_LFIMG-LFIMG
+EXCEPTIONS
+ERROR_IN_APPLICATION = 1
+ERROR                = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDIF .
+* 2006/03/31 ADD <---
+GF_WRITE-LFIMG = GF_WRITE-LFIMG + GF_LFIMG-LFIMG.
+ENDLOOP.
+FREE:GT_LFIMG.
+WHEN 4.    " 対象データなし
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH 'ZM012100' TEXT-011 '8'.
+ENDCASE.
+
+ENDFORM.                    " FRM_SET_LFIMG

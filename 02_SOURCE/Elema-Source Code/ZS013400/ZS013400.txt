@@ -1,0 +1,569 @@
+REPORT ZS013400 MESSAGE-ID Z1 .
+
+
+************************************************************************
+* 処理名：得意先回答納期一括変更
+*
+*
+*　作成日：2010/08/12
+*
+* [改定履歴]
+*　YYYY/MM/DD  Programar         Description
+*  2012/08/14  ISID              ES-UP
+*  2014/08/29  ISID18            コードページを"UTF-8"に修正
+*  2014/09/12  ISID19            グローバル化対応
+*  2015/01/12  ISID11            アップロード時のBOMロジック改修
+*  2015/02/04  ISID11            コードページ処理の再修正
+************************************************************************
+
+
+TABLES : VBAK ,
+VBKD .
+
+DATA : BDC_TAB TYPE TABLE OF BDCDATA WITH HEADER LINE ,
+IN_DATA(1000) TYPE C ,
+BDC_MSG TYPE TABLE OF BDCMSGCOLL WITH HEADER LINE .
+*----------------------------------------------------------------------*
+* 型定義
+*----------------------------------------------------------------------*
+TYPES : BEGIN OF TYP_FILE ,
+VBELN(10) TYPE C ,          "受注伝票
+BSTDK_E(10) TYPE C ,          "得意先回答納期
+END OF TYP_FILE ,
+BEGIN OF TYP_DATA  ,
+VBELN LIKE VBAK-VBELN ,     "仕入先コード
+BSTDK_E LIKE VBKD-BSTDK_E ,     "得意先回答納期
+END OF TYP_DATA  .
+*----------------------------------------------------------------------*
+* 変数宣言
+*----------------------------------------------------------------------*
+DATA :
+D_TAB TYPE TABLE OF TYP_DATA ,
+D_WRK TYPE TYP_DATA ,
+F_TAB TYPE TABLE OF TYP_FILE ,
+F_WRK TYPE TYP_FILE .
+
+DATA : W_MEINS(3)   TYPE C,          "発注単位
+W_CNT        TYPE I,          "テーブル行数カウンタ
+FLG_MEINS(1) TYPE C,          "単位変換フラグ
+FLG_WRITE(1) TYPE C.          "WRITEフラグ
+
+DATA : BDC_TRAN LIKE SYST-TCODE VALUE 'VA02' ,
+BDC_MODE(1) TYPE C VALUE 'N' .
+*      BDC_MODE(1) TYPE C VALUE 'A' .
+* Add ES-UP 2012/08/14 -->
+****START UPD 2014/08/29 ISID18****
+*CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+**** START DEL 2015/02/04 ISID11 ****
+*CONSTANTS CNS_UTF TYPE STRING VALUE `UTF-8`.
+**** END DEL 2015/02/04 ISID11 ****
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/08/14 <--
+*----------------------------------------------------------------------*
+* 選択画面
+*----------------------------------------------------------------------*
+
+**** START ADD 2014/09/12 ISID19 ****
+PARAMETERS : P_BUKRS  TYPE T001-BUKRS OBLIGATORY.
+**** END ADD 2014/09/12 ISID19 ****
+
+PARAMETERS : P_FILE LIKE RLGRAP-FILENAME.
+PARAMETERS : P_LOCAL RADIOBUTTON GROUP R_1 , "ローカル
+P_SERVE RADIOBUTTON GROUP R_1 . "サーバー
+
+**** START ADD 2014/09/12 ISID19 ****
+************************************************************************
+* INITIALIZATION
+************************************************************************
+INITIALIZATION .
+GET PARAMETER ID 'BUK' FIELD P_BUKRS.
+**** END ADD 2014/09/12 ISID19 ****
+
+AT SELECTION-SCREEN .
+
+**** START ADD 2014/09/12 ISID19 ****
+PERFORM CHK_PRC.
+**** END ADD 2014/09/12 ISID19 ****
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+PERFORM WS_FILENAME_GET USING P_FILE.
+
+START-OF-SELECTION .
+
+PERFORM READ_FILE .
+PERFORM DATA_GET .
+*  PERFORM CHK_ITEM .
+LOOP AT F_TAB INTO F_WRK .
+READ TABLE D_TAB INTO D_WRK WITH KEY VBELN = F_WRK-VBELN
+BINARY SEARCH.
+PERFORM BDC_SET .
+PERFORM CALL_TRAN .
+ENDLOOP .
+
+*----------------------------------------------------------------------*
+* ファイルパス取得
+*----------------------------------------------------------------------*
+FORM WS_FILENAME_GET USING P_FILE.
+* Mod ES-UP 2012/08/14 -->
+*  CALL FUNCTION 'WS_FILENAME_GET'
+*    EXPORTING
+*      DEF_PATH         = 'C:\SAPDATA'
+*      MASK             = '*.*,ALL FILES,*.*.'
+*      MODE             = 'O'
+*    IMPORTING
+*      FILENAME         = P_FILE
+*    EXCEPTIONS
+*      INV_WINSYS       = 1
+*      NO_BATCH         = 2
+*      SELECTION_CANCEL = 3
+*      SELECTION_ERROR  = 4
+*      OTHERS           = 5.
+DATA: L_FILE_TABLE TYPE FILETABLE,
+L_FILE TYPE REF TO FILE_TABLE,
+L_RC TYPE I.
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+*      WINDOW_TITLE            = WINDOW_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+*      DEFAULT_FILENAME        = DEFAULT_FILENAME
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+INITIAL_DIRECTORY       = 'C:\SAPDATA'
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = L_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS
+*      FILE_OPEN_DIALOG_FAILED = 1
+*      CNTL_ERROR              = 2
+*      ERROR_NO_GUI            = 3
+*      NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 0 ).
+READ TABLE L_FILE_TABLE REFERENCE INTO L_FILE INDEX 1.
+IF SY-SUBRC = 0.
+P_FILE = L_FILE->FILENAME.
+ENDIF.
+* Mod ES-UP 2012/08/14 <--
+ENDFORM.                    "WS_FILENAME_GET
+*----------------------------------------------------------------------*
+* ファイル読み込み
+*----------------------------------------------------------------------*
+FORM READ_FILE .
+* Mod ES-UP 2012/08/14 -->
+*  DATA : L_LINE(1000) TYPE C .
+*  DATA : W_TAB TYPE X VALUE '09' .
+DATA: L_LINE TYPE STRING.
+DATA: L_FILE TYPE STRING,
+**** START ADD 2015/02/04 ISID11 ****
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8  TYPE  FLAG,
+L_SUBRC    TYPE SY-SUBRC,
+**** END ADD 2015/02/04 ISID11 ****
+
+L_CODEPAGE TYPE ABAP_ENCODING.
+L_FILE = P_FILE.
+
+**** START ADD 2015/02/04 ISID11 ****
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = P_BUKRS
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+**** END ADD 2015/02/04 ISID11 ****
+
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** START UPD 2015/02/04 ISID11 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+**** END UPD 2015/02/04 ISID11 ****
+****END UPD 2014/08/29 ISID18****
+* Mod ES-UP 2012/08/14 <--
+IF P_LOCAL EQ 'X' .
+* Mod ES-UP 2012/08/14 -->
+*    CALL FUNCTION 'WS_UPLOAD'
+*         EXPORTING
+*              FILENAME                = P_FILE
+*              FILETYPE                = 'DAT'
+*         TABLES
+*              DATA_TAB                = F_TAB
+*         EXCEPTIONS
+*              CONVERSION_ERROR        = 1
+*              FILE_OPEN_ERROR         = 2
+*              FILE_READ_ERROR         = 3
+*              INVALID_TYPE            = 4
+*              NO_BATCH                = 5
+*              UNKNOWN_ERROR           = 6
+*              INVALID_TABLE_WIDTH     = 7
+*              GUI_REFUSE_FILETRANSFER = 8
+*              CUSTOMER_ERROR          = 9
+*              OTHERS                  = 10.
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILE
+FILETYPE                = 'DAT'
+HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*        HEADER_LENGTH           = 0
+*        READ_BY_LINE            = 'X'
+*        DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+*        IGNORE_CERR             = ABAP_TRUE
+*        REPLACEMENT             = '#'
+*        VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*      IMPORTING
+*        FILELENGTH              = FILELENGTH
+*        HEADER                  = HEADER
+CHANGING
+DATA_TAB                = F_TAB
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+* Mod ES-UP 2012/08/14 <--
+*   汎用モジュール失敗時エラーメッセージ出力
+IF SY-SUBRC NE 0.
+MESSAGE I616 .
+STOP .
+ELSE.
+ENDIF.
+ELSE .
+* Mod ES-UP 2012/08/14 -->
+*    OPEN DATASET P_FILE FOR INPUT IN TEXT MODE .
+
+**** START ADD 2015/02/04 ISID11 ****
+IF L_FLGUTF8 IS INITIAL.
+
+TRY .
+OPEN DATASET P_FILE FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+
+L_SUBRC = 8.
+
+ENDTRY.
+
+ELSE.
+**** END ADD 2015/02/04 ISID11 ****
+
+**** START UPD 2014/08/31 ISID19 ****
+*    OPEN DATASET P_FILE FOR INPUT
+*      IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+OPEN DATASET P_FILE FOR INPUT IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/08/31 ISID19 ****
+**** START ADD 2015/01/12 ISID11 ****
+SKIPPING BYTE-ORDER MARK
+**** END ADD 2015/01/12I SID11 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID11 ****
+L_SUBRC = SY-SUBRC.
+
+ENDIF.
+**** END ADD 2015/02/04 ISID11 ****
+* Mod ES-UP 2012/08/14 <--
+**** START UPD 2015/02/04 ISID11 ****
+*    IF SY-SUBRC NE 0 .
+IF L_SUBRC <> 0 .
+**** END UPD 2015/02/04 ISID11 ****
+MESSAGE I616 .
+STOP .
+ELSE .
+DO .
+READ DATASET P_FILE INTO L_LINE .
+IF SY-SUBRC NE 0 .
+EXIT .
+ENDIF .
+* Mod ES-UP 2012/08/14 -->
+*        SPLIT L_LINE AT W_TAB
+SPLIT L_LINE AT CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB
+* Mod ES-UP 2012/08/14 <--
+INTO F_WRK-VBELN
+F_WRK-BSTDK_E
+.
+APPEND F_WRK TO F_TAB .
+CLEAR : F_WRK .
+ENDDO .
+CLOSE DATASET P_FILE .
+ENDIF .
+ENDIF .
+
+* 取得データ０件時エラーメッセージ出力
+CLEAR : W_CNT.
+DESCRIBE TABLE F_TAB LINES W_CNT .
+IF W_CNT = 0 .
+MESSAGE I616 .
+STOP .
+ELSE.
+ENDIF.
+
+* 取得データ変換
+LOOP AT F_TAB INTO F_WRK.
+PERFORM CONV_ALPHA_IN_SYORI USING F_WRK-VBELN
+CHANGING F_WRK-VBELN.
+MODIFY F_TAB FROM F_WRK.
+ENDLOOP.
+
+
+
+ENDFORM .                    "READ_FILE
+*----------------------------------------------------------------------*
+* 対象データ取得
+*----------------------------------------------------------------------*
+FORM DATA_GET .
+
+**** START UPD 2014/09/12 ISID19 ****
+** 変更前データ取得
+*  SELECT VBELN
+*         BSTDK_E
+*    INTO CORRESPONDING FIELDS OF TABLE D_TAB
+*    FROM VBKD
+*     FOR ALL ENTRIES IN F_TAB
+*   WHERE VBELN = F_TAB-VBELN
+*     AND POSNR = '000000'.
+
+* 変更前データ取得
+SELECT A~VBELN
+B~BSTDK_E
+INTO CORRESPONDING FIELDS OF TABLE D_TAB
+FROM VBAK AS A
+INNER JOIN VBKD AS B
+ON A~VBELN = B~VBELN
+FOR ALL ENTRIES IN F_TAB
+WHERE A~VBELN    = F_TAB-VBELN  "販売伝票
+AND A~BUKRS_VF = P_BUKRS      "請求対象会社コード
+AND B~POSNR    = '000000'.    "明細番号
+**** END UPD 2014/09/12 ISID19 ****
+
+* 取得データ０件時エラーメッセージ出力
+CLEAR : W_CNT.
+DESCRIBE TABLE D_TAB LINES W_CNT .
+IF W_CNT = 0 .
+MESSAGE I616 .
+STOP .
+ELSE.
+SORT D_TAB BY VBELN.
+ENDIF.
+
+ENDFORM .                    "DATA_GET
+*----------------------------------------------------------------------*
+* BDCテーブルセット
+*----------------------------------------------------------------------*
+FORM BDC_SET .
+
+CLEAR : W_MEINS.
+
+
+PERFORM SET_BDC USING :
+*     第一画面
+'SAPMV45A' '0102' 'X' ,
+'BDC_CURSOR' 'VBAK-VBELN' '' ,
+'BDC_OKCODE' '/00' '' ,
+'VBAK-VBELN' F_WRK-VBELN '' ,
+*     第二画面
+'SAPMV45A' '4001' 'X' ,
+'BDC_OKCODE' '=KBES' '' ,
+*     購買発注データ
+'SAPMV45A' '4002' 'X' ,
+'BDC_OKCODE' '=SICH' '' ,
+'BDC_CURSOR' 'VBKD-BSTDK_E' '' ,
+'VBKD-BSTDK_E' F_WRK-BSTDK_E '' .
+
+ENDFORM .                    "BDC_SET
+*----------------------------------------------------------------------*
+* トランザクションコール
+*----------------------------------------------------------------------*
+FORM CALL_TRAN .
+
+DATA : W_MSG LIKE MESSAGE ,
+W_MSGNO LIKE SY-MSGNO .
+
+CALL TRANSACTION BDC_TRAN
+USING   BDC_TAB
+MODE    BDC_MODE
+MESSAGES INTO BDC_MSG
+.
+
+LOOP AT BDC_MSG WHERE MSGTYP = 'E' OR MSGTYP = 'A'.
+MOVE : BDC_MSG-MSGNR TO W_MSGNO ,
+'X'           TO FLG_WRITE.
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID = BDC_MSG-MSGID
+MSGNO = W_MSGNO
+MSGTY = BDC_MSG-MSGTYP
+MSGV1 = BDC_MSG-MSGV1
+MSGV2 = BDC_MSG-MSGV2
+MSGV3 = BDC_MSG-MSGV3
+MSGV4 = BDC_MSG-MSGV4
+*       MSGV5 = BDC_MSG-MSGV5
+IMPORTING
+*       ERROR =
+MESSG = W_MSG
+*       MSGLN =
+.
+MESSAGE ID BDC_MSG-MSGID
+*            Type BDC_MSG-MSGTYP
+TYPE 'S'
+NUMBER W_MSGNO
+WITH BDC_MSG-MSGV1
+BDC_MSG-MSGV2
+BDC_MSG-MSGV3
+BDC_MSG-MSGV4
+.
+WRITE : /1 BDC_MSG-MSGTYP,
+3 W_MSG-MSGTX .
+
+ENDLOOP .
+
+IF FLG_WRITE IS INITIAL.
+PERFORM WRITE_CHANGE_OK.
+ENDIF.
+
+ULINE.
+
+CLEAR   : FLG_WRITE.
+REFRESH : BDC_TAB , BDC_MSG .
+CLEAR   : D_WRK , F_WRK .
+
+ENDFORM .                    "CALL_TRAN
+*----------------------------------------------------------------------*
+* BDCセット
+*----------------------------------------------------------------------*
+FORM SET_BDC USING P_DAT P_VAL P_FLG .
+MOVE : P_FLG TO BDC_TAB-DYNBEGIN .
+IF P_FLG EQ 'X' .
+MOVE : P_DAT TO BDC_TAB-PROGRAM ,
+P_VAL TO BDC_TAB-DYNPRO .
+ELSE .
+MOVE : P_DAT TO BDC_TAB-FNAM ,
+P_VAL TO BDC_TAB-FVAL .
+ENDIF .
+APPEND : BDC_TAB .
+CLEAR : BDC_TAB .
+ENDFORM .                    "SET_BDC
+*----------------------------------------------------------------------*
+* 項目チェック
+*----------------------------------------------------------------------*
+FORM CHK_ITEM.
+
+ENDFORM.                    "CHK_ITEM
+*----------------------------------------------------------------------*
+* 前ゼロ埋め変換
+*----------------------------------------------------------------------*
+FORM CONV_ALPHA_IN_SYORI USING P_IN
+CHANGING P_OUT.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = P_IN
+IMPORTING
+OUTPUT = P_OUT.
+
+ENDFORM.                    "CONV_ALPHA_IN_SYORI
+*----------------------------------------------------------------------*
+* 変更成功メッセージ出力
+*----------------------------------------------------------------------*
+FORM WRITE_CHANGE_OK.
+
+**** START ADD 2014/09/12 ISID19 ****
+DATA:
+LW_MESSAGE  TYPE STRING.
+**** END ADD 2014/09/12 ISID19 ****
+
+CLEAR : W_MEINS.
+
+READ TABLE BDC_MSG WITH KEY MSGID = '06' MSGNR = '336'.
+
+IF SY-SUBRC = 0 .
+
+**** START UPD 2014/09/12 ISID19 ****
+*    WRITE : / F_WRK-VBELN ,
+*              'は変更されませんでした。'.
+CLEAR LW_MESSAGE.
+MESSAGE E120(Z3) WITH F_WRK-VBELN
+INTO LW_MESSAGE.
+*   &1は変更されませんでした。
+WRITE : / LW_MESSAGE.
+**** END UPD 2014/09/12 ISID19 ****
+
+EXIT.
+ENDIF.
+
+**** START UPD 2014/09/12 ISID19 ****
+*  WRITE : / F_WRK-VBELN ,
+*            'の納期が変更されました。'.
+CLEAR LW_MESSAGE.
+MESSAGE E121(Z3) WITH F_WRK-VBELN
+INTO LW_MESSAGE.
+*   &1の納期が変更されました。
+WRITE : / LW_MESSAGE.
+**** END UPD 2014/09/12 ISID19 ****
+
+WRITE: /  D_WRK-BSTDK_E , '⇒' , F_WRK-BSTDK_E.
+ENDFORM.                    "WRITE_CHANGE_OK
+
+**** START ADD 2014/09/12 ISID19 ****
+*&---------------------------------------------------------------------*
+*&      Form  CHK_PRC
+*&---------------------------------------------------------------------*
+*       チェック
+*----------------------------------------------------------------------*
+FORM CHK_PRC .
+
+* 会社コード存在チェック
+SELECT SINGLE BUKRS
+FROM T001
+INTO P_BUKRS
+WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E016(Z3) WITH P_BUKRS.
+*   会社コード & が存在しません。
+ENDIF.
+
+* 会社コード権限チェック
+AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+ID 'BUKRS' FIELD P_BUKRS
+ID 'ACTVT' FIELD '03'.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E015(Z3) WITH P_BUKRS.
+*   会社コード & では実行する権限がありません。
+ENDIF.
+
+ENDFORM.                    " CHK_PRC
+**** END ADD 2014/09/12 ISID19 ****
+*Selection text・
+*P_BUKRS:        Company Code
+*P_FILE:        File Name
+*P_LOCAL:        Local
+*P_SERVE:        Service

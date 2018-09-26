@@ -1,0 +1,625 @@
+************************************************************************
+* [プログラム名]
+*   ZS013300        受注伝票支払条件一括更新
+*
+* [処理概要]
+*   未出荷未請求の受注伝票（受注残）について、
+*　 ヘッダ、明細の支払条件を最新の得意先マスタを用いて一括更新する。
+*
+* [履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2009/07/21   SOLFIS.MAEKAWA    プログラム作成
+*
+************************************************************************
+report ZS013300 message-id z1
+line-size   170
+line-count  58
+no standard page heading.
+************************************************************************
+*     宣言部
+************************************************************************
+*----------------------------------------------------------------------*
+* TABLES定義
+*----------------------------------------------------------------------*
+tables:vbak, vbkd, vbuk, vbup, vbfa, kna1, knvv, usr01.
+*----------------------------------------------------------------------*
+* 構造定義
+*----------------------------------------------------------------------*
+*未完伝票取得用
+types:begin of t_mikan,
+vbeln like vbak-vbeln,        "伝票番号
+lfgsk like vbuk-lfgsk,        "全出荷ステータス
+gbstk like vbuk-gbstk,        "全ステータス
+end of t_mikan.
+
+*伝票情報取得用
+types:begin of t_dpinfo,
+vbeln like vbak-vbeln,        "伝票番号
+kunnr like vbak-kunnr,        "得意先（受注先）
+vkorg like vbak-vkorg,        "販売組織
+vtweg like vbak-vtweg,        "流通チャネル
+spart like vbak-spart,        "製品部門
+end of t_dpinfo.
+
+*出荷済明細存在チェック用
+types:begin of t_shukka,
+vbelv like vbfa-vbelv,        "伝票番号
+end of t_shukka.
+
+*トランザクション実行用
+types:begin of t_tran,
+vbeln like vbak-vbeln,        "伝票番号
+posnr like vbkd-posnr,        "明細
+kunnr like vbak-kunnr,        "得意先（受注先）
+vkorg like vbak-vkorg,        "販売組織
+vtweg like vbak-vtweg,        "流通チャネル
+spart like vbak-spart,        "製品部門
+zterm like vbkd-zterm,        "変更前支払条件
+lposn like vbkd-posnr,        "最終明細
+zter2 like vbkd-zterm,        "ヘッダ支払条件
+name1 like kna1-name1,        "得意先名称
+zter3 like vbkd-zterm,        "変更後支払条件
+skflg(1) type c,              "出荷済明細ﾌﾗｸﾞ
+chflg(1) type c,              "ﾏﾆｭｱﾙ変更ﾌﾗｸﾞ
+reslt(8) type c,              "処理結果
+lgmsg(400) type c,            "ログメッセージ
+end of t_tran.
+
+* ＢＤＣメッセージ取得用
+types: begin of typ_t100,
+sprsl   type t100-sprsl,  "言語キー
+arbgb   type t100-arbgb,  "アプリケーションエリア
+msgnr   type t100-msgnr,  "メッセージ番号
+Text    type t100-text,   "メッセージテキスト
+end of typ_t100.
+
+*----------------------------------------------------------------------*
+* 内部テーブル定義
+*----------------------------------------------------------------------*
+data:
+*未完伝票取得用
+gt_mikan type table of t_mikan,
+*伝票情報取得用
+gt_dpinfo type table of t_dpinfo,
+*出荷済明細存在チェック用
+gt_shukka type table of t_shukka,
+*トランザクション実行用
+gt_tran type table of t_tran.
+
+* ＢＤＣデータ編集用
+data: gt_bdc  type standard table of bdcdata with header line,
+* メッセージ取得用
+gt_msg  type standard table of bdcmsgcoll with header line.
+
+*----------------------------------------------------------------------*
+* 変数定義
+*----------------------------------------------------------------------*
+data:
+*対象処理件数取得用
+gw_dtcnt(5) type p,
+*正常処理件数取得用
+gw_okcnt(5) type p,
+*異常処理件数取得用
+gw_ercnt(5) type p.
+
+*----------------------------------------------------------------------*
+*定数定義
+*----------------------------------------------------------------------*
+constants:
+cns_mode(1) type c value 'N',   " N = ﾊﾞｯｸｸﾞﾗｳﾝﾄﾞ実行
+cns_update(1) type c value 'S'. " S = 更新モード
+
+************************************************************************
+* 選択画面定義
+************************************************************************
+*共通選択
+selection-screen begin of block bl1 with frame title text-s01.
+select-options: s_kunnr for kna1-kunnr obligatory.   "得意先コード
+select-options: s_vbeln for vbak-vbeln .             "伝票番号
+select-options: s_audat for vbak-audat .             "伝票日付
+parameters: p_test as checkbox default 'X'.       "テスト実行
+selection-screen end of block bl1.
+
+************************************************************************
+*INITIALIZATION.
+************************************************************************
+
+************************************************************************
+* AT SELECTION-SCREEN
+************************************************************************
+at selection-screen.
+*変数の初期化
+perform init_wa.
+
+*入力値チェック
+perform check_input.
+
+************************************************************************
+*START-OF-SELECTION
+************************************************************************
+start-of-selection.
+*データの取得
+perform get_data.
+
+*データの編集
+perform edit_data.
+
+*支払条件一括更新
+perform change_zterm.
+
+************************************************************************
+* 出力
+************************************************************************
+
+*本番実行時のみスプール出力
+if p_test = ''.
+perform set_spoole.
+endif.
+
+*ログ出力
+perform output_log.
+
+************************************************************************
+*TOP-OF-PAGE.
+************************************************************************
+top-of-page.
+*一覧ヘッダの作成
+perform write_head.
+
+*          <<<<<<<<<<<<  以下サブルーチン   >>>>>>>>>>>>>>
+*---------------------------------------------------------------------*
+*       FORM init_wa                                                  *
+*---------------------------------------------------------------------*
+*       変数の初期化                                                  *
+*---------------------------------------------------------------------*
+form init_wa.
+clear: gw_dtcnt, gw_okcnt, gw_ercnt.
+refresh: gt_mikan, gt_dpinfo, gt_tran, gt_bdc, gt_msg.
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM check_input                                              *
+*---------------------------------------------------------------------*
+*       入力値チェック                                                *
+*---------------------------------------------------------------------*
+form check_input.
+
+* 得意先コードの存在チェック
+select kunnr into kna1-kunnr
+from kna1
+where kunnr in s_kunnr.
+endselect.
+
+if sy-subrc <> 0.
+message e614 with '得意先コード'.
+endif.
+
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM get_data                                                 *
+*---------------------------------------------------------------------*
+*       対象データ取得                                                *
+*---------------------------------------------------------------------*
+form get_data.
+
+*ステータス未完の伝票取得
+select vbeln
+into corresponding fields of table gt_mikan
+from vbuk
+where vbeln in s_vbeln
+and lfgsk <> 'C'
+and gbstk <> 'C'.
+*対象伝票が1件も存在しない場合処理中止
+if sy-subrc <> 0.
+message s614 with '対象の受注残'.
+stop.
+endif.
+
+*選択画面の入力値よりレコード抽出・伝票情報取得
+select vbeln vkorg vtweg spart kunnr
+into corresponding fields of table gt_dpinfo
+from vbak
+for all entries in gt_mikan
+where vbeln = gt_mikan-vbeln
+and audat in s_audat    "伝票日付
+and ( vbtyp = 'C' or    "受注
+vbtyp = 'K' or    "ｸﾚｼﾞｯﾄﾒﾓ依頼
+vbtyp = 'H' or    "返品
+vbtyp = 'L' or    "ﾃﾞﾋﾞｯﾄﾞﾒﾓ依頼
+vbtyp = 'I'   )   "無償出荷
+and kunnr in s_kunnr.   "得意先コード
+
+*対象伝票が1件も存在しない場合処理中止
+if sy-subrc <> 0.
+message s614 with '対象の受注残'.
+stop.
+endif.
+
+*対象伝票の変更前支払条件取得
+select vbeln posnr zterm
+into corresponding fields of table gt_tran
+from vbkd
+for all entries in gt_dpinfo
+where vbeln = gt_dpinfo-vbeln.
+
+*出荷済明細存在チェック用テーブル取得
+select vbelv vbtyp_n
+into corresponding fields of table gt_shukka
+from vbfa
+for all entries in gt_tran
+where vbelv = gt_tran-vbeln
+and ( vbtyp_n = 'J'        "J=出荷
+or vbtyp_n = 'T' ) .     "T=仕入返品-受注
+
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM edit_data                                                *
+*---------------------------------------------------------------------*
+*       対象データ編集                                                *
+*---------------------------------------------------------------------*
+form edit_data.
+data: lw_tran type t_tran,
+lw_tran2 type t_tran,
+lw_mikan type t_mikan,
+lw_shukka type t_shukka,
+lw_dpinfo type t_dpinfo.
+
+loop at gt_tran into lw_tran.
+
+*伝票情報を付与
+read table gt_dpinfo into lw_dpinfo
+with key vbeln = lw_tran-vbeln.
+lw_tran-kunnr = lw_dpinfo-kunnr.
+lw_tran-vkorg = lw_dpinfo-vkorg.
+lw_tran-vtweg = lw_dpinfo-vtweg.
+lw_tran-spart = lw_dpinfo-spart.
+
+*ヘッダ支払条件を付与
+read table gt_tran into lw_tran2
+with key vbeln = lw_tran-vbeln
+posnr = '000000'.
+lw_tran-zter2 = lw_tran2-zterm.
+
+*変更後支払条件を付与
+select single zterm into lw_tran-zter3
+from knvv
+where kunnr = lw_tran-kunnr
+and vkorg = lw_tran-vkorg
+and vtweg = lw_tran-vtweg
+and spart = lw_tran-spart.
+
+*得意先名称の付与
+select single name1 into lw_tran-name1
+from kna1
+where kunnr = lw_tran-kunnr.
+
+*出荷済明細フラグの付与
+read table gt_shukka into lw_shukka
+with key vbelv = lw_tran-vbeln.
+if sy-subrc = 0.
+lw_tran-skflg = 'X'.
+endif.
+
+*マニュアル変更フラグの付与
+if lw_tran-posnr <> '000000'
+and lw_tran-zterm <> lw_tran-zter2 .
+lw_tran-chflg = 'X'.
+endif.
+
+*明細に支払条件変更フラグがある場合
+*以降の明細にもフラグを設定
+*(支払変更明細より後にﾋﾞｼﾞﾈｽﾃﾞｰﾀ変更明細がある場合の対応)
+read table gt_tran into lw_tran2
+with key vbeln = lw_tran-vbeln
+chflg = 'X'.
+if sy-subrc = 0.
+lw_tran-chflg = 'X'.
+endif.
+
+modify gt_tran from lw_tran.
+
+*支払条件の変更がなく、ﾏﾆｭｱル変更ﾌﾗｸﾞがない場合は削除
+delete gt_tran where vbeln = lw_tran-vbeln
+and posnr = lw_tran-posnr
+and zterm = lw_tran-zter3
+and chflg = ''.
+endloop.
+
+*ヘッダ・明細の情報をともに取得している場合
+*明細行を残して伝票番号の重複するレコードを削除
+sort gt_tran by vbeln posnr descending.
+delete adjacent duplicates from gt_tran comparing vbeln.
+
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM change_zterm                                             *
+*---------------------------------------------------------------------*
+*       支払条件一括更新                                              *
+*---------------------------------------------------------------------*
+form change_zterm.
+data: lw_tran type t_tran.
+
+*本番実行時
+if p_test = ''.
+
+loop at gt_tran into lw_tran.
+*対象処理件数取得
+gw_dtcnt = gw_dtcnt + 1.
+
+*伝票が出荷済明細を含む場合 異常終了扱い
+if lw_tran-skflg = 'X'.
+lw_tran-lgmsg = text-e02.
+"伝票が一部処理済みです
+lw_tran-reslt = text-m15.
+else.
+*伝票明細の支払条件がﾏﾆｭｱﾙ変更されている場合 異常終了扱い
+if lw_tran-chflg = 'X'.
+lw_tran-lgmsg = text-e01.
+"明細の支払条件がマニュアル変更されています
+lw_tran-reslt = text-m15.
+else.
+*明細の支払条件がﾏﾆｭｱﾙ変更されていない場合 BDC実行
+*BDCテーブル作成
+perform edit_bdc using lw_tran-vbeln
+lw_tran-posnr
+lw_tran-zter3.
+*コールトランザクション
+perform call_va02 changing lw_tran-reslt
+lw_tran-lgmsg.
+endif.
+endif.
+*処理結果付与
+modify gt_tran from lw_tran.
+endloop.
+
+*対象伝票が1件も存在しない場合処理中止
+if sy-subrc <> 0.
+message s614 with '対象の受注残'.
+stop.
+endif.
+
+else.
+*テスト実行時
+loop at gt_tran into lw_tran.
+*対象処理件数取得
+gw_dtcnt = gw_dtcnt + 1.
+endloop.
+
+*対象伝票が1件も存在しない場合処理中止
+if sy-subrc <> 0.
+message s614 with '対象の受注残'.
+stop.
+endif.
+endif.
+
+*異常処理件数取得
+gw_ercnt = gw_dtcnt - gw_okcnt.
+endform.
+*---------------------------------------------------------------------*
+*       FORM edit_bdc                                                 *
+*---------------------------------------------------------------------*
+*       BDCテーブル作成                                               *
+*---------------------------------------------------------------------*
+form edit_bdc using i_tran-vbeln
+i_tran-posnr
+i_tran-zter3.
+
+perform bdc_dynpro      using 'SAPMV45A' '0102'.
+perform bdc_field       using 'BDC_CURSOR'
+'VBAK-VBELN'.
+perform bdc_field       using 'BDC_OKCODE'
+'/00'.
+perform bdc_field       using 'VBAK-VBELN'
+i_tran-vbeln."受注伝票番号
+perform bdc_dynpro      using 'SAPMV45A' '4001'.
+perform bdc_field       using 'BDC_CURSOR'
+'RV45A-MABNR(02)'.
+perform bdc_field       using 'BDC_OKCODE'
+'=T\01'.
+perform bdc_dynpro      using 'SAPMV45A' '4001'.
+perform bdc_field       using 'BDC_CURSOR'
+'RV45A-MABNR(02)'.
+perform bdc_field       using 'BDC_OKCODE'
+'=SICH'.
+perform bdc_field       using 'VBKD-ZTERM'
+i_tran-zter3."変更後支払条件
+endform.
+*---------------------------------------------------------------------*
+*       FORM call_va02                                                *
+*---------------------------------------------------------------------*
+*       コールトランザクション                                        *
+*---------------------------------------------------------------------*
+form call_va02 changing i_reslt
+i_lgmsg.
+
+check not gt_bdc[] is initial.
+
+* test
+data test type c length 1.
+* test
+refresh gt_msg.
+call transaction 'VA02'
+using  gt_bdc
+
+mode   cns_mode
+* test
+update cns_update
+messages into gt_msg.
+if sy-subrc = 0.
+*正常終了　件数カウント
+i_reslt = text-m14.
+gw_okcnt = gw_okcnt + 1.
+else.
+*異常終了
+i_reslt = text-m15.
+endif.
+*メッセージ付与
+perform get_errmsg changing i_lgmsg.
+
+refresh gt_bdc.
+
+endform.
+*----------------------------------------------------------------------*
+*        Start new screen                                              *
+*----------------------------------------------------------------------*
+FORM BDC_DYNPRO USING PV_PROGRAM    TYPE BDCDATA-PROGRAM
+PV_DYNPRO     TYPE BDCDATA-DYNPRO.
+
+CLEAR: GT_BDC.
+GT_BDC-PROGRAM  = PV_PROGRAM.
+GT_BDC-DYNPRO   = PV_DYNPRO.
+GT_BDC-DYNBEGIN = 'X'.
+APPEND GT_BDC.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*        Insert field                                                  *
+*----------------------------------------------------------------------*
+FORM BDC_FIELD USING L_FNAM
+L_FVAL.
+
+CLEAR: GT_BDC.
+GT_BDC-FNAM = L_FNAM.
+GT_BDC-FVAL = L_FVAL.
+APPEND GT_BDC.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ERRMSG
+*&---------------------------------------------------------------------*
+*       バッチエラーメッセージの取得
+*----------------------------------------------------------------------*
+FORM GET_ERRMSG CHANGING PV_MSTRING.
+
+DATA: LW_T100 TYPE TYP_T100.
+
+LOOP AT GT_MSG.
+SELECT SINGLE * FROM T100 INTO LW_T100
+WHERE SPRSL = GT_MSG-MSGSPRA
+AND   ARBGB = GT_MSG-MSGID
+AND   MSGNR = GT_MSG-MSGNR.
+IF SY-SUBRC = 0.
+PV_MSTRING = LW_T100-TEXT.
+IF PV_MSTRING CS '&1'.
+REPLACE '&1' WITH GT_MSG-MSGV1 INTO PV_MSTRING.
+REPLACE '&2' WITH GT_MSG-MSGV2 INTO PV_MSTRING.
+REPLACE '&3' WITH GT_MSG-MSGV3 INTO PV_MSTRING.
+REPLACE '&4' WITH GT_MSG-MSGV4 INTO PV_MSTRING.
+ELSE.
+REPLACE '&' WITH GT_MSG-MSGV1 INTO PV_MSTRING.
+REPLACE '&' WITH GT_MSG-MSGV2 INTO PV_MSTRING.
+REPLACE '&' WITH GT_MSG-MSGV3 INTO PV_MSTRING.
+REPLACE '&' WITH GT_MSG-MSGV4 INTO PV_MSTRING.
+ENDIF.
+CONDENSE PV_MSTRING.
+ELSE.
+PV_MSTRING = GT_MSG.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    "
+
+*---------------------------------------------------------------------*
+*       FORM set_spoole                                               *
+*---------------------------------------------------------------------*
+*       スプール登録                                                  *
+*---------------------------------------------------------------------*
+form set_spoole.
+data:lf_pri_params like pri_params.
+
+*ユーザ設定取得
+select single * from usr01 where bname = sy-uname.
+
+* プリンタ設定
+lf_pri_params-pdest = usr01-spld.
+* 書式設定
+lf_pri_params-paart = 'X_58_170'.
+call function 'SET_PRINT_PARAMETERS'
+EXPORTING
+DESTINATION = lf_pri_params-pdest
+IMMEDIATELY = ''
+NEW_LIST_ID = 'X'
+RELEASE     = usr01-spda.
+
+new-page print on layout lf_pri_params-paart no dialog.
+
+*スプールへのログ出力
+perform output_log.
+
+*画面印刷への切替
+new-page print off.
+
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM write_head                                               *
+*---------------------------------------------------------------------*
+*       一覧ヘッダ作成                                                *
+*---------------------------------------------------------------------*
+form write_head.
+*ログヘッダ出力
+*テスト実行時
+if p_test = 'X'.
+
+write:  003    text-m01,
+033    text-m02,
+082    sy-datum,
+094    sy-uzeit,
+/,
+/005    text-m03,
+020(5) gw_dtcnt,
+025    text-m06,
+/,
+/003    text-m07,
+015    text-m08,
+027    text-m09,
+063    text-m10,
+073    text-m11.
+else.
+*本番実行時
+write:  003    text-m13,
+082    sy-datum,
+094    sy-uzeit,
+/,
+/005    text-m03,
+020(5) gw_dtcnt,
+025    text-m04,
+040(5) gw_okcnt,
+045    text-m05,
+060(5) gw_ercnt,
+065    text-m06,
+/,
+/003    text-m07,
+015    text-m08,
+027    text-m09,
+063    text-m10,
+073    text-m11,
+082    text-m12,
+092    text-m16.
+endif.
+write: / sy-uline no-gap.
+
+endform.
+*---------------------------------------------------------------------*
+*       FORM output_log                                               *
+*---------------------------------------------------------------------*
+*       ログ出力                                                      *
+*---------------------------------------------------------------------*
+form output_log.
+data: lw_tran type t_tran.
+
+loop at gt_tran into lw_tran.
+write: /003 lw_tran-vbeln,
+015 lw_tran-kunnr,
+027 lw_tran-name1,
+064 lw_tran-zter2,
+074 lw_tran-zter3,
+082 lw_tran-reslt,
+092 lw_tran-lgmsg.
+endloop.
+
+endform.

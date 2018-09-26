@@ -1,0 +1,910 @@
+************************************************************************
+* [プログラム名]
+*   ZM011100        オンライン請求伝票登録一覧
+*
+* [処理目的]
+*   オンラインで登録された請求伝票の管理を行う。
+* [処理概要]
+*   １．処理対象データ：
+*       選択条件（プラント、購買グループ、仕入先、対象期間）で指定された
+*　     請求伝票データ
+*   ２．出力順：
+*       購買グループ／請求伝票登録者／計上日
+*   ３．改ページ：
+*       購買グループ
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/05/22   PSD K.ARAI        新規開発　
+*  2002/06/19   PSD T.SAITOH      対象データ条件追加+種別場合分け変更
+*  2002/06/20   PSD T.SAITOH      再移送
+*  2002/06/21   PSD T.SAITOH      金額符号条件追加
+*  2002/07/11   PSD T.SAITOH      会社コード、購買組織対応
+*  2002/08/02   PSD T.SAITOH      姓名のいれかえ
+************************************************************************
+REPORT ZM011100
+LINE-SIZE 190
+LINE-COUNT 58(8) "()の中の数値ははフッタ割当行数
+NO STANDARD PAGE HEADING.
+
+*---------------------------------------------------------------------*
+* データ宣言(グローバル)
+*---------------------------------------------------------------------*
+*---------------------------------------------------------------------
+* TABLES
+*---------------------------------------------------------------------
+TABLES : EKPO,                               " 購買伝票明細
+EKKO,                               " 購買伝票ヘッダ
+RBKP.                               " 伝票ヘッダ:
+*---------------------------------------------------------------------
+* CONSTANTS
+*---------------------------------------------------------------------
+CONSTANTS: CNS_T001W(5)    TYPE C VALUE 'T001W',
+CNS_T024(4)     TYPE C VALUE 'T024',
+CNS_LFA1(4)     TYPE C VALUE 'LFA1',
+CNS_RBKP(4)     TYPE C VALUE 'RBKP',
+CNS_EKPO(4)     TYPE C VALUE 'EKPO',
+CNS_J(1)        TYPE C VALUE 'J',
+CNS_MR8M(4)     TYPE C VALUE 'MR8M',
+CNS_MIRO(4)     TYPE C VALUE 'MIRO',
+CNS_KESHI(4)    TYPE C VALUE '取消',
+CNS_X(1)        TYPE C VALUE 'X',
+CNS_SEI(4)      TYPE C VALUE '請求',
+CNS_CRE(4)      TYPE C VALUE 'クレ',
+CNS_NAME(30)    TYPE C VALUE 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+.
+*---------------------------------------------------------------------
+* RANGES
+*---------------------------------------------------------------------
+RANGES R_DATE FOR RBKP-GJAHR.                    " 年度
+*---------------------------------------------------------------------
+* TYPES
+*---------------------------------------------------------------------
+*--- 構造／テーブル型　宣言
+* プラントマスタ型　：　TYP_T001.
+TYPES: BEGIN OF TYP_T001W,
+WERKS      TYPE T001W-WERKS,            " プラント
+NAME1      TYPE T001W-NAME1,            " 名称１
+END   OF TYP_T001W.
+* 購買グループ型　：　TYP_T024
+TYPES: BEGIN OF TYP_T024,
+EKGRP      TYPE T024-EKGRP,             " 購買グループ
+EKNAM      TYPE T024-EKNAM,             " 購買グループテキスト
+END   OF TYP_T024.
+* 仕入先マスタ型　：　TYP_LFA1
+TYPES: BEGIN OF TYP_LFA1,
+LIFNR      TYPE LFA1-LIFNR,             " 仕入先コード
+NAME1      TYPE LFA1-NAME1,             " 名称１
+END   OF TYP_LFA1.
+* 伝票ヘッダ＆明細型　:　TYP_RBKP
+TYPES: BEGIN OF TYP_RBKP,
+BELNR     TYPE RBKP-BELNR,              " 請求伝票番号
+GJAHR     TYPE RBKP-GJAHR,              " 会計年度
+BUDAT     TYPE RBKP-BUDAT,              " 転記日付
+USNAM     TYPE RBKP-USNAM,              " ユーザー名
+TCODE     TYPE RBKP-TCODE,              " T-Code
+XBLNR     TYPE RBKP-XBLNR,              " 参照伝票番号
+LIFNR     TYPE RBKP-LIFNR,              " 請求元
+RMWWR     TYPE RBKP-RMWWR,              " 請求書総額
+XRECH     TYPE RBKP-XRECH,              " 請求書
+WAERS     TYPE RBKP-WAERS,              " 通貨コード
+BUZEI     TYPE RSEG-BUZEI,              " 請求明細
+EBELN     TYPE RSEG-EBELN,              " 購買伝票
+EBELP     TYPE RSEG-EBELP,              " 明細
+END   OF TYP_RBKP.
+* 発注伝票ヘッダ＆明細型　：　TYP_EKPO
+TYPES: BEGIN OF TYP_EKPO,
+EBELN     TYPE EKPO-EBELN,              " 購買伝票
+EBELP     TYPE EKPO-EBELP,              " 明細
+LOEKZ     TYPE EKPO-LOEKZ,              " 削除フラグ
+MATNR     TYPE EKPO-MATNR,              " 品目コード
+WERKS     TYPE EKPO-WERKS,              " プラント
+MENGE     TYPE EKPO-MENGE,              " 発注数量
+NETPR     TYPE EKPO-NETPR,              " 正味額発注単価
+PEINH     TYPE EKPO-PEINH,              " 価格単位
+BRTWR     TYPE EKPO-BRTWR,              " 総発注額
+EKGRP     TYPE EKKO-EKGRP,              " 購買グループ
+BEDAT     TYPE EKKO-BEDAT,              " 購買伝票日付
+END   OF TYP_EKPO.
+* 個人（中央ｱﾄﾞﾚｽ管理）型　：　TYP_ADRP
+TYPES: BEGIN OF TYP_ADRP,
+NAME_FIRST  TYPE ADRP-NAME_FIRST,       " 名
+NAME_LAST   TYPE ADRP-NAME_LAST,        " 姓
+END   OF TYP_ADRP.
+* 出力用データ型　：　TYP_WRITE.
+TYPES: BEGIN OF TYP_WRITE,
+WERKS     TYPE T001W-WERKS,             " 部門
+WERKSN    TYPE T001W-NAME1,             " 部門名
+EKGRP     TYPE EKKO-EKGRP,              " 購買グループ
+EKNAM     TYPE T024-EKNAM,              " 購買グループ名
+USNAM     TYPE RBKP-USNAM,              " 請求伝票登録者
+NAMEFULL(12)  TYPE C,                   " 請求伝票登録者名
+BUDAT     TYPE RBKP-BUDAT,              " 計上日
+BELNR     TYPE RBKP-BELNR,              " 請求伝票番号
+KIND1(4)  TYPE C,                       " 種別１
+KIND2(4)  TYPE C,                       " 種別２
+RMWWR(9)  TYPE P,                       " 金額
+WAERS     TYPE RBKP-WAERS,              " 通貨コード
+LIFNR     TYPE LFA1-LIFNR,              " 仕入先コード
+BEDAT     TYPE EKKO-BEDAT,              " 発注日
+ORDER_NUM(15)  TYPE C,                  " 発注番号
+MATNR     TYPE EKPO-MATNR,              " 品目コード
+MENGE     TYPE P DECIMALS 2,            " 発注数量
+ORDER_COSTS    TYPE EKPO-NETPR,         " 発注単価
+BRTWR(9)  TYPE P,                       " 発注金額
+SUPPLIER  TYPE T001W-NAME1,             " 仕入先名
+MAKTX     TYPE MAKT-MAKTX,              " 品名
+END   OF TYP_WRITE.
+*---------------------------------------------------------------------
+* DATA
+*---------------------------------------------------------------------
+* 内部テーブル
+*--- プラントマスタ内部テーブル
+DATA: GF_T001W  TYPE                 TYP_T001W,
+GT_T001W  TYPE HASHED TABLE OF TYP_T001W WITH UNIQUE KEY WERKS.
+*--- 購買グループ内部テーブル
+DATA: GF_T024   TYPE                  TYP_T024,
+GT_T024   TYPE HASHED TABLE OF  TYP_T024 WITH UNIQUE KEY EKGRP.
+*--- 仕入先マスタテーブル
+DATA: GF_LFA1   TYPE                  TYP_LFA1,
+GT_LFA1   TYPE HASHED TABLE OF  TYP_LFA1 WITH UNIQUE KEY LIFNR.
+*--- 伝票ヘッダ＆明細テーブル
+DATA: GF_RBKP   TYPE          TYP_RBKP,
+GT_RBKP   TYPE TABLE OF TYP_RBKP.
+*--- 発注伝票テーブル
+DATA: GF_EKPO   TYPE          TYP_EKPO,
+GT_EKPO   TYPE TABLE OF TYP_EKPO.
+*--- アドレステーブル
+DATA: GF_ADRP   TYPE          TYP_ADRP,
+GT_ADRP   TYPE TABLE OF TYP_ADRP.
+*--- 出力用内部ﾃｰﾌﾞﾙ
+DATA: GF_WRITE  TYPE          TYP_WRITE,
+GT_WRITE  TYPE TABLE OF TYP_WRITE.
+
+*---------------------------------------------------------------------*
+* 選択画面
+*---------------------------------------------------------------------*
+*---APPEND START PSD T.SAITOH 2002/07/11 ---------------------------*
+* 会社コード、購買組織
+PARAMETERS: PR_BUKRS TYPE RBKP-BUKRS MEMORY ID BUK OBLIGATORY,
+PR_EKORG TYPE EKKO-EKORG MEMORY ID EKO OBLIGATORY.
+*---APPEND END   PSD T.SAITOH 2002/07/11 ---------------------------*
+* プラント名
+SELECT-OPTIONS   S_WERKS FOR EKPO-WERKS OBLIGATORY.
+* 購買グループ
+SELECT-OPTIONS   S_EKGRP FOR EKKO-EKGRP.
+* 仕入先
+SELECT-OPTIONS   S_LIFNR FOR RBKP-LIFNR.
+* 対象期間
+SELECT-OPTIONS   S_DATE FOR SY-DATUM OBLIGATORY.
+
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN.
+* 選択オプションボタン押下時は入力チェック処理をしない
+IF SY-UCOMM+0(1) <> '%'.
+*---DELETE START PSD T.SAITOH 2002/07/24 ---------------------------*
+** 選択画面入力データチェック
+*    PERFORM FRM_DATA_CHECK.
+*---DELETE END   PSD T.SAITOH 2002/07/24 ---------------------------*
+ENDIF.
+*---------------------------------------------------------------------
+* START-OF-SELECTION（主処理）
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+
+*---APPEND START PSD T.SAITOH 2002/07/24 ---------------------------*
+* 選択画面入力データチェック
+PERFORM FRM_DATA_CHECK.
+*---APPEND END   PSD T.SAITOH 2002/07/24 ---------------------------*
+
+* 初期処理
+PERFORM FRM_INIT.
+* 主処理
+PERFORM FRM_MAIN.
+
+*---------------------------------------------------------------------
+* TOP-OF-PAGE
+*---------------------------------------------------------------------
+TOP-OF-PAGE.
+* ヘッダ行の出力
+PERFORM FRM_TOP_PAGE.
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_CHECK
+*&---------------------------------------------------------------------*
+*       入力画面チェック
+*----------------------------------------------------------------------*
+FORM FRM_DATA_CHECK.
+*--- プラントチェック
+PERFORM FRM_WERKS_CHECK.
+*--- 購買グループチェック
+PERFORM FRM_EKGRP_CHECK.
+*--- 仕入先チェック
+PERFORM FRM_LIFNR_CHECK.
+
+ENDFORM.                    " FRM_DATA_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WERKS_CHECK
+*&---------------------------------------------------------------------*
+*       プラントチェック
+*----------------------------------------------------------------------*
+FORM FRM_WERKS_CHECK.
+SELECT WERKS NAME1
+INTO TABLE GT_T001W
+FROM T001W
+WHERE WERKS IN S_WERKS.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+MESSAGE E613(Z1) WITH TEXT-001 TEXT-006.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_T001W
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_WERKS_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EKGRP_CHECK
+*&---------------------------------------------------------------------*
+*       購買グループ
+*----------------------------------------------------------------------*
+FORM FRM_EKGRP_CHECK.
+SELECT EKGRP EKNAM
+INTO TABLE GT_T024
+FROM T024
+WHERE EKGRP IN S_EKGRP.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+MESSAGE E613(Z1) WITH TEXT-002 TEXT-007.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_T024
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_EKGRP_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LIFNR_CHECK
+*&---------------------------------------------------------------------*
+*       仕入先チェック
+*----------------------------------------------------------------------*
+FORM FRM_LIFNR_CHECK.
+SELECT LIFNR NAME1
+INTO TABLE GT_LFA1
+FROM LFA1
+WHERE LIFNR IN S_LIFNR.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+MESSAGE E613(Z1) WITH TEXT-003 TEXT-008.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_LFA1
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_LIFNR_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_INIT
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM FRM_INIT.
+* 入力画面の会計期間から会計年度を取得する
+* 会計期間の日付が1月1日～3月31日の時は会計年度に1をプラスする
+CLEAR : S_DATE,
+R_DATE.
+LOOP AT S_DATE.
+MOVE-CORRESPONDING S_DATE TO R_DATE.
+IF ( S_DATE-LOW+4(4) >= 0101
+AND S_DATE-LOW+4(4) <= 0331 ).
+R_DATE-LOW = R_DATE-LOW - 1.
+ENDIF.
+IF ( S_DATE-HIGH+4(4) >= 0101
+AND S_DATE-HIGH+4(4) <= 0331 ).
+R_DATE-HIGH = R_DATE-HIGH - 1.
+ENDIF.
+APPEND R_DATE.
+ENDLOOP.
+
+ENDFORM.                    " FRM_INIT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAIN
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM FRM_MAIN.
+* データ抽出
+PERFORM FRM_SELECT_DATA.
+
+* 出力用内部テーブル編集
+PERFORM FRM_EDIT_DATA.
+
+* データ出力
+PERFORM FRM_DATA_WRITE.
+
+ENDFORM.                    " FRM_MAIN
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_DATA
+*&---------------------------------------------------------------------*
+*       データ抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_DATA.
+
+* 伝票ヘッダ＆伝票明細取得
+PERFORM FRM_SELECT_RBKP_RSEG.
+
+* GT_SBKP ループ処理(出力用内部テーブル作成)
+PERFORM FRM_LOOP_GT_SBKP.
+
+ENDFORM.                    " FRM_SELECT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_RBKP_RSEG
+*&---------------------------------------------------------------------*
+*       伝票ヘッダ(RBKP)＆伝票明細(RSEG)データ抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_RBKP_RSEG.
+SELECT A~BELNR                                  " 請求伝票番号
+A~GJAHR                                  " 会計年度
+A~BUDAT                                  " 転記日付
+A~USNAM                                  " ユーザー名
+A~TCODE                                  " T-Code
+A~XBLNR                                  " 参照伝票番号
+A~LIFNR                                  " 請求元
+A~RMWWR                                  " 請求書総額
+A~XRECH                                  " 請求書
+A~WAERS                                  " 通貨コード
+B~BUZEI                                  " 請求明細
+B~EBELN                                  " 購買伝票
+B~EBELP                                  " 明細
+INTO CORRESPONDING FIELDS OF TABLE GT_RBKP
+FROM       RBKP AS A                        " 伝票ヘッダテーブル
+INNER JOIN RSEG AS B                        " 伝票明細テーブル
+ON A~BELNR =  B~BELNR
+AND A~GJAHR =  B~GJAHR
+WHERE A~GJAHR IN R_DATE
+AND A~BUDAT IN S_DATE
+*---APPEND START PSD T.SAITOH 2002/06/19 ---------------------------*
+AND A~TCODE IN (CNS_MR8M,CNS_MIRO)
+*---APPEND END   PSD T.SAITOH 2002/06/19 ---------------------------*
+*---APPEND START PSD T.SAITOH 2002/07/11 ---------------------------*
+AND A~BUKRS = PR_BUKRS  "会社コード
+*---APPEND END   PSD T.SAITOH 2002/07/11 ---------------------------*
+AND A~LIFNR IN S_LIFNR.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+MESSAGE S616(Z1).
+STOP.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_RBKP
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_RBKP_RSEG
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LOOP_GT_SBKP
+*&---------------------------------------------------------------------*
+*       GT_SBKP ループ処理(出力用内部テーブル作成)
+*----------------------------------------------------------------------*
+FORM FRM_LOOP_GT_SBKP.
+LOOP AT GT_RBKP INTO GF_RBKP.
+PERFORM FRM_SELECT_EKPO_EKKO.
+ENDLOOP.
+
+ENDFORM.                    " FRM_LOOP_GT_SBKP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_EKPO_EKKO
+*&---------------------------------------------------------------------*
+*       発注伝ヘッダ(EKPO)＆明細(EKKO)データ抽出
+*       対象データが存在した場合、その他のデータ取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_EKPO_EKKO.
+SELECT SINGLE
+A~EBELN                                  " 購買伝票
+A~EBELP                                  " 明細
+A~LOEKZ                                  " 削除フラグ
+A~MATNR                                  " 品目コード
+A~WERKS                                  " プラント
+A~MENGE                                  " 発注数量
+A~NETPR                                  " 正味額発注単価
+A~PEINH                                  " 価格単位
+A~BRTWR                                  " 総発注額
+B~EKGRP                                  " 購買グループ
+B~BEDAT                                  " 購買伝票日付
+INTO CORRESPONDING FIELDS OF GF_EKPO
+FROM       EKPO AS A                        " 伝票ﾍｯﾀﾞﾃｰﾌﾞﾙ
+INNER JOIN EKKO AS B                        " 伝票明細テーブル
+ON A~EBELN =  B~EBELN                       " 伝票番号
+WHERE A~EBELN =  GF_RBKP-EBELN                 " 伝票番号
+AND A~EBELP =  GF_RBKP-EBELP                 " 明細
+AND A~WERKS IN S_WERKS                       " プラント
+AND B~EKGRP IN S_EKGRP                       " 購買グループ
+*---APPEND START PSD T.SAITOH 2002/07/11 ---------------------------*
+AND B~EKORG = PR_EKORG.                      " 購買組織
+*---APPEND END   PSD T.SAITOH 2002/07/11 ---------------------------*
+
+*--- 対象データが存在した場合、その他のデータ取得
+CASE SY-SUBRC.
+WHEN 0.
+PERFORM FRM_MAKE_DATA.
+WHEN 4.         " 対象データなし（処理続行）
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_EKPO
+SY-SUBRC.
+ENDCASE.
+ENDFORM.                    " FRM_SELECT_EKPO_EKKO
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_DATA
+*&---------------------------------------------------------------------*
+*       データ抽出
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_DATA.
+* 請求伝票登録者(NAMEFULL)
+PERFORM FRM_SELECT_ADRP.
+
+* 品目テキスト(MAKTX)
+PERFORM FRM_SELECT_MAKT.
+
+* 仕入先名(SUPPLIER)
+PERFORM FRM_READ_LFA1.
+
+* 購買グループ名(EKNAM)
+PERFORM FRM_READ_T024.
+
+* 部門名(WERKSN)
+PERFORM FRM_READ_T001W.
+
+* 種別１＆２(KIND1&KIND2)
+PERFORM FRM_GET_KIND.
+
+* 発注単価(ORDER_COSTS)
+PERFORM FRM_GET_ORDER_COSTS.
+
+* 発注番号(ORDER_NUM)
+PERFORM FRM_GET_ORDER_NUM.
+
+* 金額(PMWWR)
+PERFORM FRM_GET_KINGAKU USING    GF_RBKP-RMWWR
+CHANGING GF_WRITE-RMWWR.
+*---APPEND START PSD T.SAITOH 2002/06/21 ---------------------------*
+* 金額符号処理
+IF  GF_RBKP-TCODE = CNS_MIRO
+AND    GF_RBKP-XRECH = SPACE.
+*"  クレ
+GF_WRITE-RMWWR = GF_WRITE-RMWWR * -1.
+ELSEIF  GF_RBKP-TCODE = CNS_MR8M
+AND    GF_RBKP-XRECH = SPACE.
+*"  取消 + 請求
+GF_WRITE-RMWWR = GF_WRITE-RMWWR * -1.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/06/21 ---------------------------*
+
+* 発注金額(BTRWR)
+PERFORM FRM_GET_KINGAKU USING    GF_EKPO-BRTWR
+CHANGING GF_WRITE-BRTWR.
+
+* その他
+PERFORM FRM_OTHERS_TO_WRITE.
+
+* 出力用テーブル作成処理
+APPEND GF_WRITE TO GT_WRITE.
+CLEAR  GF_WRITE.
+ENDFORM.                    " FRM_MAKE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_ADRP
+*&---------------------------------------------------------------------*
+*       請求伝票登録者取得(USR21&ADRP)
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_ADRP.
+SELECT SINGLE
+B~NAME_FIRST                              " 名
+B~NAME_LAST                               " 姓
+INTO CORRESPONDING FIELDS OF GF_ADRP
+FROM       USR21 AS A                        "
+INNER JOIN ADRP  AS B                        "
+ON A~PERSNUMBER = B~PERSNUMBER               " 個人番号
+WHERE A~BNAME      = GF_RBKP-USNAM.             " ユーザ名
+
+CASE SY-SUBRC.
+WHEN 0.
+*--- 姓のスペースを削除して出力用テーブルにいれる
+CONDENSE GF_ADRP-NAME_LAST NO-GAPS.
+*---MODIFY START PSD T.SAITOH 2002/08/02 ---------------------------*
+*      CONCATENATE GF_ADRP-NAME_LAST                " 姓
+*                  '　'                             " 全角スペース
+*                  GF_ADRP-NAME_FIRST               " 名
+*             INTO GF_WRITE-NAMEFULL.               " 登録者名
+
+CONCATENATE GF_ADRP-NAME_FIRST               " 姓
+'　'                             " 全角スペース
+GF_ADRP-NAME_LAST                " 名
+INTO GF_WRITE-NAMEFULL.               " 登録者名
+*---MODIFY END   PSD T.SAITOH 2002/08/02 ---------------------------*
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_RBKP
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_ADRP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_READ_LFA1
+*&---------------------------------------------------------------------*
+*       仕入先マスタ取得
+*----------------------------------------------------------------------*
+FORM FRM_READ_LFA1.
+* GF_RBKPの仕入先コードから仕入先名を取得
+READ TABLE GT_LFA1 INTO GF_LFA1
+WITH TABLE KEY LIFNR = GF_RBKP-LIFNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE-SUPPLIER = GF_LFA1-NAME1.     " 仕入先名
+WHEN 4.         " 対象データなし（処理続行）
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_EKPO
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_READ_LFA1
+*&---------------------------------------------------------------------*
+*&      Form  FRM_READ_T024
+*&---------------------------------------------------------------------*
+*       購買グループ取得
+*----------------------------------------------------------------------*
+FORM FRM_READ_T024.
+* GF_EKPOの購買グループから購買テキストを取得
+READ TABLE GT_T024 INTO GF_T024
+WITH TABLE KEY EKGRP = GF_EKPO-EKGRP.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE-EKNAM = GF_T024-EKNAM.     " 仕入先名
+WHEN 4.         " 対象データなし（処理続行）
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_EKPO
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_READ_T024
+*&---------------------------------------------------------------------*
+*&      Form  FRM_READ_T001W
+*&---------------------------------------------------------------------*
+*       部門名取得
+*----------------------------------------------------------------------*
+FORM FRM_READ_T001W.
+* GF_EKPOのプラントからプラント名称を取得
+READ TABLE GT_T001W INTO GF_T001W
+WITH TABLE KEY WERKS = GF_EKPO-WERKS.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE-WERKSN = GF_T001W-NAME1.     " 部門名
+WHEN 4.         " 対象データなし（処理続行）
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_EKPO
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_READ_T001W
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MAKT
+*&---------------------------------------------------------------------*
+*       品目テキスト取得(MAKT)
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_MAKT.
+* GF_EKPOの品目コードから品目テキストを取得
+SELECT SINGLE MAKTX
+FROM MAKT
+INTO GF_WRITE-MAKTX             " 品目テキスト
+WHERE MATNR = GF_EKPO-MATNR      " 品目コード
+AND SPRAS = CNS_J.             " 言語
+CASE SY-SUBRC.
+WHEN 0.
+
+WHEN 4.         " 対象データなし（処理続行）
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_EKPO
+SY-SUBRC.
+ENDCASE.
+
+
+ENDFORM.                    " FRM_SELECT_MAKT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_OTHERS_TO_WRITE
+*&---------------------------------------------------------------------*
+*       その他データをGF_WRITEに移動
+*----------------------------------------------------------------------*
+FORM FRM_OTHERS_TO_WRITE.
+* 計上日
+GF_WRITE-BUDAT = GF_RBKP-BUDAT.
+* 請求伝票No
+GF_WRITE-BELNR = GF_RBKP-BELNR.
+* 発注日
+GF_WRITE-BEDAT = GF_EKPO-BEDAT.
+* 発注数
+GF_WRITE-MENGE = GF_EKPO-MENGE.
+* 仕入先コード
+GF_WRITE-MATNR = GF_EKPO-MATNR.
+* 部門
+GF_WRITE-WERKS = GF_EKPO-WERKS.
+* 登録者
+GF_WRITE-USNAM  = GF_RBKP-USNAM.
+* 仕入先コード
+GF_WRITE-LIFNR = GF_RBKP-LIFNR.
+* 購買グループ
+GF_WRITE-EKGRP = GF_EKPO-EKGRP.
+* 通貨
+GF_WRITE-WAERS = GF_RBKP-WAERS.
+ENDFORM.                    " FRM_OTHERS_TO_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_KIND
+*&---------------------------------------------------------------------*
+*       種別１＆２を取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_KIND.
+*---MODIFY START PSD T.SAITOH 2002/06/19 ---------------------------*
+* 仕様変更により場合分け変更
+** KIND1： GT_RBKP-TCODEの値により編集
+*  CASE GF_RBKP-TCODE.
+*    WHEN CNS_MR8M.                     " MR8Mの時
+*      GF_WRITE-KIND1 = CNS_KESHI.      " 取消
+*    WHEN CNS_MIRO.                     " MIROの時
+*      GF_WRITE-KIND1 = ' '.
+*  ENDCASE.
+** KIND2： GT_RBKP-ZRECHの値により編集
+*  CASE GF_RBKP-XRECH.
+*    WHEN CNS_X.                        " Xの時
+*      GF_WRITE-KIND2 = CNS_SEI.        " 請求
+*    WHEN SPACE.
+*      GF_WRITE-KIND2 = CNS_CRE.        " クレ
+*  ENDCASE.
+* KIND1 + KIND2
+IF      GF_RBKP-TCODE = CNS_MIRO
+AND    GF_RBKP-XRECH = CNS_X.
+GF_WRITE-KIND1 = ' '.
+GF_WRITE-KIND2 = CNS_SEI.        " 請求
+ELSEIF  GF_RBKP-TCODE = CNS_MIRO
+AND    GF_RBKP-XRECH = SPACE.
+GF_WRITE-KIND1 = ' '.
+GF_WRITE-KIND2 = CNS_CRE.        " クレ
+ELSEIF  GF_RBKP-TCODE = CNS_MR8M
+AND    GF_RBKP-XRECH = CNS_X.
+GF_WRITE-KIND1 = CNS_KESHI.      " 取消
+GF_WRITE-KIND2 = CNS_CRE.        " クレ
+
+ELSE.
+GF_WRITE-KIND1 = CNS_KESHI.      " 取消
+GF_WRITE-KIND2 = CNS_SEI.        " 請求
+ENDIF.
+
+*---MODIFY END   PSD T.SAITOH 2002/06/19 ---------------------------*
+ENDFORM.                    " FRM_GET_KIND
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_KINGAKU
+*&---------------------------------------------------------------------*
+*       金額の価格変換汎用モジュールを通して
+*      「金額」「発注金額」を取得
+*----------------------------------------------------------------------*
+*      <--P_HENKAN  変換前金額
+*      P_KINGAKU--> 変換後金額
+*----------------------------------------------------------------------*
+FORM FRM_GET_KINGAKU USING    P_HENKAN           " 変換前金額
+CHANGING P_KINGAKU.         " 変換後金額
+DATA : L_AMOUNT_DIS TYPE WMTO_S-AMOUNT,        " EXPORTING用
+L_AMOUNT_INT TYPE WMTO_S-AMOUNT.        " IMPORTING用
+
+L_AMOUNT_INT = P_HENKAN.
+* 価格変換汎用モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+EXPORTING
+CURRENCY              = GF_RBKP-WAERS
+AMOUNT_INTERNAL       = L_AMOUNT_INT
+IMPORTING
+AMOUNT_DISPLAY        = L_AMOUNT_DIS
+EXCEPTIONS
+INTERNAL_ERROR        = 1
+OTHERS                = 2
+.
+IF SY-SUBRC <> 0.
+MESSAGE A603(Z1) WITH CNS_NAME
+SY-SUBRC.
+ENDIF.
+P_KINGAKU = L_AMOUNT_DIS.
+ENDFORM.                    " FRM_GET_KINGAKU
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_ORDER_COSTS
+*&---------------------------------------------------------------------*
+*       発注単価取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_ORDER_COSTS.
+
+* 価格単位がゼロの時は１を入れる
+IF GF_EKPO-PEINH = 0.
+GF_EKPO-PEINH = 1.
+ENDIF.
+* 発注単価 = 正味価格÷価格単位
+GF_WRITE-ORDER_COSTS = GF_EKPO-NETPR / GF_EKPO-PEINH.
+
+* 単位変換
+PERFORM FRM_GET_KINGAKU USING    GF_WRITE-ORDER_COSTS
+CHANGING GF_WRITE-ORDER_COSTS.
+
+ENDFORM.                    " FRM_GET_ORDER_COSTS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_ORDER_NUM
+*&---------------------------------------------------------------------*
+*       発注番号取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_ORDER_NUM.
+DATA : L_LEN(1) TYPE N.                 " 購買伝票明細の項目長
+* 発注明細番号は後ろから2桁目を取得
+L_LEN = STRLEN( GF_EKPO-EBELP ).
+L_LEN = L_LEN - 2.
+
+CONCATENATE GF_EKPO-WERKS+1(2)          " 部門コード
+'-'
+GF_EKPO-EBELN               " 発注伝票番号
+'-'
+GF_EKPO-EBELP+L_LEN(1)      " 発注明細番号
+INTO GF_WRITE-ORDER_NUM.         " 発注番号
+
+ENDFORM.                    " FRM_GET_ORDER_NUM
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EDIT_DATA
+*&---------------------------------------------------------------------*
+*       出力用内部テーブル編集
+*----------------------------------------------------------------------*
+FORM FRM_EDIT_DATA.
+DATA : L_LINECNT(10) TYPE N.             " 出力用内部テーブル行数
+
+* 出力用内部テーブルの件数をカウント
+DESCRIBE TABLE GT_WRITE LINES L_LINECNT.
+
+* 出力データが存在しなかった場合はエラーメッセージ
+IF L_LINECNT = 0.
+MESSAGE S616(Z1).
+STOP.
+ENDIF.
+
+* ソート (プラント/購買GRP/請求伝票登録者/計上日/請求伝票No)
+SORT GT_WRITE BY WERKS EKGRP USNAM BUDAT BELNR.
+
+ENDFORM.                    " FRM_EDIT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_WRITE
+*&---------------------------------------------------------------------*
+*       データ出力
+*----------------------------------------------------------------------*
+FORM FRM_DATA_WRITE.
+DATA : L_BUDAT(8) TYPE C,                        " 計上日
+L_BEDAT(8) TYPE C,                        " 発注日
+L_MENGE(10) TYPE C.                       " 数量
+LOOP AT GT_WRITE INTO GF_WRITE.
+*   計上日と発注日を'YY/MM/DD'の形にする
+CONCATENATE GF_WRITE-BUDAT+2(2)
+'/'
+GF_WRITE-BUDAT+4(2)
+'/'
+GF_WRITE-BUDAT+6(2)
+INTO L_BUDAT.
+CONCATENATE GF_WRITE-BEDAT+2(2)
+'/'
+GF_WRITE-BEDAT+4(2)
+'/'
+GF_WRITE-BEDAT+6(2)
+INTO L_BEDAT.
+
+* 購買GRP名ブレイク時に改ページ
+AT NEW EKNAM.
+NEW-PAGE.
+ENDAT.
+* 登録者はブレイク時にのみ出力
+AT NEW NAMEFULL.
+FORMAT COLOR COL_GROUP INTENSIFIED OFF.
+WRITE : /002 GF_WRITE-USNAM,                 " 請求伝票登録者
+016(164)
+GF_WRITE-NAMEFULL.              " 請求伝票登録者名
+FORMAT COLOR OFF.
+ENDAT.
+* 数量項目の表示形式変換
+WRITE GF_WRITE-MENGE TO L_MENGE.
+
+FORMAT COLOR COL_HEADING INTENSIFIED OFF.
+WRITE : /016 L_BUDAT,                          " 計上日
+026 GF_WRITE-BELNR,                   " 請求伝票No.
+039 GF_WRITE-KIND1,                   " 種別１
+044 GF_WRITE-KIND2,                   " 種別２
+049 GF_WRITE-RMWWR,                   " 金額
+068 GF_WRITE-WAERS,                   " 通貨
+074 GF_WRITE-LIFNR,                   " 仕入先
+086 L_BEDAT,                          " 発注日
+096 GF_WRITE-ORDER_NUM,               " 発注番号
+113 GF_WRITE-MATNR,                   " 品目コード
+133 L_MENGE,                          " 発注数
+145 GF_WRITE-ORDER_COSTS,             " 発注単価
+161 GF_WRITE-BRTWR,                   " 発注金額
+179 SPACE,
+/074 GF_WRITE-SUPPLIER,                " 仕入先名
+113(67)
+GF_WRITE-MAKTX.                   " 品名
+FORMAT COLOR OFF.
+ENDLOOP.
+
+ENDFORM.                    " FRM_DATA_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TOP_PAGE
+*&---------------------------------------------------------------------*
+*       ヘッダ行の出力
+*----------------------------------------------------------------------*
+FORM FRM_TOP_PAGE.
+DATA : L_DATUM(8) TYPE C,
+L_UZEIT(8) TYPE C.
+* 出力日付を'YY/MM/DD'の形に変換する
+CONCATENATE SY-DATUM+2(2)
+'/'
+SY-DATUM+4(2)
+'/'
+SY-DATUM+6(2)
+INTO L_DATUM.
+* 出力時間を'MM:SS'の形に変換する
+CONCATENATE SY-UZEIT+0(2)
+':'
+SY-UZEIT+2(2)
+INTO L_UZEIT.
+
+* ヘッダ行出力
+WRITE : /047 TEXT-009,                         " 帳票タイトル
+113 TEXT-010,                         " 作成日時
+124 L_DATUM,                          " 出力日付
+135 L_UZEIT,                          " 出力時間
+147 TEXT-026,                         " PAGE
+154 SY-PAGNO,                         " ページNo
+/113 TEXT-011,                         " 部門
+118 GF_WRITE-WERKS,                   " 部門
+124 GF_WRITE-WERKSN,                  " 部門名
+147 TEXT-012,                         " 担当者
+156 GF_WRITE-EKGRP,                   " 購買グループ
+162 GF_WRITE-EKNAM,                   " 購買グループ名
+/118 '￣￣￣￣￣￣￣￣￣￣￣￣',       " 下罫線
+156 '￣￣￣￣￣￣￣￣￣￣￣￣'.
+FORMAT COLOR COL_HEADING INTENSIFIED ON.
+WRITE : /002 TEXT-013,                         " 請求伝票登録者
+018 TEXT-014,                         " 計上日
+026 TEXT-015,                         " 請求伝票No.
+039 TEXT-016,                         " 種別
+062 TEXT-017,                         " 金額
+068 TEXT-018,                         " 通貨
+074 TEXT-019,                         " 仕入先
+086 TEXT-020,                         " 発注日
+096 TEXT-021,                         " 発注番号
+113 TEXT-022,                         " 品目コード／品名
+137 TEXT-023,                         " 発注数
+151 TEXT-024,                         " 発注単価
+167(13)
+TEXT-025.                         " 発注金額
+FORMAT COLOR OFF.
+WRITE : /001(179)
+SY-ULINE.
+
+ENDFORM.                    " FRM_TOP_PAGE

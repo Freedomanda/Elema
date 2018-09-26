@@ -1,0 +1,818 @@
+*----------------------------------------------------------------------*
+*  REPORT    :  YK015210
+*  PROGRAM   :  一括請求書締日処理
+*  MAKE DATE :  2002.03
+*  CODING BY :  KURANO / HATA
+*  機　　能  :  入金額と一括請求明細を取得・集計し、テーブルを更新
+*----------------------------------------------------------------------*
+* 変更履歴
+* 2002.03.18A 売掛金勘定コード/入金予定勘定コードの初期値設定 INAGOSHI
+* 2002.03.22A 日次(明細)データの集計機能の追加
+*             (日次処理で実施していた機能の移行)              INAGOSHI
+* 2002.04.03A 既に確定済(出力処理済)のヘッダは、更新不可      INAGOSHI
+* 2002.04.04A ヘッダ未処理の明細が存在した場合、ヘッダ処理    INAGOSHI
+* 2002.04.09  締日を8桁化 KURANO Sadayuki
+* 2002.04.10  YK015200をコピーして入金額の取得方法の変更 KURANO Sadayuki
+* 2002.04.12A 入金明細の対象外削除／得意先に支払人をセット KURANO / INA
+* 2002.04.15A YK520取得時、得意先=支払人(BSEG-XREF1)          INAGOSHI
+* 2002.04.16A 得意先に入金先をセット(2002.04.15Aの修正は削除) INAGOSHI
+* 2002.04.16B BSAD読込み条件の修正(決済伝票≠伝票番号)+BSEG   INAGOSHI
+* 2002.04.18A 決済伝票番号は代表の１件抽出                    INAGOSHI
+* 2002.05.22A 前月請求金額セットの修正　　                    INAGOSHI
+* 2002.05.22B ヘッダ未処理分で締日より以前のものは、先に処理  INAGOSHI
+*----------------------------------------------------------------------*
+report yk015210 .
+
+* 使用テーブル
+tables yk510.   "一括請求書ヘッダデータ
+tables yk520.   "一括請求書明細データ
+tables bsad.    "会計管理: 得意先の二次索引 (決済明細)
+tables bseg .   "会計伝票明細
+tables knvv.    "得意先マスタ: 販売データ
+tables tvko.    "販売組織
+
+* 型定義
+types: begin of st_bsad,
+bukrs like bsad-bukrs, "会社コード
+kunnr like bsad-kunnr, "入金先コード
+vkorg like knvv-vkorg, "販売組織
+vtweg like knvv-vtweg, "流通チャネル
+spart like knvv-spart, "製品部門
+zfbdt like bsad-zfbdt, "締日
+waers like bsad-waers, "通貨コード
+shkzg like bsad-shkzg, "貸借フラグ
+wrbtr like bsad-wrbtr, "伝票通貨額
+end of st_bsad.
+
+* グローバル変数
+data i_knvv like standard table of knvv with header line.
+data i_st_bsad type standard table of st_bsad with header line.
+*data i_yk510 like standard table of yk510 with header line.
+data i_yk510_bsad  like standard table of yk510 with header line.
+data i_yk510_yk520 like standard table of yk510 with header line.
+data i_yk510_sort  like sorted table of yk510 with header line
+with unique key bukrs kunnr vkorg vtweg spart zfbdt waers.
+data i_yk510_err   like standard table of yk510 with header line.
+data i_yk510_list  like standard table of yk510 with header line.
+data i_yk520 like standard table of yk520 with header line.
+data i_yk520_update like standard table of yk520 with header line.
+data w_inscnt_yk510 like sy-dbcnt.
+data w_updcnt_yk510 like sy-dbcnt.
+data w_updcnt_yk520 like sy-dbcnt.
+data w_errcnt       like sy-dbcnt.
+data w_listcnt      like sy-dbcnt.
+data w_zfbdt_from type zfbdt.
+data w_zfbdt_to type zfbdt.
+data w_list_name1(50)  type c.
+data w_list_name2(100) type c.
+data w_kingaku1 like yk520-brtwr.  "通貨による金額編集用
+data w_kingaku2 like yk520-brtwr.  "通貨による金額編集用
+data w_10n type p decimals 5.      "通貨による金額編集用
+data: wc_i_st_bsad type p, wc_i_yk520 type p.
+
+* 選択画面
+selection-screen begin of block b1 with frame title text-t01. "伝票選択
+select-options s_kunnr for knvv-kunnr. "入金先コード
+parameters p_bukrs like yk520-bukrs obligatory memory id buk.
+"会社コード 2002.04.09 ADD
+parameters p_vkorg like yk510-vkorg obligatory memory id vko.
+"販売組織 2002.04.12A ADD
+parameters p_vtweg like yk510-vtweg obligatory memory id vtw.
+"流通チャネル 2002.04.12A ADD
+parameters p_spart like yk510-spart obligatory memory id spa.
+"流通チャネル 2002.04.12A ADD
+
+parameters p_zfbdt like yk520-zfbdt obligatory. "締日
+*select-options s_blart for bsad-blart.  "伝票タイプ DEL 2002.04.16B
+*select-options s_bschl for bsad-bschl.  "転記キー   DEL 2002.04.16B
+select-options s_hkont for bsad-hkont obligatory.  "売掛金勘定コード
+select-options s_hkont2 for bsad-hkont.            "入金予定勘定コード
+selection-screen end   of block b1.
+parameters p_mandt type mandt. "クライアント
+
+*----------------------------------------------------------------------*
+initialization.
+perform f_init.
+
+*----------------------------------------------------------------------*
+at selection-screen output.
+* 出力専用項目の設定
+loop at screen.
+if screen-group1 = 'OUT'.
+screen-input = 0.
+modify screen.
+endif.
+endloop.
+
+*----------------------------------------------------------------------*
+start-of-selection.
+***--- 2002.05.22B ヘッダ未処理分で締日より以前のものは先に処理(start)
+perform f_header_update1.     "ヘッダ処理
+
+*   内部テーブル・クリア
+refresh: i_yk520, i_yk510_yk520, i_yk510_sort, i_yk510_err.
+clear: w_errcnt, i_yk510_err.
+clear: i_yk520, i_yk510_yk520, i_yk510_sort.
+
+***--- 2002.05.22B ヘッダ未処理分で締日より以前のものは先に処理(end)
+
+perform f_bsad_yk520_select. "決済明細(bsad)と請求明細(yk520)の取得
+describe table i_yk520 lines wc_i_yk520.
+describe table i_st_bsad  lines wc_i_st_bsad.
+if ( wc_i_yk520 = 0 ) and ( wc_i_st_bsad = 0 ).
+rollback work.
+message i400(y1) with '入力パラメータに該当するデータがありません'.
+else.
+perform f_bsad_sum.          "決済明細(bsad)入金データの集計
+perform f_yk520_sum.         "請求明細(yk520)の集計
+perform f_table_merge. "テーブル・マージ 入金(bsad)＋請求明細(yk520)
+perform f_yk510_modify.      "一括請求書ヘッダデータ登録／更新
+perform f_headflg_update.    "ヘッダ処理済フラグの更新
+w_list_name1 = '選定データ内 <未反映データ一覧>'.
+w_list_name2 = '既に確定済(出力済)ヘッダに明細の追加不可'.
+insert lines of i_yk510_err into table i_yk510_list. "コピー
+w_listcnt = w_errcnt.
+perform f_list.          "選定データ内・未反映データ一覧の出力
+endif.
+
+* ヘッダ未処理の明細があれば、ヘッダ処理
+perform f_header_update2.     "ヘッダ処理 MOD 2002.05.22B
+
+message i402(y1) with 'テーブル:YK510' w_inscnt_yk510
+'件登録しました'.
+message i402(y1) with 'テーブル:YK510' w_updcnt_yk510
+'件変更しました'.
+*
+new-page print off.
+commit work.
+perform f_dequeue_all.        "全ロック解除
+
+*---------------------------------------------------------------------*
+*       FORM f_init
+*---------------------------------------------------------------------*
+form f_init.
+* 売掛金勘定コード　
+refresh s_hkont.
+s_hkont-sign   = 'I'.
+s_hkont-option = 'EQ'.
+s_hkont-low    = '0001107004'.
+append s_hkont.
+* 入金予定勘定コード DEL 2002.04.16B
+*  refresh s_hkont2.
+*  s_hkont2-sign   = 'E'.
+*  s_hkont2-option = 'EQ'.
+*  s_hkont2-low    = '0001107004'.
+*  append s_hkont2.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_bsad_yk520_select
+*---------------------------------------------------------------------*
+*       決済明細(bsad)取得 + 請求明細(yk520)取得
+*---------------------------------------------------------------------*
+form f_bsad_yk520_select.
+* ローカル変数
+data i_tmp  like standard table of bsad with header line.
+data i_tmp2 like standard table of bsad with header line.
+data i_tmp3 like standard table of bsad with header line.
+data w_zfbdt like yk510-zfbdt.
+ranges r_augdt for bsad-augdt.
+*  ranges r_kunnr_xref1 for bsad-kunnr. DEL 2002.04.16A
+*
+refresh: i_st_bsad, i_tmp, i_tmp2, i_tmp3.
+* 締日による決済日の範囲を作成
+w_zfbdt_from = p_zfbdt. "2002.04.09 ADD START
+w_zfbdt_from+6(2) = '01'. "締日の月初
+w_zfbdt_from = w_zfbdt_from - 1. "前月の月末
+if w_zfbdt_from+6(2) > p_zfbdt+6(2).
+w_zfbdt_from+6(2) = p_zfbdt+6(2).
+endif. "2002.04.09 ADD END
+r_augdt-sign = 'I'.
+r_augdt-option = 'BT'.
+r_augdt-low = w_zfbdt_from.    "From日付
+r_augdt-high = p_zfbdt.        "To  日付
+append r_augdt.              "決済日付
+* 決済明細を取得
+*  select * from   bsad  " DEL 2002.04.16B
+*         into   table i_tmp
+*         where  bukrs  = p_bukrs
+*         and    kunnr in s_kunnr
+*         and    augdt in r_augdt
+*         and    blart in s_blart  "伝票タイプ
+*         and    bschl in s_bschl  "転記キー
+*         and    hkont in s_hkont. "売掛金勘定コード
+*--------------- ADD 2002.04.16B (start)
+select * from   bsad CLIENT SPECIFIED
+where  mandt  = p_mandt
+and    bukrs  = p_bukrs
+and    kunnr in s_kunnr
+and    augdt in r_augdt
+and    hkont in s_hkont. "売掛金勘定コード
+
+if bsad-augbl ne bsad-belnr. "決済伝票≠会計伝票番号
+clear i_tmp.
+move-corresponding bsad to i_tmp.
+append i_tmp.
+endif.
+
+endselect.
+*--------------- ADD 2002.04.16B (end)
+
+* 決済明細の対象外削除 ADD 2002.04.12A
+loop at i_tmp.   "BSAD
+call function 'YK_ZFBDT_GET_BY_KNVV'
+exporting
+i_cord         = i_tmp-kunnr
+i_vkorg        = p_vkorg
+i_vtweg        = p_vtweg
+i_spart        = p_spart
+i_day          = p_zfbdt
+importing
+e_zfbdt        = w_zfbdt   "締日
+exceptions
+no_get_t052    = 1
+no_good_getday = 2
+no_get_zterm   = 3
+others         = 4.
+if sy-subrc <> 0.
+rollback work.
+perform f_dequeue_all.
+message e400(y1) with
+'エラー:汎用モジュールYK_ZFBDT_GET_BY_KNVV'.
+endif.
+if p_zfbdt = w_zfbdt.
+move-corresponding i_tmp to i_tmp2.
+append i_tmp2.
+endif.
+endloop.  "------- i_tmp ( = BSAD )
+* 決済伝票番号は代表の１件抽出 2002.04.18A
+sort i_tmp2 by bukrs kunnr   zfbdt waers augbl     belnr.
+"[ソート] 会社/ 入金先/ 締日/ 通貨/ 決済番号/ 会計番号
+clear i_tmp3.
+loop at i_tmp2.
+move-corresponding i_tmp2 to i_tmp3.
+at end of augbl.
+append i_tmp3.
+clear i_tmp3.
+endat.
+endloop.  "-------------- i_tmp2.
+* 印刷見出し ADD 2002.04.12A
+write:/5  '会社',
+10  '会計年度',
+20  '伝票番号',
+30  '明細番号',
+40  '入金先コード',
+55  '支払人コード',
+70  '決済日',
+82  '決済伝票番号'.
+* 伝票通貨額の取得と入金実績勘定によるチェック
+loop at i_tmp3.   "BSAD
+move-corresponding i_tmp3 to i_st_bsad.
+i_st_bsad-zfbdt = p_zfbdt.
+select *  from  bseg CLIENT SPECIFIED
+where mandt eq p_mandt
+and   bukrs eq i_tmp3-bukrs "会社コード
+*           and   belnr eq i_tmp3-belnr
+and   belnr eq i_tmp3-augbl "決済伝票 ADD 2002.04.16B
+and   gjahr eq i_tmp3-gjahr "会計年度
+and   hkont in s_hkont2.    "入金予定勘定コード
+
+**  支払人(bseg-xref1)を範囲テーブルに格納 ADD 2002.04.15A (start)
+*    clear r_kunnr_xref1.
+*    r_kunnr_xref1-sign   = 'I'.
+*    r_kunnr_xref1-option = 'EQ'.
+*    r_kunnr_xref1-low    = bseg-xref1.  "支払人
+*    append r_kunnr_xref1.
+**  支払人(bseg-xref1)を範囲テーブルに格納 ADD 2002.04.15A (end)
+
+** ADD 2002.04.12A (start)
+write:/5 bseg-bukrs,      "会社コード
+10  bseg-gjahr,      "会計年度
+20  bseg-belnr,      "伝票番号
+32  bseg-buzei,      "明細番号
+40  bseg-kunnr,      "入金先コード
+55  bseg-xref1,      "支払人コード
+70  i_tmp3-augdt,    "決済日
+82  i_tmp3-augbl.    "決済伝票番号
+* 入金明細の得意先(bsad-kunnr)には入金先が入っている
+*      i_st_bsad-kunnr  =  bseg-xref1. "得意先<=支払人
+i_st_bsad-kunnr  =  i_tmp3-kunnr. "得意先<=入金先 MOD 2002.04.16A
+i_st_bsad-vkorg  =  p_vkorg.    "販売組織
+i_st_bsad-vtweg  =  p_vtweg.    "流通チャネル
+i_st_bsad-spart  =  p_spart.    "製品部門
+** ADD 2002.04.12A (end)
+i_st_bsad-wrbtr  =  bseg-wrbtr. "伝票通貨額
+append i_st_bsad.
+
+endselect .
+if sy-subrc ne 0 .
+continue .
+endif .
+endloop.  "------- i_tmp3 ( = BSAD )
+write:/0 '　'.
+write:/0 '　'.
+
+*** 請求明細(YK520)取得
+select * from   yk520
+into   table i_yk520
+where  bukrs  = p_bukrs
+and  kunnr in s_kunnr   "MOD 2002.04.15A <= 戻す2002.04.16A
+*        and    kunnr in r_kunnr_xref1 "得意先=支払人 DEL 2002.04.16A
+and  zfbdt  = p_zfbdt.
+***
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_bsad_sum
+*---------------------------------------------------------------------*
+*       決済明細(bsad)入金を集計し、更新用データ(入金)を作成
+*---------------------------------------------------------------------*
+form f_bsad_sum.
+* 入金額の集計と更新データ(入金)の作成
+sort i_st_bsad by bukrs kunnr zfbdt waers shkzg.
+refresh i_yk510_bsad.
+loop at i_st_bsad.
+*** 項目の設定
+i_yk510_bsad-bukrs = i_st_bsad-bukrs.  "会社コード
+i_yk510_bsad-kunnr = i_st_bsad-kunnr.  "入金先コード
+i_yk510_bsad-vkorg = i_st_bsad-vkorg.  "販売組織     ###
+i_yk510_bsad-vtweg = i_st_bsad-vtweg.  "流通チャネル ###
+i_yk510_bsad-spart = i_st_bsad-spart.  "製品部門     ###
+i_yk510_bsad-zfbdt = i_st_bsad-zfbdt.  "期日計算の支払基準日（締日）
+i_yk510_bsad-waers = i_st_bsad-waers.  "通貨コード
+at end of shkzg.  "貸借フラグ
+***** 通貨コード、貸借フラグ別の金額集計(当月入金額)
+sum.
+case i_st_bsad-shkzg.    "Sは＋，Hは－ ; MOD 2002.04.16A
+when 'S'. "入金なので貸方が増加方向
+i_yk510_bsad-cicamt = i_yk510_bsad-cicamt + i_st_bsad-wrbtr.
+when 'H'. "入金なので借方が減少方向
+i_yk510_bsad-cicamt = i_yk510_bsad-cicamt - i_st_bsad-wrbtr.
+endcase.
+endat.
+at end of waers.
+***** 更新データ(入金)の保存
+append i_yk510_bsad.
+clear i_yk510_bsad.
+endat.
+endloop.  "i_st_bsad
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_yk520_sum                  2002.03.22A
+*---------------------------------------------------------------------*
+*       請求明細を集計し、更新用データ(請求明細)を作成
+*---------------------------------------------------------------------*
+form f_yk520_sum.
+* ローカル変数
+data i_yk510_sum like standard table of yk510 with header line.
+* 集計
+refresh i_yk510_sum.
+sort i_yk520 by bukrs kunnr zfbdt waers.
+loop at i_yk520.
+clear i_yk510_sum.
+i_yk510_sum-bukrs = i_yk520-bukrs. "会社コード
+i_yk510_sum-kunnr = i_yk520-kunnr. "入金先コード
+i_yk510_sum-vkorg = i_yk520-vkorg. "販売組織     ###
+i_yk510_sum-vtweg = i_yk520-vtweg. "流通チャネル ###
+i_yk510_sum-spart = i_yk520-spart. "製品部門     ###
+i_yk510_sum-zfbdt = i_yk520-zfbdt. "締日
+i_yk510_sum-waers = i_yk520-waers. "通貨コード
+i_yk510_sum-cslamt = i_yk520-netwr. "正味額→当月売上額
+i_yk510_sum-ctxamt = i_yk520-mwsbp. "税額→当月税額
+i_yk510_sum-cstamt = i_yk520-brtwr. "総額→当月税込額
+collect i_yk510_sum. "集計
+endloop.
+* 編集
+refresh i_yk510_yk520.
+append lines of i_yk510_sum to i_yk510_yk520.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_table_merge                2002.03.22A
+*---------------------------------------------------------------------*
+*       テーブル・マージ　入金(bsad)＋請求明細(yk520)
+*---------------------------------------------------------------------*
+form f_table_merge.
+* ローカル変数
+data w_yk510_sort like  yk510.
+*
+refresh i_yk510_sort.
+insert lines of i_yk510_yk520 into table i_yk510_sort. "コピー
+*
+loop at  i_yk510_bsad .
+insert  i_yk510_bsad into table i_yk510_sort.
+if sy-subrc ne 0.
+read table i_yk510_sort into w_yk510_sort
+with table key
+bukrs =  i_yk510_bsad-bukrs  "会社コード
+kunnr =  i_yk510_bsad-kunnr  "入金先コード
+vkorg =  i_yk510_bsad-vkorg  "販売組織     ###
+vtweg =  i_yk510_bsad-vtweg  "流通チャネル ###
+spart =  i_yk510_bsad-spart  "製品部門     ###
+zfbdt =  i_yk510_bsad-zfbdt  "締日
+waers =  i_yk510_bsad-waers. "通貨コード
+if sy-subrc ne 0.
+rollback work.
+message e400(y1) with 'テーブル・マージ時 readエラー'.
+endif.
+w_yk510_sort-cicamt = i_yk510_bsad-cicamt. "入金額
+modify i_yk510_sort  from  w_yk510_sort transporting cicamt
+where bukrs =  i_yk510_bsad-bukrs  "会社コード
+and   kunnr =  i_yk510_bsad-kunnr  "入金先コード
+***-------------------------------------- ADD 2002/05/22A (start)
+and   vkorg =  i_yk510_bsad-vkorg  "販売組織     ###
+and   vtweg =  i_yk510_bsad-vtweg  "流通チャネル ###
+and   spart =  i_yk510_bsad-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+and   zfbdt =  i_yk510_bsad-zfbdt  "締日
+and   waers =  i_yk510_bsad-waers. "通貨コード
+if sy-subrc ne 0.
+rollback work.
+message e400(y1) with 'テーブル・マージ時 modifyエラー'.
+endif.
+endif.
+endloop.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_yk510_modify
+*---------------------------------------------------------------------*
+form f_yk510_modify.
+* ロック
+loop at i_yk510_sort.
+call function 'ENQUEUE_EY_YK510'
+exporting
+bukrs          = i_yk510_sort-bukrs
+kunnr          = i_yk510_sort-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+vkorg =  i_yk510_sort-vkorg  "販売組織     ###
+vtweg =  i_yk510_sort-vtweg  "流通チャネル ###
+spart =  i_yk510_sort-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+zfbdt          = i_yk510_sort-zfbdt
+waers          = i_yk510_sort-waers
+exceptions
+foreign_lock   = 1
+system_failure = 2
+others         = 3.
+if sy-subrc <> 0.
+rollback work.
+perform f_dequeue_yk510_sort.
+if sy-batch = 'X'.
+message e400(y1) with
+'テーブル:YK510 をロックできません'.
+else.
+message s400(y1) with
+'テーブル:YK510 をロックできません'.
+stop.
+endif.
+endif.
+endloop.
+* テーブル更新
+loop at i_yk510_sort.
+*** 同一キーの存在チェック
+clear yk510.
+select single * from  yk510
+where  bukrs  = i_yk510_sort-bukrs
+and    kunnr  = i_yk510_sort-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+and    vkorg =  i_yk510_sort-vkorg  "販売組織     ###
+and    vtweg =  i_yk510_sort-vtweg  "流通チャネル ###
+and    spart =  i_yk510_sort-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+and    zfbdt  = i_yk510_sort-zfbdt
+and    waers  = i_yk510_sort-waers.
+if sy-subrc = 0.
+if yk510-outcnt > 0 .    "確定済
+append i_yk510_sort to i_yk510_err.
+add 1 to w_errcnt.
+else.
+perform f_yk510_update. "変更
+endif.
+else.
+perform f_yk510_insert.  "登録
+endif.
+endloop.
+* アンロック
+*  perform f_dequeue_all.
+*
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_yk510_update
+*---------------------------------------------------------------------*
+form f_yk510_update.
+yk510-cslamt = i_yk510_sort-cslamt.                    "当月売上
+yk510-ctxamt = i_yk510_sort-ctxamt.                    "当月税額
+yk510-cstamt = i_yk510_sort-cstamt.                    "当月税込
+yk510-cicamt = i_yk510_sort-cicamt.                    "入金額
+yk510-cblamt = yk510-lblamt - yk510-cicamt + yk510-cstamt .
+"当月請求 = 前月請求 - 当月入金 + 当月税込
+yk510-upddat = sy-datum.
+yk510-updtim = sy-uzeit.
+yk510-updusr = sy-uname.
+update yk510.
+if sy-subrc <> 0.
+rollback work.
+perform f_dequeue_yk510_sort.
+message e400(y1) with 'テーブル:YK510 の更新に失敗しました'.
+endif.
+add 1 to w_updcnt_yk510.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_yk510_insert
+*---------------------------------------------------------------------*
+form f_yk510_insert.
+* 前月レコードの検索
+*   請求書を出さない場合でも入金の反映のためにレコードが作成される
+*   全額入金されている場合、当月請求額は０になる
+select * from yk510 up to 1 rows     "先頭レコード
+where  bukrs  = i_yk510_sort-bukrs
+and    kunnr  = i_yk510_sort-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+and    vkorg =  i_yk510_sort-vkorg  "販売組織     ###
+and    vtweg =  i_yk510_sort-vtweg  "流通チャネル ###
+and    spart =  i_yk510_sort-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+and    waers  = i_yk510_sort-waers
+*         and    zfbdt  <  p_zfbdt      "締日 < 対象締日 MOD 2002.05.22A
+and    zfbdt  <  i_yk510_sort-zfbdt  "締日 < 対象締日
+order  by zfbdt descending.   "締日の新しい順
+i_yk510_sort-lblamt = yk510-cblamt. "当月請求額→前月請求額
+endselect.
+*
+i_yk510_sort-cblamt = i_yk510_sort-lblamt
+- i_yk510_sort-cicamt
++ i_yk510_sort-cstamt.
+"当月請求額 = 前月請求額 - 当月入金額 + 当月税込額
+i_yk510_sort-insdat = sy-datum. "登録日
+i_yk510_sort-instim = sy-uzeit. "登録時刻
+i_yk510_sort-insusr = sy-uname. "登録ユーザ
+insert into yk510 values i_yk510_sort.
+if sy-subrc <> 0.
+rollback work.
+perform f_dequeue_yk510_sort. "アンロック
+message e400(y1) with 'テーブル:YK510 の更新に失敗しました'.
+endif.
+add 1 to w_inscnt_yk510.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_headflg_update                2002.04.03A
+*---------------------------------------------------------------------*
+*       ヘッダ処理済フラグの更新
+*---------------------------------------------------------------------*
+form f_headflg_update.    "ヘッダ処理済フラグの更新
+refresh i_yk520_update.
+clear   i_yk520_update.
+* 対象の抽出
+loop at i_yk520.
+read table i_yk510_err with key "確定済みに存在するか
+bukrs  = i_yk520-bukrs
+kunnr  = i_yk520-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+vkorg =  i_yk520-vkorg  "販売組織     ###
+vtweg =  i_yk520-vtweg  "流通チャネル ###
+spart =  i_yk520-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+zfbdt  = i_yk520-zfbdt
+waers  = i_yk520-waers .
+if sy-subrc ne 0. "確定済みに存在しなければ、フラグ更新の対象
+append i_yk520 to i_yk520_update.
+endif.
+endloop.
+* ロック
+loop at i_yk520_update.
+call function 'ENQUEUE_EY_YK520'
+exporting
+bukrs          = i_yk520_update-bukrs
+kunnr          = i_yk520_update-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+vkorg          = i_yk520_update-vkorg  "販売組織     ###
+vtweg          = i_yk520_update-vtweg  "流通チャネル ###
+spart          = i_yk520_update-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+zfbdt          = i_yk520_update-zfbdt
+waers          = i_yk520_update-waers
+exceptions
+foreign_lock   = 1
+system_failure = 2
+others         = 3.
+if sy-subrc <> 0.
+rollback work.
+perform f_dequeue_all.
+if sy-batch = 'X'.
+message e400(y1) with
+'テーブル:YK520 をロックできません'.
+else.
+message s400(y1) with
+'テーブル:YK520 をロックできません'.
+stop.
+endif.
+endif.
+endloop.
+* テーブル更新
+loop at i_yk520_update.
+clear yk510.
+select single * from  yk520
+where  bukrs  = i_yk520_update-bukrs
+and    kunnr  = i_yk520_update-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+and    vkorg  = i_yk520_update-vkorg  "販売組織     ###
+and    vtweg  = i_yk520_update-vtweg  "流通チャネル ###
+and    spart  = i_yk520_update-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+and    zfbdt  = i_yk520_update-zfbdt
+and    waers  = i_yk520_update-waers
+and    vbeln  = i_yk520_update-vbeln
+and    posnr  = i_yk520_update-posnr.
+if sy-subrc = 0.
+yk520-headflg = 'X'. "ヘッダ処理済フラグ ON
+yk520-upddat  = sy-datum.
+yk520-updtim  = sy-uzeit.
+yk520-updusr  = sy-uname.
+update yk520.
+if sy-subrc <> 0.
+rollback work.
+perform f_dequeue_all.
+message e400(y1) with 'テーブル:YK520 の更新に失敗しました'.
+endif.
+add 1 to w_updcnt_yk520.
+else.
+rollback work.
+perform f_dequeue_all.
+message e400(y1) with
+'テーブル:YK520 の更新に失敗・読み込んだものがない！'.
+endif.
+endloop.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_dequeue_yk510_sort
+*---------------------------------------------------------------------*
+form f_dequeue_yk510_sort.
+loop at i_yk510_sort.
+call function 'DEQUEUE_EY_YK510'
+exporting
+bukrs = i_yk510_sort-bukrs
+kunnr = i_yk510_sort-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+vkorg = i_yk510_sort-vkorg  "販売組織     ###
+vtweg = i_yk510_sort-vtweg  "流通チャネル ###
+spart = i_yk510_sort-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+zfbdt = i_yk510_sort-zfbdt
+waers = i_yk510_sort-waers.
+endloop.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_dequeue_yk520
+*---------------------------------------------------------------------*
+form f_dequeue_yk520.
+loop at i_yk520.
+call function 'DEQUEUE_EY_YK520'
+exporting
+bukrs = i_yk520-bukrs
+kunnr = i_yk520-kunnr
+***-------------------------------------- ADD 2002/05/22A (start)
+vkorg = i_yk520-vkorg  "販売組織     ###
+vtweg = i_yk520-vtweg  "流通チャネル ###
+spart = i_yk520-spart  "製品部門     ###
+***-------------------------------------- ADD 2002/05/22A (end)
+zfbdt = i_yk520-zfbdt
+waers = i_yk520-waers.
+endloop.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_dequeue_all
+*---------------------------------------------------------------------*
+form f_dequeue_all.
+perform f_dequeue_yk510_sort.
+perform f_dequeue_yk520.
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_list
+*---------------------------------------------------------------------*
+*       データ一覧出力                       2002.04.03A
+*---------------------------------------------------------------------*
+form f_list.
+if w_listcnt > 0.
+write:/1   w_list_name1 ,
+51   w_list_name2 ,
+151   sy-datum.
+write:/5  '会社',
+10  '入金先',
+21  '販売組織',
+30  '流通チャネル',
+43  '製品部門',
+52  '締日',
+63  '通貨',
+68  '          当月入金額',
+90  '          当月税込額'.
+loop at i_yk510_list.
+*
+*      perform f_edit_kingaku using i_yk510_list-waers.
+*      w_kingaku1 = i_yk510_list-cicamt * w_10n. "当月入金額
+*      perform f_edit_kingaku using i_yk510_list-waers.
+*      w_kingaku2 = i_yk510_list-cstamt * w_10n. "当月税込額
+*        write:/ i_yk510_list.
+write:/5  i_yk510_list-bukrs,
+10  i_yk510_list-kunnr,
+21  i_yk510_list-vkorg,
+30  i_yk510_list-vtweg,
+43  i_yk510_list-spart,
+52  i_yk510_list-zfbdt,
+63  i_yk510_list-waers,
+68  i_yk510_list-cicamt currency i_yk510_list-waers,
+90  i_yk510_list-cstamt currency i_yk510_list-waers.
+endloop.
+write:/0 '　'.
+write:/0 '　'.
+endif.
+endform.
+*---------------------------------------------------------------------*
+*     FORM f_header_update1
+*---------------------------------------------------------------------*
+*     ヘッダ処理 (ヘッダ未処理の明細があればヘッダ処理) 2002.05.22B
+*---------------------------------------------------------------------*
+form f_header_update1.
+*** 内部テーブル・クリア
+refresh: i_yk520, i_yk510_yk520, i_yk510_sort, i_yk510_err.
+clear: w_errcnt, i_yk510_err.
+clear: i_yk520, i_yk510_yk520, i_yk510_sort.
+*----------- データ登録／更新／フラグの更新
+select * from yk520 appending table i_yk520
+where  headflg  ne 'X'         "ヘッダ処理済フラグ = 未処理
+and    zfbdt    lt  p_zfbdt.   "締日＜パラメータ
+perform f_yk520_sum.                    "請求明細(yk520)の集計
+insert lines of i_yk510_yk520 into table i_yk510_sort. "コピー
+perform f_yk510_modify.      "一括請求書ヘッダデータ登録／更新
+perform f_headflg_update.    "ヘッダ処理済フラグの更新
+*------------ 印刷　<ヘッダ未処理データ一覧>
+refresh: i_yk510_list.
+clear: i_yk510_list.
+w_list_name1 = '<ヘッダ未処理データ一覧> 締日＜パラメータ'.
+w_list_name2 = 'ヘッダ処理済フラグ=OFFの明細からヘッダ登録／更新'.
+insert lines of i_yk510_sort into table i_yk510_list. "コピー
+describe table i_yk510_list lines w_listcnt .
+perform f_list.              "未処理データ一覧の出力
+*------------ 印刷　ヘッダ未処理内 <未反映データ一覧>
+refresh: i_yk510_list.
+clear: i_yk510_list.
+w_list_name1 = 'ヘッダ未処理内 <未反映データ一覧>'.
+w_list_name2 = '既に確定済(出力済)ヘッダに明細の追加不可'.
+insert lines of i_yk510_err into table i_yk510_list. "コピー
+w_listcnt = w_errcnt.
+perform f_list.              "未処理データ一覧の出力
+perform f_dequeue_all.        "全ロック解除
+endform.                                    "FORM f_header_update1
+*---------------------------------------------------------------------*
+*     FORM f_header_update2
+*---------------------------------------------------------------------*
+*     ヘッダ処理 (ヘッダ未処理の明細があればヘッダ処理) 2002.04.04A
+*---------------------------------------------------------------------*
+form f_header_update2.
+*** 内部テーブル・クリア
+refresh: i_yk520, i_yk510_yk520, i_yk510_sort, i_yk510_err.
+clear: w_errcnt, i_yk510_err.
+clear: i_yk520, i_yk510_yk520, i_yk510_sort.
+*----------- データ登録／更新／フラグの更新
+select * from yk520 appending table i_yk520
+where headflg  ne 'X'       "ヘッダ処理済フラグ = 未処理
+and   zfbdt    ge p_zfbdt.  "締日≧パラメータ ADD 2002.05.22B
+perform f_yk520_sum.                    "請求明細(yk520)の集計
+insert lines of i_yk510_yk520 into table i_yk510_sort. "コピー
+perform f_yk510_modify.      "一括請求書ヘッダデータ登録／更新
+perform f_headflg_update.    "ヘッダ処理済フラグの更新
+*------------ 印刷　<ヘッダ未処理データ一覧>
+refresh: i_yk510_list.
+clear: i_yk510_list.
+w_list_name1 = '<ヘッダ未処理データ一覧> 締日≧パラメータ'.
+w_list_name2 = 'ヘッダ処理済フラグ=OFFの明細からヘッダ登録／更新'.
+insert lines of i_yk510_sort into table i_yk510_list. "コピー
+describe table i_yk510_list lines w_listcnt .
+perform f_list.              "未処理データ一覧の出力
+*------------ 印刷　ヘッダ未処理内 <未反映データ一覧>
+refresh: i_yk510_list.
+clear: i_yk510_list.
+w_list_name1 = 'ヘッダ未処理内 <未反映データ一覧>'.
+w_list_name2 = '既に確定済(出力済)ヘッダに明細の追加不可'.
+insert lines of i_yk510_err into table i_yk510_list. "コピー
+w_listcnt = w_errcnt.
+perform f_list.              "未処理データ一覧の出力
+new-page print off.
+commit work.
+perform f_dequeue_all.        "全ロック解除
+endform.                                  " FORM f_header_update2
+*----------------------------------------------------------------------*
+*    f_edit_kingaku    通貨による金額編集の為の10のN乗値
+*----------------------------------------------------------------------*
+form f_edit_kingaku using value(p_waers) like yk520-waers.
+data:  w_fract1  like tcurx-currdec. "通貨の小数点以下桁数
+clear w_fract1.
+call function 'FWOS_CURRENCY_DECIMALS_READ'
+exporting
+i_currency = p_waers
+importing
+e_decimals = w_fract1
+exceptions
+others     = 1.
+if sy-subrc ne 0.
+w_10n = 1.
+else.
+w_10n = 1 / 10 ** ( w_fract1 - 2 ).
+endif.
+endform.

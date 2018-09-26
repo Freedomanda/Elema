@@ -1,0 +1,1176 @@
+************************************************************************
+* [プログラム名]
+*   ZE010800      出荷先変換ファイルダウンロード
+*
+* [処理概要]
+*   選択画面の項目値から１件ずつ、または入力ファイルより読込んだデータで
+*   内部テーブルに更新をかける。
+*   その際、データ内容がＲ／３上のマスタと不整合が無いかチェックをかけ、
+*   整合性が取れたデータのみ登録する。
+*   さらに、正常データでＥＤＩサーバ上へファイルをダウンロードする
+*                                                             （全更新）
+*   ※マスタの内容と異なった場合はそのデータは書き込まれずエラーリストを
+*     出力する。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/02/01   PSD K.igarashi    新規開発
+*  2002/06/20   PSD T.SAITOH      再移送
+*  2010/05/25   Solfis R.Hata     選択画面項目追加
+*  2012/08/14   ISID                  ES-UP
+************************************************************************
+
+REPORT  ZE010800
+MESSAGE-ID Z1
+LINE-SIZE 155
+NO STANDARD PAGE HEADING.
+
+
+************************************************************************
+* ＴＡＢＬＥＳ
+************************************************************************
+TABLES: KNA1,                                  "得意先マスタ
+ZEDI04.
+************************************************************************
+* ＴＹＰＥＳ
+************************************************************************
+* アップロード用内部ＴＢＬ型
+TYPES: BEGIN OF TYP_FILEDATA,
+JUCHU(11)    TYPE C,                      "受注先コード
+SHUKKA(11)   TYPE C,                      "出荷先コード
+UKEWATASI(9) TYPE C,                          "受渡場所
+SAKUJO       TYPE ZEDI04-SAKUJO,            "削除フラグ
+END OF TYP_FILEDATA.
+
+* 更新用内部ＴＢＬ型
+TYPES: BEGIN OF TYP_IFILE,
+JUCHU     TYPE ZEDI04-JUCHU,              "受注先コード
+SHUKKA    TYPE ZEDI04-SHUKKA,             "出荷先コード
+UKEWATASI TYPE ZEDI04-UKEWATASI,              "受渡場所
+SAKUJO    TYPE ZEDI04-SAKUJO,               "削除フラグ
+END OF TYP_IFILE.
+
+* 出力ファイル編集用内部ＴＢＬ型
+TYPES: BEGIN OF TYP_EDIT_FILE,
+JUCHU     TYPE ZEDI04-JUCHU,                  "受注先コード
+SHUKKA    TYPE ZEDI04-SHUKKA,                 "出荷先コード
+UKEWATASI TYPE ZEDI04-UKEWATASI,                  "受渡場所
+SAKUJO    TYPE ZEDI04-SAKUJO,                   "削除フラグ
+DATVR     TYPE ZEDI04-DATVR,                        "更新日
+UHRVR     TYPE ZEDI04-UHRVR,                      "更新時間
+END OF TYP_EDIT_FILE.
+
+* 対マスタ不整合リスト内部ＴＢＬ型
+TYPES: BEGIN OF TYP_WRITE,
+JUCHU(11)    TYPE C,                "受注先コード
+SHUKKA(11)   TYPE C,               "出荷先コード
+UKEWATASI(9) TYPE C,                "受渡場所
+SAKUJO      TYPE ZEDI04-SAKUJO,                 "削除フラグ
+DATVR       TYPE ZEDI04-DATVR,                      "更新日
+MESSAGE(80) TYPE C,                             "メッセージ
+END OF TYP_WRITE.
+
+************************************************************************
+* ＤＡＴＡ
+************************************************************************
+* ファイルアップロード用内部ＴＢＬ
+DATA: GF_IFILE TYPE TYP_IFILE,
+GT_IFILE LIKE TABLE OF GF_IFILE.
+
+* 変換ＴＢＬ情報格納用内部ＴＢＬ
+DATA: GF_ZEDI04 LIKE ZEDI04,
+GT_ZEDI04 LIKE TABLE OF GF_ZEDI04.
+
+* ＳＦＬＡＧ更新用内部ＴＢＬ
+DATA: GF_UPDATE LIKE ZEDI04,
+GT_UPDATE LIKE TABLE OF GF_UPDATE.
+
+* 出力ファイル編集用構造
+DATA: GF_EDIT_FILE TYPE TYP_EDIT_FILE.
+
+* 出力ファイル用内部ＴＢＬ
+* Mod ES-UP 2012/10/24 -->
+*DATA: GF_OFILE(60) TYPE C,
+DATA: GF_OFILE TYPE string,
+* Mod ES-UP 2012/10/24 <--
+GT_OFILE LIKE TABLE OF GF_OFILE.
+
+* 対マスタ不整合リスト表示用内部ＴＢＬ
+DATA: GF_WRITE TYPE TYP_WRITE,
+GT_WRITE LIKE TABLE OF GF_WRITE.
+
+* ポップアップ表示情報
+DATA: MSG_TEXT(100) TYPE C,         "ポップアップメッセージ格納項目
+UPD_COUNT TYPE I VALUE 0,                       "更新カウンタ
+INS_COUNT TYPE I VALUE 0,                   "新規登録カウンタ
+UPD_KENSU(10) TYPE C,                               "更新件数
+INS_KENSU(10) TYPE C.                           "新規登録件数
+
+DATA: MSG_FLG TYPE I VALUE 0.                     "メッセージフラグ
+DATA: G_FNAME(14) TYPE C.                             "項目名格納用
+
+*** 汎用モジュール WS_FILENAME_GET ***
+DATA: W_MASK(22)        TYPE C VALUE
+',*.TXT,*.TXT,*.*,*.*.'.                 "ファイルの種類
+* Mod ES-UP 2012/08/14 -->
+*DATA: G_FILENM_GET      LIKE RLGRAP-FILENAME.           "ファイル名
+DATA: G_FILENM_GET      type string.           "ファイル名
+* Mod ES-UP 2012/08/14 <--
+
+DATA: W_DEF_FILENM(255) TYPE C.                             "PCﾌｧｲﾙ名
+
+*** 汎用モジュール WS_UPLOAD ***
+DATA: GF_FILEDATA TYPE TYP_FILEDATA,           "アップロードファイル内容
+GT_FILEDATA LIKE TABLE OF GF_FILEDATA.
+DATA: IFILENAME LIKE RLGRAP-FILENAME.       "アップロードファイル名
+
+*** 汎用モジュール SXPG_CALL_SYSTEM ***
+DATA: BEGIN OF EXEC_PROTOCOL.
+INCLUDE STRUCTURE BTCXPM.
+DATA: END OF EXEC_PROTOCOL.
+
+DATA: GT_PROTOCOL   LIKE TABLE OF EXEC_PROTOCOL,
+G_COMMANDNAME LIKE SXPGCOLIST-NAME,
+G_STATUS      LIKE EXTCMDEXEX-STATUS.
+************************************************************************
+* ＣＯＮＳＴＡＮＴＳ
+************************************************************************
+CONSTANTS: CNS_TBL_002(6) TYPE C VALUE 'ZEDI04'.
+* Mod ES-UP 2012/08/14 -->
+*CONSTANTS: CNS_MOD_001(9)  TYPE C VALUE 'WS_UPLOAD',
+CONSTANTS: CNS_MOD_001(10)  TYPE C VALUE 'GUI_UPLOAD',
+* Mod ES-UP 2012/08/14 <--
+CNS_MOD_003(15) TYPE C VALUE 'ENQUEUE_EZEDI01',
+CNS_MOD_004(15) TYPE C VALUE 'DEQUEUE_EZEDI01',
+* Mod ES-UP 2012/08/14 -->
+*           CNS_MOD_005(15) TYPE C VALUE 'WS_FILENAME_GET'.
+CNS_MOD_005(16) TYPE C VALUE 'FILE_OPEN_DIALOG'.
+* Mod ES-UP 2012/08/14 <--
+************************************************************************
+* 選択画面
+************************************************************************
+* 一件ずつ更新
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS R_UPDAT1 RADIOBUTTON GROUP rd_1.
+SELECTION-SCREEN COMMENT 4(12) text-001 FOR FIELD R_UPDAT1.
+SELECTION-SCREEN END OF LINE.
+* 受注先コード
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(12) text-005 FOR FIELD P_JUCHU,
+POSITION 20.
+PARAMETERS P_JUCHU LIKE KNA1-KUNNR.
+SELECTION-SCREEN END OF LINE.
+* 出荷先コード
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(12) text-006 FOR FIELD P_SHUKKA,
+POSITION 20.
+PARAMETERS P_SHUKKA LIKE KNA1-KUNNR.
+SELECTION-SCREEN END OF LINE.
+* 受渡場所
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(14) text-007 FOR FIELD P_UKEWTS,
+POSITION 20.
+PARAMETERS P_UKEWTS(8) TYPE C.
+SELECTION-SCREEN END OF LINE.
+* 削除フラグ
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(10) text-008 FOR FIELD C_SAKUJO,
+POSITION 20.
+PARAMETERS C_SAKUJO AS CHECKBOX.
+SELECTION-SCREEN: COMMENT 23(13) text-011.
+SELECTION-SCREEN END OF LINE.
+
+* ファイルより更新(一括更新)
+SELECTION-SCREEN SKIP 1.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS R_UPDAT2 RADIOBUTTON GROUP rd_1.
+SELECTION-SCREEN COMMENT 4(26) text-002 FOR FIELD R_UPDAT2.
+SELECTION-SCREEN END OF LINE.
+* 入力ファイル
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(12) text-009 FOR FIELD P_IFILE,
+POSITION 20.
+PARAMETERS P_IFILE TYPE RLGRAP-FILENAME.
+SELECTION-SCREEN END OF LINE.
+
+* 一覧表示
+SELECTION-SCREEN SKIP 1.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS R_ICHIRN RADIOBUTTON GROUP rd_1.
+SELECTION-SCREEN COMMENT 4(8) text-003 FOR FIELD R_ICHIRN.
+SELECTION-SCREEN END OF LINE.
+* 受注先コード
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(12) text-005 FOR FIELD S_JUCHU,
+POSITION 17.
+SELECT-OPTIONS S_JUCHU FOR KNA1-KUNNR.
+SELECTION-SCREEN END OF LINE.
+*Add 2010/05/26 --->
+* 出荷先コード
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(12) text-006 FOR FIELD S_SHUKKA,
+POSITION 17.
+SELECT-OPTIONS S_SHUKKA FOR ZEDI04-SHUKKA .
+SELECTION-SCREEN END OF LINE.
+* 受渡場所
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(14) text-007 FOR FIELD S_UKEWTS,
+POSITION 17.
+SELECT-OPTIONS S_UKEWTS FOR ZEDI04-UKEWATASI.
+SELECTION-SCREEN END OF LINE.
+*Add 2010/05/26 <---
+
+
+* EDIマスタ送信
+SELECTION-SCREEN SKIP 1.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS R_EDI RADIOBUTTON GROUP rd_1.
+SELECTION-SCREEN COMMENT 4(16) text-004 FOR FIELD R_EDI.
+SELECTION-SCREEN END OF LINE.
+* 出力ファイル
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT 3(14) text-010 FOR FIELD P_OFILE,
+POSITION 20.
+PARAMETERS P_OFILE TYPE RLGRAP-FILENAME.
+SELECTION-SCREEN END OF LINE.
+
+************************************************************************
+* ＡＴ　ＳＥＬＥＣＴＩＯＮ－ＳＣＲＥＥＮ
+************************************************************************
+AT SELECTION-SCREEN.
+
+DATA: W_FLG TYPE I VALUE 0.
+
+* 入力チェック
+* 「一件ずつ更新」選択時
+IF R_UPDAT1 = 'X'.
+IF P_JUCHU = ' '.    "受注先コード
+MESSAGE S006 WITH text-005.
+STOP.
+ENDIF.
+
+IF P_SHUKKA = ' '.    "出荷先コード
+MESSAGE S006 WITH text-006.
+STOP.
+ENDIF.
+
+IF P_UKEWTS = ' '.    "受渡場所
+MESSAGE S006 WITH text-007.
+STOP.
+ENDIF.
+
+* 「ファイルより更新」選択時
+ELSEIF R_UPDAT2 = 'X'.
+IF P_IFILE = ' '.    "入力ファイル
+MESSAGE S006 WITH text-009.
+STOP.
+ENDIF.
+IFILENAME = P_IFILE.
+
+* ワーニング項目
+IF P_JUCHU <> ' '.    "受注先コード
+W_FLG = 1.
+MESSAGE I622 WITH text-005.
+ENDIF.
+
+IF W_FLG = 0.
+IF P_SHUKKA <> ' '.    "出荷先コード
+W_FLG = 1.
+MESSAGE I622 WITH text-006.
+ENDIF.
+ENDIF.
+
+IF W_FLG = 0.
+IF P_UKEWTS <> ' '.    "受渡場所
+W_FLG = 1.
+MESSAGE I622 WITH text-007.
+ENDIF.
+ENDIF.
+
+IF W_FLG = 0.
+IF C_SAKUJO <> ' '.    "削除フラグ
+W_FLG = 1.
+MESSAGE I622 WITH text-008.
+ENDIF.
+ENDIF.
+
+
+ELSEIF R_EDI = 'X'.
+IF P_OFILE = ' '.
+MESSAGE S006 WITH text-010.
+STOP.
+ENDIF.
+
+ENDIF.
+************************************************************************
+* ＡＴ　ＳＥＬＥＣＴＩＯＮ－ＳＣＲＥＥＮ　入力ファイルヘルプ
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_IFILE.   "入力ヘルプ
+* Mod ES-UP 2012/08/14 -->
+*  CALL FUNCTION 'WS_FILENAME_GET'
+*     EXPORTING
+*         DEF_FILENAME           = W_DEF_FILENM
+*         MASK                   = W_MASK
+*         TITLE                  = '保管場所'
+*     IMPORTING
+*         FILENAME               = G_FILENM_GET
+*   EXCEPTIONS
+*     INV_WINSYS             = 1
+*     NO_BATCH               = 2
+*     SELECTION_CANCEL       = 3
+*     SELECTION_ERROR        = 4
+*     OTHERS                 = 5.
+
+
+DATA: L_USER_ACTION TYPE I,
+l_path        type string,
+lt_file       type FILETABLE,
+l_rc          type i.
+
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+EXPORTING
+WINDOW_TITLE            = '保管場所'
+*    DEFAULT_EXTENSION       =
+*    DEFAULT_FILENAME        =
+*    FILE_FILTER             =
+*    WITH_ENCODING           =
+*    INITIAL_DIRECTORY       =
+*    MULTISELECTION          =
+CHANGING
+FILE_TABLE              = lt_file
+RC                      = l_rc
+USER_ACTION             = L_USER_ACTION
+*    FILE_ENCODING           =
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+others                  = 5
+.
+
+if lt_file is not initial.
+read table lt_file into G_FILENM_GET index 1.
+endif.
+
+* Mod ES-UP 2012/08/14 <--
+
+* Mod ES-UP 2012/08/14 -->
+if L_USER_ACTION = CL_GUI_FRONTEND_SERVICES=>ACTION_CANCEL.
+MESSAGE ID '00' TYPE 'S' NUMBER '208' WITH '処理中断'.
+STOP.
+elseif SY-SUBRC = 0.
+P_IFILE = G_FILENM_GET.
+else.
+MESSAGE I502 WITH CNS_MOD_005 SY-SUBRC.
+STOP.
+endif.
+
+*  IF SY-SUBRC = 0.
+*      P_IFILE = G_FILENM_GET.
+*  ELSEIF SY-SUBRC = 4.
+*      MESSAGE ID '00' TYPE 'S' NUMBER '208' WITH '処理中断'.
+*      STOP.
+*  ELSE.
+*      MESSAGE I502 WITH CNS_MOD_005 SY-SUBRC.
+*      STOP.
+*  ENDIF.
+* Mod ES-UP 2012/08/14 -->
+
+************************************************************************
+* ＳＴＡＲＴ－ＯＦ－ＳＥＬＥＣＴＩＯＮ
+************************************************************************
+START-OF-SELECTION.
+
+* 一件ずつ更新
+IF R_UPDAT1 = 'X'.
+PERFORM frm_table_rock.                    "テーブルロック処理
+PERFORM frm_data_set.                    "取得データセット処理
+PERFORM frm_update.                      "変換テーブル更新処理
+PERFORM frm_write_message.               "更新メッセージの出力
+PERFORM frm_table_unrock.                      "ロック解除処理
+* ファイルより更新
+ELSEIF R_UPDAT2 = 'X'.
+PERFORM frm_table_rock.                    "テーブルロック処理
+PERFORM frm_file_uplode.         "入力ファイルアップロード処理
+PERFORM frm_filedata_check.        "入力ファイルデータチェック
+PERFORM frm_update.                      "変換テーブル更新処理
+PERFORM frm_write_message.               "更新メッセージの出力
+PERFORM frm_table_unrock.                      "ロック解除処理
+* EDIマスタ送信
+ELSEIF R_EDI = 'X'.
+PERFORM frm_table_rock.                    "テーブルロック処理
+PERFORM frm_make_file.                   "出力ファイル作成処理
+PERFORM frm_sxpg_call_system.     "EDIサーバ側システム起動処理
+PERFORM frm_sflag_update.                "変換テーブル更新処理
+perform delte_table.
+PERFORM frm_table_unrock.                      "ロック解除処理
+* 一覧表示
+ELSEIF R_ICHIRN = 'X'.
+PERFORM frm_get_ichirandata.             "一覧用データ取得処理
+PERFORM frm_write_ichiran.                       "一覧出力処理
+ENDIF.
+
+************************************************************************
+* ＴＯＰ-ＯＦ-ＰＡＧＥ
+************************************************************************
+TOP-OF-PAGE.
+
+IF R_ICHIRN = 'X' OR R_EDI = 'X'.
+WRITE: SY-ULINE,
+text-016, SY-REPID,      "PROGRAM-ID:
+32(26) text-017,         "*  出荷先変換マスタ一覧  *
+110 text-021, SY-DATUM,  "日付
+text-022, SY-UZEIT,  "時間
+140 SY-PAGNO, text-023,  "貢
+SY-ULINE,
+/0(12) text-005,         "受注先コード
+14(12) text-006,         "出荷先コード
+28(8)  text-007,         "受渡場所
+38(10) text-008,         "削除フラグ
+50(10) text-024,         "更新日
+62(8)  text-030,         "更新時間
+72(14) text-025,         "ＥＤＩ送信済み
+SY-ULINE.
+ELSE.
+WRITE: SY-ULINE,
+text-016, SY-REPID,      "PROGRAM-ID:
+32(26) text-026,         "*  対マスタ不整合リスト  *
+110 text-021, SY-DATUM,  "日付
+text-022, SY-UZEIT,  "時間
+140 SY-PAGNO, text-023,  "貢
+SY-ULINE,
+/0(12) text-005,         "受注先コード
+14(12) text-006,         "出荷先コード
+28(9)  text-007,         "受渡場所
+39(10) text-008,         "削除フラグ
+51(10) text-024,         "更新日
+63(60) text-027,         "メッセージ
+SY-ULINE.
+ENDIF.
+
+************************************************************************
+* ＦＯＲＭ
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  frm_data_set
+*&---------------------------------------------------------------------*
+*       入力データセット
+*----------------------------------------------------------------------*
+FORM frm_data_set.
+
+GF_IFILE-JUCHU     = P_JUCHU.
+GF_IFILE-SHUKKA    = P_SHUKKA.
+GF_IFILE-UKEWATASI = P_UKEWTS.
+GF_IFILE-SAKUJO    = C_SAKUJO.
+
+APPEND GF_IFILE TO GT_IFILE.
+
+ENDFORM.                    " frm_data_set
+*&---------------------------------------------------------------------*
+*&      Form  frm_file_uplode
+*&---------------------------------------------------------------------*
+*       入力ファイル読み込み処理
+*----------------------------------------------------------------------*
+FORM frm_file_uplode.
+
+DATA: L_SUBRC LIKE SY-SUBRC.
+
+* Mod ES-UP 2012/08/14 -->
+*CALL FUNCTION 'WS_UPLOAD'
+*  EXPORTING
+*      FILENAME                      = IFILENAME
+*      FILETYPE                      = 'DAT'
+*  TABLES
+*      DATA_TAB                      = GT_FILEDATA
+*  EXCEPTIONS
+*      CONVERSION_ERROR              = 1
+*      FILE_OPEN_ERROR               = 2
+*      FILE_READ_ERROR               = 3
+*      INVALID_TYPE                  = 4
+*      NO_BATCH                      = 5
+*      UNKNOWN_ERROR                 = 6
+*      INVALID_TABLE_WIDTH           = 7
+*      GUI_REFUSE_FILETRANSFER       = 8
+*      CUSTOMER_ERROR                = 9
+*      OTHERS                        = 10.
+
+DATA: L_CODEPAGE TYPE ABAP_ENCODING,
+l_filename type string.
+
+clear: l_filename.
+l_filename = IFILENAME.
+
+*--- シフトJISのコードページを取得
+clear: l_codepage.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( 'shift_jis' ).
+
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = l_filename
+FILETYPE                = 'DAT'
+HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*    HEADER_LENGTH           = 0
+*    READ_BY_LINE            = 'X'
+*    DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+IGNORE_CERR             = ABAP_FALSE
+*    REPLACEMENT             = '#'
+*    VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*  IMPORTING
+*    FILELENGTH              = FILELENGTH
+*    HEADER                  = HEADER
+CHANGING
+DATA_TAB                = GT_FILEDATA
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+
+* Mod ES-UP 2012/08/14 <--
+
+IF SY-SUBRC = 0.
+* Mod ES-UP 2012/08/14 -->
+*  ELSEIF SY-SUBRC = 2.
+ELSEIF SY-SUBRC = 1.
+* Mod ES-UP 2012/08/14 <--
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE S614 WITH '入力ファイル'.
+STOP.
+ELSE.
+L_SUBRC = SY-SUBRC.
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE I502 WITH CNS_MOD_001 L_SUBRC.
+STOP.
+ENDIF.
+
+IF GT_FILEDATA IS INITIAL.
+MESSAGE S621.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_file_uplode
+*&---------------------------------------------------------------------*
+*&      Form  frm_filedata_check
+*&---------------------------------------------------------------------*
+*       入力ファイルデータチェック
+*----------------------------------------------------------------------*
+FORM frm_filedata_check.
+
+DATA: LEN TYPE I VALUE 0.
+
+
+LOOP AT GT_FILEDATA INTO GF_FILEDATA.
+
+* 更新用ファイルへコピー
+GF_IFILE-JUCHU     = GF_FILEDATA-JUCHU.
+GF_IFILE-SHUKKA    = GF_FILEDATA-SHUKKA.
+GF_IFILE-UKEWATASI = GF_FILEDATA-UKEWATASI.
+GF_IFILE-SAKUJO    = GF_FILEDATA-SAKUJO.
+
+* 仕入先コード桁溢れチェック
+LEN = STRLEN( GF_FILEDATA-JUCHU ).
+IF LEN > 10.
+G_FNAME = text-005.
+MSG_FLG = 3.
+PERFORM frm_writelist_set.
+CONTINUE.
+ENDIF.
+
+* 出荷先コード桁溢れチェック
+LEN = STRLEN( GF_FILEDATA-SHUKKA ).
+IF LEN > 10.
+G_FNAME = text-006.
+MSG_FLG = 3.
+PERFORM frm_writelist_set.
+CONTINUE.
+ENDIF.
+
+* 受渡場所桁溢れチェック
+LEN = STRLEN( GF_FILEDATA-UKEWATASI ).
+IF LEN > 8.
+G_FNAME = text-007.
+MSG_FLG = 3.
+PERFORM frm_writelist_set.
+CONTINUE.
+ENDIF.
+
+* 削除フラグチェック
+IF GF_IFILE-SAKUJO = 'X' OR GF_IFILE-SAKUJO = ' '.
+ELSE.
+MSG_FLG = 4.
+PERFORM frm_writelist_set.
+CONTINUE.
+ENDIF.
+
+APPEND GF_IFILE TO GT_IFILE.
+
+ENDLOOP.
+
+ENDFORM.                    " frm_filedata_check
+*&---------------------------------------------------------------------*
+*&      Form  frm_update
+*&---------------------------------------------------------------------*
+*       更新処理
+*----------------------------------------------------------------------*
+FORM frm_update.
+
+DATA L_JUCHU LIKE KNA1-KUNNR.
+
+
+LOOP AT GT_IFILE INTO GF_IFILE.
+**2002.07.04 add >>
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = GF_IFILE-JUCHU
+IMPORTING
+OUTPUT        = GF_IFILE-JUCHU
+.
+**2002.07.04 add <<
+
+* 更新データの整合性チェック(ＫＮＡ１－①)
+SELECT SINGLE KUNNR FROM KNA1 INTO L_JUCHU
+WHERE KUNNR = GF_IFILE-JUCHU
+AND   KTOKD = '0001'.
+
+IF SY-SUBRC = 0.
+PERFORM frm_check_kna1.
+ELSEIF SY-SUBRC = 4.
+MSG_FLG = 1.
+PERFORM frm_writelist_set.
+CLEAR MSG_FLG.
+ELSEIF SY-SUBRC = 8.
+ROLLBACK WORK.
+PERFORM frm_table_unrock.
+MESSAGE I400 WITH text-018.
+STOP.
+ENDIF.
+
+ENDLOOP.
+
+
+ENDFORM.                    " frm_update
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_kna1
+*&---------------------------------------------------------------------*
+*       更新データ整合性チェック(ＫＮＡ１－②)
+*----------------------------------------------------------------------*
+FORM
+frm_check_kna1.
+
+DATA L_SHUKKA LIKE KNA1-KUNNR.
+**2002.07.04 add >>
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = GF_IFILE-SHUKKA
+IMPORTING
+OUTPUT        = GF_IFILE-SHUKKA
+.
+**2002.07.04 add <<
+SELECT SINGLE KUNNR FROM KNA1 INTO L_SHUKKA
+WHERE KUNNR = GF_IFILE-SHUKKA.
+
+IF SY-SUBRC = 0.
+PERFORM frm_update_zedi04.
+ELSEIF SY-SUBRC = 4.
+MSG_FLG = 2.
+PERFORM frm_writelist_set.
+CLEAR MSG_FLG.
+ELSEIF SY-SUBRC = 8.
+ROLLBACK WORK.
+PERFORM frm_table_unrock.
+MESSAGE I400 WITH text-018.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_check_kna1
+*&---------------------------------------------------------------------*
+*&      Form  frm_update_zedi04.
+*&---------------------------------------------------------------------*
+*       更新処理
+*----------------------------------------------------------------------*
+FORM frm_update_zedi04.
+
+DATA LF_MODIFY_DATA LIKE ZEDI04.        "新規登録用データ格納構造
+
+* 変換テーブル存在チェック
+SELECT SINGLE *
+FROM ZEDI04
+INTO CORRESPONDING FIELDS OF GF_ZEDI04
+WHERE JUCHU = GF_IFILE-JUCHU
+AND   ukewatasi = gf_ifile-ukewatasi.  "2002.04.15 add
+*   AND   SHUKKA = GF_IFILE-SHUKKA.
+
+IF SY-SUBRC = 0.
+UPD_COUNT = UPD_COUNT + 1.
+ELSEIF SY-SUBRC = 4.
+INS_COUNT = INS_COUNT + 1.
+ENDIF.
+
+LF_MODIFY_DATA-JUCHU     = GF_IFILE-JUCHU.
+LF_MODIFY_DATA-SHUKKA    = GF_IFILE-SHUKKA.
+LF_MODIFY_DATA-UKEWATASI = GF_IFILE-UKEWATASI.
+LF_MODIFY_DATA-SAKUJO    = GF_IFILE-SAKUJO.
+LF_MODIFY_DATA-DATVR     = SY-DATUM.
+LF_MODIFY_DATA-UHRVR     = SY-UZEIT.
+LF_MODIFY_DATA-SFLAG     = ' '.
+MODIFY ZEDI04 FROM LF_MODIFY_DATA.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+ROLLBACK WORK.
+PERFORM frm_table_unrock.
+MESSAGE I400 WITH text-018.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_update_zedi04
+*&---------------------------------------------------------------------*
+*&      Form  frm_writelist_set
+*&---------------------------------------------------------------------*
+*       リスト表示用内部ＴＢＬセット
+*----------------------------------------------------------------------*
+FORM frm_writelist_set.
+
+DATA G_MESSAGE LIKE GF_WRITE-MESSAGE.         "メッセージ格納項目
+
+* メッセージの編集
+IF MSG_FLG = 1.
+CONCATENATE: text-012                                   "受注先
+GF_IFILE-JUCHU
+text-013
+INTO G_MESSAGE.
+ELSEIF MSG_FLG = 2.
+CONCATENATE: text-028                                   "出荷先
+GF_IFILE-SHUKKA
+text-014
+INTO G_MESSAGE.
+ELSEIF MSG_FLG = 3.
+CONCATENATE: G_FNAME
+text-031
+INTO G_MESSAGE.
+ELSEIF MSG_FLG = 4.
+CONCATENATE: text-008
+text-032
+INTO G_MESSAGE.
+ENDIF.
+
+* リスト表示用内部テーブルへ登録
+IF MSG_FLG = 3.
+GF_WRITE-JUCHU     = GF_FILEDATA-JUCHU.
+GF_WRITE-SHUKKA    = GF_FILEDATA-SHUKKA.
+GF_WRITE-UKEWATASI = GF_FILEDATA-UKEWATASI.
+GF_WRITE-SAKUJO    = GF_FILEDATA-SAKUJO.
+GF_WRITE-DATVR     = SY-DATUM.
+GF_WRITE-MESSAGE   = G_MESSAGE.
+ELSE.
+GF_WRITE-JUCHU     = GF_IFILE-JUCHU.
+GF_WRITE-SHUKKA    = GF_IFILE-SHUKKA.
+GF_WRITE-UKEWATASI = GF_IFILE-UKEWATASI.
+GF_WRITE-SAKUJO    = GF_IFILE-SAKUJO.
+GF_WRITE-DATVR     = SY-DATUM.
+GF_WRITE-MESSAGE   = G_MESSAGE.
+ENDIF.
+
+APPEND GF_WRITE TO GT_WRITE.
+
+ENDFORM.                    " frm_writelist_set
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_message
+*&---------------------------------------------------------------------*
+*       更新件数メッセージの出力
+*----------------------------------------------------------------------*
+FORM frm_write_message.
+
+* ポップアップ出力
+IF UPD_COUNT <> 0 AND INS_COUNT = 0.
+UPD_KENSU = UPD_COUNT.
+CONCATENATE UPD_KENSU text-020 text-019 INTO MSG_TEXT.
+CONDENSE MSG_TEXT.
+MESSAGE I400 WITH MSG_TEXT.
+ELSEIF UPD_COUNT = 0 AND INS_COUNT <> 0.
+INS_KENSU = INS_COUNT.
+CONCATENATE INS_KENSU text-033 text-019 INTO MSG_TEXT.
+CONDENSE MSG_TEXT.
+MESSAGE I400 WITH MSG_TEXT.
+ELSEIF UPD_COUNT <> 0 AND INS_COUNT <> 0.
+UPD_KENSU = UPD_COUNT.
+INS_KENSU = INS_COUNT.
+MESSAGE I619 WITH UPD_KENSU INS_KENSU.
+ENDIF.
+
+PERFORM frm_list_write.          "対マスタ不整合リスト出力処理
+
+ENDFORM.                    " frm_write_message
+*&---------------------------------------------------------------------*
+*&      Form  frm_list_write
+*&---------------------------------------------------------------------*
+*       リスト表示(明細行)
+*----------------------------------------------------------------------*
+FORM frm_list_write.
+
+DATA: L_DATVR(10) TYPE C.                      "編集用更新日
+
+IF NOT GT_WRITE IS INITIAL.
+
+LOOP AT GT_WRITE INTO GF_WRITE.
+
+CONCATENATE GF_WRITE-DATVR+0(4) '/'
+GF_WRITE-DATVR+4(2) '/'
+GF_WRITE-DATVR+6(2)
+INTO L_DATVR.
+
+WRITE: /0(12) GF_WRITE-JUCHU,
+14(12) GF_WRITE-SHUKKA,
+28(9)  GF_WRITE-UKEWATASI,
+39(10) GF_WRITE-SAKUJO,
+51(10) L_DATVR,
+63(80) GF_WRITE-MESSAGE.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " frm_list_write
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_file
+*&---------------------------------------------------------------------*
+*       出力ファイル作成処理
+*----------------------------------------------------------------------*
+FORM frm_make_file.
+
+PERFORM frm_get_filedata.              "ファイルデータ取得処理
+PERFORM frm_edit_ofile.                      "ファイル編集処理
+PERFORM frm_output_file.                     "ファイル出力処理
+
+ENDFORM.                    " frm_make_file
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_filedata
+*&---------------------------------------------------------------------*
+*       ファイルデータ取得処理
+*----------------------------------------------------------------------*
+FORM frm_get_filedata.
+
+DATA: L_SUBRC LIKE SY-SUBRC.
+
+SELECT * FROM ZEDI04
+INTO CORRESPONDING FIELDS OF TABLE GT_ZEDI04
+WHERE SFLAG = ' '.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+MESSAGE S600 WITH text-015.                 "出荷先変換テーブル
+PERFORM frm_table_unrock.                      "ロック解除処理
+STOP.
+ELSEIF SY-SUBRC = 8.
+L_SUBRC = SY-SUBRC.
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE A603 WITH SY-REPID CNS_TBL_002 L_SUBRC.
+ENDIF.
+
+ENDFORM.                    " frm_get_filedata
+*&---------------------------------------------------------------------*
+*&      Form  frm_edit_ofile
+*&---------------------------------------------------------------------*
+*       ファイル編集処理
+*----------------------------------------------------------------------*
+FORM frm_edit_ofile.
+
+LOOP AT GT_ZEDI04 INTO GF_ZEDI04.
+
+GF_EDIT_FILE-JUCHU     = GF_ZEDI04-JUCHU.
+GF_EDIT_FILE-SHUKKA    = GF_ZEDI04-SHUKKA.
+GF_EDIT_FILE-UKEWATASI = GF_ZEDI04-UKEWATASI.
+GF_EDIT_FILE-SAKUJO    = GF_ZEDI04-SAKUJO.
+GF_EDIT_FILE-DATVR     = GF_ZEDI04-DATVR.
+GF_EDIT_FILE-UHRVR     = GF_ZEDI04-UHRVR.
+
+CONCATENATE '"'  GF_EDIT_FILE-JUCHU     '"'  ','
+'"'  GF_EDIT_FILE-SHUKKA    '"'  ','
+'"'  GF_EDIT_FILE-UKEWATASI '"'  ','
+'"'  GF_EDIT_FILE-SAKUJO    '"'  ','
+'"'  GF_EDIT_FILE-DATVR     '"'  ','
+'"'  GF_EDIT_FILE-UHRVR     '"'
+INTO GF_OFILE.
+
+APPEND GF_OFILE TO GT_OFILE.
+CLEAR: GF_EDIT_FILE,
+GF_OFILE.
+
+APPEND GF_ZEDI04 TO GT_UPDATE.
+
+ENDLOOP.
+
+ENDFORM.                    " frm_edit_ofile
+*&---------------------------------------------------------------------*
+*&      Form  frm_output_file
+*&---------------------------------------------------------------------*
+*       ファイル出力処理
+*----------------------------------------------------------------------*
+FORM frm_output_file.
+
+* ファイルの出力
+* Mod ES-UP 2012/08/14 -->
+*  OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE.
+data: l_conv type ref to zcl_conv_to_sjis,
+l_errfile type string,
+l_message type string,
+l_openflg type abap_bool.
+create object l_conv.
+
+l_errfile = l_conv->GET_ERROR_FILENAME( filename = p_ofile
+FOLDNUM  = 0 ).
+if l_errfile is initial.
+message e001(z2).
+endif.
+
+OPEN DATASET p_ofile FOR output
+IN LEGACY TEXT MODE CODE PAGE l_conv->codepage
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/08/14 <--
+
+IF SY-SUBRC = 8.
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE I209.
+CLOSE DATASET P_OFILE.
+STOP.
+ENDIF.
+* Mod ES-UP 2012/10/22 -->
+l_openflg = abap_false.
+LOOP AT GT_OFILE INTO GF_OFILE.
+if l_conv->CONVERT_CHECK( GF_OFILE ) = abap_true.
+TRANSFER GF_OFILE TO P_OFILE.
+else.
+if l_openflg = abap_false.
+l_openflg = abap_true.
+open dataset l_errfile for output
+in legacy text mode code page l_conv->codepage
+message l_message
+ignoring conversion errors.
+if sy-subrc <> 0.
+message l_message type 'E'.
+endif.
+endif.
+TRANSFER GF_OFILE TO l_errfile.
+endif.
+ENDLOOP.
+
+CLOSE DATASET P_OFILE.
+
+if l_openflg = abap_true.
+close dataset l_errfile.
+message s002(z2).
+endif.
+* Mod ES-UP 2012/10/22 <--
+
+ENDFORM.                    " frm_output_file
+*&---------------------------------------------------------------------*
+*&      Form  frm_sxpg_call_system
+*&---------------------------------------------------------------------*
+*       ＥＤＩサーバ側のファイル読込ＢＡＴの起動
+*----------------------------------------------------------------------*
+FORM frm_sxpg_call_system.
+G_COMMANDNAME = 'ZEDI_OUTBOUNDM'.
+CALL FUNCTION 'SXPG_CALL_SYSTEM'
+EXPORTING
+COMMANDNAME                      = G_COMMANDNAME
+*      ADDITIONAL_PARAMETERS            = ' '
+IMPORTING
+STATUS                           = G_STATUS
+*   EXITCODE                         =
+TABLES
+EXEC_PROTOCOL                    = GT_PROTOCOL
+EXCEPTIONS
+NO_PERMISSION                    = 1
+COMMAND_NOT_FOUND                = 2
+PARAMETERS_TOO_LONG              = 3
+SECURITY_RISK                    = 4
+WRONG_CHECK_CALL_INTERFACE       = 5
+PROGRAM_START_ERROR              = 6
+PROGRAM_TERMINATION_ERROR        = 7
+X_ERROR                          = 8
+PARAMETER_EXPECTED               = 9
+TOO_MANY_PARAMETERS              = 10
+ILLEGAL_COMMAND                  = 11
+OTHERS                           = 12.
+
+IF SY-SUBRC <> 0.
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE I400 WITH text-029.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_sxpg_call_system
+*&---------------------------------------------------------------------*
+*&      Form  frm_sflag_update
+*&---------------------------------------------------------------------*
+*       ＳＦＬＡＧの更新
+*----------------------------------------------------------------------*
+FORM frm_sflag_update.
+
+DATA: L_SUBRC LIKE SY-SUBRC.
+
+LOOP AT GT_UPDATE INTO GF_UPDATE.
+
+UPDATE ZEDI04 SET   SFLAG     = 'X'
+WHERE JUCHU     = GF_UPDATE-JUCHU
+AND   ukewatasi = GF_UPDATE-ukewatasi.  "2002.04.15 add
+*                   AND   SHUKKA    = GF_UPDATE-SHUKKA.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+ROLLBACK WORK.
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE I400 WITH text-018.
+STOP.
+ENDIF.
+
+ENDLOOP.
+
+* ポップアップ出力
+MESSAGE I620 WITH '1'.
+
+* 更新一覧の出力
+REFRESH GT_ZEDI04.
+
+SELECT * FROM ZEDI04
+INTO CORRESPONDING FIELDS OF TABLE GT_ZEDI04
+FOR ALL ENTRIES IN GT_UPDATE
+WHERE JUCHU  = GT_UPDATE-JUCHU
+AND   ukewatasi = GT_UPDATE-ukewatasi. "2002.04.15 add
+*   AND   SHUKKA = GT_UPDATE-SHUKKA.
+
+IF SY-SUBRC = 0.
+SORT GT_ZEDI04 ASCENDING BY JUCHU ukewatasi. "2002.04.15 edit
+ELSEIF SY-SUBRC = 4.
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE S600 WITH text-015.                 "得意先変換テーブル
+STOP.
+ELSEIF SY-SUBRC = 8.
+L_SUBRC = SY-SUBRC.
+PERFORM frm_table_unrock.                      "ロック解除処理
+MESSAGE A603 WITH SY-REPID CNS_TBL_002 L_SUBRC.
+ENDIF.
+
+PERFORM frm_write_ichiran.                       "一覧出力処理
+
+ENDFORM.                    " frm_sflag_update
+************************************************************************
+***
+************************************************************************
+form delte_table.
+*TABLES:ZEDI04.
+DELETE FROM ZEDI04 WHERE SAKUJO = 'X'.
+endform.
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_ichirandata
+*&---------------------------------------------------------------------*
+*       一覧データの取得処理
+*----------------------------------------------------------------------*
+FORM frm_get_ichirandata.
+
+SELECT * FROM ZEDI04
+INTO CORRESPONDING FIELDS OF TABLE GT_ZEDI04
+WHERE JUCHU IN S_JUCHU
+*Add 2010/05/26 --->
+AND  UKEWATASI IN S_UKEWTS
+AND  SHUKKA IN S_SHUKKA
+.
+*Add 2010/05/26 <---
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+MESSAGE S600 WITH text-015.                 "出荷先変換テーブル
+STOP.
+ELSEIF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_002 SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " frm_get_ichirandata
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_ichiran
+*&---------------------------------------------------------------------*
+*       一覧の出力
+*----------------------------------------------------------------------*
+FORM frm_write_ichiran.
+
+DATA: L_DATVR(10) TYPE C.
+
+LOOP AT GT_ZEDI04 INTO GF_ZEDI04.
+
+CONCATENATE GF_ZEDI04-DATVR+0(4) '/'
+GF_ZEDI04-DATVR+4(2) '/'
+GF_ZEDI04-DATVR+6(2)
+INTO L_DATVR.
+
+WRITE: /0(12) GF_ZEDI04-JUCHU,
+14(12) GF_ZEDI04-SHUKKA,
+28(8)  GF_ZEDI04-UKEWATASI,
+38(10) GF_ZEDI04-SAKUJO,
+50(10) L_DATVR,
+62(8)  GF_ZEDI04-UHRVR,
+72(14) GF_ZEDI04-SFLAG.
+ENDLOOP.
+
+ENDFORM.                    " frm_write_ichiran
+*&---------------------------------------------------------------------*
+*&      Form  frm_table_rock
+*&---------------------------------------------------------------------*
+*       テーブルロック処理
+*----------------------------------------------------------------------*
+FORM frm_table_rock.
+
+CALL FUNCTION 'ENQUEUE_EZEDI04'
+EXPORTING
+MODE_ZEDI04          = 'E'
+MANDT                = SY-MANDT
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 1.
+MESSAGE I617 WITH CNS_TBL_002.
+STOP.
+WHEN OTHERS.
+MESSAGE I502 WITH CNS_MOD_003 SY-SUBRC.
+STOP.
+ENDCASE.
+
+ENDFORM.                    " frm_table_rock
+*&---------------------------------------------------------------------*
+*&      Form  frm_table_unrock
+*&---------------------------------------------------------------------*
+*       テーブル解除処理
+*----------------------------------------------------------------------*
+FORM frm_table_unrock.
+
+CALL FUNCTION 'DEQUEUE_EZEDI04'
+EXPORTING
+MODE_ZEDI04       = 'E'
+MANDT             = SY-MANDT
+EXCEPTIONS
+OTHERS         = 3.
+
+IF sy-subrc <> 0.
+MESSAGE I502 WITH CNS_MOD_004 SY-SUBRC.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_table_unrock

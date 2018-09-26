@@ -1,0 +1,309 @@
+*----------------------------------------------------------------------
+*
+*   INCLUDE ZXNIWU07
+*
+*----------------------------------------------------------------------
+*
+* 低価法対応：時価取得ロジック
+*
+*  時価判断：①　受注残が存在した場合には受注残テーブルより伝票単価を
+*　　　　　　　　取得。スケールについては考慮しない。
+*　　　　　　　　受注残の中で納期が一番遅い伝票を採用する。
+*　　　　　　②　受注残が存在しない場合には価格マスタより時価を取得
+*　　　　　　　　スケールが登録されていた場合には在庫数量に見合った
+*　　　　　　　　価格を取得する
+*
+*　特殊判断条件：①受注残にはプラントが設定されていない為プラントから
+*　　　　　　　　営業所への変換が必要になる
+*　　　　　　　　プラントと営業所の関係は４桁のプラントの２文字目以降
+*　　　　　　　　に０を付加した形となる
+*　　　　　　　　例）プラント「P040」の場合⇒営業所「0400」
+*
+*　　　　　　　　②価格マスタから取得する条件はZPR0であり、決定条件は
+*　　　　　　　　「得意先／得意先品目」となる。
+*　　　　　　　　そのため営業所に紐付く得意先とそこに紐付く得意先品目で
+*　　　　　　　　価格を取得する必要がある。
+*
+*----------------------------------------------------------------------
+*
+TYPES: BEGIN OF TYP_KNVV,
+KUNNR TYPE KNVV-KUNNR,
+VKORG TYPE KNMT-VKORG,
+VTWEG TYPE KNMT-VTWEG,
+SPART TYPE KNVV-SPART,
+KDMAT TYPE KNMT-KDMAT,
+KNUMH TYPE A901-KNUMH,
+END OF TYP_KNVV.
+
+DATA: LT_KNVV TYPE TABLE OF TYP_KNVV, "得意先：販売エリア
+LW_KNVV TYPE TYP_KNVV,          "得意先：販売エリア
+LT_KONM TYPE TABLE OF KONM,     "条件(スケール)
+LW_KONM TYPE KONM,              "条件(スケール)
+LT_YS0011 TYPE TABLE OF YS0011, "受注残分析テーブル
+LW_YS0011 TYPE YS0011.          "受注残分析テーブル
+
+DATA: LW_MBEWV  TYPE MBEWV,     "品目評価ビュー
+LW_KNMT   TYPE KNMT,      "得意先/品目情報レコードデータテーブル
+LW_A901   TYPE A901,      "価格マスタ(得意先/得意先品目)
+LW_KONP   TYPE KONP.      "条件(明細)
+
+DATA: LV_VKBUR      TYPE VBAK-VKBUR,           "営業所
+LV_KURSK      TYPE VBKD-KURSK,           "換算レート
+LV_NOUKI      TYPE D,
+LV_KBETR      TYPE RM08Y-NIWE_PREIS ,
+LV_KBETR_MIN  TYPE RM08Y-NIWE_PREIS VALUE '999999999.99',
+LV_MEINS      TYPE MARA-MEINS,
+LV_MENGE      TYPE EKPO-MENGE,
+*   insert 2008/12/18 DMC {
+LV_KNUMV      TYPE VBAK-KNUMV,           "伝票条件
+LV_KMEIN      TYPE KONV-KMEIN.           "条件単位
+* } insert 2008/12/18 DMC
+
+*営業所取得
+READ TABLE T_MBEWV INDEX 1 INTO LW_MBEWV.
+LV_VKBUR = LW_MBEWV-BWKEY+1(3).
+LV_VKBUR+3(1) = '0'.
+
+*基本数量単位を取得
+SELECT SINGLE
+MEINS
+INTO LV_MEINS
+FROM MARA
+WHERE MATNR = LW_MBEWV-MATNR.
+
+*受注残の販売価格取得
+SELECT *
+INTO TABLE LT_YS0011
+FROM YS0011
+WHERE MATNR = LW_MBEWV-MATNR
+AND VKBUR = LV_VKBUR
+AND  ( AUART = 'TA' OR AUART = 'ZOR' ) .
+
+*受注残がある場合は受注残の販売価格を取得
+IF SY-SUBRC = 0.
+
+SORT LT_YS0011 BY NOUKI  DESCENDING.
+
+LOOP AT LT_YS0011 INTO LW_YS0011.
+CLEAR: LV_MENGE.
+
+IF LV_NOUKI > LW_YS0011-NOUKI.
+EXIT.
+ENDIF.
+
+*   insert 2008/12/18 DMC {
+*   伝票条件番号の取得
+SELECT SINGLE KNUMV
+FROM VBAK
+INTO LV_KNUMV
+WHERE VBELN = LW_YS0011-VBELN.
+
+*   伝票の条件単位取得
+SELECT SINGLE KMEIN
+FROM KONV
+INTO LV_KMEIN
+WHERE KNUMV = LV_KNUMV
+AND KSCHL = 'ZPR0'.
+* } insert 2008/12/18 DMC
+
+****汎用モジュールで数量単位変換
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR              = LW_YS0011-MATNR
+I_IN_ME              = LW_YS0011-VRKME
+*   delete 2008/12/18 DMC {
+*              I_OUT_ME             = LV_MEINS
+* } delete 2008/12/18 DMC
+*   insert 2008/12/18 DMC {
+I_OUT_ME             = LV_KMEIN
+* } insert 2008/12/18 DMC
+I_MENGE              = 1
+IMPORTING
+E_MENGE              = LV_MENGE
+EXCEPTIONS
+ERROR_IN_APPLICATION = 1
+ERROR                = 2
+OTHERS               = 3.
+
+IF SY-SUBRC <> 0
+OR LV_MENGE <  1.
+CONTINUE.
+ENDIF.
+
+*   基本数量単位での受注単価を算出
+LW_YS0011-JTANKA = LW_YS0011-JTANKA / LV_MENGE.
+
+***円貨以外の場合は通貨変換をする
+IF LW_YS0011-WAERK <> 'JPY'.
+*     明細の換算レート取得
+SELECT SINGLE
+KURSK
+INTO LV_KURSK
+FROM VBKD
+WHERE VBELN = LW_YS0011-VBELN
+AND POSNR = LW_YS0011-POSNR.
+*     明細の換算レートが無ければヘッダの換算レート
+IF SY-SUBRC <> 0.
+SELECT SINGLE
+KURSK
+INTO LV_KURSK
+FROM VBKD
+WHERE VBELN = LW_YS0011-VBELN
+AND POSNR = '000000'.
+ENDIF.
+*     汎用モジュールで円貨に変換
+CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+EXPORTING
+DATE             = SY-DATUM
+FOREIGN_AMOUNT   = LW_YS0011-JTANKA
+FOREIGN_CURRENCY = LW_YS0011-WAERK
+LOCAL_CURRENCY   = 'JPY'
+RATE             = LV_KURSK
+TYPE_OF_RATE     = 'M'
+READ_TCURR       = ' '
+IMPORTING
+LOCAL_AMOUNT     = LW_YS0011-JTANKA
+EXCEPTIONS
+NO_RATE_FOUND    = 1
+OVERFLOW         = 2
+NO_FACTORS_FOUND = 3
+NO_SPREAD_FOUND  = 4
+DERIVED_2_TIMES  = 5
+OTHERS           = 6.
+ENDIF.
+
+*   販売価格を比較し最低価格を取得
+LV_KBETR = LW_YS0011-JTANKA / LW_YS0011-TANITANKA.
+IF LV_KBETR_MIN > LV_KBETR .
+LV_KBETR_MIN = LV_KBETR .
+ENDIF .
+
+LV_NOUKI = LW_YS0011-NOUKI.
+ENDLOOP.
+
+*受注残が無い場合は価格マスタから販売価格を取得
+ELSE.
+*営業所に紐づく得意先を取得
+SELECT DISTINCT
+KNVV~KUNNR
+KNMT~VKORG
+KNMT~VTWEG
+KNVV~SPART
+KNMT~KDMAT
+INTO TABLE LT_KNVV
+FROM KNVV
+INNER JOIN KNMT
+ON KNVV~VKORG = KNMT~VKORG
+AND KNVV~VTWEG = KNMT~VTWEG
+AND KNVV~KUNNR = KNMT~KUNNR
+AND KNMT~MATNR = LW_MBEWV-MATNR
+WHERE KNVV~LOEVM =  SPACE
+AND KNVV~VKBUR =  LV_VKBUR
+AND KNMT~MATNR =  LW_MBEWV-MATNR.
+
+* 得意先の販売価格のうち、最低価格を取得する
+LOOP AT LT_KNVV INTO LW_KNVV.
+CLEAR:LV_MENGE.
+
+*   価格マスタ(得意先/得意先品目)から条件番号を取得
+SELECT KNUMH
+INTO LW_A901-KNUMH
+FROM A901
+UP TO 1 ROWS
+WHERE KAPPL    = 'V'
+AND KSCHL    = 'ZPR0'
+AND VKORGAU  = LW_KNVV-VKORG
+AND VTWEG    = LW_KNVV-VTWEG
+AND SPART    = LW_KNVV-SPART
+AND KUNNR    = LW_KNVV-KUNNR
+AND ZZZKDMAT = LW_KNVV-KDMAT
+AND DATBI   => SY-DATUM
+AND DATAB   <= SY-DATUM.
+ENDSELECT.
+
+IF SY-SUBRC <> 0.
+CONTINUE.
+ENDIF.
+
+*   条件明細より販売価格を取得
+SELECT *
+INTO LW_KONP
+FROM KONP
+UP TO 1 ROWS
+WHERE KNUMH = LW_A901-KNUMH
+AND KSCHL = 'ZPR0'.
+ENDSELECT.
+
+IF SY-SUBRC <> 0.
+CONTINUE.
+ENDIF.
+
+*   スケール条件よりスケール価格を取得
+SELECT *
+INTO TABLE LT_KONM
+FROM KONM
+WHERE KNUMH = LW_A901-KNUMH.
+
+*   スケールが登録されている場合は在庫数に見合う価格を取得
+SORT LT_KONM BY KSTBM DESCENDING.
+LOOP AT LT_KONM INTO LW_KONM.
+IF LW_KONM-KSTBM <= LW_MBEWV-LBKUM.
+LW_KONP-KBETR = LW_KONM-KBETR.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+****汎用モジュールで数量単位変換
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR              = LW_MBEWV-MATNR
+I_IN_ME              = LW_KONP-KMEIN
+I_OUT_ME             = LV_MEINS
+I_MENGE              = 1
+IMPORTING
+E_MENGE              = LV_MENGE
+EXCEPTIONS
+ERROR_IN_APPLICATION = 1
+ERROR                = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0
+OR LV_MENGE <  1.
+CONTINUE.
+ENDIF.
+*   基本数量単位での単価を算出
+LW_KONP-KBETR = LW_KONP-KBETR / LV_MENGE.
+
+****円貨以外の場合は円貨に換算する
+IF LW_KONP-KONWA <> 'JPY'.
+*     汎用モジュールで換算する
+CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+EXPORTING
+DATE             = SY-DATUM
+FOREIGN_AMOUNT   = LW_KONP-KBETR
+FOREIGN_CURRENCY = LW_KONP-KONWA
+LOCAL_CURRENCY   = 'JPY'
+TYPE_OF_RATE     = 'M'
+READ_TCURR       = 'X'
+IMPORTING
+LOCAL_AMOUNT     = LW_KONP-KBETR
+EXCEPTIONS
+NO_RATE_FOUND    = 1
+OVERFLOW         = 2
+NO_FACTORS_FOUND = 3
+NO_SPREAD_FOUND  = 4
+DERIVED_2_TIMES  = 5
+OTHERS           = 6.
+ENDIF.
+
+*   販売価格を比較し最低価格を取得
+LV_KBETR = LW_KONP-KBETR / LW_KONP-KPEIN .
+IF LV_KBETR_MIN > LV_KBETR .
+LV_KBETR_MIN = LV_KBETR .
+ENDIF .
+
+ENDLOOP.
+ENDIF.
+
+IF LV_KBETR_MIN <> '999999999.99'.
+E_PREIS = LV_KBETR_MIN .
+ENDIF.

@@ -1,0 +1,917 @@
+*----------------------------------------------------------------------*
+*  REPORT    :  ZYK15300
+*  PROGRAM   :  一括請求書出力処理（SVFファイル出力）
+*  MAKE DATE :  2002.03
+*  CODING BY :  KURANO / HATA
+*  機　　能  :
+*      標準テーブルとアドオンテーブルを検索し、印刷用データを出力。
+*      ファイルへの編集の順序により項目の編集がうまく行かないことがある
+*    ため、構造の変更には注意すること。
+*      このプログラムの実行前に、アドオンテーブルに入金額を設定しておく
+*    必要がある。
+*----------------------------------------------------------------------*
+* 変更履歴
+* 2002.03.11A 会社コードをパラメータに追加                   INAGOSHI
+* 2002.03.13A 金額の通貨コード編集                           INAGOSHI
+* 2002.03.14A MAKT/T052/KNVV/の取得                          INAGOSHI
+* 2002.04.09A 上位明細への集計機能の追加                     INAGOSHI
+* 2002.04.10A テーブルSTXHによる得意先限定の追加             INAGOSHI
+* 2002.04.16A 得意先を入金先に名称(TEXT)のみ変更             INAGOSHI
+* 2002.04.17A パラメータのNO-DISPLAYを全て削除               INAGOSHI
+* 2002.04.18A P_DIRNMの初期値 MEMORY ID ZSVF                 INAGOSHI
+*             SVFとの連携を調整                              HATA
+* 2002.05.23 プリンタ名の編集方法修正                        INAGOSHI
+* 2002.05.27 上記修正の無効化                                KURANO
+*            上位明細が存在しない場合の対応
+*            データ行の先頭のTABを削除する対応
+*            出力用WORKの幅を広げる
+* 2002.05.28 項目追加（営業グループ）                        KURANO
+*            単位項目の変換
+* 2002.05.29 PARAMETRSの初期化を追加                         KURANO
+* 2002.05.30a 金額の符号編集                                INAGOSHI
+* 2002.05.30b 都道府県名の編集                              INAGOSHI
+* 2002.06.07  数量単価の小数点を削除                        KURANO
+*             数量：100.000→100000
+*             単価：100.00→10000
+* 2002.08.20  ソート順の変更                                KURANO
+*             SQLエラー対策
+* 2002.08.20  再出力機能追加                                KAJISA
+* 2003.03.05  正味額取得修正                                ABE
+* 2004.01.16  請求書出力制御　　　　　　　　　　　　　　　　FURUYA
+* 2005.04.20  請求書検収の出力判定追加　　　　　　　　　　　ONODA
+* 2008.05.20  検索条件１キーをとしてソート順追加　　　　　  DMC
+* 2012.09.03  ES-UP                                         ISID
+*----------------------------------------------------------------------*
+report zyk15300 .
+* 使用テーブル
+tables usr01     . "ユーザマスタレコード (実行時間データ)
+tables tsp03d    . "スプール: デバイス内容説明（新規書式）
+tables yk510     . "一括請求書データ
+tables yk520     . "一括請求書明細データ
+tables kna1      .
+tables knvv      .
+tables yk01530020. "項目VIEW ( DD03L + DD03T )
+tables stxh      . "STXD SAPscript テキストファイルヘッダ 2002.04.10A
+tables t005u     . "地域名称取得 ADD 2002.05.30b
+* 型定義
+types: begin of st_seldata,       "請求伝票
+kunnr  like vbpa-kunnr,
+adrnr  like vbpa-adrnr,
+name   like tsp03d-name ,
+vbrk   like vbrk,
+vbrp   like vbrp,
+end of st_seldata.
+types: begin of st_outdata,       "出力データ
+kunrg       like vbrk-kunrg,    "支払人
+name2       type ad_name2,      "名前２
+name3       type ad_name3,      "名前３ ADD 2002.05.30b
+bezei       type ad_region,     "地域
+street      type ad_street,     "都道府県
+city1       type ad_city1,      "市区町村
+str_suppl1  type ad_strspp1,    "地名２ ADD 2002.05.30b
+str_suppl2  type ad_strspp2,    "地名３ ADD 2002.05.30b
+end of st_outdata.
+*added by DMC 20080520 begin
+data: begin of st_editdata,            "編集データ
+sort1 type ad_sort1.                                "検索条件 1
+include structure yk01530010.
+data: end of st_editdata.
+*added by DMC 20080520 end
+* フィールドシンボル
+field-symbols <f> type any.
+* グローバル変数
+data i_yk510 like standard table of yk510 with header line.
+data i_yk520       like standard table of yk520 with header line.
+data i_yk520_sum   like standard table of yk520 with header line.
+data i_yk520_uepos like standard table of yk520 with header line.
+*edited by DMC 20080520 begin
+*data i_outdata  like standard table of yk01530010 with header line.
+*------------------------------------------>>>>
+data i_outdata  like standard table of st_editdata with header line.
+*edited by DMC 20080520 end
+data i_outdata2 like standard table of yk01530010 with header line.
+data i_yk01530020 like standard table of yk01530020 with header line.
+data w_addr1_sel like addr1_sel.
+data w_addr1_val like addr1_val.
+data w_addr1_text like addr1_text.
+*data w_out(256) type c. 2002/05/27 MOD
+data w_out(1024) type c.
+* Mod ES-UP 2012/09/03 -->
+*data w_tab(1) type x value '09'.     "ASCIIコードのタブ
+data w_tab type string value CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/09/03 <--
+data w_crlf(2) type x value '0D0A'.  "ASCIIコードの復帰改行
+data w_fldname(40) type c.
+data w_lines like sy-dbcnt.
+data w_yk01530020 like yk01530020.
+data w_len type i.
+data w_adrnr like kna1-adrnr .
+data w_decimal2 type p decimals 2.  "2002.03.11 ADD
+data w1 type p.                     "2002.03.11 ADD
+data w_kingaku(15)  type p.                     "2002.05.30a MOD
+data w_value_c(15)  type c.    "数値格納用エリア 2002.05.30a ADD
+data w_fugou(1)     type c  value '-'.     "符号 2002.05.30a ADD
+data w_kingaku2 like yk520-netwr.   "金額編集用
+data w_10n type p decimals 5.       "金額編集用 2002.03.13 ADD
+data w_zterm like t052-zterm.       "2002.03.14 ADD
+data w_pos1 type p. "2002.03.14 ADD
+data w_pos_max type p. "2002.03.14 ADD
+data w_updcnt_yk510 like sy-dbcnt.
+*** ポップアップ用 <=削除してよい(start)
+data:w_pop_ans(1) type c,
+w_value1 like spop-varvalue1.
+*** ポップアップ用 <=削除してよい(end)
+ranges r_kunnr for knvv-kunnr.
+
+* 選択画面
+*データ(NAST)
+constants p_kappl like nast-kappl  value 'V3'.   "アプリケーション
+constants p_kschl like nast-kschl  value 'YK01'. "メッセージタイプ
+constants p_nacha like nast-nacha  value '1'.    "送信媒体
+
+ranges s_vsztp for  nast-vsztp.     "ディスパッチ時刻
+ranges s_vstat for  nast-vstat.     "処理ステータス
+data   p_aktiv like nast-aktiv.     "アクティビティフラグ
+ranges s_parnr for  nast-parnr.     "取引先
+ranges s_parvw for  nast-parvw.     "取引先機能
+
+parameters: p_bukrs like yk510-bukrs          "会社コード
+memory id buk  obligatory.   "2002.03.11A
+
+select-options: s_kunnr for knvv-kunnr,   "入金先コード
+s_vkorg for knvv-vkorg ,  "販売組織
+s_vtweg for knvv-vtweg ,  "流通チャネル
+s_spart for knvv-spart ,  "製品部門
+s_vkbur for knvv-vkbur ,  "営業所
+s_vkgrp for knvv-vkgrp .  "営業グループ
+parameters: p_zfbdt type d obligatory.     "締日
+
+ranges s_fkart for vbrk-fkart.             "請求タイプ
+constants p_parvw like vbpa-parvw value 'RG'.
+parameters p_spld like usr01-spld obligatory . "スプール: 出力デバイス
+parameters p_pname like tsp03d-paprosname modif id out .
+"スプール: ホストスプーラ用プリンタの正式名／トレイ 2002.04.17A
+parameters p_rname like i_outdata-title
+default '高千穂請求書' .  "2002.04.17A
+parameters p_datum like sy-datum default sy-datum modif id out.
+"2002.04.17A
+parameters p_dirnm like rlgrap-filename memory id zsvf. "2002.04.18A
+parameters p_fname like rlgrap-filename modif id out. "2002.04.17A
+parameters p_tdid like stxh-tdid default 'ZK01'. "2002.04.10A
+parameters p_test as checkbox default 'X'.
+parameters p_out as checkbox. "再出力 2002/10/01 ADD
+*----------------------------------------------------------------------*
+initialization.
+* 選択条件の初期化
+get parameter id 'BUK' field p_bukrs. "2002.05.29 ADD
+get parameter id 'ZSVF' field p_dirnm. "2002.05.29 ADD
+clear: s_vsztp, s_vstat, s_parnr, s_parvw, s_fkart.
+s_vsztp-sign = 'I'.
+s_vsztp-option = 'EQ'.
+s_vsztp-low = '3'. "アプリケーション専用トランザクションによる送信
+append s_vsztp.
+s_vstat-sign = 'I'.
+s_vstat-option = 'EQ'.
+s_vstat-low = '0'. "未処理
+append s_vstat.
+s_vstat-low = '2'. "不適切処理
+append s_vstat.
+s_fkart-sign = 'I'.
+s_fkart-option = 'EQ'.
+s_fkart-low = 'F2'. "請求書（F2）
+append s_fkart.
+* ユーザパラメタの検索
+select single * from  usr01
+where  bname  = sy-uname.
+if sy-subrc = 0.
+p_spld = usr01-spld.
+select single * from  tsp03d
+where  padest = p_spld.
+p_pname = tsp03d-paprosname.
+*   p_tray = tsp03d-inputtray.
+endif.
+* 出力ファイル名の組み立て
+concatenate sy-repid sy-uname sy-uzeit '.txt' into p_fname.
+* 出力専用項目の設定
+loop at screen.
+if screen-group1 = 'OUT'.
+screen-input = 0.
+modify screen.
+endif.
+endloop.
+
+*----------------------------------------------------------------------*
+at selection-screen.
+select single * from  tsp03d
+where  padest = p_spld.
+p_pname = tsp03d-paprosname.
+if sy-subrc <> 0.
+message w400(y1) with 'スプールがありません'.
+endif.
+
+*----------------------------------------------------------------------*
+start-of-selection.
+perform f_kunnr.           "入金先の限定　2002.04.10A
+perform f_get_yk510.       "入金先別残高の取得 & ロック
+perform f_edit.            "出力データの編集
+perform f_item_select.     "出力項目選択
+perform f_file_output.     "ファイル出力
+if p_test = space.
+perform f_yk510_update.    "版数の更新 & ロック解除
+message i402(y1) with 'テーブル:YK510' w_updcnt_yk510
+'件出力＆版数更新しました'.
+endif.
+
+*---------------------------------------------------------------------*
+*    FORM f_kunnr  テーブルSTXHによる入金先限定　  2002.04.10A
+*---------------------------------------------------------------------*
+form f_kunnr.
+* ローカル変数
+data i_stxh like standard table of stxh with header line.
+* 2004/01/16 APPEND START1
+data i_tline like standard table of tline with header line.
+* 2004/01/16 APPEND END1
+refresh: r_kunnr.
+clear  : r_kunnr.
+select * from stxh into table i_stxh
+where  tdobject =  'KNB1'
+and  tdid     =  p_tdid
+and  tdspras  =  sy-langu.
+loop at i_stxh.
+if i_stxh-tdname+10(4) = p_bukrs.
+if i_stxh-tdname+0(10) in s_kunnr.
+* 2004/01/16 APPEND START2
+call function 'READ_TEXT'  "テキストデータ読込
+exporting
+*      CLIENT                        = SY-MANDT
+id                            = p_tdid
+language                      = sy-langu
+name                          = i_stxh-tdname
+object                        = 'KNB1'
+tables
+lines                         = i_tline
+exceptions
+id                            = 1
+language                      = 2
+name                          = 3
+not_found                     = 4
+object                        = 5
+reference_check               = 6
+wrong_access_to_archive       = 7
+others                        = 8
+.
+case sy-subrc.
+when 0 or 4.
+when others.
+message s001(z1) with text-011 sy-subrc.
+endcase.
+read table i_tline into i_tline index 1.
+* 2byte目が'X'は対象外
+if ( i_tline-tdline+1(1) <> 'X' )
+* 2004/01/16 APPEND END2
+* 2005/04/20 START_ADD
+* 3byte目が'X'は対象
+or ( i_tline-tdline+2(1) = 'X' ).
+* 2005/04/20 END_ADD
+r_kunnr-sign   = 'I'.
+r_kunnr-option = 'EQ'.
+r_kunnr-low    =  i_stxh-tdname+0(10).
+append r_kunnr.
+endif. "2004/01/16 APPEND
+endif.
+endif.
+endloop.
+*
+clear w1.
+describe table r_kunnr lines w1.
+if w1 eq 0.
+message i400(y1) with '入金先がSTXHに存在しません。' .
+stop.
+endif.
+*
+endform.   "f_kunnr
+*---------------------------------------------------------------------*
+*       FORM f_get_yk510      得意先別残高の取得 & ロック
+*---------------------------------------------------------------------*
+form f_get_yk510.
+* ローカル変数
+data w_yk510 like yk510. "ADD 2002/08/20
+* 得意先別残高の取得
+* 2002/08/20 MOD START
+* select *   from  yk510  into table i_yk510
+*            where  bukrs  eq p_bukrs  "会社コード
+*             and    kunnr  in s_kunnr  "入金先コード MOD 2002.04.10A
+*            and    kunnr  in r_kunnr  "入金先コード
+*            and    vkorg  in s_vkorg  "販売組織
+*            and    vtweg  in s_vtweg  "流通チャネル
+*            and    spart  in s_spart  "製品部門
+*            and    zfbdt  eq p_zfbdt. "締日
+refresh i_yk510.
+select *   from  yk510
+into   w_yk510
+where  bukrs  eq p_bukrs  "会社コード
+and    vkorg  in s_vkorg  "販売組織
+and    vtweg  in s_vtweg  "流通チャネル
+and    spart  in s_spart  "製品部門
+and    zfbdt  eq p_zfbdt  "締日
+order by primary key.
+*2002/10/01 ADD START
+if p_out = 'X' and w_yk510-outcnt = 0.
+continue. "再出力なのに出力回数が０は対象外
+endif.
+*2002/10/01 ADD END
+if w_yk510-kunnr in r_kunnr.
+append w_yk510 to i_yk510.
+endif.
+endselect.
+* 2002/08/20 MOD END
+clear w1.
+describe table i_yk510 lines w1.
+if w1 eq 0.
+message i400(y1)
+with '該当データがヘッダ(YK510)にありません。' .
+stop.
+endif.
+* ロック
+loop at i_yk510.
+call function 'ENQUEUE_EY_YK510'
+exporting
+bukrs          = i_yk510-bukrs
+kunnr          = i_yk510-kunnr
+vkorg          = i_yk510-vkorg
+vtweg          = i_yk510-vtweg
+spart          = i_yk510-spart
+zfbdt          = i_yk510-zfbdt
+waers          = i_yk510-waers
+exceptions
+foreign_lock   = 1
+system_failure = 2
+others         = 3.
+if sy-subrc <> 0.
+rollback work.
+perform f_dequeue_yk510.
+if sy-batch = 'X'.
+message e400(y1) with
+'テーブル:YK510 をロックできません'.
+else.
+message s400(y1) with
+'テーブル:YK510 をロックできません'.
+stop.
+endif.
+endif.
+endloop.
+endform.   "f_get_yk510
+*---------------------------------------------------------------------*
+*    FORM f_edit        出力データの編集
+*---------------------------------------------------------------------*
+form f_edit.
+data w_pname type string.  "ADD 2002.05.23
+data w_vkbur like knvv-vkbur. "ADD 2002.05.28
+data w_bezei2 like tvkbt-bezei. "ADD 2002.05.28
+data w_vkgrp like tvgrt-vkgrp. "ADD 2002.05.28
+data w_bezei3 like tvkbt-bezei. "ADD 2002.05.28
+data w_spart like knvv-spart. "ADD 2002.05.28
+data w_output(3) type c. "ADD 2002.05.28
+*added by DMC 20080520 begin
+data w_sadr like sadr.
+*added by DMC 20080520 end
+*
+loop at i_yk510.
+***** 得意先住所
+select single adrnr from kna1
+into w_adrnr
+where kunnr eq i_yk510-kunnr.
+clear: w_addr1_sel, w_addr1_val, w_addr1_text.
+w_addr1_sel-addrnumber = w_adrnr.
+call function 'ADDR_GET'
+exporting
+address_selection = w_addr1_sel
+read_texts        = 'X'
+importing
+address_value     = w_addr1_val
+address_text      = w_addr1_text
+*added by DMC 20080520 begin
+sadr              = w_sadr      "住所情報
+*added by DMC 20080520 end
+exceptions
+parameter_error   = 1
+address_not_exist = 2
+version_not_exist = 3
+internal_error    = 4
+others            = 5.
+*added by DMC 20080520 begin
+w_addr1_val-sort1 = w_sadr-sortl.
+*added by DMC 20080520 end
+*--- t005u から地域名称を取得  ADD 2002.05.30b (start)
+clear t005u.
+select single * from t005u
+where spras = sy-langu             "言語
+and   land1 = w_addr1_val-country  "国コード
+and   bland = w_addr1_val-region.  "地域
+*--- t005u から地域名称を取得  ADD 2002.05.30b (end)
+*   得意先マスタから営業所/営業グループを検索
+clear knvv.
+select single vkbur vkgrp
+from   knvv
+into   (w_vkbur,w_vkgrp)
+where  kunnr  = i_yk510-kunnr
+and    vkorg  = i_yk510-vkorg
+and    vtweg  = i_yk510-vtweg
+and    spart  = i_yk510-spart.
+if sy-subrc <> 0.
+clear w_spart.
+select single spaku "参照製品部門の検索
+into   w_spart
+from   tvta
+where  vkorg  = i_yk510-vkorg
+and    vtweg  = i_yk510-vtweg
+and    spart  = i_yk510-spart.
+select single vkbur vkgrp
+from   knvv
+into   (w_vkbur,w_vkgrp)
+where  kunnr  = i_yk510-kunnr
+and    vkorg  = i_yk510-vkorg
+and    vtweg  = i_yk510-vtweg
+and    spart  = w_spart.
+endif.
+select single bezei
+from   tvkbt
+into   w_bezei2
+where  spras  = sy-langu
+and    vkbur  = w_vkbur.
+select single bezei
+from   tvgrt
+into   w_bezei3
+where  spras  = sy-langu
+and    vkgrp  = w_vkgrp.
+* 明細データ取得
+refresh i_yk520.
+clear   i_yk520.
+select * from yk520 into table i_yk520
+where bukrs eq i_yk510-bukrs  "会社コード
+and   kunnr eq i_yk510-kunnr  "入金先コード
+and   vkorg eq i_yk510-vkorg  "販売組織
+and   vtweg eq i_yk510-vtweg  "流通チャネル
+and   spart eq i_yk510-spart  "製品部門
+and   zfbdt eq i_yk510-zfbdt  "締日
+order by primary key.         "ADD 2002/08/20
+*
+perform f_sum. "金額集計
+*
+loop at i_yk520_sum.
+*** 編集と保存
+clear i_outdata.
+move-corresponding i_yk510 to i_outdata .
+move-corresponding i_yk520_sum to i_outdata .
+move-corresponding w_addr1_val to i_outdata.
+"注）addr1_val内に title 項目がある
+move w_addr1_val-post_code1 to i_outdata-post_code. "郵便番号
+move w_addr1_text-bezei to i_outdata-bezei.         "地域
+
+*--- 都道府県 <= 地域 + 都道府県 + 市区町村 "ADD 2002.05.30b (start)
+concatenate t005u-bezei         "地域
+w_addr1_val-street  "都道府県
+w_addr1_val-city1   "市区町村
+into i_outdata-street.
+*--- 都道府県 <= 地域 + 都道府県 + 市区町村 "ADD 2002.05.30b (end)
+
+*--- "MOD 2002.05.23 (start)
+i_outdata-p_name = p_pname.  "プリンタ／トレイ
+*      w_pname = p_pname.  "空白部分が202020～となっている為
+*      i_outdata-p_name = w_pname.
+*--- "MOD 2002.05.23 (end)
+
+i_outdata-title  = p_rname.  "帳票名
+i_outdata-s_date = sy-datum. "出力日
+
+*---------- "MAKT/T052/KNVV/の取得  2002.03.14A(start)
+clear i_outdata-maktx.
+select single maktx into i_outdata-maktx
+from makt  where matnr = i_yk520_sum-matnr
+and   spras = sy-langu .
+clear: w_zterm, i_outdata-vkgrp.
+select single zterm into w_zterm
+from t052  where zfael = i_yk520_sum-zfbdt .
+if sy-subrc eq 0.
+select single vkgrp into i_outdata-vkgrp
+from knvv
+where kunnr =  i_yk520_sum-kunnr  "入金先コード
+and vkorg =  i_yk520_sum-vkorg  "販売地域
+and vtweg =  i_yk520_sum-vtweg  "流通チャネル
+and spart =  i_yk520_sum-spart  "製品部門
+and vkbur in s_vkbur      "営業所
+and vkgrp in s_vkgrp .    "営業グループ
+*                and zterm =  w_zterm .    "支払条件キー
+endif.
+*---------- "KNVV/T052/MAKTの取得  2002.03.14A(end)
+
+*     営業所/営業グループの編集 2002.05.28 ADD
+i_outdata-vkbur = w_vkbur.
+i_outdata-bezei2 = w_bezei2.
+i_outdata-vkgrp = w_vkgrp.
+i_outdata-bezei3 = w_bezei3.
+
+*     単位の出力形式への変換 2002.05.28 ADD
+call function 'CONVERSION_EXIT_CUNIT_OUTPUT'
+exporting
+input          = i_outdata-vrkme
+language       = sy-langu
+importing
+output         = w_output
+exceptions
+unit_not_found = 1
+others         = 2.
+if sy-subrc = 0.
+i_outdata-vrkme = w_output.
+endif.
+
+*---------- "通貨による金額編集  2002.03.13A(start)
+perform f_edit_kingaku using i_yk520_sum-waers.
+
+perform f_edit_fugou using i_yk510-lblamt.
+i_outdata-lblamt = w_value_c.  "前月御請求額
+
+perform f_edit_fugou using i_yk510-cicamt.
+i_outdata-cicamt = w_value_c.  "当月御入金額
+
+perform f_edit_fugou using i_yk510-cslamt.
+i_outdata-cslamt = w_value_c.  "当月御買上額
+
+perform f_edit_fugou using i_yk510-ctxamt.
+i_outdata-ctxamt = w_value_c.  "当月消費税額
+
+perform f_edit_fugou using i_yk510-cstamt.
+i_outdata-cstamt = w_value_c.  "当月消費税込御買上額
+
+perform f_edit_fugou using i_yk510-cblamt.
+i_outdata-cblamt = w_value_c.  "当月御請求額
+
+perform f_edit_fugou using i_yk520_sum-netwr.
+i_outdata-netwr = w_value_c.  "金額
+
+w_kingaku2 = i_yk520_sum-mwsbp.
+perform f_edit_fugou using w_kingaku2.
+i_outdata-mwsbp = w_value_c.  "消費税
+
+perform f_edit_fugou using i_yk520_sum-brtwr.
+i_outdata-brtwr = w_value_c.  "税込金額
+
+*--- 数量のマイナス編集 ADD 2002.05.30a (start)
+*     w_value_c = i_yk520_sum-fkimg.
+w_value_c = i_yk520_sum-fkimg * 1000. "2002.06.07 MOD
+if i_yk520_sum-fkimg < 0.
+write w_value_c right-justified to w_value_c.
+concatenate  w_fugou w_value_c(14) into w_value_c.
+endif.
+condense w_value_c no-gaps.
+i_outdata-fkimg = w_value_c.
+*--- 数量のマイナス編集 ADD 2002.05.30a (end)
+
+clear i_outdata-tanka.
+if i_yk520_sum-fkimg ne 0 .
+clear w_decimal2.  "単価 = 金額 / 数量
+* 2003/03/05 NDSC MOD-S
+*        W_DECIMAL2 = I_OUTDATA-NETWR / I_YK520_SUM-FKIMG.
+w_decimal2 = ( i_yk520_sum-netwr * w_10n ) / i_yk520_sum-fkimg.
+* 2003/03/05 NDSC MOD-E
+*       i_outdata-tanka = w_decimal2. "小数点２桁表示
+i_outdata-tanka = w_decimal2 * 100. "2002.06.07 MOD
+endif .                            "小数３位を四捨五入
+*---------- "通貨による金額編集  2002.03.13A(end)
+append i_outdata.
+endloop.   "--------------------------- yk520
+endloop.     "------------------------------------ yk510
+endform.       "f_edit.
+*---------------------------------------------------------------------*
+*    FORM f_sum        金額集計(上位明細への集計) 2002.04.09A
+*---------------------------------------------------------------------*
+form f_sum.
+* ローカル変数
+data w_yk520 like yk520.
+* 上位明細の有無で分割
+refresh: i_yk520_uepos, i_yk520_sum.
+clear:   i_yk520_uepos, i_yk520_sum.
+loop at i_yk520.
+if ( i_yk520-uepos = '000000' ) or ( i_yk520-uepos is initial ).
+move-corresponding i_yk520 to i_yk520_sum.
+append i_yk520_sum.
+else.
+*       上位明細の存在を確認 2002/05/27
+read table i_yk520 into w_yk520
+with key
+bukrs  = i_yk520-bukrs  "会社
+kunnr  = i_yk520-kunnr  "入金先
+vkorg  = i_yk520-vkorg  "販売組織
+vtweg  = i_yk520-vtweg  "流通チャネル
+spart  = i_yk520-spart  "請求部門
+zfbdt  = i_yk520-zfbdt  "締日
+vbeln  = i_yk520-vbeln  "請求伝票
+posnr  = i_yk520-uepos. "請求明細 <=上位明細
+if sy-subrc ne 0.
+move-corresponding i_yk520 to i_yk520_sum.
+append i_yk520_sum.
+else.
+move-corresponding i_yk520 to i_yk520_uepos.
+append i_yk520_uepos.
+endif.
+endif.
+endloop.
+* 上位明細有の明細データを上位に集計
+loop at i_yk520_uepos.
+read table i_yk520_sum into w_yk520
+with key
+bukrs  = i_yk520_uepos-bukrs  "会社
+kunnr  = i_yk520_uepos-kunnr  "入金先
+vkorg  = i_yk520_uepos-vkorg  "販売組織
+vtweg  = i_yk520_uepos-vtweg  "流通チャネル
+spart  = i_yk520_uepos-spart  "請求部門
+zfbdt  = i_yk520_uepos-zfbdt  "締日
+vbeln  = i_yk520_uepos-vbeln  "請求伝票
+posnr  = i_yk520_uepos-uepos. "請求明細 <=上位明細
+if sy-subrc ne 0.
+rollback work.
+message e400(y1) with '上位明細の集計時 read エラー'.
+endif.
+w_yk520-netwr = w_yk520-netwr + i_yk520_uepos-netwr. "正味額
+w_yk520-mwsbp = w_yk520-mwsbp + i_yk520_uepos-mwsbp. "税額
+w_yk520-brtwr = w_yk520-brtwr + i_yk520_uepos-brtwr. "総額
+modify i_yk520_sum from w_yk520
+transporting netwr mwsbp brtwr
+where  bukrs  = i_yk520_uepos-bukrs  "会社
+and  kunnr  = i_yk520_uepos-kunnr  "入金先
+and  vkorg  = i_yk520_uepos-vkorg  "販売組織
+and  vtweg  = i_yk520_uepos-vtweg  "流通チャネル
+and  spart  = i_yk520_uepos-spart  "請求部門
+and  zfbdt  = i_yk520_uepos-zfbdt  "締日
+and  vbeln  = i_yk520_uepos-vbeln  "請求伝票
+and  posnr  = i_yk520_uepos-uepos. "請求明細 <=上位明細
+if sy-subrc ne 0.
+rollback work.
+message e400(y1) with '上位明細の集計時 modify エラー'.
+endif.
+endloop.
+*
+endform.   "f_sum
+*---------------------------------------------------------------------*
+*       FORM f_item_select       出力項目選択
+*---------------------------------------------------------------------*
+form f_item_select.
+* 出力項目選択
+if p_test = space.
+select *             "本番用
+from   yk01530020
+into   table   i_yk01530020
+where  tabname     = 'YK01530010'
+and    ddlanguage  = sy-langu
+order  by position.
+else.
+clear: w1, w_pos1.  "テスト用(start) 2002.03.14
+perform pop_up .  "出力開始位置の入力.
+select *
+from   yk01530020
+into   w_yk01530020
+where  tabname     = 'YK01530010'
+and    ddlanguage  = sy-langu
+order  by position.
+
+add 1 to w1.
+if w1 >= w_pos1.   " w_pos1=0 で全部出力
+append w_yk01530020 to i_yk01530020.
+endif.
+endselect."テスト用(end) 2002.03.14
+endif.
+endform.   "f_item_select
+*---------------------------------------------------------------------*
+*       FORM f_file_output        ファイル出力
+*---------------------------------------------------------------------*
+form f_file_output.
+* Add ES-UP 2012/09/03 -->
+CONSTANTS:
+CNS_SJIS TYPE STRING VALUE `shift_jis`.
+DATA:
+L_CODEPAGE TYPE CPCODEPAGE.
+
+clear: l_codepage.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+
+* Add ES-UP 2012/09/03 <--
+*
+*added by DMC 20080520 begin
+* 検索条件１、得意先をキーとして　昇順ソート
+sort i_outdata ascending by sort1 kunnr
+* Add 20100316 =>
+FKDAT
+* Add 20100316 <=
+.
+*added by DMC 20080520 end
+loop at i_outdata.
+at first.
+***** ファイルOPEN
+if p_test = space.
+concatenate p_dirnm p_fname into p_fname.
+condense p_fname.
+* Mod ES-UP 2012/09/03 -->
+*        open dataset p_fname for output in text mode.
+OPEN DATASET p_fname for output
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+* Mod ES-UP 2012/09/03 <--
+if sy-subrc <> 0.
+message e400(y1) with 'ファイルがOPENできません'.
+endif.
+endif.
+***** APIタグ出力
+if p_test = space.
+transfer '<start>' to p_fname.
+else.   "*** test ***
+write / '<start>'.
+endif.
+add 1 to w_lines.
+concatenate 'VrSetDocName2="' sy-title '(' sy-uname ')"'
+into w_out.
+condense w_out.
+if p_test = space.
+transfer w_out to p_fname.
+else.   "*** test ***
+write / w_out.
+endif.
+add 1 to w_lines.
+if p_test = space.
+transfer '<end>' to p_fname.
+else.   "*** test ****
+write / '<end>'.
+endif.
+add 1 to w_lines.
+***** タイトル行出力
+loop at i_yk01530020.
+at first.
+clear w_out.
+endat.
+concatenate w_out i_yk01530020-ddtext w_tab into w_out.
+condense w_out.
+at last.
+if p_test = space.
+transfer w_out to p_fname.
+else.   "*** test ****
+write / w_out.
+endif.
+add 1 to w_lines.
+endat.
+endloop. "------------ i_yk01530020
+endat. "------------------------------ first
+*** データ行出力
+loop at i_yk01530020.
+at first.
+clear w_out.
+endat.
+concatenate 'I_OUTDATA-' i_yk01530020-fieldname into w_fldname.
+condense w_fldname.
+assign (w_fldname) to <f>.
+concatenate w_out <f> into w_out separated by w_tab .
+condense w_out.
+at last.
+* 2002/05/27 先頭のTABを削除
+shift w_out.
+condense w_out.
+*
+if p_test = space.
+transfer w_out to p_fname.
+else.   "*** test ****
+write w_out.
+endif.
+add 1 to w_lines.
+endat.
+endloop. "---------------------------- i_yk01530020
+at last.
+***** ファイルCLOSE
+if p_test = space.
+close dataset p_fname.
+if sy-subrc = 0.
+write: / w_lines, '行ファイルへ書き込みました'.
+else.
+*          perform f_dequeue_all.
+message e400(y1) with 'ファイルがCLOSEできません'.
+endif.
+endif.
+endat. " ------------------------------ last
+endloop. "-------------------------------------------- i_outdata
+endform.   " f_file_output.
+*----------------------------------------------------------------------*
+*    f_edit_kingaku    通貨による金額編集の為の10のN乗値
+*----------------------------------------------------------------------*
+form f_edit_kingaku using value(p_waers) like yk520-waers.
+data:  w_fract1  like tcurx-currdec. "通貨の小数点以下桁数
+clear w_fract1.
+call function 'FWOS_CURRENCY_DECIMALS_READ'
+exporting
+i_currency = p_waers
+importing
+e_decimals = w_fract1
+exceptions
+others     = 1.
+if sy-subrc ne 0.
+w_10n = 1.
+else.
+w_10n = 1 / 10 ** ( w_fract1 - 2 ).
+endif.
+endform.
+*----------------------------------------------------------------------*
+*    f_edit_fugou    金額の符号編集 2002.05.30a
+*----------------------------------------------------------------------*
+form f_edit_fugou using value(p_value) like yk520-netwr.
+*
+* 2003/03/05 NDSC MOD-S
+*  W_KINGAKU = P_VALUE * W_10N.              "通貨編集
+**  write w_kingaku decimals 0 to w_value_c.  "カンマ入り
+*  W_VALUE_C = W_KINGAKU.
+w_value_c = p_value * w_10n.              "通貨編集
+* 2003/03/05 NDSC MOD-E
+if p_value < 0.
+write w_value_c right-justified to w_value_c.
+concatenate  w_fugou w_value_c(14) into w_value_c.
+endif.
+condense w_value_c no-gaps.
+*
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_yk510_update  版数の更新 & ロック解除
+*---------------------------------------------------------------------*
+form f_yk510_update.
+loop at i_yk510.
+select single * from  yk510
+where  bukrs  = i_yk510-bukrs  "会社コード
+and    kunnr  = i_yk510-kunnr  "入金先コード
+and    vkorg  = i_yk510-vkorg  "販売組織
+and    vtweg  = i_yk510-vtweg  "流通チャネル
+and    spart  = i_yk510-spart  "製品部門
+and    zfbdt  = i_yk510-zfbdt  "締日
+and    waers  = i_yk510-waers. "通貨コード
+if sy-subrc = 0.
+if not ( yk510-outcnt ca '0123456789' ).  "版数
+yk510-outcnt = 1.
+else.
+yk510-outcnt = i_yk510-outcnt + 1.
+endif.
+yk510-outdat = sy-datum.
+yk510-outtim = sy-uzeit.
+yk510-outusr = sy-uname.
+update yk510.
+if sy-subrc ne 0.
+rollback work.
+perform f_dequeue_yk510.
+message e400(y1) with 'テーブル:YK510 の更新に失敗しました'.
+endif.
+add 1 to w_updcnt_yk510.
+else.
+rollback work.
+perform f_dequeue_yk510.
+message e400(y1) with 'YK510更新失敗・読込んだデータがない！'.
+endif.
+endloop.
+perform f_dequeue_yk510.   "ロック解除
+endform.
+*---------------------------------------------------------------------*
+*       FORM f_dequeue_yk510   ロック解除
+*---------------------------------------------------------------------*
+form f_dequeue_yk510.
+loop at i_yk510.
+call function 'DEQUEUE_EY_YK510'
+exporting
+bukrs = i_yk510-bukrs
+kunnr = i_yk510-kunnr
+vkorg = i_yk510-vkorg
+vtweg = i_yk510-vtweg
+spart = i_yk510-spart
+zfbdt = i_yk510-zfbdt
+waers = i_yk510-waers.
+endloop.
+endform.
+
+*&---------------------------------------------------------------------*
+*&      Form  POP_UP                 <=　削除してよい
+*&---------------------------------------------------------------------*
+*       ポップアップメッセージ
+*----------------------------------------------------------------------*
+form pop_up.
+call function 'POPUP_TO_GET_ONE_VALUE'
+exporting
+titel       = '一括請求書出力'
+textline1   = '出力開始の項目番号'
+textline2   = '何も入力しなければ全部出力'
+textline3   = '( 1 / 16 / 25 ) Max = 35'
+valuelength = 3
+importing
+answer      = w_pop_ans
+value1      = w_value1
+exceptions
+others      = 1.
+if sy-subrc ne 0.
+message e400(y1) with 'ポップアップGET_ONE_VALUEエラー' sy-subrc.
+else.
+if w_pop_ans = 'J'.
+w_pos1 = w_value1.
+endif.
+endif.
+endform.                    " POP_UP

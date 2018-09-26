@@ -1,0 +1,188 @@
+*&---------------------------------------------------------------------*
+*& バリアント一覧
+*&---------------------------------------------------------------------*
+report  zb099980.
+*&---------------------------------------------------------------------*
+*&  選択画面
+*&---------------------------------------------------------------------*
+tables varid.
+select-options p_report for varid-report.
+*&---------------------------------------------------------------------*
+*&  型宣言
+*&---------------------------------------------------------------------*
+types: begin of t_varid,
+report  type varid-report,
+variant type varid-variant,
+end of t_varid,
+tt_varid type table of t_varid.
+types: begin of t_disp,
+report    type varid-report,
+variant   type varid-variant,
+tablename type rsseldyn-tablename,
+fieldname type rsseldyn-fieldname,
+vname     type vanz-vname,
+sign      type rsparamsl_255-sign,
+option    type rsparamsl_255-option,
+low       type rsparamsl_255-low,
+high      type rsparamsl_255-high,
+end of t_disp,
+tt_disp type table of t_disp.
+*&---------------------------------------------------------------------*
+*&  データ定義
+*&---------------------------------------------------------------------*
+data: i_varid type tt_varid,
+i_disp  type tt_disp.
+*&---------------------------------------------------------------------*
+*&  イベント：initialization
+*&---------------------------------------------------------------------*
+initialization.
+%_p_report_%_app_%-text = 'プログラム名'.
+*&---------------------------------------------------------------------*
+*&  イベント：start-of-selection
+*&---------------------------------------------------------------------*
+start-of-selection.
+perform main.
+*&---------------------------------------------------------------------*
+*&      メイン処理
+*&---------------------------------------------------------------------*
+form main.
+data: l_varid type ref to t_varid,
+rts     type abap_bool.
+perform get_varid.
+loop at i_varid reference into l_varid.
+perform check using l_varid->report rts.
+check rts = abap_true.
+perform get_variant using l_varid->*.
+endloop.
+perform disp.
+endform.                    "main
+*&---------------------------------------------------------------------*
+*& バリアント一覧取得
+*&---------------------------------------------------------------------*
+form get_varid.
+select report variant into table i_varid
+from varid client specified
+where mandt = '000'
+and report in p_report
+and ( variant like 'SAP&%'
+or variant like 'CUS&%' ).
+endform.                    "get_VARID
+*&---------------------------------------------------------------------*
+*& 構文チェック(強制的に有効化したPGを除外(選択画面を生成できないため))
+*&---------------------------------------------------------------------*
+form check using p_name type trdir-name
+rts    type abap_bool.
+statics: s_name type trdir-name,
+s_rts  type abap_bool.
+data: soc      type table of string,
+l_dir    type trdir,
+mess     type string,
+lin      type i,
+wrd      type string.
+if s_name <> p_name.
+s_name = p_name.
+s_rts  = abap_false.
+select single * into l_dir from trdir
+where name = s_name
+and uccheck = abap_true.
+if sy-subrc = 0.
+read report s_name into soc.
+if sy-subrc = 0.
+syntax-check for soc message mess line lin word wrd
+directory entry l_dir.
+if sy-subrc = 0.
+s_rts = abap_true.
+endif.
+endif.
+endif.
+endif.
+rts = s_rts.
+endform.                    "check
+*&---------------------------------------------------------------------*
+*&      バリアント取得
+*&---------------------------------------------------------------------*
+form get_variant using l_varid type t_varid.
+data: valutab       type table of rsparamsl_255,
+objects       type table of vanz,
+free_value    type table of rsseldyn,
+l_disp        type t_disp,
+l_valutab     type ref to rsparamsl_255,
+l_objects     type ref to vanz,
+l_free_value  type ref to rsseldyn.
+* バリアント取得(画面生成ができないときはショートダンプする)
+call function 'RS_VARIANT_CONTENTS_255'
+exporting
+report                = l_varid-report
+variant               = l_varid-variant
+tables
+valutab               = valutab
+objects               = objects
+free_selections_value = free_value
+exceptions
+others                = 0.
+* 選択画面部
+sort objects by name.
+loop at valutab reference into l_valutab.
+clear l_disp.
+l_disp-report    = l_varid-report.
+l_disp-variant   = l_varid-variant.
+l_disp-fieldname = l_valutab->selname.
+l_disp-sign      = l_valutab->sign.
+l_disp-option    = l_valutab->option.
+l_disp-low       = l_valutab->low.
+l_disp-high      = l_valutab->high.
+*   システム変数(TVARVC)部
+read table objects reference into l_objects binary search
+with key name = l_valutab->selname.
+if sy-subrc = 0 and l_objects->vtype <> space.
+l_disp-vname   = l_objects->vname.
+endif.
+append l_disp to i_disp.
+endloop.
+* 動的選択部
+loop at free_value reference into l_free_value.
+clear l_disp.
+l_disp-report  = l_varid-report.
+l_disp-variant = l_varid-variant.
+l_disp-tablename = l_free_value->tablename.
+l_disp-fieldname = l_free_value->fieldname.
+l_disp-sign      = l_free_value->sign.
+l_disp-option    = l_free_value->option.
+l_disp-low       = l_free_value->low.
+l_disp-high      = l_free_value->high.
+append l_disp to i_disp.
+endloop.
+endform.                    "get_variant
+*&---------------------------------------------------------------------*
+*&      表示
+*&---------------------------------------------------------------------*
+form disp.
+data: alv type ref to cl_salv_table,
+lr_functions type ref to cl_salv_functions_list,
+lr_columns type ref to cl_salv_columns.
+try.
+cl_salv_table=>factory(
+importing r_salv_table = alv
+changing  t_table      = i_disp ).
+catch cx_salv_msg.
+endtry.
+if alv is not bound.
+message 'ALV...ERROR' type 'E'.
+endif.
+* 機能ボタンON
+lr_functions = alv->get_functions( ).
+lr_functions->set_default( ).
+lr_functions->set_export_spreadsheet( ).
+lr_functions->set_export_localfile( ).
+lr_functions->set_filter( ).
+lr_functions->set_filter_delete( ).
+lr_functions->set_print( ).
+lr_functions->set_print_preview( ).
+lr_functions->set_find( ).
+lr_functions->set_find_more( ).
+* 列最適化ON
+lr_columns = alv->get_columns( ).
+lr_columns->set_optimize( ).
+* 表示
+alv->display( ).
+endform.                    "DISP

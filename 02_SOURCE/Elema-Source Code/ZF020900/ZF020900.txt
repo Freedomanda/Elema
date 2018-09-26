@@ -1,0 +1,1127 @@
+REPORT ZF020900 NO STANDARD PAGE HEADING
+MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT 58.
+************************************************************************
+* プログラムID  :ZF020900
+* プログラム名  :相殺候補一覧作成
+* 作成日        :2008/01/15
+* 作成者        :DMC
+* 変更履歴      :
+* 2008/02/18 　　DMC 　　　　入金予定データがない得意先が
+*                            出力される対応
+*                            支払依頼が0でない時は入金予定がない得意先が
+*                            出力される対応
+*                            締日が相殺候補一覧の入金予定日の後ろに
+*                            出力される対応
+* 2008/02/20 　　DMC 　　　　部門名称の内容が部門コードから部門名称に
+*                            変更する
+* 2012/08/15     ISID        ES-UP
+************************************************************************
+*----------------------------------------------------------------------*
+*     宣言部
+*----------------------------------------------------------------------*
+TABLES:     BSIK,                      "会計管理: 仕入先の二次索引
+YK310,                     "入金予定
+YK330,                     "売掛管理
+KNA1,                      "得意先マスタ: 一般データ
+KNVV,                      "得意先マスタ: 販売データ
+T052,                      "支払条件
+LFA1,                      "仕入先マスタ (一般セクション)
+SKA1,                      "G/L 勘定マスタ (勘定コード表)
+ZF2010.                    "仕入先得意先紐付テーブル
+*---------------------------------------------------------------------*
+*       構造定義          　　　　                                    *
+*---------------------------------------------------------------------*
+**買掛の未消し込みデータ取得用
+TYPES:BEGIN OF TYP_BSIK,
+LIFNR   LIKE BSIK-LIFNR,               "仕入先コード
+SHKZG   LIKE BSIK-SHKZG,               "借方/貸方フラグ
+WAERS   LIKE BSIK-WAERS,               "通貨コード
+DMBTR   LIKE BSIK-DMBTR,               "国内通貨額
+END   OF TYP_BSIK.
+**未消し込み仕入先の相手得意先取得用
+TYPES:BEGIN OF TYP_ZF2010.
+INCLUDE STRUCTURE ZF2010.
+TYPES:END   OF TYP_ZF2010.
+**未消し込みデータ
+TYPES:BEGIN OF TYP_DATA,
+LIFNR   LIKE BSIK-LIFNR,              "仕入先コード
+**20080218 DMC MOD START
+*        DMBTR   LIKE BSIK-DMBTR,              "国内通貨額
+DMBTR(20) TYPE C,                     "国内通貨額
+**20080218 DMC MOD END
+KUNNR   LIKE ZF2010-KUNNR,            "得意先コード
+COMNT   LIKE ZF2010-COMNT,            "コメント
+WAERS   LIKE BSIK-WAERS,              "通貨コード
+**20080218 DMC ADD START
+INCDAT LIKE YK310-INCDAT,             "入金予定日
+INCAMT LIKE YK310-INCAMT,             "入金予定額
+ZFBDT  LIKE YK310-ZFBDT,              "締日
+**20080218 DMC ADD END
+END   OF TYP_DATA.
+**入金予定データ
+TYPES:BEGIN OF TYP_YK310,
+KUNNR  LIKE YK310-KUNNR,               "得意先コード
+INCDAT LIKE YK310-INCDAT,              "入金予定日
+INCAMT LIKE YK310-INCAMT,              "入金予定額
+WAERS  LIKE YK310-WAERS,               "通貨コード
+**20080218 DMC ADD START
+ZFBDT  LIKE YK310-ZFBDT,               "締日
+**20080218 DMC ADD END
+END   OF TYP_YK310.
+**得意先名称取得用
+TYPES:BEGIN OF TYP_KNA1,
+KUNNR LIKE KNA1-KUNNR,                 "得意先コード
+NAME1 LIKE KNA1-NAME1,                 "名称 1
+END   OF TYP_KNA1.
+**部門名称取得用
+TYPES:BEGIN OF TYP_KNVV,
+KUNNR LIKE KNVV-KUNNR,                 "得意先コード
+ZTERM LIKE KNVV-ZTERM,                 "支払条件キー
+VKBUR LIKE KNVV-VKBUR,                 "営業所
+END   OF TYP_KNVV.
+**20080220 DMC ADD START
+**部門名称取得用
+TYPES:BEGIN OF TYP_TVKBT,
+VKBUR LIKE TVKBT-VKBUR,                 "営業所
+BEZEI LIKE TVKBT-BEZEI,               "テキスト
+END   OF TYP_TVKBT.
+**20080220 DMC ADD END
+**支払条件情報取得用
+TYPES:BEGIN OF TYP_T052,
+ZTERM LIKE T052-ZTERM,                 "支払条件キー
+ZFAEL LIKE T052-ZFAEL,                 "支払基準日のカレンダ日
+ZSTG1 LIKE T052-ZSTG1,                 "特別条件の期日
+END   OF TYP_T052.
+**売掛管理データ取得用
+TYPES:BEGIN OF TYP_YK330,
+KUNNR       LIKE YK330-KUNNR,
+WAERS       LIKE YK330-WAERS,          "通貨コード
+URIKAKEZAN  LIKE YK330-URIKAKEZAN,     "売掛残
+TOUMIKEN    LIKE YK330-TOUMIKEN,       "今回未検収額
+NYUKINYOTEI LIKE YK330-NYUKINYOTEI,    "入金予定額
+SAI         LIKE YK330-SAI,            "残高差異
+END   OF TYP_YK330.
+**出力ファイルデータ
+TYPES:BEGIN OF TYP_OTDATA,
+KDATE(8)  TYPE C,                      "計上日
+LIFNR     LIKE BSIK-LIFNR,             "仕入先コード
+DMBTR(20) TYPE C,                      "支払金額
+KUNNR     LIKE YK310-KUNNR,            "得意先コード
+**20080220 DMC MOD START
+*        VKBUR     LIKE KNVV-VKBUR,             "部門名称
+BEZEI     LIKE TVKBT-BEZEI,             "部門名称
+**20080220 DMC MOD END
+INCAMT(20) TYPE C,                     "入金予定額
+INCDAT    LIKE YK310-INCDAT,           "入金予定日
+**20080218 DMC ADD START
+ZFBDT     LIKE YK310-ZFBDT,            "締日
+**20080218 DMC ADD END
+NAME1     LIKE KNA1-NAME1,             "得意先名称
+COMNT(50) TYPE C,                      "コメント入力欄
+ZFAEL(2)  TYPE C,                      "得意先締日
+ZSTG1(2)  TYPE C,                      "得意先支払日
+ZTERM     LIKE KNVV-ZTERM,             "支払条件（B919等）
+INCAMTS(20)     TYPE C,                "入金予定額（合計）
+NYUKINYOTEI(20) TYPE C,                "得意先入金予定額
+SAI(20)   TYPE C,                      "残高差異
+URIKAKEZAN(20)  TYPE C,                "売掛残
+TOUMIKEN(20)    TYPE C,                "当月未検収
+FLAG(1)   TYPE C,                      "残余優先フラグ
+NUM(14)   TYPE C,                      "登録済伝票番号
+YEAR(18)  TYPE C,                      "登録済会計年度
+STATUS(1) TYPE C,                      "処理ステータス
+END   OF TYP_OTDATA.
+*---------------------------------------------------------------------*
+*       テーブル定義                                                  *
+*---------------------------------------------------------------------*
+DATA: GT_BSIK    TYPE TABLE OF TYP_BSIK,
+GW_BSIK    TYPE TYP_BSIK.
+DATA: GT_ZF2010  TYPE TABLE OF TYP_ZF2010,
+GW_ZF2010  TYPE TYP_ZF2010.
+DATA: GT_YK310   TYPE TABLE OF TYP_YK310,
+GW_YK310   TYPE TYP_YK310.
+DATA: GT_KNA1    TYPE TABLE OF TYP_KNA1,
+GW_KNA1    TYPE TYP_KNA1.
+DATA: GT_KNVV    TYPE TABLE OF TYP_KNVV,
+GW_KNVV    TYPE TYP_KNVV.
+DATA: GT_T052    TYPE TABLE OF TYP_T052,
+GW_T052    TYPE TYP_T052.
+DATA: GT_YK330   TYPE TABLE OF TYP_YK330,
+GW_YK330   TYPE TYP_YK330.
+DATA: GT_DATA    TYPE TABLE OF TYP_DATA,
+GW_DATA    TYPE TYP_DATA.
+DATA: GT_OTDATA  TYPE TABLE OF TYP_OTDATA,
+GW_OTDATA  TYPE TYP_OTDATA.
+DATA: GT_FILE    TYPE STANDARD TABLE OF STRING,
+GW_FILE    TYPE STRING.
+**20080218 DMC ADD START
+DATA: GT_DATASUM    TYPE TABLE OF TYP_DATA,
+GW_DATASUM    TYPE TYP_DATA.
+**20080218 DMC ADD END
+**20080220 DMC ADD START
+DATA: GT_TVKBT   TYPE TABLE OF TYP_TVKBT,
+GW_TVKBT   TYPE TYP_TVKBT.
+**20080220 DMC ADD END
+*---------------------------------------------------------------------*
+*       変数定義                                                      *
+*---------------------------------------------------------------------*
+DATA:G_DCNT       TYPE P,   "ダウンロード件数
+G_STRING(32) TYPE C.   "金額出力用
+*---------------------------------------------------------------------*
+*       定数定義                                                      *
+*---------------------------------------------------------------------*
+CONSTANTS:C_CSV         TYPE C VALUE ','.
+* Add ES-UP 2012/08/29 -->
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/08/29 <--
+*----------------------------------------------------------------------*
+*     入力画面定義
+*----------------------------------------------------------------------*
+*入金予定日
+SELECT-OPTIONS: S_INCDAT FOR SY-DATUM OBLIGATORY.
+*売掛検収締日
+SELECT-OPTIONS: S_ZFBDT2 FOR SY-DATUM OBLIGATORY.
+*支払基準日
+SELECT-OPTIONS: S_ZFBDT1 FOR SY-DATUM OBLIGATORY.
+*得意先コード
+SELECT-OPTIONS: S_KUNNR FOR KNA1-KUNNR.
+*仕入先コード
+SELECT-OPTIONS: S_LIFNR FOR LFA1-LIFNR.
+*債務勘定
+SELECT-OPTIONS: S_SAKNR FOR SKA1-SAKNR OBLIGATORY.
+SELECTION-SCREEN SKIP 2.
+*出力ファイル
+PARAMETERS:P_FILE LIKE RLGRAP-FILENAME LOWER CASE OBLIGATORY
+DEFAULT 'C:\相殺候補一覧.csv'.
+*----------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+* 出力ファイル名の検索ヘルプ
+PERFORM F4HELP CHANGING P_FILE.
+*----------------------------------------------------------------------*
+INITIALIZATION.
+*----------------------------------------------------------------------*
+DATA:L_DATE  LIKE SY-DATUM.
+CLEAR:L_DATE.
+* ｼｽﾃﾑ日付の翌月取得
+PERFORM CALL_DATE USING    '1'
+CHANGING L_DATE.
+* 入金予定初期値の設定
+MOVE: 'I'      TO S_INCDAT-SIGN,
+'EQ'     TO S_INCDAT-OPTION.
+CONCATENATE SY-DATUM+0(6) '01' INTO S_INCDAT-LOW.
+CONCATENATE L_DATE+0(6)   '10' INTO S_INCDAT-HIGH.
+APPEND S_INCDAT.
+
+* 支払基準初期値の設定
+MOVE: 'I'      TO S_INCDAT-SIGN,
+'EQ'     TO S_INCDAT-OPTION.
+CONCATENATE SY-DATUM+0(6) '01' INTO S_ZFBDT1-LOW.
+PERFORM CALL_LASTDAY USING SY-DATUM
+CHANGING S_ZFBDT1-HIGH.
+APPEND S_ZFBDT1.
+
+CLEAR:L_DATE.
+* ｼｽﾃﾑ日付の前月取得
+PERFORM CALL_DATE USING    '-1'
+CHANGING L_DATE.
+* 検収情報初期値の設定
+MOVE: 'I'      TO S_INCDAT-SIGN,
+'EQ'     TO S_INCDAT-OPTION.
+CONCATENATE L_DATE+0(6)   '05' INTO S_ZFBDT2-LOW.
+PERFORM CALL_LASTDAY USING L_DATE
+CHANGING S_ZFBDT2-HIGH.
+APPEND S_ZFBDT2.
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+*----------------------------------------------------------------------*
+PERFORM CHECK_PATH.                "ファイルパス存在チェック
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+PERFORM CHECK_FILE.                "ファイル存在チェック
+PERFORM INT_SEC.                   "初期処理
+PERFORM SET_DATA.                  "出力データ作成
+PERFORM DLOAD_DATA.                "ダウンロード処理
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  CALL_DATE
+*&---------------------------------------------------------------------*
+*       日付取得
+*----------------------------------------------------------------------*
+*      -->P_MON   月
+*      <--P_DATE  日付
+*----------------------------------------------------------------------*
+FORM CALL_DATE  USING    P_MON
+CHANGING P_DATE.
+
+CALL FUNCTION 'RE_ADD_MONTH_TO_DATE'
+EXPORTING
+MONTHS        = P_MON
+OLDDATE       = SY-DATUM
+IMPORTING
+NEWDATE       = P_DATE.
+
+ENDFORM.                    " CALL_DATE
+*&---------------------------------------------------------------------*
+*&      Form  CALL_LASTDAY
+*&---------------------------------------------------------------------*
+*       末日取得
+*----------------------------------------------------------------------*
+*      -->P_DATUM  日付
+*      <--P_DATE 　該当月分の末日
+*----------------------------------------------------------------------*
+FORM CALL_LASTDAY USING    P_DATUM
+CHANGING P_DATE.
+
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN                 = P_DATUM
+IMPORTING
+LAST_DAY_OF_MONTH       = P_DATE
+EXCEPTIONS
+DAY_IN_NO_DATE          = 1
+OTHERS                  = 2.
+
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " CALL_LASTDAY
+*&---------------------------------------------------------------------*
+*&      Form  F4HELP
+*&---------------------------------------------------------------------*
+*       ファイル名のF4ヘルプ
+*----------------------------------------------------------------------*
+FORM F4HELP CHANGING    P_FILE.
+
+DATA : L_FNAME TYPE STRING,
+L_PATH  TYPE STRING,
+L_FPATH TYPE STRING.
+CLEAR:L_FNAME,L_PATH,L_FPATH.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_SAVE_DIALOG
+EXPORTING
+DEFAULT_EXTENSION = '.CSV'
+FILE_FILTER       = '*.*'
+CHANGING
+FILENAME          = L_FNAME
+PATH              = L_PATH
+FULLPATH          = L_FPATH
+EXCEPTIONS
+CNTL_ERROR        = 1
+ERROR_NO_GUI      = 2
+others            = 3.
+IF SY-SUBRC <> 0.
+MESSAGE S612 WITH TEXT-M01.
+ELSE.
+P_FILE = L_FPATH.
+ENDIF.
+
+ENDFORM.                    " F4HELP
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PATH
+*&---------------------------------------------------------------------*
+*       ファイルパス存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_PATH.
+
+DATA: L_RC(4) TYPE C.
+DATA: L_FNAME LIKE RLGRAP-FILENAME,
+L_FPATH LIKE RLGRAP-FILENAME.
+* Add ES-UP 2012/08/15 -->
+data  L_FPATH2 type string.
+* Add ES-UP 2012/08/15 <--
+CLEAR:L_RC,L_FNAME,L_FPATH.
+L_FNAME = P_FILE.
+CALL FUNCTION 'SO_SPLIT_FILE_AND_PATH'
+EXPORTING
+FULL_NAME          = L_FNAME
+IMPORTING
+FILE_PATH           = L_FPATH
+EXCEPTIONS
+X_ERROR             = 1
+OTHERS              = 2.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+* Mod ES-UP 2012/08/15 -->
+*  CALL FUNCTION 'WS_QUERY'
+*    EXPORTING
+*      FILENAME            = L_FPATH
+*      QUERY               = 'DE'
+*   IMPORTING
+*     RETURN               = L_RC
+*   EXCEPTIONS
+*     INV_QUERY            = 1
+*     NO_BATCH             = 2
+*     FRONTEND_ERROR       = 3
+*     OTHERS               = 4.
+** 存在しない場合
+*  IF L_RC <> '1'.
+L_FPATH2 = L_FPATH.
+if CL_GUI_FRONTEND_SERVICES=>DIRECTORY_EXIST( L_FPATH2 ) = abap_false.
+* Mod ES-UP 2012/08/15 <--
+MESSAGE E612 WITH TEXT-M02.
+STOP.
+ENDIF.
+
+ENDFORM.                    " CHECK_PATH
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_FILE
+*&---------------------------------------------------------------------*
+*       ファイル存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_FILE.
+
+DATA: L_FILE      TYPE STRING,
+L_RESULT(1) TYPE C,
+L_ANSWER(1) TYPE C.
+CLEAR:L_RESULT,L_ANSWER,L_FILE.
+L_FILE = P_FILE.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_EXIST
+EXPORTING
+FILE            =  L_FILE
+RECEIVING
+RESULT          =  L_RESULT
+EXCEPTIONS
+CNTL_ERROR      = 1
+ERROR_NO_GUI    = 2
+WRONG_PARAMETER = 3
+others          = 4.
+* 存在する場合
+IF L_RESULT = 'X'.
+*   ファイルの上書き確認を行う
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+TITLEBAR                    = TEXT-M03
+TEXT_QUESTION               = TEXT-M04
+TEXT_BUTTON_1               = TEXT-M05
+TEXT_BUTTON_2               = TEXT-M06
+IMPORTING
+ANSWER                      = L_ANSWER
+EXCEPTIONS
+TEXT_NOT_FOUND              = 1
+OTHERS                      = 2.
+*  【いええ】/【中止】が選択された場合
+IF L_ANSWER <> '1'.
+*     処理終了、元の画面に戻す
+STOP.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_FILE
+*&---------------------------------------------------------------------*
+*&      Form  INT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INT_SEC.
+
+CLEAR:   GW_FILE,GW_OTDATA,GW_DATA,GW_YK330,GW_T052,
+GW_KNVV,GW_KNA1,GW_YK310,GW_ZF2010,GW_BSIK,
+G_DCNT,G_STRING.
+REFRESH: GT_FILE,GT_OTDATA,GT_DATA,GT_YK330,GT_T052,
+GT_KNVV,GT_KNA1,GT_YK310,GT_ZF2010,GT_BSIK.
+
+ENDFORM.                    " INT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  SET_DATA
+*&---------------------------------------------------------------------*
+*       出力データ作成
+*----------------------------------------------------------------------*
+FORM SET_DATA.
+
+DATA: L_INCAMT(20) TYPE C,
+L_LINE   TYPE I,
+LW_YK310 TYPE TYP_YK310,
+L_KUNNR  LIKE YK310-KUNNR,
+L_LIFNR  LIKE BSIK-LIFNR,
+L_FLG(1) TYPE C.
+* 買掛の未消し込みデータ・相手得意先の抽出
+PERFORM GET_DATA1.
+* 相手得意先の入金予定データ・売掛管理データの抽出
+PERFORM GET_DATA2.
+**20080218 DMC ADD START
+* 対象データ編集
+REFRESH:GT_DATASUM.
+CLEAR:GW_DATA.
+LOOP AT GT_DATA INTO GW_DATA.
+CLEAR:GW_YK310,GW_DATASUM,L_FLG.
+MOVE-CORRESPONDING GW_DATA TO GW_DATASUM.
+LOOP AT GT_YK310 INTO GW_YK310 WHERE KUNNR = GW_DATA-KUNNR.
+L_FLG = 'X'.
+GW_DATASUM-WAERS  = GW_YK310-WAERS.
+GW_DATASUM-INCAMT = GW_YK310-INCAMT.
+GW_DATASUM-INCDAT = GW_YK310-INCDAT.
+GW_DATASUM-ZFBDT  = GW_YK310-ZFBDT.
+APPEND GW_DATASUM TO GT_DATASUM.
+ENDLOOP.
+*   入金予定データ出力
+IF L_FLG <> 'X'.
+APPEND GW_DATASUM TO GT_DATASUM.
+ENDIF.
+ENDLOOP.
+REFRESH:GT_DATA.
+GT_DATA[] = GT_DATASUM[].
+* ソート
+SORT GT_DATA BY LIFNR KUNNR INCDAT ASCENDING INCAMT DESCENDING.
+* 出力データ編集
+CLEAR:GW_DATA,L_LIFNR,L_KUNNR.
+LOOP AT GT_DATA INTO GW_DATA.
+
+CLEAR:L_INCAMT,GW_OTDATA.
+*  【入金予定額(合計)】を該当得意先の先頭行にセットする
+IF L_KUNNR <> GW_DATA-KUNNR.
+CLEAR:GW_YK310.
+LOOP AT GT_YK310 INTO GW_YK310
+WHERE KUNNR = GW_DATA-KUNNR.
+*      【得意先】毎に、【入金予定額】を集計する
+CLEAR: G_STRING.
+WRITE GW_YK310-INCAMT TO G_STRING CURRENCY GW_YK310-WAERS
+LEFT-JUSTIFIED NO-GROUPING.
+L_INCAMT = L_INCAMT + G_STRING.
+ENDLOOP.
+*     マイナス符号頭付
+PERFORM PUT_SIGN_IN_FRONT CHANGING L_INCAMT.
+GW_OTDATA-INCAMTS = L_INCAMT.          "入金予定額(合計)
+CLEAR:GW_KNA1.
+READ TABLE GT_KNA1 INTO GW_KNA1 WITH KEY KUNNR = GW_DATA-KUNNR.
+GW_OTDATA-NAME1       = GW_KNA1-NAME1. "得意先名称
+CLEAR:GW_KNVV.
+READ TABLE GT_KNVV INTO GW_KNVV WITH KEY KUNNR = GW_DATA-KUNNR.
+**20080220 DMC DEL START
+*      GW_OTDATA-VKBUR       = GW_KNVV-VKBUR. "部門名称
+**20080220 DMC DEL END
+GW_OTDATA-ZTERM       = GW_KNVV-ZTERM. "支払条件（B919等）
+**20080220 DMC ADD START
+IF NOT GW_KNVV-VKBUR IS INITIAL.
+CLEAR:GW_TVKBT.
+READ TABLE GT_TVKBT INTO GW_TVKBT
+WITH KEY VKBUR = GW_KNVV-VKBUR.
+GW_OTDATA-BEZEI       = GW_TVKBT-BEZEI. "部門名称
+ENDIF.
+**20080220 DMC ADD END
+IF NOT GW_KNVV-ZTERM IS INITIAL.
+CLEAR:GW_T052.
+READ TABLE GT_T052 INTO GW_T052
+WITH KEY ZTERM = GW_KNVV-ZTERM.
+IF GW_T052-ZSTG1 = '00'.
+GW_OTDATA-ZSTG1 = ''.
+ELSE.
+GW_OTDATA-ZSTG1       = GW_T052-ZSTG1. "得意先支払日
+ENDIF.
+IF GW_T052-ZFAEL = '00'.
+GW_OTDATA-ZFAEL = ''.
+ELSE.
+GW_OTDATA-ZFAEL       = GW_T052-ZFAEL. "得意先締日
+ENDIF.
+ENDIF.
+CLEAR:GW_YK330.
+READ TABLE GT_YK330 INTO GW_YK330
+WITH KEY KUNNR = GW_DATA-KUNNR.
+CLEAR: G_STRING.
+WRITE GW_YK330-NYUKINYOTEI TO G_STRING CURRENCY GW_YK330-WAERS
+LEFT-JUSTIFIED NO-GROUPING.
+*     マイナス符号頭付
+PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+GW_OTDATA-NYUKINYOTEI = G_STRING. "得意先入金予定額
+CLEAR: G_STRING.
+WRITE GW_YK330-SAI TO G_STRING CURRENCY GW_YK330-WAERS
+LEFT-JUSTIFIED NO-GROUPING.
+*     マイナス符号頭付
+PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+GW_OTDATA-SAI         = G_STRING. "残高差異
+CLEAR: G_STRING.
+WRITE GW_YK330-URIKAKEZAN TO G_STRING CURRENCY GW_YK330-WAERS
+LEFT-JUSTIFIED NO-GROUPING.
+*    マイナス符号頭付
+PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+GW_OTDATA-URIKAKEZAN  = G_STRING. "売掛残
+CLEAR: G_STRING.
+WRITE GW_YK330-TOUMIKEN TO G_STRING CURRENCY GW_YK330-WAERS
+LEFT-JUSTIFIED NO-GROUPING.
+*     マイナス符号頭付
+PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+GW_OTDATA-TOUMIKEN    = G_STRING.      "当月未検収
+GW_OTDATA-COMNT       = GW_DATA-COMNT. "コメント
+ENDIF.
+L_KUNNR = GW_DATA-KUNNR.
+*   同一仕入先の先頭行のみ出力
+IF L_LIFNR <> GW_DATA-LIFNR.
+GW_OTDATA-DMBTR = GW_DATA-DMBTR.  "国内通貨額
+ENDIF.
+L_LIFNR = GW_DATA-LIFNR.
+GW_OTDATA-LIFNR   = GW_DATA-LIFNR.  "仕入先コード
+GW_OTDATA-KUNNR   = GW_DATA-KUNNR.  "得意先コード
+GW_OTDATA-INCDAT  = GW_DATA-INCDAT. "入金予定日
+GW_OTDATA-ZFBDT   = GW_DATA-ZFBDT.  "締日
+CLEAR: G_STRING.
+WRITE GW_DATA-INCAMT TO G_STRING CURRENCY GW_DATA-WAERS
+LEFT-JUSTIFIED NO-GROUPING.
+*   マイナス符号頭付
+PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+GW_OTDATA-INCAMT  = G_STRING.       "入金予定額
+APPEND GW_OTDATA TO GT_OTDATA.
+ENDLOOP.
+**20080218 DMC ADD END
+**20080218 DMC DEL START
+** 出力データ編集
+*  CLEAR:GW_DATA,L_LIFNR.
+*  LOOP AT GT_DATA INTO GW_DATA.
+**   入金予定データが取得できない場合
+*    CLEAR:GW_YK310.
+*    READ TABLE GT_YK310 INTO GW_YK310 WITH KEY KUNNR = GW_DATA-KUNNR.
+*    IF SY-SUBRC <> 0.
+**     データ出力しない
+*      CONTINUE.
+*    ENDIF.
+*    CLEAR:GW_YK310,L_KUNNR.
+*    LOOP AT GT_YK310 INTO GW_YK310
+*         WHERE KUNNR = GW_DATA-KUNNR.
+**    【入金予定額(合計)】を該当得意先の先頭行にセットする
+*      CLEAR:L_INCAMT,GW_OTDATA.
+*      IF L_KUNNR <> GW_YK310-KUNNR.
+*        LOOP AT GT_YK310 INTO LW_YK310
+*             WHERE KUNNR = GW_YK310-KUNNR.
+**        【得意先】毎に、【入金予定額】を集計する
+*          CLEAR: G_STRING.
+*          WRITE LW_YK310-INCAMT TO G_STRING CURRENCY LW_YK310-WAERS
+*                                   LEFT-JUSTIFIED NO-GROUPING.
+*          L_INCAMT = L_INCAMT + G_STRING.
+*        ENDLOOP.
+**       マイナス符号頭付
+*        PERFORM PUT_SIGN_IN_FRONT CHANGING L_INCAMT.
+*        GW_OTDATA-INCAMTS = L_INCAMT.
+*        CLEAR:GW_KNA1.
+*       READ TABLE GT_KNA1 INTO GW_KNA1 WITH KEY KUNNR = GW_YK310-KUNNR.
+*        GW_OTDATA-NAME1       = GW_KNA1-NAME1. "得意先名称
+*        CLEAR:GW_KNVV.
+*       READ TABLE GT_KNVV INTO GW_KNVV WITH KEY KUNNR = GW_YK310-KUNNR.
+*        GW_OTDATA-VKBUR       = GW_KNVV-VKBUR. "部門名称
+*        GW_OTDATA-ZTERM       = GW_KNVV-ZTERM. "支払条件（B919等）
+*        IF NOT GW_KNVV-ZTERM IS INITIAL.
+*          CLEAR:GW_T052.
+*          READ TABLE GT_T052 INTO GW_T052
+*                             WITH KEY ZTERM = GW_KNVV-ZTERM.
+*          IF GW_T052-ZSTG1 = '00'.
+*            GW_OTDATA-ZSTG1 = ''.
+*          ELSE.
+*            GW_OTDATA-ZSTG1       = GW_T052-ZSTG1. "得意先支払日
+*          ENDIF.
+*          IF GW_T052-ZFAEL = '00'.
+*            GW_OTDATA-ZFAEL = ''.
+*          ELSE.
+*            GW_OTDATA-ZFAEL       = GW_T052-ZFAEL. "得意先締日
+*          ENDIF.
+*        ENDIF.
+*        CLEAR:GW_YK330.
+*        READ TABLE GT_YK330 INTO GW_YK330
+*                            WITH KEY KUNNR = GW_YK310-KUNNR.
+*        CLEAR: G_STRING.
+*        WRITE GW_YK330-NYUKINYOTEI TO G_STRING CURRENCY GW_YK330-WAERS
+*                                   LEFT-JUSTIFIED NO-GROUPING.
+**       マイナス符号頭付
+*        PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+*        GW_OTDATA-NYUKINYOTEI = G_STRING. "得意先入金予定額
+*        CLEAR: G_STRING.
+*        WRITE GW_YK330-SAI TO G_STRING CURRENCY GW_YK330-WAERS
+*                              LEFT-JUSTIFIED NO-GROUPING.
+**       マイナス符号頭付
+*        PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+*        GW_OTDATA-SAI         = G_STRING. "残高差異
+*        CLEAR: G_STRING.
+*        WRITE GW_YK330-URIKAKEZAN TO G_STRING CURRENCY GW_YK330-WAERS
+*                                  LEFT-JUSTIFIED NO-GROUPING.
+**      マイナス符号頭付
+*        PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+*        GW_OTDATA-URIKAKEZAN  = G_STRING. "売掛残
+*        CLEAR: G_STRING.
+*        WRITE GW_YK330-TOUMIKEN TO G_STRING CURRENCY GW_YK330-WAERS
+*                                LEFT-JUSTIFIED NO-GROUPING.
+**       マイナス符号頭付
+*        PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+*        GW_OTDATA-TOUMIKEN    = G_STRING. "当月未検収
+*        GW_OTDATA-COMNT       = GW_DATA-COMNT. "コメント
+*      ENDIF.
+*      L_KUNNR = GW_YK310-KUNNR.
+*      GW_OTDATA-KUNNR   = GW_YK310-KUNNR.  "得意先コード
+*      GW_OTDATA-INCDAT        = GW_YK310-INCDAT. "入金予定日
+*      CLEAR: G_STRING.
+*      WRITE GW_YK310-INCAMT TO G_STRING CURRENCY GW_YK310-WAERS
+*                               LEFT-JUSTIFIED NO-GROUPING.
+**     マイナス符号頭付
+*      PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+*      GW_OTDATA-INCAMT        = G_STRING.      "入金予定額
+*      GW_OTDATA-LIFNR         = GW_DATA-LIFNR. "仕入先コード
+**     同一仕入先の先頭行のみ出力
+*      IF L_LIFNR <> GW_DATA-LIFNR.
+*        CLEAR: G_STRING.
+*        WRITE GW_DATA-DMBTR TO G_STRING CURRENCY GW_DATA-WAERS
+*                               LEFT-JUSTIFIED NO-GROUPING.
+**       マイナス符号頭付
+*        PERFORM PUT_SIGN_IN_FRONT CHANGING G_STRING.
+*        GW_OTDATA-DMBTR = G_STRING. "国内通貨額
+*      ENDIF.
+*      L_LIFNR = GW_DATA-LIFNR.
+*      APPEND GW_OTDATA TO GT_OTDATA.
+*    ENDLOOP.
+*  ENDLOOP.
+**20080218 DMC DEL END
+
+*【出力用データ】件数が0件の場合
+CLEAR:L_LINE.
+DESCRIBE TABLE GT_OTDATA LINES L_LINE.
+IF L_LINE = 0.
+MESSAGE S612 WITH TEXT-M11.
+STOP.
+ENDIF.
+
+ENDFORM.                    " SET_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA1
+*&---------------------------------------------------------------------*
+*       買掛の未消し込みデータ・相手得意先の抽出
+*----------------------------------------------------------------------*
+FORM GET_DATA1.
+
+DATA: L_LINE TYPE I,
+L_DMBTR LIKE BSIK-DMBTR,
+L_DMBTRSUM(20) TYPE C.
+* 買掛の未消し込みデータの抽出
+PERFORM GET_BSIK.
+* データが取得できない場合
+CLEAR:L_LINE.
+DESCRIBE TABLE GT_BSIK LINES L_LINE.
+IF L_LINE = 0.
+MESSAGE S612 WITH TEXT-M07.
+STOP.
+ENDIF.
+* 未消し込み仕入先の相手得意先の取得
+PERFORM GET_ZF2010.
+* 未消し込みデータ編集
+CLEAR:GW_ZF2010.
+LOOP AT GT_ZF2010 INTO GW_ZF2010.
+CLEAR:GW_BSIK,GW_DATA,L_DMBTR.
+LOOP AT GT_BSIK INTO GW_BSIK WHERE LIFNR = GW_ZF2010-LIFNR.
+IF GW_BSIK-SHKZG = 'S'.
+L_DMBTR = L_DMBTR + GW_BSIK-DMBTR * -1.
+ELSE.
+L_DMBTR = L_DMBTR + GW_BSIK-DMBTR.
+ENDIF.
+GW_DATA-LIFNR = GW_BSIK-LIFNR.
+GW_DATA-WAERS = GW_BSIK-WAERS.
+ENDLOOP.
+**20080218 DMC ADD START
+CLEAR: G_STRING.
+WRITE L_DMBTR    TO G_STRING CURRENCY GW_DATA-WAERS
+LEFT-JUSTIFIED NO-GROUPING.
+L_DMBTRSUM = G_STRING.
+**20080218 DMC ADD END
+*   支払金額が'0'場合、対象外とする
+**20080218 DMC MOD START
+*    IF L_DMBTR = 0.
+IF L_DMBTRSUM = 0.
+**20080218 DMC MOD END
+CONTINUE.
+ENDIF.
+**20080218 DMC MOD START
+*    GW_DATA-DMBTR = L_DMBTR.
+*   マイナス符号頭付
+PERFORM PUT_SIGN_IN_FRONT CHANGING L_DMBTRSUM.
+GW_DATA-DMBTR = L_DMBTRSUM.
+**20080218 DMC MOD END
+GW_DATA-KUNNR = GW_ZF2010-KUNNR.
+GW_DATA-COMNT = GW_ZF2010-COMNT.
+APPEND GW_DATA TO GT_DATA.
+ENDLOOP.
+*【仕入先】【得意先】ソート順とする
+SORT GT_DATA BY LIFNR KUNNR.
+
+ENDFORM.                    " GET_DATA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSIK
+*&---------------------------------------------------------------------*
+*       買掛の未消し込みデータの抽出
+*----------------------------------------------------------------------*
+FORM GET_BSIK.
+
+REFRESH:GT_BSIK.
+SELECT LIFNR          "仕入先
+SHKZG          "借方/貸方フラグ
+WAERS          "通貨コード
+SUM( DMBTR )   "国内通貨額
+FROM BSIK
+INTO TABLE GT_BSIK
+WHERE HKONT IN S_SAKNR
+AND ZFBDT IN S_ZFBDT1
+AND WAERS = 'JPY'
+GROUP BY LIFNR SHKZG WAERS
+HAVING LIFNR IN
+(
+SELECT LIFNR
+FROM ZF2010
+WHERE LIFNR IN S_LIFNR
+).
+
+ENDFORM.                    " GET_BSIK
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZF2010
+*&---------------------------------------------------------------------*
+*       未消し込み仕入先の相手得意先の取得
+*----------------------------------------------------------------------*
+FORM GET_ZF2010.
+
+REFRESH:GT_ZF2010.
+SELECT *
+FROM ZF2010
+INTO TABLE GT_ZF2010
+FOR ALL ENTRIES IN GT_BSIK
+WHERE LIFNR = GT_BSIK-LIFNR
+AND KUNNR IN S_KUNNR.
+
+ENDFORM.                    " GET_ZF2010
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA2
+*&---------------------------------------------------------------------*
+*       相手得意先の入金予定データ・売掛管理データの抽出
+*----------------------------------------------------------------------*
+FORM GET_DATA2.
+
+* 入金予定データの取得
+PERFORM GET_YK310.
+*【入金予定日】(昇順)⇒【入金予定額】(降順)のソート順
+SORT GT_YK310 BY INCDAT ASCENDING INCAMT DESCENDING .
+* 得意先名称の取得
+PERFORM GET_KNA1.
+* 部門名称の取得
+PERFORM GET_KNVV.
+CLEAR:GW_KNVV.
+REFRESH:GT_T052,
+**20080220 DMC ADD START
+GT_TVKBT.
+**20080220 DMC ADD END
+LOOP AT GT_KNVV INTO GW_KNVV.
+**20080220 DMC ADD START
+IF NOT GW_KNVV-VKBUR IS INITIAL.
+*     部門名称の取得
+PERFORM GET_TVKBT USING GW_KNVV-VKBUR.
+ENDIF.
+**20080220 DMC ADD END
+IF NOT GW_KNVV-ZTERM IS INITIAL.
+*     支払条件情報の取得
+PERFORM GET_T052 USING GW_KNVV-ZTERM.
+ENDIF.
+ENDLOOP.
+* 売掛管理データの取得
+PERFORM GET_YK330.
+
+ENDFORM.                    " GET_DATA2
+*&---------------------------------------------------------------------*
+*&      Form  GET_YK310
+*&---------------------------------------------------------------------*
+*       入金予定データの取得
+*----------------------------------------------------------------------*
+FORM GET_YK310.
+
+REFRESH:GT_YK310.
+SELECT KUNNR            "得意先
+INCDAT           "入金予定日
+INCAMT           "入金予定額
+WAERS            "通貨コード
+ZFBDT            "締日
+FROM YK310
+INTO TABLE GT_YK310
+FOR ALL ENTRIES IN GT_DATA
+WHERE KUNNR = GT_DATA-KUNNR
+AND INCDAT IN S_INCDAT
+AND WAERS = 'JPY'.
+**20080218 DMC DEL START
+*     AND INCAMT <> 0.
+**20080218 DMC DEL END
+
+ENDFORM.                    " GET_YK310
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNA1
+*&---------------------------------------------------------------------*
+*       得意先名称の取得
+*----------------------------------------------------------------------*
+FORM GET_KNA1.
+
+REFRESH:GT_KNA1.
+SELECT KUNNR      "得意先
+NAME1      "得意先名称
+FROM KNA1
+INTO TABLE GT_KNA1
+FOR ALL ENTRIES IN GT_DATA
+WHERE KUNNR = GT_DATA-KUNNR.
+
+ENDFORM.                    " GET_KNA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNVV
+*&---------------------------------------------------------------------*
+*       部門名称の取得
+*----------------------------------------------------------------------*
+FORM GET_KNVV.
+
+REFRESH:GT_KNVV.
+SELECT KUNNR        "得意先
+ZTERM        "支払条件キー
+VKBUR        "営業所
+FROM KNVV
+INTO TABLE GT_KNVV
+FOR ALL ENTRIES IN GT_DATA
+WHERE KUNNR = GT_DATA-KUNNR
+AND VKORG = '1000'
+AND VTWEG = '10'
+AND SPART = '10'.
+
+ENDFORM.                    " GET_KNVV
+*&---------------------------------------------------------------------*
+*&      Form  GET_T052
+*&---------------------------------------------------------------------*
+*       支払条件情報の取得
+*----------------------------------------------------------------------*
+FORM GET_T052 USING P_ZTERM.
+
+SELECT ZTERM        "支払条件キー
+ZFAEL        "支払基準日のカレンダ日
+ZSTG1        "特別条件の期日
+FROM T052 UP TO 1 ROWS
+APPENDING TABLE GT_T052
+WHERE ZTERM = P_ZTERM.
+
+ENDFORM.                    " GET_T052
+*&---------------------------------------------------------------------*
+*&      Form  GET_YK330
+*&---------------------------------------------------------------------*
+*       売掛管理データの取得
+*----------------------------------------------------------------------*
+FORM GET_YK330.
+
+CLEAR:GW_DATA.
+REFRESH:GT_YK330.
+LOOP AT GT_DATA INTO GW_DATA.
+SELECT KUNNR             "得意先
+WAERS             "通貨コード
+SUM( URIKAKEZAN ) "売掛残
+SUM( TOUMIKEN )   "今回未検収額
+SUM( NYUKINYOTEI )"入金予定額	
+SUM( SAI )        "残高差異
+FROM YK330
+APPENDING TABLE GT_YK330
+WHERE KUNNR = GW_DATA-KUNNR
+AND ZFBDT IN S_ZFBDT2
+AND WAERS = 'JPY'
+GROUP BY KUNNR WAERS.
+ENDLOOP.
+
+ENDFORM.                    " GET_YK330
+*&---------------------------------------------------------------------*
+*&      Form  DLOAD_DATA
+*&---------------------------------------------------------------------*
+*       ダウンロード処理
+*----------------------------------------------------------------------*
+FORM DLOAD_DATA.
+
+* 出力ファイルのタイトルをセットする
+PERFORM FRM_SET_TITLE.
+* 出力レコードの作成
+PERFORM FRM_APPENT_FILE TABLES GT_OTDATA
+GT_FILE
+USING C_CSV
+GW_OTDATA
+GW_FILE.
+* ファイル出力
+PERFORM FRM_OUT_FILE.
+
+ENDFORM.                    " DLOAD_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_TITLE
+*&---------------------------------------------------------------------*
+*       出力ファイルのタイトルをセットする
+*----------------------------------------------------------------------*
+FORM FRM_SET_TITLE.
+DATA: L_TITLE TYPE STRING.
+
+CLEAR: GT_FILE[].
+
+CONCATENATE
+'計上日'
+'仕入先コード'
+'支払金額'
+'得意先コード'
+'部門名称'
+'入金予定額'
+'入金予定日'
+**20080218 DMC ADD START
+'締日'
+**20080218 DMC ADD END
+'得意先名称'
+'コメント入力欄'
+'得意先締日'
+'得意先支払日'
+'支払条件（B919等）'
+'入金予定額（合計）'
+'得意先入金予定額'
+'残高差異'
+'売掛残'
+'当月未検収'
+'残余優先フラグ'
+'登録済伝票番号'
+'登録済会計年度'
+'処理ステータス'
+INTO L_TITLE SEPARATED BY C_CSV.
+
+APPEND L_TITLE TO GT_FILE.
+
+ENDFORM.                    " FRM_SET_TITLE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_APPENT_FILE
+*&---------------------------------------------------------------------*
+*       データ取得
+*----------------------------------------------------------------------*
+*      <--P_T_DATA     データ内部テーブル
+*      -->P_T_FILE     FILE 内部テーブル
+*      -->P_SEPARATOR  区切記号
+*      -->P_W_DATA     データ内部テーブルのヘッド
+*      -->P_W_FILE     FILE 内部テーブルのヘッド
+*----------------------------------------------------------------------*
+FORM FRM_APPENT_FILE  TABLES   P_T_DATA
+P_T_FILE
+USING    P_SEPARATOR
+P_W_DATA
+P_W_FILE.
+
+DATA: L_INDEX   TYPE SY-INDEX,
+L_INDEXC  TYPE SY-INDEX,
+L_TMP     TYPE STRING.
+
+FIELD-SYMBOLS: <FS_FIELD>     TYPE ANY,
+<FS_FIELD_COM> TYPE ANY.
+
+CLEAR:G_DCNT.
+LOOP AT P_T_DATA INTO P_W_DATA.
+
+CLEAR: P_W_FILE,
+L_INDEX,
+L_INDEXC.
+DO.
+L_INDEX = L_INDEX + 1.
+ASSIGN COMPONENT L_INDEX OF STRUCTURE P_W_DATA
+TO <FS_FIELD>.
+
+IF SY-SUBRC = 0.
+L_TMP = <FS_FIELD>.
+IF L_INDEX = 1.
+P_W_FILE = L_TMP.
+ELSE.
+CONCATENATE P_W_FILE L_TMP
+INTO P_W_FILE
+SEPARATED BY P_SEPARATOR.
+ENDIF.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+APPEND P_W_FILE TO P_T_FILE.
+G_DCNT = G_DCNT + 1.
+ENDLOOP.
+
+ENDFORM.                    " FRM_APPENT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_OUT_FILE
+*&---------------------------------------------------------------------*
+*       ファイル出力
+*----------------------------------------------------------------------*
+FORM FRM_OUT_FILE .
+* Add ES-UP 2012/08/29 -->
+data L_CODEPAGE TYPE ABAP_ENCODING.
+* Add ES-UP 2012/08/29 <--
+DATA:L_FILE TYPE STRING.
+L_FILE = P_FILE.
+* Add ES-UP 2012/08/29 -->
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+* Add ES-UP 2012/08/29 <--
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+FILENAME                      = L_FILE
+FILETYPE                      = 'ASC'
+* Add ES-UP 2012/08/29 -->
+CODEPAGE                      = L_CODEPAGE
+* Add ES-UP 2012/08/29 <--
+TABLES
+DATA_TAB                     = GT_FILE
+EXCEPTIONS
+FILE_WRITE_ERROR              = 1
+NO_BATCH                      = 2
+GUI_REFUSE_FILETRANSFER       = 3
+INVALID_TYPE                  = 4
+NO_AUTHORITY                  = 5
+UNKNOWN_ERROR                 = 6
+HEADER_NOT_ALLOWED            = 7
+SEPARATOR_NOT_ALLOWED         = 8
+FILESIZE_NOT_ALLOWED          = 9
+HEADER_TOO_LONG               = 10
+DP_ERROR_CREATE               = 11
+DP_ERROR_SEND                 = 12
+DP_ERROR_WRITE                = 13
+UNKNOWN_DP_ERROR              = 14
+ACCESS_DENIED                 = 15
+DP_OUT_OF_MEMORY              = 16
+DISK_FULL                     = 17
+DP_TIMEOUT                    = 18
+FILE_NOT_FOUND                = 19
+DATAPROVIDER_EXCEPTION        = 20
+CONTROL_FLUSH_ERROR           = 21
+OTHERS                        = 22.
+* ダウンロード成功の場合
+IF SY-SUBRC = 0.
+MESSAGE S612 WITH TEXT-M08 G_DCNT TEXT-M09.
+* ダウンロード失敗の場合
+ELSE.
+MESSAGE S612 WITH TEXT-M10.
+ENDIF.
+
+ENDFORM.                    " FRM_OUT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  PUT_SIGN_IN_FRONT
+*&---------------------------------------------------------------------*
+*       マイナス符号頭付
+*----------------------------------------------------------------------*
+*      -->P_VALUE    対象文字列
+*----------------------------------------------------------------------*
+FORM PUT_SIGN_IN_FRONT CHANGING P_VALUE.
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+VALUE = P_VALUE
+EXCEPTIONS
+OTHERS               = 1.
+IF SY-SUBRC <> 0.
+MESSAGE I219 WITH 'CLOI_PUT_SIGN_IN_FRONT' SY-SUBRC.
+STOP.
+ENDIF.
+ENDFORM.                    "PUT_SIGN_IN_FRONT
+*&---------------------------------------------------------------------*
+*&      Form  GET_TVKBT
+*&---------------------------------------------------------------------*
+*       部門名称の取得
+*----------------------------------------------------------------------*
+*      -->P_VKBUR  営業所
+*----------------------------------------------------------------------*
+FORM GET_TVKBT USING    P_VKBUR.
+
+SELECT VKBUR        "営業所
+BEZEI        "テキスト
+FROM TVKBT
+APPENDING TABLE GT_TVKBT
+WHERE VKBUR = P_VKBUR
+AND SPRAS = 'JA'.
+
+ENDFORM.                    " GET_TVKBT

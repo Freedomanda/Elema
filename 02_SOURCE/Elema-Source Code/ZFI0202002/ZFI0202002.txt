@@ -1,0 +1,962 @@
+*& ISID Co.,Ltd. 2010 All rights.reserved.
+*----------------------------------------------------------------------*
+*  プログラムＩＤ：  ZFI0202002
+*  プログラム名称：  銀行マスタアップロード
+*                    選択画面で指定されたファイルからデータを読み込み、
+*           　　　   銀行コードの登録/変更を行う
+*  作    成    者：  ISID　井草
+*  作    成    日：  2010/01/22
+*----------------------------------------------------------------------*
+*  変　更　番　号：  変更管理№1
+*  変　　更　　者：  ISID　井草
+*  変　　更　　日：  2010/01/22
+*  変　更　内　容：　流用元PGM … ZRLFIR9050(Fusion)
+*----------------------------------------------------------------------*
+*  変　更　番　号：  変更管理№2
+*  変　　更　　者：  IMGジャパン　末永
+*  変　　更　　日：  2010/03/30
+*  変　更　内　容：　入力ファイルヘッダ行判断ロジック変更
+*----------------------------------------------------------------------*
+*  変　更　番　号：  変更管理№3
+*  変　　更　　者：  IMGジャパン　末永
+*  変　　更　　日：  2010/04/05
+*  変　更　内　容：　バッチインプット項目追加
+*----------------------------------------------------------------------*
+*  変　更　番　号：  変更管理№4  (#004)
+*  変　　更　　者：  SISCO 朝生（ISID114）
+*  変　　更　　日：  2011/02/03
+*  変　更　内　容：　多言語対応
+*&---------------------------------------------------------------------*
+*  変　更　番　号：  変更管理№5
+*  変　　更　　者：  ISID 陳（ISID11）
+*  変　　更　　日：  2015/01/13
+*  変　更　内　容：　移行ツールアップロード時にBOMロジック改修
+*&---------------------------------------------------------------------*
+REPORT ZFI0202002 NO STANDARD PAGE HEADING
+LINE-SIZE  65
+LINE-COUNT 80
+MESSAGE-ID 00.
+
+*&---------------------------------------------------------------------*
+*&  テーブル定義
+*&---------------------------------------------------------------------*
+DATA:
+BNKA        TYPE BNKA.     " 銀行マスタ
+
+*&---------------------------------------------------------------------*
+*&  内部テーブル定義
+*&---------------------------------------------------------------------*
+*-構造(TYPES)
+TYPES:
+BEGIN OF GTT_BDCDATA,                " バッチインプット用
+PROGRAM   TYPE BDCDATA-PROGRAM,    " BDC モジュールプール
+DYNPRO    TYPE BDCDATA-DYNPRO,     " BDC Dynpro 番号
+DYNBEGIN  TYPE BDCDATA-DYNBEGIN,   " BDC Dynpro 開始
+FNAM      TYPE BDCDATA-FNAM,       " 項目名
+FVAL      TYPE BDCDATA-FVAL,       " BDC 項目値
+END OF GTT_BDCDATA,
+BEGIN OF GTT_REC,                    " タブ区切りファイルからのデータを格納
+FLAG(01)  TYPE C,                  " 制御コード          "2010/03/30 INSERT
+BANKS     TYPE BNKA-BANKS,         " 銀行国コード
+BANKL     TYPE BNKA-BANKL,         " 銀行コード
+BANKA     TYPE BNKA-BANKA,         " 銀行名
+BRNCH     TYPE BNKA-BRNCH,         " 支店名
+*--------------------------------------------- 2010/04/05 INSERT START
+PROVZ     TYPE BNKA-PROVZ,         " 地域 (都道府県)
+STRAS     TYPE BNKA-STRAS,         " 地名/番地-号
+ORT01     TYPE BNKA-ORT01,         " 市区町村
+SWIFT     TYPE BNKA-SWIFT,         " 国際決済方法 SWIFT コード
+BGRUP     TYPE BNKA-BGRUP,         " 銀行グループ (銀行ネットワーク)
+XPGRO     TYPE BNKA-XPGRO,         " 郵便貯金勘定
+*--------------------------------------------- 2010/04/05 INSERT END
+END OF GTT_REC.
+
+DATA:
+*-内部テーブル
+* バッチインプット用内部テーブル
+GDT_BDC    TYPE STANDARD TABLE OF GTT_BDCDATA,
+* タブ区切りファイルからのデータを格納する内部テーブル
+GDT_REC    TYPE STANDARD TABLE OF GTT_REC,
+*-ヘッダ行
+GDS_BDC       LIKE LINE OF GDT_BDC,
+GDS_REC       LIKE LINE OF GDT_REC.
+
+*&---------------------------------------------------------------------*
+*&  項目定義
+*&---------------------------------------------------------------------*
+DATA:
+*-変数
+WA_TCODE         TYPE SY-TCODE,                " トランザクションコード
+WA_SPLIT         TYPE C,                       " 区切りコード
+*-フラグ
+FLG_ERR(01)      TYPE C,                       " エラーフラグ
+*-カウンタ
+CNT_INDEX        TYPE I.                       " 処理件数
+*--------------------------------------------- 2010/03/30 DELETE START
+*  CNT_LINE         TYPE I VALUE '2'.             " ヘッダスキップ用
+*--------------------------------------------- 2010/03/30 DELETE END
+*-構造
+*-定数
+CONSTANTS:
+*--------------------------------------------- 2010/03/30 INSERT START
+GCF_CTRU(01)     TYPE C VALUE 'U',             " 制御コード(Ｕ=変更)
+GCF_CTRN(01)     TYPE C VALUE 'N',             " 制御コード(Ｎ=登録)
+*--------------------------------------------- 2010/03/30 INSERT END
+GCF_FE(02)       TYPE C VALUE 'FE',            " ファイル存在チェック
+GCF_1(01)        TYPE C VALUE '1',             " リターンコード
+GCF_CHK(01)      TYPE C VALUE 'X',             " チェック
+GCF_SPC(01)      TYPE C VALUE ' ',             " スペース
+GCF_PATH(03)     TYPE C VALUE 'C:\',           " 初期パス
+GCF_MASK(09)     TYPE C VALUE ',*.*,*.*.',     " マスク
+GCF_MODE(01)     TYPE C VALUE 'O',             " モード(Ｏ=開く)
+GCF_TYPE(10)     TYPE C VALUE 'ASC',           " タブ区切りFILE
+GCF_FI01(04)     TYPE C VALUE 'FI01',          " 銀行コード登録
+GCF_FI02(04)     TYPE C VALUE 'FI02',          " 銀行コード変更
+GCF_PGM(08)      TYPE C VALUE 'SAPMF02B',      " プログラムID
+GCF_0100(04)     TYPE C VALUE '0100',          " 画面番号(第一画面)
+GCF_0110(04)     TYPE C VALUE '0110',          " 画面番号(詳細画面)
+GCF_ENTR(04)     TYPE C VALUE '/00',           " OKコード(ENTER)
+GCF_UPDA(04)     TYPE C VALUE 'UPDA'.          " OKコード(保存)
+* #004 DEL 20110203 ISID144 START
+*  GCF_LA_J(01)     TYPE C VALUE 'J',             " 言語キー(日本語)
+*  GCF_LA_1(01)     TYPE C VALUE '1',             " 言語キー(中国語)
+*  GCF_LA_E(01)     TYPE C VALUE 'E',             " 言語キー(英語)
+*  GCF_TITLE_1      TYPE SYTITLE                  " タイトル(中国語)
+*                          VALUE '#行主数据上#',
+*  GCF_TITLE_E      TYPE SYTITLE                  " タイトル(英語)
+*                          VALUE 'Upload the Bank master records',
+*
+*  GCF_JTXT(36)     TYPE C VALUE 'ファイルの保存場所を選択してください',
+*  GCF_CTXT(20)     TYPE C VALUE '###文件所在的位置',
+*  GCF_ETXT(28)     TYPE C VALUE 'Select the location for file',
+*
+*  GCF_TXT1J(10)    TYPE C VALUE 'ファイル名',    " 選択テキスト
+*  GCF_TXT1C(10)    TYPE C VALUE '文件名',        " 選択テキスト
+*  GCF_TXT1E(10)    TYPE C VALUE 'File Name',     " 選択テキスト
+*  GCF_TXT2J(06)    TYPE C VALUE 'サーバ',        " 選択テキスト
+*  GCF_TXT2C(06)    TYPE C VALUE '服#器',        " 選択テキスト
+*  GCF_TXT2E(06)    TYPE C VALUE 'Server',        " 選択テキスト
+*  GCF_TXT3J(08)    TYPE C VALUE 'ローカル',      " 選択テキスト
+*  GCF_TXT3C(08)    TYPE C VALUE '本地',          " 選択テキスト
+*  GCF_TXT3E(08)    TYPE C VALUE 'Local',         " 選択テキスト
+*
+*  GCF_TXT4J(24)    TYPE C VALUE 'ファイルが存在しません。',
+*  GCF_TXT4C(10)    TYPE C VALUE '文件不存在',
+*  GCF_TXT4E(20)    TYPE C VALUE 'File does not exist.',
+*  GCF_TXT5J(28)    TYPE C VALUE 'FILE OPEN 異常終了    例外：',
+*  GCF_TXT5C(28)    TYPE C VALUE 'FILE OPEN #生##    代#：',
+*  GCF_TXT5E(45)    TYPE C
+*                  VALUE 'Error during file open processing. Exception:',
+*  GCF_TXT6J(40)    TYPE C
+*                  VALUE 'タブ区切りファイルにデータが存在しません',
+*  GCF_TXT6C(25)    TYPE C VALUE 'TAB#隔文本文件中没有数据',
+*  GCF_TXT6E(18)    TYPE C VALUE 'TAB file is empty.',
+*  GCF_TXT7J(25)    TYPE C VALUE 'UPLOAD 異常終了    例外：',
+*  GCF_TXT7C(25)    TYPE C VALUE 'UPLOAD #生##    代#：',
+*  GCF_TXT7E(42)    TYPE C
+*                  VALUE 'Error during upload processing. Exception:',
+*  GCF_TXT8J(25)    TYPE C VALUE 'BDC_OPEN 異常終了　例外：',
+*  GCF_TXT8C(25)    TYPE C VALUE '函数 BDC_OPEN ##  代#：',
+*  GCF_TXT8E(44)    TYPE C
+*                  VALUE 'Error during BDC_OPEN processing. Exception:',
+*  GCF_TXT9J(27)    TYPE C VALUE 'BDC_INSERT 異常終了　例外：',
+*  GCF_TXT9C(27)    TYPE C VALUE '函数 BDC_INSERT ##　代#：',
+*  GCF_TXT9E(46)    TYPE C
+*                  VALUE 'Error during BDC_INSERT processing. Exception:',
+*  GCF_TXT10J(26)   TYPE C VALUE 'BDC_CLOSE 異常終了　例外：',
+*  GCF_TXT10C(26)   TYPE C VALUE '函数 BDC_CLOSE ##　代#：',
+*  GCF_TXT10E(45)   TYPE C
+*                  VALUE 'Error during BDC_CLOSE processing. Exception:',
+*  GCF_TXT11J(32)   TYPE C VALUE 'セッションログを確認してください',
+*  GCF_TXT11C(24)   TYPE C VALUE '###批#入会##理##',
+*  GCF_TXT11E(26)   TYPE C VALUE 'Check the logs of session.'.
+* #004 MOD 20110203 ISID144 END
+*----------------------------------------------------------------------*
+*&  入力パラメータ
+*&---------------------------------------------------------------------*
+* ファイル名
+SELECTION-SCREEN BEGIN OF LINE.
+* #004 MOD 20110203 ISID144 START
+*SELECTION-SCREEN COMMENT 1(20) NAME_F FOR FIELD P_FILENM.
+SELECTION-SCREEN COMMENT 1(20) TEXT-002 FOR FIELD P_FILENM.
+* #004 MOD 20110203 ISID144 END
+PARAMETERS:
+P_FILENM TYPE RLGRAP-FILENAME OBLIGATORY.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN SKIP 1.
+* ファイルの保存場所を選択
+* #004 MOD 20110203 ISID144 START
+*SELECTION-SCREEN BEGIN OF BLOCK SAVE WITH FRAME TITLE TEXT_1.
+SELECTION-SCREEN BEGIN OF BLOCK SAVE WITH FRAME TITLE TEXT-001.
+* #004 MOD 20110203 ISID144 END
+* サーバ
+SELECTION-SCREEN BEGIN OF LINE.
+* #004 MOD 20110203 ISID144 START
+*SELECTION-SCREEN COMMENT 1(10) NAME_S FOR FIELD P_SERVER.
+SELECTION-SCREEN COMMENT 1(10) TEXT-003 FOR FIELD P_SERVER.
+* #004 MOD 20110203 ISID144 END
+SELECTION-SCREEN POSITION 20.
+PARAMETERS:
+P_SERVER RADIOBUTTON GROUP SAVE.
+SELECTION-SCREEN END OF LINE.
+* ローカル
+SELECTION-SCREEN BEGIN OF LINE.
+* #004 MOD 20110203 ISID144 START
+*SELECTION-SCREEN COMMENT 1(10) NAME_L FOR FIELD P_LOCAL.
+SELECTION-SCREEN COMMENT 1(10) TEXT-004 FOR FIELD P_LOCAL.
+* #004 MOD 20110203 ISID144 END
+SELECTION-SCREEN POSITION 20.
+PARAMETERS:
+P_LOCAL RADIOBUTTON GROUP SAVE DEFAULT 'X'.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN END OF BLOCK SAVE.
+
+*&---------------------------------------------------------------------*
+*&  初期処理
+*&---------------------------------------------------------------------*
+INITIALIZATION.
+* #004 DEL 20110203 ISID144 START
+** プログラム表題の設定
+*  PERFORM FRM_SET_TITLE.
+*
+** 選択テキストの設定
+*  CASE SY-LANGU.
+*    WHEN GCF_LA_J.                     " 日本語
+*      TEXT_1 = GCF_JTXT.               "'ファイルの保存場所を選択してください'
+*      NAME_F = GCF_TXT1J.              "'ファイル名'
+*      NAME_S = GCF_TXT2J.              "'サーバ'
+*      NAME_L = GCF_TXT3J.              "'ローカル'
+*    WHEN GCF_LA_1.                     " 中国語
+*      TEXT_1 = GCF_CTXT.               "'###文件所在的位置'
+*      NAME_F = GCF_TXT1C.              "'文件名'
+*      NAME_S = GCF_TXT2C.              "'服#器'
+*      NAME_L = GCF_TXT3C.              "'本地'
+*    WHEN GCF_LA_E.                     " 英語
+*      TEXT_1 = GCF_ETXT.               "'Select the location for file'
+*      NAME_F = GCF_TXT1E.              "'File Name'
+*      NAME_S = GCF_TXT2E.              "'Server'
+*      NAME_L = GCF_TXT3E.              "'Local'
+*  ENDCASE.
+* #004 DEL 20110203 ISID144 END
+*&---------------------------------------------------------------------*
+*&  入力チェック処理
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILENM.  " ファイル名の取得
+PERFORM FRM_FILENAME_GET CHANGING P_FILENM.
+
+AT SELECTION-SCREEN.       " ファイルの存在をチェック
+PERFORM FRM_PATGDS_CHK USING P_FILENM.
+
+*&---------------------------------------------------------------------*
+*&  メイン処理
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+PERFORM:
+FRM_INIT_ALL,                      " 作業領域初期化
+FRM_UPLOAD_DATA,                   " ファイルアップロード
+* #004 ADD 20110203 ISID144 START
+FRM_CHECK_DATA,                    " 件数チェック
+* #004 ADD 20110203 ISID144 END
+FRM_BDC_OPEN.                      " BDCセッションを開く
+*--------------------------------------------- 2010/03/30 UPDATE START
+*  LOOP AT GDT_REC INTO GDS_REC FROM CNT_LINE.
+LOOP AT GDT_REC INTO GDS_REC
+WHERE FLAG = GCF_CTRN   " N
+OR FLAG = GCF_CTRU . " U
+*--------------------------------------------- 2010/03/30 UPDATE END
+CLEAR:GDT_BDC,FLG_ERR,WA_TCODE.
+PERFORM:
+FRM_SET_BDCDATA,                 " BDCデータのセット
+FRM_BDC_INSERT.                  " データをBDCセッションに挿入
+ENDLOOP.
+PERFORM:
+FRM_BDC_CLOSE,                     " セッションを閉じる
+FRM_CALL_RSBDCSUB.                 " セッションの自動処理
+
+*&---------------------------------------------------------------------*
+*&  終了処理
+*&---------------------------------------------------------------------*
+END-OF-SELECTION.
+* #004 MOD 20110203 ISID144 START
+** プログラム表題の設定
+*  PERFORM FRM_SET_TITLE.
+***--処理件数出力
+*  CASE SY-LANGU.
+*    WHEN GCF_LA_J.        " 日本語
+*      WRITE:
+*        / '***************** < 銀行マスタ取り込み > *****************',
+*        / '*  処理件数                     ＝ ' ,  CNT_INDEX,
+*        / '**********************************************************'.
+*
+*    WHEN GCF_LA_1.        " 中国語
+*      WRITE:
+*        / '******************* < #行主数据#取 > *******************',
+*        / '*  #理件数                     ＝ ' ,  CNT_INDEX,
+*        / '**********************************************************'.
+*
+*    WHEN GCF_LA_E.        " 英語
+*      WRITE:
+*        / '*************** < Take the Bank in master > **************',
+*        / '*  The number of processes      ＝ ' ,  CNT_INDEX,
+*        / '**********************************************************'.
+*  ENDCASE.
+* プログラム処理件数表示
+PERFORM FRM_WRITE_RESULT.
+* #004 MOD 20110203 ISID144 START
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PATGDS_CHK
+*&---------------------------------------------------------------------*
+*       ファイルの存在をチェック
+*----------------------------------------------------------------------*
+*      -->P_IPATH   入力ファイル名
+*----------------------------------------------------------------------*
+FORM FRM_PATGDS_CHK USING    P_IPATH.
+CHECK P_LOCAL = GCF_CHK.        " ローカルファイルのときのみ実行する
+DATA:LDF_FILE       TYPE STRING,         " ファイル名
+LDF_RESULT     TYPE C.              " 結果
+*       LDF_MSGV1(50)  TYPE C.              " メッセージ変数１  "#004 DEL
+
+LDF_FILE = P_IPATH.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_EXIST
+EXPORTING
+FILE                 = LDF_FILE
+RECEIVING
+RESULT               = LDF_RESULT
+EXCEPTIONS
+CNTL_ERROR           = 1
+ERROR_NO_GUI         = 2
+WRONG_PARAMETER      = 3
+NOT_SUPPORTED_BY_GUI = 4
+OTHERS               = 5.
+CASE SY-SUBRC.
+WHEN 0.
+* ファイルが存在する＝X／存在しない＝スペース
+IF LDF_RESULT = GCF_SPC.
+* #004 MOD 20110203 ISID144 START
+**       メッセージ変数のセット
+*        CASE SY-LANGU.
+*          WHEN GCF_LA_J.                "日本語
+*            LDF_MSGV1 = GCF_TXT4J.      "'ファイルが存在しません。'
+*          WHEN GCF_LA_1.                "中国語
+*            LDF_MSGV1 = GCF_TXT4J.      "'文件不存在'
+*          WHEN GCF_LA_E.                "英語
+*            LDF_MSGV1 = GCF_TXT4J.      "'File does not exist.'
+*        ENDCASE.
+*          MESSAGE E398 WITH LDF_MSGV1 SPACE SPACE SPACE.
+MESSAGE E014(ZFI001).
+* #004 MOD 20110203 ISID144 END
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+ENDFORM.                    " FRM_PATGDS_CHK
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILENAME_GET
+*&---------------------------------------------------------------------*
+*       ファイル名の取得
+*----------------------------------------------------------------------*
+*      <--P_IOPATH  ファイル名
+*----------------------------------------------------------------------*
+FORM FRM_FILENAME_GET  CHANGING P_IOPATH.
+
+DATA:LDF_FILE  TYPE FILETABLE,       " ファイル名一覧格納
+LDF_HFILE LIKE LINE OF LDF_FILE," ヘッダ
+LDF_RC    TYPE I,               " 結果
+LDF_TITLE TYPE STRING.          " WINDOW TITLE
+
+* #004 MOD 20110203 ISID144 START
+** WINDOW_TITLEの設定
+*  CASE SY-LANGU.
+*    WHEN GCF_LA_J.                     " 日本語
+*      LDF_TITLE = GCF_TXT1J.           "'ファイル名'
+*    WHEN GCF_LA_1.                     " 中国語
+*      LDF_TITLE = GCF_TXT1C.           "'文件名'
+*    WHEN GCF_LA_E.                     " 英語
+*      LDF_TITLE = GCF_TXT1E.           "'File Name'
+*  ENDCASE.
+LDF_TITLE = TEXT-002.
+* #004 MOD 20110203 ISID144 START
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+EXPORTING
+WINDOW_TITLE            = LDF_TITLE
+CHANGING
+FILE_TABLE              = LDF_FILE
+RC                      = LDF_RC
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 5.
+CASE SY-SUBRC.
+WHEN 0.
+IF LDF_RC < 0.
+ELSE.
+READ TABLE LDF_FILE INTO LDF_HFILE INDEX 1.
+P_IOPATH = LDF_HFILE-FILENAME.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " FRM_FILENAME_GET
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_INIT_ALL
+*&---------------------------------------------------------------------*
+*       作業領域初期化
+*----------------------------------------------------------------------*
+FORM FRM_INIT_ALL .
+CLEAR:
+GDT_BDC,GDS_BDC,
+GDT_REC,GDS_REC,
+WA_TCODE,FLG_ERR,CNT_INDEX.
+ENDFORM.                    " FRM_INIT_ALL
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPLOAD_DATA
+*&---------------------------------------------------------------------*
+*       ファイルのアップロード
+*----------------------------------------------------------------------*
+FORM FRM_UPLOAD_DATA.
+* ファイルの保存場所によってアップロード方法を変える
+IF P_SERVER = GCF_CHK.
+PERFORM:
+FRM_UPLOAD_SERVER_DATA.          " サーバからデータをUL
+ELSEIF P_LOCAL = GCF_CHK.
+PERFORM:
+FRM_UPLOAD_LOCAL_DATA.           " ローカルからデータをUL
+ENDIF.
+ENDFORM.                    " FRM_UPLOAD_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPLOAD_SERVER_DATA
+*&---------------------------------------------------------------------*
+*       入力ファイルデータをアップロードする(サーバ)
+*----------------------------------------------------------------------*
+FORM FRM_UPLOAD_SERVER_DATA .
+DATA:LDF_CNT  TYPE I,                  " データ件数
+**** START ADD 2015/01/13 ISID11 ****
+LDF_ENCODING  TYPE SYCHAR01,      " Encoding (Class Constant)
+**** END ADD 2015/01/13 ISID11 ****
+LDF_DATA(120) TYPE C.
+*       LDF_MSGV1(50) TYPE C.             " メッセージ変数  "#004 DEL
+
+* 区切りコードにTABを設定
+WA_SPLIT = CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+
+**** START ADD 2015/01/13 ISID11 ****
+* UTF-8ファイルの判断
+TRY.
+CALL METHOD CL_ABAP_FILE_UTILITIES=>CHECK_UTF8
+EXPORTING
+FILE_NAME         = P_FILENM
+IMPORTING
+ENCODING          = LDF_ENCODING.
+CATCH CX_SY_FILE_OPEN .
+
+MESSAGE S052(ZFI001)
+WITH SY-SUBRC
+DISPLAY LIKE 'E'.
+*     FILE OPEN 異常終了　例外：&1
+
+CATCH CX_SY_FILE_AUTHORITY .
+CATCH CX_SY_FILE_IO .
+ENDTRY.
+**** END ADD 2015/01/13 ISID11 ****
+
+* ファイルオープン(UNIX FILE)
+**** START ADD 2015/01/13 ISID11 ****
+IF LDF_ENCODING = CL_ABAP_FILE_UTILITIES=>ENCODING_UTF8.
+
+OPEN DATASET P_FILENM  FOR INPUT
+IN TEXT MODE
+ENCODING UTF-8
+SKIPPING BYTE-ORDER MARK.
+
+ELSE.
+**** END ADD 2015/01/13 ISID11 ****
+OPEN DATASET P_FILENM FOR INPUT IN TEXT MODE ENCODING DEFAULT.  " ENT
+**** START ADD 2015/01/13 ISID11 ****
+ENDIF.
+**** END ADD 2015/01/13 ISID11 ****
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 8.
+* #004 MOD 20110203 ISID144 START
+**     メッセージ変数のセット
+*      CASE SY-LANGU.
+*        WHEN GCF_LA_J.                                  " 日本語
+*          LDF_MSGV1 = GCF_TXT5J.                        " 'FILE OPEN 異常終了    例外：'
+*        WHEN GCF_LA_1.                                  " 中国語
+*          LDF_MSGV1 = GCF_TXT5C.                        " 'FILE OPEN #生##    代#：'
+*        WHEN GCF_LA_E.                                  " 英語
+*          LDF_MSGV1 = GCF_TXT5E.                        " 'Error during file open processing. Exception:'
+*      ENDCASE.
+*      MESSAGE E398 WITH LDF_MSGV1 SY-SUBRC SPACE SPACE.
+MESSAGE S052(ZFI001)
+WITH SY-SUBRC
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+* #004 MOD 20110203 ISID144 END
+ENDCASE.
+
+* 入力ファイル読込
+DO.
+CLEAR: GDS_REC,LDF_DATA.
+READ DATASET P_FILENM INTO LDF_DATA.
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+SPLIT LDF_DATA AT WA_SPLIT INTO
+GDS_REC-FLAG                                  " "2010/03/30 INSERT
+GDS_REC-BANKS
+GDS_REC-BANKL
+GDS_REC-BANKA
+GDS_REC-BRNCH
+*--------------------------------------------- 2010/04/05 INSERT START
+GDS_REC-PROVZ
+GDS_REC-STRAS
+GDS_REC-ORT01
+GDS_REC-SWIFT
+GDS_REC-BGRUP
+GDS_REC-XPGRO.
+*--------------------------------------------- 2010/04/05 INSERT END
+APPEND GDS_REC TO GDT_REC.
+ENDDO.
+* データ件数チェック
+DESCRIBE TABLE GDT_REC LINES LDF_CNT.
+IF LDF_CNT = 0  .
+* #004 MOD 20110203 ISID144 START
+**   メッセージ変数のセット
+*    CASE SY-LANGU.
+*      WHEN GCF_LA_J.                                     " 日本語
+*        LDF_MSGV1 = GCF_TXT6J.                           " 'タブ区切りファイルにデータが存在しません'
+*      WHEN GCF_LA_1.                                     " 中国語
+*        LDF_MSGV1 = GCF_TXT6C.                           " 'TAB#隔文本文件中没有数据'
+*      WHEN GCF_LA_E.                                     " 英語
+*        LDF_MSGV1 = GCF_TXT6E.                           " 'TAB file is empty.'
+*    ENDCASE.
+*    MESSAGE E398 WITH LDF_MSGV1 SPACE SPACE SPACE.
+MESSAGE S015(ZFI001) DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+* #004 MOD 20110203 ISID144 END
+ENDIF.
+
+*   ファイルクローズ(UNIX FILE)
+CLOSE DATASET P_FILENM.
+ENDFORM.                    " FRM_UPLOAD_SERVER_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPLOAD_LOCAL_DATA
+*&---------------------------------------------------------------------*
+*       入力ファイルデータをアップロードする(ローカル)
+*----------------------------------------------------------------------*
+FORM FRM_UPLOAD_LOCAL_DATA.
+DATA:LDF_LENGTH TYPE I.              " ファイル長
+DATA:LDF_FNAME TYPE STRING.          " ファイル名
+*       LDF_MSGV1(50) TYPE C.           " メッセージ変数１  "#004 DEL
+LDF_FNAME = P_FILENM.
+
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                = LDF_FNAME
+FILETYPE                = GCF_TYPE
+HAS_FIELD_SEPARATOR     = GCF_CHK
+IMPORTING
+FILELENGTH              = LDF_LENGTH
+TABLES
+DATA_TAB                = GDT_REC
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+OTHERS                  = 17.
+CASE SY-SUBRC.
+WHEN 0.
+IF LDF_LENGTH <= 0.
+* #004 MOD 20110203 ISID144 START
+**       メッセージ変数のセット
+*        CASE SY-LANGU.
+*          WHEN GCF_LA_J.                     " 日本語
+*            LDF_MSGV1 = GCF_TXT6J.           "'タブ区切りファイルにデータが存在しません'
+*          WHEN GCF_LA_1.                     " 中国語
+*            LDF_MSGV1 = GCF_TXT6C.           "'TAB#隔文本文件中没有数据'
+*          WHEN GCF_LA_E.                     " 英語
+*            LDF_MSGV1 = GCF_TXT6E.           "'TAB file is empty.'
+*        ENDCASE.
+*        MESSAGE E398 WITH LDF_MSGV1 SPACE SPACE SPACE.
+MESSAGE S015(ZFI001) DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+* #004 MOD 20110203 ISID144 END
+ENDIF.
+WHEN OTHERS.
+* #004 MOD 20110203 ISID144 START
+*     メッセージ変数のセット
+*      CASE SY-LANGU.
+*        WHEN GCF_LA_J.                       " 日本語
+*          LDF_MSGV1 = GCF_TXT7J.             " 'FILE OPEN 異常終了    例外：'
+*        WHEN GCF_LA_1.                       " 中国語
+*          LDF_MSGV1 = GCF_TXT7C.             " 'FILE OPEN #生##    代#：'
+*        WHEN GCF_LA_E.                       " 英語
+*          LDF_MSGV1 = GCF_TXT7E.             " 'Error during file open processing. Exception:'
+*      ENDCASE.
+*      MESSAGE E398 WITH LDF_MSGV1 SY-SUBRC SPACE SPACE.
+MESSAGE S052(ZFI001)
+WITH SY-SUBRC
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+* #004 MOD 20110203 ISID144 START
+ENDCASE.
+ENDFORM.                    " FRM_UPLOAD_LOCAL_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_BDCDATA
+*&---------------------------------------------------------------------*
+*       BDCデータのセット
+*----------------------------------------------------------------------*
+FORM FRM_SET_BDCDATA.
+DATA:LDF_CHAR TYPE I.        " 項目行読み飛ばし
+* 項目行の読み飛ばし
+LDF_CHAR = CHARLEN( GDS_REC-BANKL ).
+IF LDF_CHAR = 2.
+FLG_ERR = GCF_CHK.
+EXIT.
+ENDIF.
+* 処理件数のカウント
+CNT_INDEX = CNT_INDEX + 1.
+PERFORM:
+FRM_SELECT_BNKA,         " 銀行マスタ既存データの存在チェック
+FRM_BDC_SET.             " バッチインプットテーブルにデータをセット
+ENDFORM.                    " FRM_SET_BDCDATA
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_BNKA
+*&---------------------------------------------------------------------*
+*       銀行マスタ既存データの存在チェック
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_BNKA .
+SELECT SINGLE *
+INTO BNKA
+FROM BNKA
+WHERE BANKS = GDS_REC-BANKS
+AND BANKL = GDS_REC-BANKL.
+CASE SY-SUBRC.
+WHEN 0.                  " データが存在する時(変更モード)
+WA_TCODE = GCF_FI02.   " T-CD設定(変更)
+WHEN 4.                  " データが存在しない時(登録モード)
+WA_TCODE = GCF_FI01.   " T-CD設定(登録)
+WHEN OTHERS.
+ENDCASE.
+ENDFORM.                    " FRM_SELECT_BNKA
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDC_SET
+*&---------------------------------------------------------------------*
+*       バッチインプットテーブルにデータをセット
+*----------------------------------------------------------------------*
+FORM FRM_BDC_SET .
+PERFORM:
+FRM_SET_0100,                        " 第一画面
+FRM_SET_0110.                        " 詳細画面
+ENDFORM.                    " FRM_BDC_SET
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_0100
+*&---------------------------------------------------------------------*
+*       第一画面にデータセット
+*----------------------------------------------------------------------*
+FORM FRM_SET_0100 .
+PERFORM
+FRM_BDCDATA_SET USING:
+GCF_CHK GCF_PGM      GCF_0100,          " 画面設定
+GCF_SPC 'BDC_OKCODE' GCF_ENTR,          " OKコード(ENTER)
+GCF_SPC 'BNKA-BANKS' GDS_REC-BANKS,         " 国コード
+GCF_SPC 'BNKA-BANKL' GDS_REC-BANKL.       " 銀行コード
+ENDFORM.                    " FRM_SET_0100
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_0110
+*&---------------------------------------------------------------------*
+*       詳細画面にデータセット
+*----------------------------------------------------------------------*
+FORM FRM_SET_0110 .
+PERFORM
+FRM_BDCDATA_SET USING:
+GCF_CHK GCF_PGM      GCF_0110,          " 画面設定
+GCF_SPC 'BDC_OKCODE' GCF_UPDA,          " OKコード(保存)
+GCF_SPC 'BNKA-BANKA' GDS_REC-BANKA,     " 銀行名
+GCF_SPC 'BNKA-BRNCH' GDS_REC-BRNCH,     " 支店名
+*--------------------------------------------- 2010/04/05 INSERT START
+GCF_SPC 'BNKA-PROVZ' GDS_REC-PROVZ,     " 地域 (都道府県)
+GCF_SPC 'BNKA-STRAS' GDS_REC-STRAS,     " 地名/番地-号
+GCF_SPC 'BNKA-ORT01' GDS_REC-ORT01,     " 市区町村
+GCF_SPC 'BNKA-SWIFT' GDS_REC-SWIFT,     " 国際決済方法 SWIFT コード
+GCF_SPC 'BNKA-BGRUP' GDS_REC-BGRUP,     " 銀行グループ (銀行ネットワーク)
+GCF_SPC 'BNKA-XPGRO' GDS_REC-XPGRO.     " 郵便貯金勘定
+*--------------------------------------------- 2010/04/05 INSERT END
+ENDFORM.                    " FRM_SET_0110
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDCDATA_SET
+*&---------------------------------------------------------------------*
+*       BDCテーブルにデータをセット
+*----------------------------------------------------------------------*
+*      -->P_IDYNBGN  フラグ
+*      -->P_INAME    プログラム名　or　項目名
+*      -->P_IVALUE   DYNPRO番号　or　項目値
+*----------------------------------------------------------------------*
+FORM FRM_BDCDATA_SET USING    VALUE(P_IDYNBGN)
+VALUE(P_INAME)
+VALUE(P_IVALUE).
+CLEAR GDS_BDC.
+IF P_IDYNBGN = GCF_CHK.
+GDS_BDC-PROGRAM  = P_INAME.          " プログラム番号
+GDS_BDC-DYNPRO   = P_IVALUE.         " DYNPRO番号
+GDS_BDC-DYNBEGIN = GCF_CHK.          " DYNPRO開始区分
+ELSE.
+GDS_BDC-FNAM = P_INAME.              " 項目名
+GDS_BDC-FVAL = P_IVALUE.             " 項目値
+ENDIF.
+APPEND GDS_BDC TO GDT_BDC.
+ENDFORM.                    " FRM_BDCDATA_SET
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDC_OPEN
+*&---------------------------------------------------------------------*
+*       バッチインプットセッションのオープン処理
+*----------------------------------------------------------------------*
+FORM FRM_BDC_OPEN.
+
+*  DATA: LDF_MSGV1(50) TYPE C.           " メッセージ変数１  "#004 DEL
+* セッションを開く
+CALL FUNCTION 'BDC_OPEN_GROUP'
+EXPORTING
+CLIENT              = SY-MANDT  " クライアント
+GROUP               = SY-UNAME  " セッション名称
+KEEP                = GCF_CHK   " 保存
+USER                = SY-UNAME  " 実行ユーザ名
+EXCEPTIONS
+CLIENT_INVALID      = 1
+DESTINATION_INVALID = 2
+GROUP_INVALID       = 3
+GROUP_IS_LOCKED     = 4
+HOLDDATE_INVALID    = 5
+INTERNAL_ERROR      = 6
+QUEUE_ERROR         = 7
+RUNNING             = 8
+SYSTEM_LOCK_ERROR   = 9
+USER_INVALID        = 10
+OTHERS              = 11.
+CASE SY-SUBRC.
+WHEN 0.
+WHEN OTHERS.
+* #004 MOD 20110203 ISID144 START
+**     メッセージ変数のセット
+*      CASE SY-LANGU.
+*        WHEN GCF_LA_J.                     " 日本語
+*          LDF_MSGV1 = GCF_TXT8J.           "'BDC_OPEN 異常終了　例外：'
+*        WHEN GCF_LA_1.                     " 中国語
+*          LDF_MSGV1 = GCF_TXT8C.           "'函数 BDC_OPEN ##  代#：'
+*        WHEN GCF_LA_E.                     " 英語
+*          LDF_MSGV1 = GCF_TXT8E.           "'Error during BDC_OPEN processing. Exception:'
+*      ENDCASE.
+*      MESSAGE E398 WITH LDF_MSGV1 SY-SUBRC SPACE SPACE.
+MESSAGE S018(ZFI001)
+WITH SY-SUBRC
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+* #004 MOD 20110203 ISID144 END
+ENDCASE.
+ENDFORM.                    " FRM_BDC_OPEN
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDC_INSERT
+*&---------------------------------------------------------------------*
+*       バッチインプットセッションへのトランザクション用データ挿入処理
+*----------------------------------------------------------------------*
+FORM FRM_BDC_INSERT.
+
+*  DATA: LDF_MSGV1(50) TYPE C.          "メッセージ変数１  "#004 DEL
+CHECK FLG_ERR = SPACE.
+* BDCテーブルのデータをセッションにセット
+CALL FUNCTION 'BDC_INSERT'
+EXPORTING
+TCODE            = WA_TCODE     " トランザクションコード
+TABLES
+DYNPROTAB        = GDT_BDC     " BDCテーブル
+EXCEPTIONS
+INTERNAL_ERROR   = 1
+NOT_OPEN         = 2
+QUEUE_ERROR      = 3
+TCODE_INVALID    = 4
+PRINTING_INVALID = 5
+POSTING_INVALID  = 6
+OTHERS           = 7.
+CASE SY-SUBRC.
+WHEN 0.
+WHEN OTHERS.
+* #004 MOD 20110203 ISID144 START
+**     メッセージ変数のセット
+*      CASE SY-LANGU.
+*        WHEN GCF_LA_J.                     " 日本語
+*          LDF_MSGV1 = GCF_TXT9J.           "'BDC_INSERT 異常終了　例外：'
+*        WHEN GCF_LA_1.                     " 中国語
+*          LDF_MSGV1 = GCF_TXT9C.           "'函数 BDC_INSERT ##　代#：'
+*        WHEN GCF_LA_E.                     " 英語
+*          LDF_MSGV1 = GCF_TXT9E.           "'Error during BDC_INSERT processing. Exception:'
+*      ENDCASE.
+*      MESSAGE E398 WITH LDF_MSGV1 SY-SUBRC SPACE SPACE.
+MESSAGE S039(ZFI001)
+WITH SY-SUBRC
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+* #004 MOD 20110203 ISID144 END
+ENDCASE.
+ENDFORM.                    " FRM_BDC_INSERT
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_BDC_CLOSE
+*&---------------------------------------------------------------------*
+*       バッチインプットセッションのクローズ処理
+*----------------------------------------------------------------------*
+FORM FRM_BDC_CLOSE.
+
+*  DATA: LDF_MSGV1(50) TYPE C.        " メッセージ変数１  "#004 DEL
+* セッションを閉じる
+CALL FUNCTION 'BDC_CLOSE_GROUP'
+EXCEPTIONS
+NOT_OPEN    = 1
+QUEUE_ERROR = 2
+OTHERS      = 3.
+CASE SY-SUBRC.
+WHEN 0.
+WHEN OTHERS.
+* #004 MOD 20110203 ISID144 START
+**     メッセージ変数のセット
+*      CASE SY-LANGU.
+*        WHEN GCF_LA_J.                     " 日本語
+*          LDF_MSGV1 = GCF_TXT10J.          "'BDC_CLOSE 異常終了　例外：'
+*        WHEN GCF_LA_1.                     " 中国語
+*          LDF_MSGV1 = GCF_TXT10C.          "'函数 BDC_CLOSE ##　代#：'
+*        WHEN GCF_LA_E.                     " 英語
+*          LDF_MSGV1 = GCF_TXT10E.          "'Error during BDC_CLOSE processing. Exception:'
+*      ENDCASE.
+*      MESSAGE E398 WITH LDF_MSGV1 SY-SUBRC SPACE SPACE.
+MESSAGE S040(ZFI001)
+WITH SY-SUBRC
+DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+* #004 MOD 20110203 ISID144 END
+ENDCASE.
+ENDFORM.                    " FRM_BDC_CLOSE
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CALL_RSBDCSUB
+*&---------------------------------------------------------------------*
+*       セッションの自動処理
+*----------------------------------------------------------------------*
+FORM FRM_CALL_RSBDCSUB.
+
+*  DATA: LDF_MSGV1(50) TYPE C.        " メッセージ変数１  "#004 DEL
+* セッションを処理
+SUBMIT RSBDCSUB                 " バッチインプット: 全セッション処理
+WITH MAPPE    = SY-UNAME           " セッション
+WITH Z_VERARB = GCF_CHK            " 新規
+WITH FEHLER   = ' '                " エラー
+AND RETURN.
+* #004 MOD 20110203 ISID144 START
+** メッセージ変数のセット
+*  CASE SY-LANGU.
+*    WHEN GCF_LA_J.                     " 日本語
+*      LDF_MSGV1 = GCF_TXT11J.          "'セッションログを確認してください'
+*    WHEN GCF_LA_1.                     " 中国語
+*      LDF_MSGV1 = GCF_TXT11C.          "'###批#入会##理##'
+*    WHEN GCF_LA_E.                     " 英語
+*      LDF_MSGV1 = GCF_TXT11E.          "'Check the logs of session.'
+*  ENDCASE.
+*  MESSAGE I398 WITH SY-UNAME LDF_MSGV1 SPACE SPACE.
+MESSAGE I083(ZFI001) WITH SY-UNAME.
+* #004 MOD 20110203 ISID144 START
+
+ENDFORM.                    " FRM_CALL_RSBDCSUB
+* #004 DEL 20110203 ISID144 START
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_TITLE
+*&---------------------------------------------------------------------*
+*       プログラム表題の設定
+*----------------------------------------------------------------------*
+*FORM FRM_SET_TITLE .
+*
+*  CASE SY-LANGU.
+*    WHEN GCF_LA_J.                     " 日本語
+**    初期値のまま
+*    WHEN GCF_LA_1.                     " 中国語
+*      SY-TITLE = GCF_TITLE_1.          "'#行主数据上#'
+*    WHEN GCF_LA_E.                     " 英語
+*      SY-TITLE = GCF_TITLE_E.          "'Upload the Bank master records'
+*  ENDCASE.
+*ENDFORM.                    " FRM_SET_TITLE
+* #004 DEL 20110203 ISID144 END
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WRITE_RESULT
+*&---------------------------------------------------------------------*
+*       処理結果表示                                           "#004 ADD
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_RESULT .
+
+DATA:
+LDF_LINE01(100)   TYPE C,
+LDF_LINE02(50)    TYPE C,
+LDF_INDEX(5)      TYPE C.
+
+*--処理件数出力
+LDF_INDEX = CNT_INDEX.
+
+CONCATENATE '**************<' SY-TITLE '>**************' INTO LDF_LINE01 SEPARATED BY SPACE.
+CONCATENATE '*   ' TEXT-005 '      ='  LDF_INDEX       INTO LDF_LINE02 SEPARATED BY SPACE.
+WRITE:
+/ LDF_LINE01,
+/ LDF_LINE02.
+
+ENDFORM.                    " FRM_WRITE_RESULT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_DATA
+*&---------------------------------------------------------------------*
+*       件数チェック                                           "#004 ADD
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_DATA .
+
+* ファイルのループ処理（対象は、N:新規 U:更新フラグを持つもののみ)
+LOOP AT GDT_REC INTO GDS_REC WHERE FLAG = GCF_CTRN   " N
+OR    FLAG = GCF_CTRU . " U
+EXIT.
+
+ENDLOOP.
+
+* 処理件数のカウント
+CHECK SY-SUBRC <> 0.
+MESSAGE S015(ZFI001) DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+
+ENDFORM.                    " FRM_CHECK_DATA
+*Text symbol text・
+*001:Select the location for file
+*002:File Name
+*003:Server
+*004:Local
+*005:The number of processes

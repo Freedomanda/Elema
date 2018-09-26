@@ -1,0 +1,1097 @@
+*----------------------------------------------------------------------*
+*  売上自動照合起動                                                    *
+*    機能：売上自動照合を起動する                                      *
+*          照合条件を一時的に変更する                                  *
+*          バッチジョブを登録する                                      *
+*            バッチ処理の場合は、結果帳票を一括しいて出力指定できる    *
+*          バッチジョブのログを照会できる                              *
+*    作成：2002/02/07 KURANO Sadayuki                                  *
+*    変更：2002/03/01 KURANO Sadayuki SUBMIT時のパラメタ修正           *
+*    変更：2002/03/29 K.KAJISA 締日の引継ぎ                            *
+*    変更：2002/04/01 KURANO Sadayuki SUBMIT時のパラメタ追加           *
+*    変更：2002/04/05 K.KAJISA 照合条件ボタン廃止                      *
+*    変更：2002/04/18 KURANO Sadayuki ジョブ名のデフォルト変更         *
+*                     SUBMITパラメタの変更（検収先→受注先対応）       *
+*    変更：2002/05/13 KURANO 得意先一括処理を追加                      *
+*    変更：2002/05/29 Inagoshi ZFBDT='LE'の修正漏れ対応                *
+*    変更：2002/06/14 KURANO 締め日チェックの汎用モジュール変更        *
+*    変更：2002/10/09 KAJISA 検収データ読込条件追加                    *
+*    変更：2002/10/09 KAJISA 得意先取得ロジック強化                    *
+*    変更：2002/12/11 KAJISA ログ出力抑制ボタン                        *
+*    変更：2003/01/07 KAJISA 得意先発注番号桁指定対応                  *
+*    変更：2003/05/12 KAJISA 営業所、営業GRP初期値提案処理修正         *
+*    変更：2003/05/12 KAJISA 営業所、営業GRP初期値提案処理修正2        *
+*    変更：2003/06/25 KAJISA 入力チェック強化                          *
+*    変更：2003/06/26 KAJISA 選択画面の得意先→検収先に変更            *
+*    変更：2003/07/25 KAJISA 得意先発注番号桁指定対応(売 検 別化)      *
+*    ↓以下 ZYK11610                                                   *
+*    変更：2006/04/19 MIKAMI ボタン連打対応                            *
+*    変更：2006/05/09 FURUYA ボタン連打対応(ジョブチェック箇所変更）   *
+*　　変更：2007/01/11 FURUYA SUBMITプログラム変更                      *
+*    変更：2007/08/09 C.SEKINE  得意先コード、締日取得箇所修正　       *
+*----------------------------------------------------------------------*
+REPORT YK011610 .
+
+* 使用テーブル
+TABLES YK150. "売上照合マスタ
+TABLES T001. "会社コード
+TABLES KNA1. "得意先マスタ: 一般データ
+TABLES KNVV. "得意先マスタ: 販売データ
+TABLES KNVP. "得意先マスタ 取引先機能 2002/04/18
+TABLES TVKOT. "組織単位: 販売組織: テキスト
+TABLES TVTWT. "組織単位: 流通チャネル: テキスト
+TABLES TSPAT. "組織単位: 販売製品部門: テキスト
+TABLES YK110. "検収データ
+TABLES SSCRFIELDS. "選択画面上項目
+
+* グローバル変数
+TYPES: BEGIN OF ST_KUNNR,
+KUNR2 LIKE YK110-KUNR2, "検収先
+VKBUR LIKE YK110-VKBUR, "営業所
+VKGRP LIKE YK110-VKGRP, "営業グループ
+GSBER LIKE YK110-GSBER, "事業領域
+END OF ST_KUNNR.
+DATA I_KUNNR TYPE STANDARD TABLE OF ST_KUNNR WITH HEADER LINE.
+DATA W_PARM LIKE PRI_PARAMS.
+DATA W_SPART LIKE YK150-SPART. "参照製品部門
+
+DATA W_OLD_KUNNR LIKE KNVV-KUNNR."2002/12/11 ADD
+* 選択画面
+SELECTION-SCREEN BEGIN OF BLOCK B1 WITH FRAME TITLE TEXT-T01."03/04 DEL
+PARAMETERS P_BUKRS LIKE YK150-BUKRS MEMORY ID BUK. "会社コード
+*Parameters p_kunnr like yk150-kunnr memory id kun. "検収先コード
+PARAMETERS P_KUNNR LIKE YK150-KUNNR.               "検収先コード
+PARAMETERS P_VKORG LIKE YK150-VKORG MEMORY ID VKO. "販売組織
+PARAMETERS P_VTWEG LIKE YK150-VTWEG MEMORY ID VTW. "流通チャネル
+PARAMETERS P_SPART LIKE YK150-SPART MEMORY ID SPA. "製品部門
+PARAMETERS P_CHECK AS CHECKBOX. "未処理得意先 2002/05/14 ADD
+SELECTION-SCREEN END   OF BLOCK B1.
+SELECTION-SCREEN BEGIN OF BLOCK B2 WITH FRAME TITLE TEXT-T02.
+SELECT-OPTIONS S_VKBUR FOR YK110-VKBUR. "営業所
+SELECT-OPTIONS S_VKGRP FOR YK110-VKGRP. "営業グループ
+SELECT-OPTIONS S_GSBER FOR YK110-GSBER. "事業領域
+SELECTION-SCREEN END   OF BLOCK B2.
+SELECTION-SCREEN BEGIN OF BLOCK B3 WITH FRAME TITLE TEXT-T03.
+PARAMETERS P_ZFBDT LIKE YK110-ZFBDT2. "締日
+PARAMETERS P_BATCH AS CHECKBOX. "バッチ起動
+PARAMETERS P_JOB LIKE TBTCJOB-JOBNAME DEFAULT SY-REPID. "ジョブ名
+PARAMETERS P_IMMED AS CHECKBOX. "即時起動
+PARAMETERS P_STRTDT LIKE TBTCJOB-SDLSTRTDT. "開始日付
+PARAMETERS P_STRTTM LIKE TBTCJOB-SDLSTRTTM. "開始時刻
+PARAMETERS P_LIST1 AS CHECKBOX MEMORY ID YK1. "未検収リスト
+PARAMETERS P_LIST2 AS CHECKBOX MEMORY ID YK2. "未入力リスト
+PARAMETERS P_LIST3 AS CHECKBOX MEMORY ID YK3. "アンマッチリスト
+PARAMETERS P_LOGU  AS CHECKBOX MEMORY ID YKL. "ログ出力 2002/12/11 ADD
+SELECTION-SCREEN END   OF BLOCK B3.
+PARAMETERS P_LAYOUT LIKE PRI_PARAMS-PAART DEFAULT 'X_58_170' NO-DISPLAY.
+PARAMETERS P_COUNT LIKE PRI_PARAMS-LINCT DEFAULT '58' NO-DISPLAY.
+PARAMETERS P_SIZE LIKE PRI_PARAMS-LINSZ DEFAULT '170' NO-DISPLAY.
+
+* 押しボタン定義
+*SELECTION-SCREEN FUNCTION KEY 1. "照合条件 "2002/04/05 DEL
+SELECTION-SCREEN FUNCTION KEY 2. "ジョブ一覧
+
+*----------------------------------------------------------------------*
+INITIALIZATION.
+SSCRFIELDS-FUNCTXT_01 = TEXT-B01. "照合条件
+SSCRFIELDS-FUNCTXT_02 = TEXT-B02. "ジョブ一覧
+P_STRTTM = SY-UZEIT + 600. "現在時刻より１０分後
+IF P_STRTTM < 600.
+P_STRTDT = SY-DATUM + 1.
+ELSE.
+P_STRTDT = SY-DATUM.
+ENDIF.
+CONCATENATE SY-REPID '-' SY-UNAME '-' SY-DATUM INTO P_JOB."2002/04/18
+CLEAR W_OLD_KUNNR. "2002/12/11 ADD
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+IF W_OLD_KUNNR <> P_KUNNR.  "2002/12/11 ADD
+W_OLD_KUNNR = P_KUNNR.   "2002/12/11 ADD
+REFRESH: S_VKBUR,S_VKGRP. "2002/12/11 ADD
+PERFORM F_SET_S1000. "省略時値のセット
+ENDIF.                     "2002/12/11 ADD
+PERFORM F_CHECK_S1000. "入力項目のチェック
+IF YK150-BUKRS <> P_BUKRS OR
+YK150-KUNNR <> P_KUNNR OR
+YK150-VKORG <> P_VKORG OR
+YK150-VTWEG <> P_VTWEG OR
+YK150-SPART <> P_SPART.
+PERFORM F_SELECT_YK150. "照合条件の設定
+ENDIF.
+CASE SSCRFIELDS-UCOMM.
+WHEN 'FC01'.
+CALL SCREEN 2000. "照合条件
+WHEN 'FC02'.
+PERFORM F_JOBLIST. "ジョブ一覧
+ENDCASE.
+
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+*2003/05/12 ADD START
+IF YK150-B_VKBUR_INIT <> 'X'.
+CLEAR   S_VKBUR.
+REFRESH S_VKBUR.
+ENDIF.
+IF YK150-B_VKGRP_INIT <> 'X'.
+CLEAR   S_VKGRP.
+REFRESH S_VKGRP.
+ENDIF.
+*2003/05/12 ADD END
+
+IF P_BATCH = 'X'.
+
+* insert 2006/05/09 furuya{
+PERFORM  F_JOB_CHECK.  "ジョブ実行チェック（ボタン連打対応）
+* }insert 2006/05/09 furuya
+
+PERFORM F_PRINT_PARM. "印刷パラメタの作成
+IF P_CHECK = 'X'. "未処理得意先の処理
+PERFORM F_SELECT. "未処理得意先の選択
+SORT I_KUNNR BY VKBUR KUNR2.
+LOOP AT I_KUNNR.
+REFRESH: S_VKBUR, S_VKGRP, S_GSBER. "パラメタの設定
+P_KUNNR = I_KUNNR-KUNR2.
+S_VKBUR-OPTION = 'EQ'.
+S_VKBUR-SIGN = 'I'.
+S_VKBUR-LOW = I_KUNNR-VKBUR.
+APPEND S_VKBUR.
+S_VKGRP-OPTION = 'EQ'.
+S_VKGRP-SIGN = 'I'.
+S_VKGRP-LOW = I_KUNNR-VKGRP.
+APPEND S_VKGRP.
+S_GSBER-OPTION = 'EQ'.
+S_GSBER-SIGN = 'I'.
+S_GSBER-LOW = I_KUNNR-GSBER.
+APPEND S_GSBER.
+PERFORM F_SELECT_YK150. "照合条件の設定
+PERFORM F_JOB. "ジョブ登録
+ENDLOOP.
+ELSE.
+PERFORM F_JOB. "ジョブ登録
+ENDIF.
+ELSE.
+PERFORM F_SUBMIT. "オンライン実行
+ENDIF.
+
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_2000  OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE STATUS_2000 OUTPUT.
+SET PF-STATUS 'S2000'.
+SET TITLEBAR 'T01'.
+ENDMODULE.                 " STATUS_2000  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  exit_2000  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE EXIT_2000 INPUT.
+CASE SY-UCOMM.           "プログラム終了機能
+WHEN 'BACK'.
+SET SCREEN 0.
+WHEN 'EXIT'.
+SET SCREEN 0.
+WHEN 'CANC'.
+ROLLBACK WORK.
+SET SCREEN 0.
+ENDCASE.
+LEAVE SCREEN.
+ENDMODULE.                 " exit_2000  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  user_command  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE USER_COMMAND INPUT.
+CASE SY-UCOMM.
+WHEN 'SAVE'.
+WHEN 'MAST'.
+SUBMIT YK019B00
+USING SELECTION-SET SY-REPID
+AND RETURN.
+ENDCASE.
+ENDMODULE.                 " user_command  INPUT
+*---------------------------------------------------------------------*
+*       FORM f_check_s1000                                            *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_CHECK_S1000.
+* ローカル変数
+DATA W_ZFBDT LIKE SY-DATUM.
+DATA W_SIHARAIBI LIKE SY-DATUM.
+CLEAR: W_ZFBDT, W_SIHARAIBI.
+
+* 会社コードチェック
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS  = P_BUKRS.
+IF SY-SUBRC <> 0.
+MESSAGE E685(Y1) WITH P_BUKRS.
+ENDIF.
+* 検収先コードのチェック
+IF P_CHECK <> 'X'. "未処理得意先がチェックされていない場合
+SELECT SINGLE * FROM KNA1
+WHERE  KUNNR  = P_KUNNR.
+IF SY-SUBRC <> 0.
+MESSAGE E686(Y1) WITH P_KUNNR.
+ENDIF.
+ENDIF.
+* 販売組織のチェック
+SELECT SINGLE * FROM  TVKOT
+WHERE  SPRAS  = SY-LANGU
+AND    VKORG  = P_VKORG.
+IF SY-SUBRC <> 0.
+MESSAGE E687(Y1) WITH P_VKORG.
+ENDIF.
+* 流通チャネルのチェック
+SELECT SINGLE * FROM  TVTWT
+WHERE  SPRAS  = SY-LANGU
+AND    VTWEG  = P_VTWEG.
+IF SY-SUBRC <> 0.
+MESSAGE E688(Y1) WITH P_VTWEG.
+ENDIF.
+* 製品部門のチェック
+SELECT SINGLE * FROM  TSPAT
+WHERE  SPRAS  = SY-LANGU
+AND    SPART  = P_SPART.
+IF SY-SUBRC <> 0.
+MESSAGE E689(Y1) WITH P_SPART.
+ENDIF.
+*2003/05/22 MOV START
+* clear w_spart.
+* select single spaku "参照製品部門の検索
+*        into   w_spart
+*        from   tvta
+*        where  vkorg  = p_vkorg
+*        and    vtweg  = p_vtweg
+*        and    spart  = p_spart.
+*2003/05/22 MOV END
+* 締日のチェック
+IF P_CHECK <> 'X'. "未処理得意先がチェックされていない場合
+* 2002/06/14 MOD START チェック用のモジュール変更
+*   call function 'YK_ZFBDT_GET_BY_KNVV'
+*        exporting
+*             i_cord         = p_kunnr
+*             i_vkorg        = p_vkorg
+*             i_vtweg        = p_vtweg
+*             i_spart        = p_spart
+*             i_day          = p_zfbdt
+*        importing
+*             e_zfbdt        = w_zfbdt
+*             e_siharaibi    = w_siharaibi
+*        exceptions
+*             no_get_t052    = 1
+*             no_good_getday = 2
+*             no_get_zterm   = 3
+*             others         = 4.
+*   if sy-subrc <> 0.
+*     message e690(y1) with sy-subrc.
+*   ELSEIF w_zfbdt <> p_zfbdt.
+*   elseif p_zfbdt  = w_zfbdt     or "支払基準日が締日の場合
+*          p_zfbdt  = w_siharaibi.   "支払基準日が入金日の場合
+*   else.
+*     message e691(y1) with p_zfbdt w_zfbdt.
+*   endif.
+*2003/06/25 ADD START
+IF P_ZFBDT IS INITIAL.
+MESSAGE E691(Y1) WITH P_ZFBDT W_ZFBDT.
+ENDIF.
+*2003/06/25 ADD END
+CALL FUNCTION 'YK_ZFBDT_CHECK_BY_KNVV'
+EXPORTING
+I_CORD        = P_KUNNR
+I_VKORG       = P_VKORG
+I_VTWEG       = P_VTWEG
+I_SPART       = P_SPART
+I_DAY         = P_ZFBDT
+EXCEPTIONS
+INVALID_ZFBDT = 1
+NO_GET_ZTERM  = 2
+OTHERS        = 3.
+IF SY-SUBRC <> 0.
+MESSAGE E690(Y1) WITH SY-SUBRC.
+ENDIF.
+ELSE.
+IF P_ZFBDT IS INITIAL.
+MESSAGE E691(Y1) WITH P_ZFBDT W_ZFBDT.
+ENDIF.
+ENDIF.
+* フラグのチェック
+IF P_BATCH IS INITIAL.
+IF P_LIST1 = 'X' OR
+P_LIST2 = 'X' OR
+P_LIST3 = 'X'.
+MESSAGE S692(Y1).
+CLEAR: P_LIST1, P_LIST2, P_LIST3.
+ENDIF.
+IF P_CHECK = 'X'. "オンラインで未処理得意先処理は不可
+MESSAGE E400(Y1)
+WITH '未処理得意先の処理は、バッチ処理で行ってください'.
+ENDIF.
+ENDIF.
+
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_set_s1000                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_SET_S1000.
+* ローカル変数
+DATA W_CNT LIKE SY-DBCNT.
+
+* 未処理得意先をチェックしていない場合のみ提案
+IF P_CHECK <> 'X'.
+*   締日の設定
+*   if p_zfbdt is initial. "DEL 2002/12/11
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD         = P_KUNNR
+I_VKORG        = P_VKORG
+I_VTWEG        = P_VTWEG
+I_SPART        = P_SPART
+I_DAY          = SY-DATUM
+IMPORTING
+E_ZFBDT_OLD    = P_ZFBDT
+EXCEPTIONS
+NO_GET_T052    = 1
+NO_GOOD_GETDAY = 2
+NO_GET_ZTERM   = 3
+OTHERS         = 4.
+IF SY-SUBRC <> 0.
+MESSAGE S690(Y1).
+ENDIF.
+*   endif.                   "DEL 2002/12/11
+PERFORM F_SELECT_YK150.
+IF YK150-B_VKBUR_INIT = 'X'.  "2003/05/12 ADD.
+*   営業所の設定
+CLEAR KNVV.
+*   describe table s_vkbur lines w_cnt.   "DEL 2002/12/11
+*   if w_cnt = 0.                          "DEL 2002/12/11
+SELECT SINGLE * FROM  KNVV
+WHERE  KUNNR  = P_KUNNR
+AND    VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = P_SPART.
+IF SY-SUBRC <> 0.
+SELECT SINGLE * FROM  KNVV
+WHERE  KUNNR  = P_KUNNR
+AND    VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = W_SPART. "参照製品部門で検索
+IF SY-SUBRC = 0 AND KNVV-VKBUR <> SPACE.
+S_VKBUR-OPTION = 'EQ'.
+S_VKBUR-SIGN = 'I'.
+S_VKBUR-LOW = KNVV-VKBUR.
+APPEND S_VKBUR.
+ENDIF.
+ELSEIF KNVV-VKBUR <> SPACE.
+S_VKBUR-OPTION = 'EQ'.
+S_VKBUR-SIGN = 'I'.
+S_VKBUR-LOW = KNVV-VKBUR.
+APPEND S_VKBUR.
+ENDIF.
+ENDIF.                                                  "2003/05/12
+*   endif.                              "DEL 2002/12/11
+IF YK150-B_VKGRP_INIT = 'X'.  "2003/05/12 ADD.
+*   営業グループの設定
+CLEAR KNVV.
+*   describe table s_vkgrp lines w_cnt.  "DEL 2002/12/11
+*   if w_cnt = 0.                         "DEL 2002/12/11
+SELECT SINGLE * FROM  KNVV
+WHERE  KUNNR  = P_KUNNR
+AND    VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = P_SPART.
+IF SY-SUBRC <> 0.
+SELECT SINGLE * FROM  KNVV
+WHERE  KUNNR  = P_KUNNR
+AND    VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = W_SPART. "参照製品部門で検索
+IF SY-SUBRC = 0 AND KNVV-VKGRP <> SPACE.
+S_VKGRP-OPTION = 'EQ'.
+S_VKGRP-SIGN = 'I'.
+S_VKGRP-LOW = KNVV-VKGRP.
+APPEND S_VKGRP.
+ENDIF.
+ELSEIF KNVV-VKGRP <> SPACE.
+S_VKGRP-OPTION = 'EQ'.
+S_VKGRP-SIGN = 'I'.
+S_VKGRP-LOW = KNVV-VKGRP.
+APPEND S_VKGRP.
+ENDIF.
+ENDIF.                                                  "2003/05/12
+ENDIF.
+*
+* endif.                                   "DEL 2002/12/11
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_select_yk150                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_SELECT_YK150.
+* 初期化
+CLEAR YK150. "ヘッダ行のクリア
+* 照合条件の検索
+SELECT SINGLE * FROM  YK150
+WHERE  BUKRS  = P_BUKRS
+AND    KUNNR  = P_KUNNR
+AND    VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = P_SPART.
+IF SY-SUBRC = 0.
+MESSAGE S693(Y1).
+ELSE.
+*** デフォルトの読み出し
+SELECT SINGLE * FROM  YK150
+WHERE  BUKRS  = P_BUKRS
+AND    KUNNR  = 'DEFAULT'.
+IF SY-SUBRC = 0.
+YK150-KUNNR = P_KUNNR.
+YK150-VKORG = P_VKORG.
+YK150-VTWEG = P_VTWEG.
+YK150-SPART = P_SPART.
+MESSAGE S693(Y1).
+ELSE.
+MESSAGE E694(Y1).
+ENDIF.
+ENDIF.
+*2003/05/22 MOV START
+CLEAR W_SPART.
+SELECT SINGLE SPAKU "参照製品部門の検索
+INTO   W_SPART
+FROM   TVTA
+WHERE  VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = P_SPART.
+*2003/05/22 MOV END
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_submit                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_SUBMIT.
+* ローカル変数
+RANGES R_KEKKBN FOR YK130-KEKKBN. "結果区分
+RANGES R_VKORG FOR YK130-VKORG. "販売組織
+RANGES R_VTWEG FOR YK130-VTWEG. "流通チャネル
+RANGES R_SPART FOR YK130-SPART. "製品部門
+RANGES R_ZFBDT FOR YK230-ZFBDT. "締日      "2002/03/29 ADD
+* 実行条件作成
+REFRESH R_KEKKBN. "結果区分
+R_KEKKBN-OPTION = 'EQ'.
+R_KEKKBN-SIGN = 'E'.
+R_KEKKBN-LOW = '4'.
+APPEND R_KEKKBN.
+REFRESH R_VKORG. "販売組織
+R_VKORG-OPTION = 'EQ'.
+R_VKORG-SIGN = 'I'.
+R_VKORG-LOW = P_VKORG.
+APPEND R_VKORG.
+REFRESH R_VTWEG. "流通チャネル
+R_VTWEG-OPTION = 'EQ'.
+R_VTWEG-SIGN = 'I'.
+R_VTWEG-LOW = P_VTWEG.
+APPEND R_VTWEG.
+REFRESH R_SPART. "製品部門
+R_SPART-OPTION = 'EQ'.
+R_SPART-SIGN = 'I'.
+R_SPART-LOW = P_SPART.
+APPEND R_SPART.
+*
+REFRESH R_ZFBDT.        "締日 2002/03/29 ADD
+* r_ZFBDT-option = 'EQ'.  "2002/03/29 ADD
+R_ZFBDT-OPTION = 'LE'.  "2002/04/01 MOD
+R_ZFBDT-SIGN = 'I'.     "2002/03/29 ADD
+R_ZFBDT-LOW = P_ZFBDT.  "2002/03/29 ADD
+APPEND R_ZFBDT.         "2002/03/29 ADD
+MESSAGE S400(Y1) WITH '照合を実行中です'.
+SUBMIT YK011620
+WITH B_VKORG EQ YK150-B_VKORG "販売組織
+WITH B_VKGRP EQ YK150-B_VKGRP "営業グループ
+WITH B_MATNR EQ YK150-B_MATNR "品目コード
+WITH B_VTWEG EQ YK150-B_VTWEG "流通チャネル
+WITH B_BUKRS EQ YK150-B_BUKRS "会社コード
+WITH B_KDMAT EQ YK150-B_KDMAT "得意先品目コード
+WITH B_SPART EQ YK150-B_SPART "製品部門
+WITH B_GSBER EQ YK150-B_GSBER "事業領域
+WITH B_MAKTX EQ YK150-B_MAKTX "品目テキスト
+WITH B_VKBUR EQ YK150-B_VKBUR "営業所
+WITH B_BSTKD EQ YK150-B_BSTKD "得意先発注番号
+WITH B_ZFBDT EQ YK150-B_ZFBDT "締日
+*2003/07/25 MOD START
+**2003/01/07 ADD START
+*         with P_STRNO eq yk150-P_STRNO "開始桁
+*         with P_ENDNO eq yk150-P_ENDNO "終了桁
+**2003/01/07 ADD END
+WITH P_STR_U EQ YK150-P_STRNO_U "開始桁
+WITH P_END_U EQ YK150-P_ENDNO_U "終了桁
+WITH P_STR_K EQ YK150-P_STRNO_K "開始桁
+WITH P_END_K EQ YK150-P_ENDNO_K "終了桁
+*2003/07/25 MOD END
+WITH R_QUA_WG EQ YK150-R_QUA_WG "数量：警告
+WITH R_QUA_ER EQ YK150-R_QUA_ER "数量：エラー
+WITH R_QUA_NC EQ YK150-R_QUA_NC "数量：チェックなし
+WITH R_UPR_WG EQ YK150-R_UPR_WG "単価：警告
+WITH R_UPR_ER EQ YK150-R_UPR_ER "単価：エラー
+WITH R_UPR_NC EQ YK150-R_UPR_NC "単価：チェックなし
+WITH R_ITX_WG EQ YK150-R_ITX_WG "税抜金額：警告
+WITH R_ITX_ER EQ YK150-R_ITX_ER "税抜金額：エラー
+WITH R_ITX_NC EQ YK150-R_ITX_NC "税抜金額：チェックなし
+WITH P_ITX_AL EQ YK150-P_ITX_AL "税抜金額：許容差額
+WITH R_TAX_WG EQ YK150-R_TAX_WG "消費税額：警告
+WITH R_TAX_ER EQ YK150-R_TAX_ER "消費税額：エラー
+WITH R_TAX_NC EQ YK150-R_TAX_NC "消費税額：チェックなし
+WITH P_TAX_AL EQ YK150-P_TAX_AL "消費税額：許容差額
+WITH R_ETX_WG EQ YK150-R_ETX_WG "税込金額：警告
+WITH R_ETX_ER EQ YK150-R_ETX_ER "税込金額：エラー
+WITH R_ETX_NC EQ YK150-R_ETX_NC "税込金額：チェックなし
+WITH P_ETX_AL EQ YK150-P_ETX_AL "税込金額：許容差額
+WITH P_KUNR2 EQ P_KUNNR "検収先
+WITH P_BUKRS EQ P_BUKRS "会社コード
+* << 2002/03/01
+*        WITH s_vkirg EQ r_vkorg "販売組織
+*        WITH s_vtweg EQ r_vtweg "流通チャネル
+*        WITH s_spart EQ r_spart "製品部門
+* >> 2002/03/01
+WITH S_VKIRG IN R_VKORG "販売組織
+WITH S_VTWEG IN R_VTWEG "流通チャネル
+WITH S_SPART IN R_SPART "製品部門
+*
+WITH S_VKBUR IN S_VKBUR "営業所
+WITH S_VKGRP IN S_VKGRP "営業グループ
+WITH S_KEKKBN IN R_KEKKBN "照合結果区分
+WITH P_ZFBDT2 EQ P_ZFBDT "照合締日
+WITH S_ZFBDT  IN R_ZFBDT "締日 2002/03/29 ADD
+WITH P_LOGU   EQ P_LOGU  "ログ出力 2002/12/11 ADD
+AND  RETURN.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_job                                                    *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_JOB.
+* ローカル変数
+DATA W_JOBCOUNT LIKE TBTCJOB-JOBCOUNT.
+DATA W_TITLE LIKE SY-TITLE.
+DATA W_KUNNR LIKE KNVP-KUNNR.
+* del 2006/05/09 furuya{
+* insert 2006/04/19 mikami{
+*  DATA: LW_TBTCO TYPE TBTCO.
+* }insert 2006/04/19 mikami
+* }del 2006/05/09 furuya
+RANGES R_KUNNR FOR YK130-KUNNR. "得意先コード
+RANGES R_ZFBDT FOR YK130-ZFBDT. "締日
+RANGES R_KEKKBN FOR YK130-KEKKBN. "結果区分
+RANGES R_VKORG FOR YK130-VKORG. "販売組織
+RANGES R_VTWEG FOR YK130-VTWEG. "流通チャネル
+RANGES R_SPART FOR YK130-SPART. "製品部門
+CLEAR: W_JOBCOUNT, W_TITLE, W_KUNNR.
+REFRESH: R_KUNNR, R_ZFBDT, R_KEKKBN, R_VKORG, R_VTWEG, R_SPART.
+
+* del 2006/05/09 furuya{
+* insert 2006/04/19 mikami{
+*  SELECT SINGLE * FROM TBTCO INTO LW_TBTCO
+*         WHERE JOBNAME = P_JOB
+*           AND STATUS <> 'A'
+*           AND STATUS <> 'F'.
+*  IF SY-SUBRC = 0.
+*    MESSAGE S400(Y1) WITH
+*    '同名ジョブは照合処理中です（ジョブ一覧参照）'.
+*    STOP.
+*  ENDIF.
+* }insert 2006/04/19 mikami
+* }del 2006/05/09 furuya
+
+* ジョブを開く
+CALL FUNCTION 'JOB_OPEN'
+EXPORTING
+*     DELANFREP              = ' '
+JOBNAME                = P_JOB
+IMPORTING
+JOBCOUNT               = W_JOBCOUNT
+EXCEPTIONS
+CANT_CREATE_JOB        = 1
+INVALID_JOB_DATA       = 2
+JOBNAME_MISSING        = 3
+OTHERS                 = 4
+.
+IF SY-SUBRC = 0.
+MESSAGE S695(Y1) WITH W_JOBCOUNT.
+ELSE.
+MESSAGE S696(Y1) WITH SY-SUBRC.
+STOP.
+ENDIF.
+* ステップの追加１
+REFRESH R_KEKKBN. "結果区分
+R_KEKKBN-OPTION = 'EQ'.
+R_KEKKBN-SIGN = 'E'.
+R_KEKKBN-LOW = '4'.
+APPEND R_KEKKBN.
+REFRESH R_VKORG. "販売組織
+R_VKORG-OPTION = 'EQ'.
+R_VKORG-SIGN = 'I'.
+R_VKORG-LOW = P_VKORG.
+APPEND R_VKORG.
+REFRESH R_VTWEG. "流通チャネル
+R_VTWEG-OPTION = 'EQ'.
+R_VTWEG-SIGN = 'I'.
+R_VTWEG-LOW = P_VTWEG.
+APPEND R_VTWEG.
+REFRESH R_SPART. "製品部門
+R_SPART-OPTION = 'EQ'.
+R_SPART-SIGN = 'I'.
+R_SPART-LOW = P_SPART.
+APPEND R_SPART.
+REFRESH R_ZFBDT.        "締日 2002/03/29 ADD
+* r_ZFBDT-option = 'EQ'.  "2002/03/29 ADD
+R_ZFBDT-OPTION = 'LE'.  "2002/04/01 MOD
+R_ZFBDT-SIGN = 'I'.     "2002/03/29 ADD
+R_ZFBDT-LOW = P_ZFBDT.  "2002/03/29 ADD
+APPEND R_ZFBDT.         "2002/03/29 ADD
+SUBMIT YK011620
+WITH B_VKORG EQ YK150-B_VKORG "販売組織
+WITH B_VKGRP EQ YK150-B_VKGRP "営業グループ
+WITH B_MATNR EQ YK150-B_MATNR "品目コード
+WITH B_VTWEG EQ YK150-B_VTWEG "流通チャネル
+WITH B_BUKRS EQ YK150-B_BUKRS "会社コード
+WITH B_KDMAT EQ YK150-B_KDMAT "得意先品目コード
+WITH B_SPART EQ YK150-B_SPART "製品部門
+WITH B_GSBER EQ YK150-B_GSBER "事業領域
+WITH B_MAKTX EQ YK150-B_MAKTX "品目テキスト
+WITH B_VKBUR EQ YK150-B_VKBUR "営業所
+WITH B_BSTKD EQ YK150-B_BSTKD "得意先発注番号
+WITH B_ZFBDT EQ YK150-B_ZFBDT "締日
+*2003/07/25 MOD START
+*2003/01/07 ADD START
+*        with P_STRNO eq yk150-P_STRNO "開始桁
+*        with P_ENDNO eq yk150-P_ENDNO "終了桁
+*2003/01/07 ADD END
+WITH P_STR_U EQ YK150-P_STRNO_U "開始桁
+WITH P_END_U EQ YK150-P_ENDNO_U "終了桁
+WITH P_STR_K EQ YK150-P_STRNO_K "開始桁
+WITH P_END_K EQ YK150-P_ENDNO_K "終了桁
+*2003/07/25 MOD END
+WITH R_QUA_WG EQ YK150-R_QUA_WG "数量：警告
+WITH R_QUA_ER EQ YK150-R_QUA_ER "数量：エラー
+WITH R_QUA_NC EQ YK150-R_QUA_NC "数量：チェックなし
+WITH R_UPR_WG EQ YK150-R_UPR_WG "単価：警告
+WITH R_UPR_ER EQ YK150-R_UPR_ER "単価：エラー
+WITH R_UPR_NC EQ YK150-R_UPR_NC "単価：チェックなし
+WITH R_ITX_WG EQ YK150-R_ITX_WG "税抜金額：警告
+WITH R_ITX_ER EQ YK150-R_ITX_ER "税抜金額：エラー
+WITH R_ITX_NC EQ YK150-R_ITX_NC "税抜金額：チェックなし
+WITH P_ITX_AL EQ YK150-P_ITX_AL "税抜金額：許容差額
+WITH R_TAX_WG EQ YK150-R_TAX_WG "消費税額：警告
+WITH R_TAX_ER EQ YK150-R_TAX_ER "消費税額：エラー
+WITH R_TAX_NC EQ YK150-R_TAX_NC "消費税額：チェックなし
+WITH P_TAX_AL EQ YK150-P_TAX_AL "消費税額：許容差額
+WITH R_ETX_WG EQ YK150-R_ETX_WG "税込金額：警告
+WITH R_ETX_ER EQ YK150-R_ETX_ER "税込金額：エラー
+WITH R_ETX_NC EQ YK150-R_ETX_NC "税込金額：チェックなし
+WITH P_ETX_AL EQ YK150-P_ETX_AL "税込金額：許容差額
+WITH P_KUNR2 EQ P_KUNNR "検収先
+WITH P_BUKRS EQ P_BUKRS "会社コード
+* << 2002/03/19
+*        WITH s_vkirg EQ r_vkorg "販売組織
+*        WITH s_vtweg EQ r_vtweg "流通チャネル
+*        WITH s_spart EQ r_spart "製品部門
+* >> 2002/03/19
+WITH S_VKORG IN R_VKORG "販売組織
+WITH S_VTWEG IN R_VTWEG "流通チャネル
+WITH S_SPART IN R_SPART "製品部門
+*
+WITH S_VKBUR IN S_VKBUR "営業所
+WITH S_VKGRP IN S_VKGRP "営業グループ
+WITH S_GSBER IN S_GSBER "事業領域
+WITH S_KEKKBN IN R_KEKKBN "照合結果区分
+WITH P_ZFBDT2 EQ P_ZFBDT "照合締日
+WITH S_ZFBDT  IN R_ZFBDT "締日 2002/03/29 ADD
+USER SY-UNAME VIA JOB P_JOB NUMBER W_JOBCOUNT
+AND  RETURN.
+IF SY-SUBRC <> 0.
+MESSAGE S696(Y1) WITH SY-SUBRC.
+STOP.
+ENDIF.
+
+*2007/08/09 ADD START C.SEKINE 得意先コード、締日取得箇所修正
+REFRESH: R_KUNNR, R_ZFBDT, R_KEKKBN.
+R_KUNNR-OPTION = 'EQ'.
+R_KUNNR-SIGN = 'I'.
+SELECT DISTINCT KUNNR FROM  KNVP
+INTO   W_KUNNR
+WHERE  VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = P_SPART
+AND    PARVW  = 'Y4' "検収先
+AND    KUNN2  = P_KUNNR.
+R_KUNNR-LOW = W_KUNNR.
+APPEND R_KUNNR.
+ENDSELECT.
+IF SY-SUBRC <> 0.
+SELECT DISTINCT KUNNR FROM  KNVP
+INTO   W_KUNNR
+WHERE  VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = W_SPART "参照製品部門
+AND    PARVW  = 'Y4' "検収先
+AND    KUNN2  = P_KUNNR.
+R_KUNNR-LOW = W_KUNNR.
+APPEND R_KUNNR.
+ENDSELECT.
+ENDIF.
+R_ZFBDT-OPTION = 'LE'.
+R_ZFBDT-SIGN = 'I'.
+R_ZFBDT-LOW = P_ZFBDT.
+APPEND R_ZFBDT.
+*2007/08/09 ADD END C.SEKINE
+
+* ステップの追加２（未検収リスト）
+IF P_LIST1 = 'X'.
+
+*** パラメタの準備
+
+*2007/08/09 DEL START C.SEKINE 得意先コード、締日取得箇所修正
+*    REFRESH: R_KUNNR, R_ZFBDT, R_KEKKBN.
+*    R_KUNNR-OPTION = 'EQ'.
+*    R_KUNNR-SIGN = 'I'.
+*    SELECT DISTINCT KUNNR FROM  KNVP "2002/04/18 検収先→受注先
+*           INTO   W_KUNNR
+*           WHERE  VKORG  = P_VKORG
+*           AND    VTWEG  = P_VTWEG
+*           AND    SPART  = P_SPART
+*           AND    PARVW  = 'Y4' "検収先
+*           AND    KUNN2  = P_KUNNR.
+*      R_KUNNR-LOW = W_KUNNR.
+*      APPEND R_KUNNR.
+*    ENDSELECT.
+*    IF SY-SUBRC <> 0.
+*      SELECT DISTINCT KUNNR FROM  KNVP
+*             INTO   W_KUNNR
+*             WHERE  VKORG  = P_VKORG
+*             AND    VTWEG  = P_VTWEG
+*             AND    SPART  = W_SPART "参照製品部門
+*             AND    PARVW  = 'Y4' "検収先
+*             AND    KUNN2  = P_KUNNR.
+*        R_KUNNR-LOW = W_KUNNR.
+*        APPEND R_KUNNR.
+*      ENDSELECT.
+*    ENDIF.
+**    r_zfbdt-option = 'EQ'.  "MOD 2002/05/29a
+*    R_ZFBDT-OPTION = 'LE'.
+*    R_ZFBDT-SIGN = 'I'.
+*    R_ZFBDT-LOW = P_ZFBDT.
+*    APPEND R_ZFBDT.
+*2007/08/09 DEL END C.SEKINE
+
+R_KEKKBN-OPTION = 'EQ'.
+R_KEKKBN-SIGN = 'I'.
+R_KEKKBN-LOW = '1'.
+APPEND R_KEKKBN.
+*** 未検収リスト
+*2007/01/11 MOD START
+*    SUBMIT YK011200
+SUBMIT ZYK11200
+*2007/01/11 MOD END
+WITH P_BUKRS EQ P_BUKRS "会社コード 2002/04/01
+WITH P_VKORG EQ P_VKORG "販売組織 2002/04/01
+WITH P_VTWEG EQ P_VTWEG "流通チャネル 2002/04/01
+WITH P_SPART EQ P_SPART "製品部門 2002/04/01
+WITH S_GSBER IN S_GSBER "事業領域 2002/04/01
+WITH S_KUNNR IN R_KUNNR "得意先コード
+WITH S_VKBUR IN S_VKBUR "営業所 2002/04/01
+WITH S_VKGRP IN S_VKGRP "営業グループ 2002/04/01
+WITH S_ZFBDT IN R_ZFBDT "締日
+WITH S_KEKKBN IN R_KEKKBN "照合結果区分
+USER SY-UNAME VIA JOB P_JOB NUMBER W_JOBCOUNT
+TO SAP-SPOOL SPOOL PARAMETERS W_PARM
+WITHOUT SPOOL DYNPRO
+AND  RETURN.
+IF SY-SUBRC <> 0.
+MESSAGE S696(Y1) WITH SY-SUBRC.
+STOP.
+ENDIF.
+ENDIF.
+* ステップの追加３（未入力リスト）
+IF P_LIST2 = 'X'.
+*** パラメタの準備
+REFRESH R_KEKKBN.
+R_KEKKBN-OPTION = 'EQ'.
+R_KEKKBN-SIGN = 'I'.
+R_KEKKBN-LOW = '2'.
+APPEND R_KEKKBN.
+*** 未入力リスト
+*2007/01/11 MOD START
+*    SUBMIT YK011700
+SUBMIT ZYK11700
+*2007/01/11 MOD END
+WITH P_BUKRS EQ P_BUKRS "会社コード 2002/04/01
+WITH P_VKORG EQ P_VKORG "販売組織 2002/04/01
+WITH P_VTWEG EQ P_VTWEG "流通チャネル 2002/04/01
+WITH P_SPART EQ P_SPART "製品部門 2002/04/01
+WITH S_GSBER IN S_GSBER "事業領域 2002/04/01
+WITH S_KUNNR IN R_KUNNR "得意先コード
+WITH S_VKBUR IN S_VKBUR "営業所 2002/04/01
+WITH S_VKGRP IN S_VKGRP "営業グループ 2002/04/01
+WITH S_ZFBDT IN R_ZFBDT "締日
+WITH S_KEKKBN IN R_KEKKBN "照合結果区分
+USER SY-UNAME VIA JOB P_JOB NUMBER W_JOBCOUNT
+TO SAP-SPOOL SPOOL PARAMETERS W_PARM
+WITHOUT SPOOL DYNPRO
+AND  RETURN.
+IF SY-SUBRC <> 0.
+MESSAGE S696(Y1) WITH SY-SUBRC.
+STOP.
+ENDIF.
+ENDIF.
+* ステップの追加４（アンマッチ力リスト）
+IF P_LIST3 = 'X'.
+*** パラメタの準備
+REFRESH R_KEKKBN.
+R_KEKKBN-OPTION = 'EQ'.
+R_KEKKBN-SIGN = 'I'.
+R_KEKKBN-LOW = '3'.
+APPEND R_KEKKBN.
+W_TITLE = 'アンマッチリスト'.
+*** アンマッチリスト
+*2007/01/11 MOD START
+*    SUBMIT YK011800
+SUBMIT ZYK11800
+*2007/01/11 MOD END
+WITH P_BUKRS EQ P_BUKRS "会社コード 2002/04/01
+WITH P_VKORG EQ P_VKORG "販売組織 2002/04/01
+WITH P_VTWEG EQ P_VTWEG "流通チャネル 2002/04/01
+WITH P_SPART EQ P_SPART "製品部門 2002/04/01
+WITH S_GSBER IN S_GSBER "事業領域 2002/04/01
+WITH S_KUNNR IN R_KUNNR "得意先コード
+WITH S_VKBUR IN S_VKBUR "営業所 2002/04/01
+WITH S_VKGRP IN S_VKGRP "営業グループ 2002/04/01
+WITH S_ZFBDT IN R_ZFBDT "締日
+WITH S_KEKKBN IN R_KEKKBN "照合結果区分
+WITH P_TITLE EQ W_TITLE "タイトル 2002/04/01
+USER SY-UNAME VIA JOB P_JOB NUMBER W_JOBCOUNT
+TO SAP-SPOOL SPOOL PARAMETERS W_PARM
+WITHOUT SPOOL DYNPRO
+AND  RETURN.
+IF SY-SUBRC <> 0.
+MESSAGE S696(Y1) WITH SY-SUBRC.
+STOP.
+ENDIF.
+ENDIF.
+* ジョブを閉じる
+IF P_IMMED = 'X'.
+CALL FUNCTION 'JOB_CLOSE'
+EXPORTING
+JOBCOUNT             = W_JOBCOUNT
+JOBNAME              = P_JOB
+STRTIMMED            = 'X'
+EXCEPTIONS
+CANT_START_IMMEDIATE = 1
+INVALID_STARTDATE    = 2
+JOBNAME_MISSING      = 3
+JOB_CLOSE_FAILED     = 4
+JOB_NOSTEPS          = 5
+JOB_NOTEX            = 6
+LOCK_FAILED          = 7
+OTHERS               = 8.
+IF SY-SUBRC <> 0.
+MESSAGE S696(Y1) WITH SY-SUBRC.
+STOP.
+ENDIF.
+ELSE.
+CALL FUNCTION 'JOB_CLOSE'
+EXPORTING
+JOBCOUNT             = W_JOBCOUNT
+JOBNAME              = P_JOB
+SDLSTRTDT            = P_STRTDT
+SDLSTRTTM            = P_STRTTM
+EXCEPTIONS
+CANT_START_IMMEDIATE = 1
+INVALID_STARTDATE    = 2
+JOBNAME_MISSING      = 3
+JOB_CLOSE_FAILED     = 4
+JOB_NOSTEPS          = 5
+JOB_NOTEX            = 6
+LOCK_FAILED          = 7
+OTHERS               = 8.
+IF SY-SUBRC <> 0.
+MESSAGE S696(Y1) WITH SY-SUBRC.
+STOP.
+ENDIF.
+ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_joblist                                                *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_JOBLIST.
+* ローカル変数
+DATA W_JOBSEL LIKE BTCSELECT.
+DATA I_JOBLIST LIKE STANDARD TABLE OF TBTCJOB.
+* ジョブ選択
+W_JOBSEL-JOBNAME = '*'.
+W_JOBSEL-USERNAME = SY-UNAME.
+CALL FUNCTION 'BP_JOB_SELECT'
+EXPORTING
+JOBSELECT_DIALOG    = 'N'  "BTC_NO
+JOBSEL_PARAM_IN     = W_JOBSEL
+IMPORTING
+JOBSEL_PARAM_OUT    = W_JOBSEL
+TABLES
+JOBSELECT_JOBLIST   = I_JOBLIST
+EXCEPTIONS
+INVALID_DIALOG_TYPE = 1
+JOBNAME_MISSING     = 2
+NO_JOBS_FOUND       = 3
+SELECTION_CANCELED  = 4
+USERNAME_MISSING    = 5
+OTHERS              = 6.
+IF SY-SUBRC <> 0.
+MESSAGE S697(Y1) WITH SY-SUBRC.
+EXIT.
+ENDIF.
+* ジョブ一覧
+CALL FUNCTION 'BP_JOBLIST_PROCESSOR'
+EXPORTING
+JOBLIST_OPCODE                   = 21 "BTC_JOBLIST_EDIT
+*     joblist_opcode                   = 22 "BTC_JOBLIST_SHOW
+JOBLIST_REFR_PARAM               = W_JOBSEL
+*   IMPORTING
+*     JOBLIST_SEL_JOB                  =
+TABLES
+JOBLIST                          = I_JOBLIST
+EXCEPTIONS
+INVALID_OPCODE                   = 1
+JOBLIST_IS_EMPTY                 = 2
+JOBLIST_PROCESSOR_CANCELED       = 3
+OTHERS                           = 4
+.
+IF SY-SUBRC <> 0.
+MESSAGE S698(Y1) WITH SY-SUBRC.
+EXIT.
+ENDIF.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_select                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM F_SELECT.
+* ローカル変数
+DATA I_TMP TYPE STANDARD TABLE OF ST_KUNNR WITH HEADER LINE.
+DATA W_CNT LIKE SY-DBCNT.
+
+* 検収データ検索
+SELECT KUNR2 VKBUR VKGRP GSBER
+FROM   YK110
+INTO   TABLE I_TMP
+WHERE  BUKRS   = P_BUKRS
+AND    KEKKBN  = SPACE
+AND    VKORG   = P_VKORG
+AND    VTWEG   = P_VTWEG
+AND    SPART   = P_SPART
+AND    VKBUR  IN S_VKBUR
+AND    VKGRP  IN S_VKGRP
+AND    ZFBDT   = P_ZFBDT
+*2002/10/09 ADD START
+AND    DELFLG  <> 'X'
+AND    FIXFLG  =  'X'.
+*2002/10/09 ADD END
+* 対象得意先一覧の作成
+REFRESH I_KUNNR.
+LOOP AT I_TMP.
+COLLECT I_TMP INTO I_KUNNR.
+ENDLOOP.
+FREE I_TMP.
+DESCRIBE TABLE I_KUNNR LINES W_CNT.
+IF W_CNT = 0.
+MESSAGE S400(Y1) WITH '未処理データがありません'.
+ENDIF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  f_print_parm
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM F_PRINT_PARM.
+* ローカル変数
+DATA W_PDEST LIKE PRI_PARAMS-PDEST.
+DATA W_REPID LIKE PRI_PARAMS-PLIST.
+W_REPID = SY-REPID.
+
+* 出力デバイス取得
+SELECT SINGLE SPLD
+INTO   W_PDEST
+FROM   USR01
+WHERE  BNAME  = SY-UNAME.
+IF SY-SUBRC <> 0.
+MESSAGE E400(Y1) WITH 'デフォルトプリンタが取得できません'.
+EXIT.
+ENDIF.
+* プリントパラメタ作成
+CALL FUNCTION 'GET_PRINT_PARAMETERS'
+EXPORTING
+ARCHIVE_MODE           = '1'  "印刷のみ
+COPIES                 = 1  "印刷部数
+DESTINATION            = W_PDEST  "出力デバイス
+IMMEDIATELY            = 'X'  "即時印刷
+LAYOUT                 = P_LAYOUT  "書式
+LINE_COUNT             = P_COUNT  "行
+LINE_SIZE              = P_SIZE  "列
+LIST_NAME              = W_REPID  "名称
+NO_DIALOG              = 'X'  "画面表示なし
+RECEIVER               = SY-UNAME  "受信者
+SAP_COVER_PAGE         = 'D'  "SAPカバーシート
+HOST_COVER_PAGE        = 'D'  "OS カバーシート
+USER                   = SY-UNAME
+IMPORTING
+OUT_PARAMETERS         = W_PARM
+EXCEPTIONS
+ARCHIVE_INFO_NOT_FOUND = 1
+INVALID_PRINT_PARAMS   = 2
+INVALID_ARCHIVE_PARAMS = 3
+OTHERS                 = 4.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " f_print_parm
+*&---------------------------------------------------------------------*
+*&      Form  F_JOB_CHECK
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM F_JOB_CHECK.
+*ローカル変数
+DATA: LW_TBTCO TYPE TBTCO.
+
+*ジョブ実行チェック
+SELECT SINGLE * FROM TBTCO INTO LW_TBTCO
+WHERE JOBNAME = P_JOB
+AND STATUS <> 'A'
+AND STATUS <> 'F'.
+IF SY-SUBRC = 0.
+MESSAGE S400(Y1) WITH
+'同名ジョブは照合処理中です（ジョブ一覧参照）'.
+STOP.
+ENDIF.
+
+ENDFORM.                    " F_JOB_CHECK

@@ -1,0 +1,382 @@
+*&---------------------------------------------------------------------*
+*& Report  ZF_CORR_XLGCLR_BSEG
+*&
+*&---------------------------------------------------------------------*
+*& To correct the BSEG-XLGCLR field with the values in SKB1-XLGCLR
+*&             after implementing the note 1323960
+*&
+*& Change log:
+*& 16.06.2010: Check cleared BSEG for existing BSIS and delete BSIS
+*&             (error case when BSEG-XLGCLR was filled with '/' AFTER
+*&             the document was posted => no index update during
+*&             clearing)
+*&
+*& 02.09.2010: Included SY-SUBRC check
+*&
+*& 22.09.2010: For asset accounting recon account is checked
+*& 14.01.2011: Wrong SKB1-XLGCLR will be corrected as well
+*&
+*& 02.02.2011: New update form for SKB1 added to ensure that all
+*&             affected accounts will be updated, not only those with
+*&             inconsistent documents
+
+*& 04.09.2012: XLGCLR value in BSEG should be set to that in SKB1
+*&             for the account, missing value for some fields in index
+*&             update is filled.
+*& Can be found in E38
+*&---------------------------------------------------------------------*
+
+REPORT  zf_corr_xlgclr_bseg.
+
+*----------------------------------------------------------------------*
+*             DATA DECLARATION                                         *
+*----------------------------------------------------------------------*
+TABLES: bkpf.                                               "SKJ020910
+
+DATA: it_bkpf TYPE TABLE OF bkpf WITH HEADER LINE,
+it_bseg TYPE TABLE OF bseg WITH HEADER LINE,
+it_bseg1 TYPE TABLE OF bseg WITH HEADER LINE,
+it_skb1 TYPE TABLE OF skb1 WITH HEADER LINE.
+
+DATA: letter TYPE c,
+l_lines TYPE i,
+l_lines_1 TYPE i,
+count TYPE i.
+
+*----------------------------------------------------------------------*
+*             SELECTION-SCREEN                                         *
+*----------------------------------------------------------------------*
+
+SELECTION-SCREEN BEGIN OF BLOCK 001 WITH FRAME.
+
+SELECT-OPTIONS: s_belnr FOR bkpf-belnr,
+s_bukrs FOR bkpf-bukrs,
+s_gjahr FOR bkpf-gjahr.
+
+SELECTION-SCREEN END OF BLOCK 001.
+
+PARAMETERS : update AS CHECKBOX.
+
+*----------------------------------------------------------------------*
+*             START-OF-SELECTION                                       *
+*----------------------------------------------------------------------*
+
+IF update = 'X'.
+WRITE:/ 'Update RUN' COLOR 5 INTENSIFIED.
+ELSE.
+WRITE:/ 'Test RUN ' COLOR 3 INTENSIFIED.
+ENDIF.
+
+REFRESH:it_bseg,it_bkpf,it_skb1,it_bseg1.
+
+* DB020211: new update form
+PERFORM update_skb1.                                        "DB020211
+
+SELECT * FROM bseg INTO TABLE it_bseg
+WHERE bukrs IN s_bukrs
+AND belnr IN s_belnr
+AND gjahr IN s_gjahr
+AND xlgclr = '/'.
+
+IF sy-subrc = 0.                                            "SKJ020910
+DESCRIBE TABLE it_bseg LINES l_lines.
+
+*  WRITE:/ 'Lines seleted with BSEG-XLGCLR = / are:', l_lines.
+count = 0.
+it_bseg1[] = it_bseg[].
+
+SORT it_bseg1 BY bukrs belnr gjahr.
+DELETE ADJACENT DUPLICATES FROM it_bseg1 COMPARING bukrs belnr gjahr.
+
+SELECT * FROM bkpf INTO TABLE it_bkpf
+FOR ALL ENTRIES IN it_bseg1
+WHERE bukrs = it_bseg1-bukrs
+AND belnr = it_bseg1-belnr
+AND gjahr = it_bseg1-gjahr.
+
+IF sy-subrc = 0.
+SORT it_bkpf BY bukrs belnr gjahr.
+ENDIF.
+
+SELECT * FROM skb1 INTO TABLE it_skb1                     "DB020211
+WHERE bukrs IN s_bukrs.                         "DB020211
+*
+*   describe table it_skb1 lines l_lines_1.                 "DB020211
+*   write:/ 'Number of gl accounts in company codes','is', l_lines_1.
+
+*C--Loop on BSEG and get values from SKB1 to update BSEG
+LOOP AT it_bseg.
+
+AT NEW bukrs.
+count = 0.
+NEW-PAGE.
+WRITE:/'Lines items to be updated in BSEG in company code',
+it_bseg-bukrs, ':'.
+SKIP 1.
+FORMAT COLOR 1 ON.
+WRITE:/(6) 'BUKRS',
+(10) 'BELNR',
+(5) 'Year',
+(5) 'BUZEI',
+(10) 'Account',
+(11) 'SBK1-XLGCLR',
+(20) 'COMMENT'.
+FORMAT COLOR OFF.
+
+ENDAT.
+
+* begin of DB020211: SKB1-check needs to be done for ALL accounts
+READ TABLE it_skb1 WITH
+KEY bukrs = it_bseg-bukrs
+saknr = it_bseg-hkont.
+
+*begin of SKJ040912 : XLGCLR should be set based on the value in SKB1
+IF sy-subrc = 0.
+letter = it_skb1-xlgclr.
+*end of SKJ040912
+
+*      IF letter = '/'.
+* DB140111: change SKB1-XLGCLR in DB
+*      WRITE:/ 'Please implement the note 1323960 immediately' COLOR 6.
+*        EXIT.
+*       IF update = 'X'.
+*          CLEAR it_skb1-xlgclr.
+*          UPDATE skb1
+*          SET xlgclr = it_skb1-xlgclr
+*            WHERE bukrs = it_skb1-bukrs
+*            AND   saknr = it_skb1-saknr.
+*        ENDIF.
+* end of DB140111
+*      ENDIF.
+* end of DB020211
+
+WRITE:/(6) it_bseg-bukrs,
+(10) it_bseg-belnr,
+(5) it_bseg-gjahr,
+(5) it_bseg-buzei,
+(10) it_skb1-saknr,
+(11) letter.
+
+IF update = 'X'.
+UPDATE bseg SET: xlgclr = letter
+WHERE belnr = it_bseg-belnr
+AND bukrs = it_bseg-bukrs
+AND gjahr = it_bseg-gjahr
+AND buzei = it_bseg-buzei.
+IF sy-subrc = 0.
+PERFORM insert_index USING it_bseg.
+ENDIF.
+ENDIF.
+count = count + 1.
+
+* begin of SKJ040912
+ENDIF.
+* end of SKJ040912
+
+
+AT END OF bukrs.
+SKIP 1.
+IF update = 'X'.
+WRITE:/ 'The number of lines updated in BSEG are:',
+count COLOR 3.
+ELSE.
+WRITE:/ 'The number of lines that will',
+'be updated in BSEG are:', count COLOR 3.
+ENDIF.
+ENDAT.
+
+ENDLOOP.
+
+ELSE.                                                       "SKJ020910
+
+WRITE:/ 'No error documents found and no corrections',
+'required for the given selection criteria'.
+"SKJ020910
+
+ENDIF.                                                      "SKJ020910
+
+*&---------------------------------------------------------------------*
+*&      Form  INSERT_INDEX
+*&---------------------------------------------------------------------*
+*       To insert the secondary index table entries
+*----------------------------------------------------------------------*
+*  -->  LS_BSEG   BSEG  processing BSEG table entry
+*----------------------------------------------------------------------*
+FORM insert_index USING ls_bseg TYPE bseg.
+
+DATA:    ls_bsis TYPE bsis.
+DATA:    ls_bsis_check TYPE bsis.                         "DB160610
+
+
+CLEAR:it_bkpf.
+
+READ TABLE it_bkpf WITH KEY
+bukrs = ls_bseg-bukrs
+belnr = ls_bseg-belnr
+gjahr = ls_bseg-gjahr BINARY SEARCH.
+
+IF sy-subrc = 0.
+
+
+CASE ls_bseg-koart.
+WHEN 'K' OR 'D'.
+IF ls_bseg-augbl EQ space.
+*C--Insert corresponding recon account
+CHECK ( ls_bseg-xlgclr EQ ' ') .
+MOVE-CORRESPONDING it_bkpf TO ls_bsis.
+MOVE-CORRESPONDING ls_bseg TO ls_bsis.
+ls_bsis-zuonr = ls_bseg-hzuon.
+*begin of SKJ040912 : updation of missing fields
+ls_bsis-fkber = ls_bseg-fkber_long.
+CLEAR ls_bsis-xopvw.
+*end of SKJ040912
+INSERT bsis FROM ls_bsis.
+IF sy-subrc EQ 0.
+WRITE: 'BSIS inserted' COLOR 5.
+ENDIF.
+ELSE.
+*C--Insert corresponding recon account
+CHECK ls_bseg-xhres EQ 'X'.
+MOVE-CORRESPONDING it_bkpf TO ls_bsis.
+MOVE-CORRESPONDING ls_bseg TO ls_bsis.
+ls_bsis-zuonr = ls_bseg-hzuon.
+*begin of SKJ040912 : updation of missing fields
+ls_bsis-fkber = ls_bseg-fkber_long.
+CLEAR ls_bsis-xopvw.
+*end of SKJ040912
+INSERT bsas FROM ls_bsis.
+IF sy-subrc EQ 0.
+WRITE: 'BSAS inserted' COLOR 5.
+ENDIF.
+*Check for existing BSIS if BSEG is cleared                 "DB160610
+SELECT SINGLE * FROM bsis INTO ls_bsis_check      "DB160610
+WHERE bukrs EQ ls_bsis-bukrs AND                  "DB160610
+hkont EQ ls_bsis-hkont AND                  "DB160610
+gjahr EQ ls_bsis-gjahr AND                  "DB160610
+belnr EQ ls_bsis-belnr AND                  "DB160610
+buzei EQ ls_bsis-buzei.                     "DB160610
+*Delete BSIS                                                "DB160610
+IF sy-subrc = 0.                                  "DB160610
+DELETE bsis FROM ls_bsis_check.                 "DB160610
+IF sy-subrc EQ 0.                               "DB160610
+WRITE: 'DEL BSIS' COLOR 5.                    "DB160610
+ENDIF.                                          "DB160610
+ENDIF.                                            "DB160610
+ENDIF.
+
+WHEN 'S'.
+CHECK ls_bseg-xkres EQ 'X'.
+IF ls_bseg-augbl EQ space.
+MOVE-CORRESPONDING it_bkpf TO ls_bsis.
+MOVE-CORRESPONDING ls_bseg TO ls_bsis.
+*begin of SKJ040912 : updation of missing fields
+ls_bsis-fkber = ls_bseg-fkber_long.
+*end of SKJ040912
+INSERT bsis FROM ls_bsis.
+IF sy-subrc EQ 0.
+WRITE: 'BSIS inserted' COLOR 5.
+ENDIF.
+ELSE.
+MOVE-CORRESPONDING it_bkpf TO ls_bsis.
+MOVE-CORRESPONDING ls_bseg TO ls_bsis.
+*begin of SKJ040912 : updation of missing fields
+ls_bsis-fkber = ls_bseg-fkber_long.
+*end of SKJ040912
+INSERT bsas FROM ls_bsis.
+IF sy-subrc EQ 0.
+WRITE: 'BSAS inserted' COLOR 5.
+ENDIF.
+*Check for existing BSIS if BSEG is cleared                 "DB160610
+SELECT SINGLE * FROM bsis INTO ls_bsis_check      "DB160610
+WHERE bukrs EQ ls_bsis-bukrs AND                  "DB160610
+hkont EQ ls_bsis-hkont AND                  "DB160610
+gjahr EQ ls_bsis-gjahr AND                  "DB160610
+belnr EQ ls_bsis-belnr AND                  "DB160610
+buzei EQ ls_bsis-buzei.                     "DB160610
+*Delete BSIS                                                "DB160610
+IF sy-subrc = 0.                                  "DB160610
+DELETE bsis FROM ls_bsis_check.                 "DB160610
+IF sy-subrc EQ 0.                               "DB160610
+WRITE: 'DEL BSIS' COLOR 5.                    "DB160610
+ENDIF.                                          "DB160610
+ENDIF.                                            "DB160610
+
+ENDIF.
+
+*      WHEN 'M' OR 'A'.
+WHEN 'M'.                                             "SKJ220910
+CHECK ls_bseg-xkres EQ 'X'.
+MOVE-CORRESPONDING it_bkpf TO ls_bsis.
+MOVE-CORRESPONDING ls_bseg TO ls_bsis.
+*begin of SKJ040912 : updation of missing fields
+ls_bsis-fkber = ls_bseg-fkber_long.
+*end of SKJ040912
+INSERT bsis FROM ls_bsis.
+IF sy-subrc EQ 0.
+WRITE: 'BSIS inserted' COLOR 5.
+ENDIF.
+
+WHEN 'A'.                                             "SKJ220910
+CHECK ls_bseg-xhres EQ 'X'.                         "SKJ220910
+MOVE-CORRESPONDING it_bkpf TO ls_bsis.              "SKJ220910
+MOVE-CORRESPONDING ls_bseg TO ls_bsis.              "SKJ220910
+ls_bsis-zuonr = ls_bseg-hzuon.
+*begin of SKJ040912 : updation of missing fields
+ls_bsis-fkber = ls_bseg-fkber_long.
+*end of SKJ040912
+INSERT bsis FROM ls_bsis.                           "SKJ220910
+IF sy-subrc EQ 0.                                   "SKJ220910
+WRITE: 'BSIS inserted' COLOR 5.                   "SKJ220910
+ENDIF.                                              "SKJ220910
+
+WHEN OTHERS.
+ENDCASE.
+ENDIF.    "  IF SY-SUBRC = 0.
+ENDFORM.                    " INSERT_INDEX
+
+
+
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_SKB1
+*&---------------------------------------------------------------------*
+FORM update_skb1 .
+
+DATA: lt_skb1 TYPE TABLE OF skb1 WITH HEADER LINE.
+
+REFRESH lt_skb1.
+
+SELECT * FROM skb1 INTO TABLE lt_skb1
+WHERE bukrs IN s_bukrs
+AND   xlgclr = '/'.
+
+CHECK sy-subrc = 0.
+SKIP 2.
+WRITE:/ 'Affected GL account master entries to be changed:'.
+SKIP.
+FORMAT COLOR 1.
+WRITE:/(5) 'BUKRS',
+(10) 'SAKNR',
+(6) 'XLGCLR',
+(20) 'COMMENT'.
+FORMAT COLOR OFF.
+LOOP AT lt_skb1.
+WRITE:/(5) lt_skb1-bukrs,
+(10) lt_skb1-saknr,
+(6) lt_skb1-xlgclr.
+IF update = 'X'.
+CLEAR lt_skb1-xlgclr.
+UPDATE skb1
+SET xlgclr = lt_skb1-xlgclr
+WHERE bukrs = lt_skb1-bukrs
+AND   saknr = lt_skb1-saknr.
+IF sy-subrc = 0.
+WRITE: 'updated' COLOR 5.
+ENDIF.
+ENDIF.
+ENDLOOP.
+SKIP.
+NEW-LINE.
+ULINE (80).
+SKIP 2.
+
+ENDFORM.                    " UPDATE_SKB1

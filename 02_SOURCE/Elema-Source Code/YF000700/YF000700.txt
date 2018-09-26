@@ -1,0 +1,1498 @@
+REPORT YF000700 MESSAGE-ID Y1
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT  58(0).
+*----------------------------------------------------------------------*
+*     ﾌﾟﾛｸﾞﾗﾑID : YF000700                                             *
+*     ﾌﾟﾛｸﾞﾗﾑ名 : 比較貸借対照表作成                                   *
+*     処理種別  : バッチ(ABAP/4)                                       *
+*     処理概要  : 総勘定元帳ﾃｰﾌﾞﾙより，指定された年月のデータを抽出し  *
+*               : 勘定科目ごとに金額集計､構成比､増減費､前期比計算を    *
+*               : 行い､帳票を出力する。                                *
+*     入力      : 会計年度，会計期間，会社ｺｰﾄﾞ                         *
+*     出力      : 比較貸借対照表                                       *
+*     変更履歴  : 2000/06/06 k.kajisa(NDSC)                            *
+*               : 金額項目の値が零ならその明細は出力しない             *
+*               : 2000/06/15 k.kajisa(NDSC)                            *
+*               : パラメータの初期値をユーザ情報から取得               *
+*----------------------------------------------------------------------*
+
+*テーブル定義
+TABLES:SKC1A,                          "総勘定元帳
+T001,                           "会社コードマスタ
+YFA01,                          "貸借対照表CTLﾏｽﾀ
+YFA06.                          "勘定別集計先決定ﾃｰﾌﾞﾙ
+
+*内部テーブル定義
+DATA: BEGIN   OF       T_SKC1A OCCURS 100.     "総勘定元帳
+INCLUDE STRUCTURE  SKC1A.
+DATA: END     OF       T_SKC1A.
+
+DATA: BEGIN   OF       T_CYOHYO OCCURS 100.    "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA01.      "(貸借対照表)
+DATA: TOUKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "当期累計実績金額
+ZENKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "前期累計実績金額
+ZOUGEN(15)   TYPE P DECIMALS 2 VALUE 0,  "増減額
+HI1(06)      TYPE P DECIMALS 1 VALUE 0,  "当期構成比
+HI2(06)      TYPE P DECIMALS 1 VALUE 0,  "前期構成比
+*     ZENKIHI(07)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+ZENKIHI(15)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+END     OF       T_CYOHYO.
+
+DATA: BEGIN   OF       T_ZF210  OCCURS 100.    "集計先決定ﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA06.      "(貸借対照表)
+DATA: END     OF       T_ZF210.
+
+DATA: BEGIN   OF   T_SYUKEI       OCCURS 3,    "金額集計用ﾜｰｸﾃｰﾌﾞﾙ
+TOUKIZAN LIKE T_CYOHYO-TOUKIZAN, "当期累計実績金額
+ZENKIZAN LIKE T_CYOHYO-ZENKIZAN, "前期累計実績金額
+ZOUGEN   LIKE T_CYOHYO-ZOUGEN,   "増減額
+ZENKIHI  LIKE T_CYOHYO-ZENKIHI,  "前期比
+END     OF   T_SYUKEI.
+
+DATA: BEGIN OF     T_RIEKI,            "当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ
+TOUKIZAN LIKE T_CYOHYO-TOUKIZAN,
+ZENKIZAN LIKE T_CYOHYO-ZENKIZAN,
+END   OF     T_RIEKI.
+
+* 97/10/24 追加 **********
+DATA: BEGIN   OF       T_CYOHYOSV.     "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA01.      "(貸借対照表)
+DATA: TOUKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "当期累計実績金額
+ZENKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "前期累計実績金額
+ZOUGEN(15)   TYPE P DECIMALS 2 VALUE 0,  "増減額
+HI1(06)      TYPE P DECIMALS 1 VALUE 0,  "当期構成比
+HI2(06)      TYPE P DECIMALS 1 VALUE 0,  "前期構成比
+ZENKIHI(07)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+END     OF       T_CYOHYOSV.
+* 98/04/06 追加 **********
+DATA: BEGIN   OF       T_CYOHYOSV_A.   "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ 当年度
+INCLUDE STRUCTURE  YFA01.      "(貸借対照表)
+DATA: TOUKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "当期累計実績金額
+ZENKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "前期累計実績金額
+ZOUGEN(15)   TYPE P DECIMALS 2 VALUE 0,  "増減額
+HI1(06)      TYPE P DECIMALS 1 VALUE 0,  "当期構成比
+HI2(06)      TYPE P DECIMALS 1 VALUE 0,  "前期構成比
+ZENKIHI(07)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+END     OF       T_CYOHYOSV_A.
+**************************
+
+*パラメータ定義
+*2000/06/15 MOD START
+*parameters: p_bukrs(04),               "会社コード
+PARAMETERS: P_BUKRS(04) MEMORY ID BUK, "会社コード
+*2000/06/15 MOD END
+P_GJAHR(04)  TYPE N,       "会計年
+P_PERIO(02)  TYPE N,       "会計月
+P_NENJI AS CHECKBOX.       "年次用フラグ
+*2000/06/06 ADD START
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(13) TEXT-001.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_Z_OUT RADIOBUTTON GROUP GR02 DEFAULT 'X'."零表示FLG(ON)
+SELECTION-SCREEN COMMENT 37(04) TEXT-002.
+SELECTION-SCREEN POSITION 43.
+PARAMETERS: P_Z_OUT2 RADIOBUTTON GROUP GR02.
+SELECTION-SCREEN COMMENT 45(06) TEXT-003.
+SELECTION-SCREEN END   OF LINE.
+*2000/06/06 ADD END
+
+*作業用データ定義
+DATA: W_DATE        LIKE SY-DATUM,
+W_NEN_F       LIKE P_GJAHR,
+W_NEN_T       LIKE P_GJAHR,
+W_TUKI        LIKE P_PERIO,
+W_TUKI3(03)   TYPE N,
+W_BUNBO_D1    LIKE T_CYOHYO-TOUKIZAN,
+W_BUNBO_D2    LIKE T_CYOHYO-TOUKIZAN,
+W_BUNBO_C1    LIKE T_CYOHYO-TOUKIZAN,
+W_BUNBO_C2    LIKE T_CYOHYO-TOUKIZAN,
+W_KINGAKU     LIKE T_CYOHYO-TOUKIZAN,
+W_ZAN         LIKE T_CYOHYO-TOUKIZAN,
+W_HI          LIKE T_CYOHYO-HI1,
+W_FLG_OUT(01) TYPE C,
+W_FUGO        TYPE I,
+W_LOOP_D      TYPE I,
+W_LOOP_C      TYPE I,
+W_CTR         TYPE I  VALUE  0,
+W_CTR_LINE    TYPE I  VALUE 99,
+W_IDX         TYPE I,
+W_IDX_BUNBO_D TYPE I,
+W_IDX_BUNBO_C TYPE I,
+W_IDX_RIEKI   TYPE I,
+W_GJAHR(04)   TYPE N,
+W_PERIO(03)   TYPE N,
+W_SKIP-SW(01) TYPE C.            "98/08/03 改行用フラグ
+
+DATA: BEGIN OF EDT,                    "編集後フォーマット
+MINUS(1) TYPE C,                 "  符号
+HI(6)    TYPE C,                 "  金額
+END OF EDT.
+
+*2000/06/06 ADD START
+DATA : W_CNT           TYPE I."内部テーブル件数
+DATA : W_DC_FLG(1)     TYPE C."DC出力判定
+*2000/06/06 ADD END
+
+INCLUDE:YF01NUMC,                      "金額出力用編集ｻﾌﾞ
+YF01RNK2,                      "ランクごとの金額編集
+YF01SGET.                      "総勘定元帳月別ﾃﾞｰﾀ取込
+************************************************************************
+*  主処理                                                              *
+************************************************************************
+START-OF-SELECTION.
+
+PERFORM  READ_FILES.
+
+GET                 SKC1A.
+MOVE-CORRESPONDING  SKC1A TO T_SKC1A.
+APPEND                       T_SKC1A.
+
+END-OF-SELECTION.
+
+PERFORM  READ_SKC1A.                 "総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ
+PERFORM  SUMM_KINGAKU.               "金額集計処理
+* 97/10/24 追加 **********
+PERFORM  SAIKEI_RIEKI.               "再掲 当期利益
+**************************
+
+
+
+PERFORM  PRNT_LIST.                  "貸借対照表出力処理
+EXIT.
+*======================================================================*
+*  ファイルの読込み                                                    *
+*======================================================================*
+FORM READ_FILES.
+
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS       = P_BUKRS        .
+
+MOVE: P_GJAHR TO W_DATE(4),
+P_PERIO TO W_DATE+4(2),
+'01' TO W_DATE+6(2).
+
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = W_DATE
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = W_GJAHR
+E_POPER        = W_PERIO
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+ENDIF.
+
+CLEAR  : T_CYOHYO,T_SYUKEI,T_RIEKI.
+* 97/10/24 追加 **********
+CLEAR  : T_CYOHYOSV.
+* 98/04/06 追加 **********
+CLEAR  : T_CYOHYOSV_A.
+**************************
+REFRESH: T_CYOHYO,T_SYUKEI.
+*------------------------------------------出力CTLﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA01  INTO  T_CYOHYO.
+
+IF  SY-SUBRC  =  0.
+W_CTR  =  W_CTR  +  1.           "読込件数ｶｳﾝﾀ UP
+ELSE.
+EXIT.
+ENDIF.
+
+T_CYOHYO-TOUKIZAN = 0.             "金額項目ｸﾘｱ
+T_CYOHYO-TOUKIZAN = 0.
+T_CYOHYO-ZOUGEN   = 0.
+T_CYOHYO-HI1      = 0.
+T_CYOHYO-HI2      = 0.
+T_CYOHYO-ZENKIHI  = 0.
+
+APPEND  T_CYOHYO.
+
+CASE    T_CYOHYO-ZBPRKBN.
+WHEN  'B'.
+CASE    T_CYOHYO-ZBDCKBN.
+WHEN  'D'.
+W_IDX_BUNBO_D  =  W_CTR.   "構成比算出用
+WHEN  'C'.
+W_IDX_BUNBO_C  =  W_CTR.
+ENDCASE.
+WHEN  'R'.
+W_IDX_RIEKI  =  W_CTR.         "当期利益の位置取得
+ENDCASE.
+*
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+W_LOOP_D  =  W_CTR.              "借方終了位置取得(出力時使用)
+ENDIF.
+ENDSELECT.
+
+W_LOOP_C  =  W_LOOP_D  +  1.         "貸方終了位置取得(出力時使用)
+*------------------------------------------集計先決定ﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA06  APPENDING  TABLE  T_ZF210.
+
+IF  SY-SUBRC  NE  0.
+EXIT.
+ENDIF.
+*------------------------------------------集計ﾃｰﾌﾞﾙ
+DO  9  TIMES.
+APPEND  T_SYUKEI.
+ENDDO.
+
+ENDFORM.
+*======================================================================*
+*  総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ・当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ              *
+*======================================================================*
+FORM READ_SKC1A.
+
+LOOP AT T_SKC1A.                     "総勘定元帳読込み
+LOOP AT T_ZF210 WHERE HKONT   =  T_SKC1A-SAKNR
+AND ZBBSKEY <>  ''.
+
+PERFORM  ZIMD0016.               "総勘定元帳の対象月データ取得
+PERFORM  SUM_T_RIEKI.            "当期利益計算用金額集計
+PERFORM  SUM_TUKI_DATA.          "対象月の金額集計
+ENDLOOP.
+ENDLOOP.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ金額集計                                      *
+*----------------------------------------------------------------------*
+FORM SUM_T_RIEKI.
+
+IF T_SKC1A-GJAHR = W_GJAHR.
+T_RIEKI-TOUKIZAN = T_RIEKI-TOUKIZAN + ZI16-TOUZAN.
+ELSE.
+T_RIEKI-ZENKIZAN = T_RIEKI-ZENKIZAN + ZI16-TOUZAN.
+ENDIF.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  帳票出力用ﾜｰｸﾃｰﾌﾞﾙ金額集計                                          *
+*----------------------------------------------------------------------*
+FORM SUM_TUKI_DATA.
+
+READ  TABLE T_CYOHYO  INDEX  T_ZF210-ZBBSSEQ.
+
+IF T_SKC1A-GJAHR = W_GJAHR.
+T_CYOHYO-TOUKIZAN = T_CYOHYO-TOUKIZAN + ZI16-TOUZAN.
+ELSE.
+T_CYOHYO-ZENKIZAN = T_CYOHYO-ZENKIZAN + ZI16-TOUZAN.
+ENDIF.
+
+T_CYOHYO-ZOUGEN   = T_CYOHYO-TOUKIZAN - T_CYOHYO-ZENKIZAN.
+
+IF T_CYOHYO-ZENKIZAN = 0.
+T_CYOHYO-ZENKIHI  = 0.
+ELSE.
+T_CYOHYO-ZENKIHI  = T_CYOHYO-TOUKIZAN / T_CYOHYO-ZENKIZAN * 100.
+ENDIF.
+
+MODIFY      T_CYOHYO  INDEX  T_ZF210-ZBBSSEQ.
+
+ENDFORM.
+*======================================================================*
+*  金額集計処理                                                        *
+*======================================================================*
+FORM SUMM_KINGAKU.
+*- - - - - - - - - - - - - - - - - - - - - "当期利益(損失)の金額設定
+READ  TABLE T_CYOHYO  INDEX  W_IDX_RIEKI.
+
+T_RIEKI-TOUKIZAN = T_RIEKI-TOUKIZAN * -1.
+T_RIEKI-ZENKIZAN = T_RIEKI-ZENKIZAN * -1.
+
+T_CYOHYO-ZOUGEN  = T_RIEKI-TOUKIZAN - T_RIEKI-ZENKIZAN.
+
+IF T_RIEKI-ZENKIZAN = 0.
+T_CYOHYO-ZENKIHI = 0.
+ELSE.
+T_CYOHYO-ZENKIHI = T_RIEKI-TOUKIZAN / T_RIEKI-ZENKIZAN * 100.
+ENDIF.
+
+T_CYOHYO-TOUKIZAN = T_RIEKI-TOUKIZAN.
+T_CYOHYO-ZENKIZAN = T_RIEKI-ZENKIZAN.
+
+MODIFY      T_CYOHYO  INDEX  W_IDX_RIEKI.
+*- - - - - - - - - - - - - - - - - - - - - "ランクごとの金額集計
+PERFORM  ZIMD0014.
+*- - - - - - - - - - - - - - - - - - - - - "構成比計算
+PERFORM  KEIS_KOSEIHI.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  構成比計算                                                          *
+*----------------------------------------------------------------------*
+FORM KEIS_KOSEIHI.
+*                                          "構成比計算用分母取得(借方)
+READ  TABLE T_CYOHYO  INDEX  W_IDX_BUNBO_D.
+
+W_BUNBO_D1  =  T_CYOHYO-TOUKIZAN.
+W_BUNBO_D2  =  T_CYOHYO-ZENKIZAN.
+*                                          "構成比計算用分母取得(貸方）
+READ  TABLE T_CYOHYO  INDEX  W_IDX_BUNBO_C.
+
+W_BUNBO_C1  =  T_CYOHYO-TOUKIZAN.
+W_BUNBO_C2  =  T_CYOHYO-ZENKIZAN.
+*
+LOOP AT T_CYOHYO.
+*                                          "構成比計算
+CASE    T_CYOHYO-ZBDCKBN.
+WHEN  'D'.
+IF  W_BUNBO_D1  <>  0.
+T_CYOHYO-HI1  =  T_CYOHYO-TOUKIZAN /  W_BUNBO_D1  *  100.
+ELSE.
+T_CYOHYO-HI1  =  0.
+ENDIF.
+IF  W_BUNBO_D2  <>  0.
+T_CYOHYO-HI2  =  T_CYOHYO-ZENKIZAN /  W_BUNBO_D2  *  100.
+ELSE.
+T_CYOHYO-HI2  =  0.
+ENDIF.
+WHEN  'C'.
+IF  W_BUNBO_C1  <>  0.
+T_CYOHYO-HI1  =  T_CYOHYO-TOUKIZAN  /  W_BUNBO_C1  *  100.
+ELSE.
+T_CYOHYO-HI1  =  0.
+ENDIF.
+IF  W_BUNBO_C2  <>  0.
+T_CYOHYO-HI2  =  T_CYOHYO-ZENKIZAN  /  W_BUNBO_C2  *  100.
+ELSE.
+T_CYOHYO-HI2  =  0.
+ENDIF.
+ENDCASE.
+
+* 97/10/24 追加 **********
+IF T_CYOHYO-ZBPRKBN = 'R'.
+MOVE-CORRESPONDING T_CYOHYO TO T_CYOHYOSV.
+ENDIF.
+* 98/04/06 追加 **********
+IF T_CYOHYO-ZBPRKBN = 'A'.
+MOVE-CORRESPONDING T_CYOHYO TO T_CYOHYOSV_A.
+ENDIF.
+**************************
+
+MODIFY      T_CYOHYO  INDEX  SY-TABIX.
+ENDLOOP.
+
+ENDFORM.
+*======================================================================*
+*  貸借対照表出力処理                                                  *
+*======================================================================*
+FORM PRNT_LIST.
+*                                          "見出し編集
+PERFORM EDT_HEADER.
+*
+*2000/06/06 ADD START
+DESCRIBE TABLE T_CYOHYO LINES W_CNT.     "内部テーブル件数取得
+*2000/06/06 ADD END
+*                                          "出力コントロール
+LOOP AT T_CYOHYO  FROM  1  TO  W_LOOP_D.
+*2000/06/06 ADD START
+W_DC_FLG = 'X'.                        "正常出力
+*2000/06/06 ADD END
+W_FLG_OUT  =  '0'.
+
+IF  W_CTR_LINE  >=  58.
+NEW-PAGE.
+PERFORM  OUT_HEADER.             "見出し出力
+W_CTR_LINE  =  8.
+ENDIF.
+
+IF  T_CYOHYO-ZBPRKBN  <>  'D'.
+PERFORM  OUT_DETAIL.             "明細出力(借方)
+W_FLG_OUT  =  '1'.
+IF  T_CYOHYO-ZBLSNM  = '△                  '.  "98/08/03
+W_SKIP-SW        = '1'.        "98/08/03
+ELSE.                            "98/08/03
+W_SKIP-SW        = '0'.        "98/08/03
+ENDIF.                           "98/08/03
+ENDIF.
+*2000/06/06 MOD START
+*    read  table t_cyohyo  index  w_loop_c.
+IF P_Z_OUT = 'X'.                 "金額ゼロ出力ＯＮ
+READ  TABLE T_CYOHYO  INDEX  W_LOOP_C.
+ELSE.                             "金額ゼロ出力ＯＦＦ
+DO.
+READ  TABLE T_CYOHYO  INDEX  W_LOOP_C."金額がゼロ以外のc方の取得
+IF T_CYOHYO-TOUKIZAN = 0.
+IF  T_CYOHYO-ZBLSNM = '--------------------'
+OR  T_CYOHYO-ZBLSNM  = '===================='.
+IF W_DC_FLG  = 'X'.
+W_LOOP_C = W_LOOP_C + 1.
+ENDIF.
+EXIT.
+ENDIF.
+IF  W_LOOP_C > W_CNT.
+EXIT.                   "C方全件出力完了
+ENDIF.
+W_LOOP_C = W_LOOP_C + 1.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+ENDIF.
+*2000/06/06 MOD END
+
+IF  T_CYOHYO-ZBDCKBN  =   'C'      "明細出力(貸方)
+AND T_CYOHYO-ZBPRKBN  <>  'D'.
+*2000/06/06 MOD START
+*      perform  out_detail.
+IF P_Z_OUT = 'X'.                "金額ゼロ出力ＯＮ
+PERFORM  OUT_DETAIL.
+ELSEIF W_DC_FLG = 'X'.           "D方金額がゼロの時、非出力
+PERFORM  OUT_DETAIL.
+ENDIF.
+*2000/06/06 MOD END
+W_FLG_OUT  =  '1'.
+IF  T_CYOHYO-ZBLSNM  = '△                  '   "98/08/03
+AND W_SKIP-SW        = '1'.      "98/08/03
+SKIP.                          "98/08/03
+ENDIF.                           "98/08/03
+ENDIF.
+
+IF  W_FLG_OUT  =  '1'.
+W_CTR_LINE  =  W_CTR_LINE  +  1. "明細行カウントＵＰ
+ENDIF.
+*2000/06/06 MOD START
+*   w_loop_c  =  w_loop_c  +  1.       "貸方行カウントＵＰ
+IF P_Z_OUT = 'X'.                    "金額ゼロ出力ＯＮ
+W_LOOP_C  =  W_LOOP_C  +  1.       "貸方行カウントＵＰ
+ENDIF.
+*2000/06/06 MOD END
+ENDLOOP.
+
+*2000/06/06 ADD START
+IF P_Z_OUT <> 'X'.                   "金額ゼロ出力ＯＦＦ
+W_DC_FLG = 'E'.                    "C項目残明細出力
+DO.
+READ  TABLE T_CYOHYO  INDEX  W_LOOP_C.
+IF  W_LOOP_C > W_CNT.
+EXIT.
+ELSEIF T_CYOHYO-TOUKIZAN <> 0
+OR  T_CYOHYO-ZBLSNM = '--------------------'
+OR  T_CYOHYO-ZBLSNM = '===================='.
+PERFORM  OUT_DETAIL.
+ENDIF.
+W_LOOP_C = W_LOOP_C + 1.
+ENDDO.
+ENDIF.
+*2000/06/06 ADD END
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し編集処理                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_HEADER.
+*                                          "対象年月編集
+* IF  P_PERIO >=  4.
+*   W_NEN_F   =  P_GJAHR.
+*   W_TUKI    =  P_PERIO - 3.
+* ELSE.
+*   W_NEN_F   =  P_GJAHR - 1.
+*   W_TUKI    =  P_PERIO + 9.
+* ENDIF.
+
+W_NEN_F   =  W_GJAHR.
+W_NEN_T   =  P_GJAHR.
+W_TUKI3   =  W_PERIO.
+*                                          "月末日取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = W_GJAHR
+I_PERIV        = T001-PERIV
+I_POPER        = W_PERIO
+IMPORTING
+E_DATE         = W_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF  SY-SUBRC  >  0.
+MESSAGE A001  WITH  'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+ENDIF.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し出力処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_HEADER.
+*                                          "見出し編集
+WRITE: 164 SY-PAGNO , 160 'ﾍﾟｰｼﾞ '.
+WRITE: /011 W_NEN_F,
+015 '年度',
+073 '比  較  貸  借  対  照  表',
+138 '作成年月日',
+148 SY-DATUM(4),
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+164 SY-UZEIT(2),
+166 ':',
+167 SY-UZEIT+2(2).
+WRITE: /072 '============================',
+162 '単位:円'.
+WRITE: /077 '(',
+078 W_NEN_T,
+082 '年',
+084 P_PERIO NO-ZERO,
+086 '月',
+088 W_DATE+6(2) NO-ZERO,
+090 '日現在)'.
+SKIP.
+WRITE: /007 '科    目',
+022 '当 期 累 計 実 績 (A)前 期 累 計 実 績 (B)',
+065 '(A)-(B)',
+076 '(A)/(B)',
+107 '当 期 累 計 実 績 (A)前 期 累 計 実 績 (B)',
+150 '(A)-(B)',
+161 '(A)/(B)'.
+WRITE: /026 '金  額',
+036 '構成比',
+046 '金  額',
+056 '構成比',
+066 '増 減 額',
+076 '前期比',
+111 '金  額',
+121 '構成比',
+131 '金  額',
+141 '構成比',
+151 '増 減 額',
+161 '前期比'.
+* WRITE: /001 TEXT-L01,                "単線出力
+*         086 TEXT-L01.
+ULINE /001(170).                     "単線出力
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細出力処理                                                        *
+*----------------------------------------------------------------------*
+FORM OUT_DETAIL.
+*                                          "見出し編集
+CASE    T_CYOHYO-ZBLSNM.
+WHEN  '△                  '.
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE: /001 TEXT-B01.          "ブランク(ダミー)
+ELSE.
+WRITE:  086 TEXT-B01.
+ENDIF.
+WHEN  '--------------------'.
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+ULINE /001(85).                "単線出力
+ELSE.
+ULINE 086(85).
+ENDIF.
+WHEN  '===================='.
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE: /001 '==============================',  "二重線出力
+031 '==============================',
+061 '========================='.
+ELSE.
+WRITE:  086 '==============================',  "二重線出力
+116 '==============================',
+146 '========================='.
+ENDIF.
+WHEN OTHERS.
+*2000/06/06 ADD START
+IF P_Z_OUT <> 'X'.
+IF  T_CYOHYO-ZBDCKBN  =   'C'      "明細出力(貸方)
+AND T_CYOHYO-ZBPRKBN  <>  'D'.
+W_LOOP_C = W_LOOP_C + 1.
+ENDIF.
+IF T_CYOHYO-TOUKIZAN = 0.
+W_DC_FLG = ''.
+W_CTR_LINE  =  W_CTR_LINE  - 1.
+ENDIF.
+CHECK T_CYOHYO-TOUKIZAN <> 0."金額がゼロ以外の明細のみ出力
+ENDIF.
+*2000/06/06 ADD END
+IF  T_CYOHYO-ZBDCKBN  =  'D'.    "勘定科目名称
+WRITE: /001  T_CYOHYO-ZBLSNM.
+ELSE.
+*2000/06/06 MOD START
+*        write:  086  t_cyohyo-zblsnm.
+IF P_Z_OUT = 'X' OR W_DC_FLG <> 'E'.
+WRITE:  086  T_CYOHYO-ZBLSNM.
+ELSEIF W_DC_FLG = 'E'.
+WRITE:  /086  T_CYOHYO-ZBLSNM.
+ENDIF.
+*2000/06/06 MOD END
+ENDIF.
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+W_FUGO  =  1.
+ELSE.
+W_FUGO  =  -1.
+ENDIF.
+
+W_KINGAKU  =  T_CYOHYO-TOUKIZAN  *  W_FUGO * 100.
+PERFORM YF01NUMC USING W_KINGAKU 13 0."当期累計実績金額
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  022  O_NUM USING EDIT MASK 'RR_____________'.
+ELSE.
+WRITE:  107  O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+
+PERFORM EDT_KOSEIHI1.            "当期構成比
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  036  EDT USING EDIT MASK 'RR_____'.
+ELSE.
+WRITE:  121  EDT USING EDIT MASK 'RR_____'.
+ENDIF.
+
+W_KINGAKU  =  T_CYOHYO-ZENKIZAN  *  W_FUGO * 100.
+PERFORM YF01NUMC USING W_KINGAKU 13 0."前期累計実績金額
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  042  O_NUM USING EDIT MASK 'RR_____________'.
+ELSE.
+WRITE:  127  O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+
+PERFORM EDT_KOSEIHI2.            "前期構成比
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  056  EDT USING EDIT MASK 'RR_____'.
+ELSE.
+WRITE:  141  EDT USING EDIT MASK 'RR_____'.
+ENDIF.
+
+W_KINGAKU  =  T_CYOHYO-ZOUGEN  *  W_FUGO * 100.
+PERFORM YF01NUMC USING W_KINGAKU 13 0."増減額
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  062  O_NUM USING EDIT MASK 'RR_____________'.
+ELSE.
+WRITE:  147  O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+
+PERFORM YF01NUMC USING T_CYOHYO-ZENKIHI 5 1.
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  076  O_NUM USING EDIT MASK 'RR_______'.
+ELSE.
+WRITE:  161  O_NUM USING EDIT MASK 'RR_______'.
+ENDIF.
+
+ENDCASE.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  当期構成比編集                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_KOSEIHI1.
+
+IF T_CYOHYO-HI1  <  0.               "負の値の場合
+EDT-MINUS  =  '-'.                 "  -セット
+W_HI     =  T_CYOHYO-HI1  *  -1.   "　絶対値セット
+EDT-HI     =         W_HI.
+ELSE.                                "正の値の場合
+EDT-MINUS  =  ''.
+EDT-HI     =  T_CYOHYO-HI1.
+ENDIF.
+
+CONDENSE  EDT  NO-GAPS.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  前期構成比編集                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_KOSEIHI2.
+
+IF T_CYOHYO-HI2  <  0.               "負の値の場合
+EDT-MINUS  =  '-'.                 "  -セット
+W_HI     =  T_CYOHYO-HI2  *  -1.   "　絶対値セット
+EDT-HI     =         W_HI.
+ELSE.                                "正の値の場合
+EDT-MINUS  =  ''.
+EDT-HI     =  T_CYOHYO-HI2.
+ENDIF.
+
+CONDENSE  EDT  NO-GAPS.
+
+ENDFORM.
+
+* 97/10/24 追加 **********
+*----------------------------------------------------------------------*
+*  再掲 当期利益 編集                                                  *
+*----------------------------------------------------------------------*
+FORM SAIKEI_RIEKI.
+
+LOOP AT T_CYOHYO
+WHERE ZBPRKBN = 'R'
+OR ZBPRKBN = 'A'.            "98/04/06 条件追加
+
+T_CYOHYO-TOUKIZAN = T_CYOHYOSV-TOUKIZAN + T_CYOHYOSV_A-TOUKIZAN.
+T_CYOHYO-ZENKIZAN = T_CYOHYOSV-ZENKIZAN + T_CYOHYOSV_A-ZENKIZAN.
+T_CYOHYO-ZOUGEN   = T_CYOHYOSV-ZOUGEN   + T_CYOHYOSV_A-ZOUGEN.
+T_CYOHYO-HI1      = T_CYOHYOSV-HI1      + T_CYOHYOSV_A-HI1.
+T_CYOHYO-HI2      = T_CYOHYOSV-HI2      + T_CYOHYOSV_A-HI2.
+T_CYOHYO-ZENKIHI  = T_CYOHYOSV-ZENKIHI  + T_CYOHYOSV_A-ZENKIHI.
+
+MODIFY T_CYOHYO  INDEX  SY-TABIX.
+
+ENDLOOP.
+
+ENDFORM.
+**************************
+REPORT YF000700 MESSAGE-ID Y1
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT  58(0).
+*----------------------------------------------------------------------*
+*     ﾌﾟﾛｸﾞﾗﾑID : YF000700                                             *
+*     ﾌﾟﾛｸﾞﾗﾑ名 : 比較貸借対照表作成                                   *
+*     処理種別  : バッチ(ABAP/4)                                       *
+*     処理概要  : 総勘定元帳ﾃｰﾌﾞﾙより，指定された年月のデータを抽出し  *
+*               : 勘定科目ごとに金額集計､構成比､増減費､前期比計算を    *
+*               : 行い､帳票を出力する。                                *
+*     入力      : 会計年度，会計期間，会社ｺｰﾄﾞ                         *
+*     出力      : 比較貸借対照表                                       *
+*     変更履歴  : 2000/06/06 k.kajisa(NDSC)                            *
+*               : 金額項目の値が零ならその明細は出力しない             *
+*               : 2000/06/15 k.kajisa(NDSC)                            *
+*               : パラメータの初期値をユーザ情報から取得               *
+*----------------------------------------------------------------------*
+
+*テーブル定義
+TABLES:SKC1A,                          "総勘定元帳
+T001,                           "会社コードマスタ
+YFA01,                          "貸借対照表CTLﾏｽﾀ
+YFA06.                          "勘定別集計先決定ﾃｰﾌﾞﾙ
+
+*内部テーブル定義
+DATA: BEGIN   OF       T_SKC1A OCCURS 100.     "総勘定元帳
+INCLUDE STRUCTURE  SKC1A.
+DATA: END     OF       T_SKC1A.
+
+DATA: BEGIN   OF       T_CYOHYO OCCURS 100.    "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA01.      "(貸借対照表)
+DATA: TOUKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "当期累計実績金額
+ZENKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "前期累計実績金額
+ZOUGEN(15)   TYPE P DECIMALS 2 VALUE 0,  "増減額
+HI1(06)      TYPE P DECIMALS 1 VALUE 0,  "当期構成比
+HI2(06)      TYPE P DECIMALS 1 VALUE 0,  "前期構成比
+*     ZENKIHI(07)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+ZENKIHI(15)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+END     OF       T_CYOHYO.
+
+DATA: BEGIN   OF       T_ZF210  OCCURS 100.    "集計先決定ﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA06.      "(貸借対照表)
+DATA: END     OF       T_ZF210.
+
+DATA: BEGIN   OF   T_SYUKEI       OCCURS 3,    "金額集計用ﾜｰｸﾃｰﾌﾞﾙ
+TOUKIZAN LIKE T_CYOHYO-TOUKIZAN, "当期累計実績金額
+ZENKIZAN LIKE T_CYOHYO-ZENKIZAN, "前期累計実績金額
+ZOUGEN   LIKE T_CYOHYO-ZOUGEN,   "増減額
+ZENKIHI  LIKE T_CYOHYO-ZENKIHI,  "前期比
+END     OF   T_SYUKEI.
+
+DATA: BEGIN OF     T_RIEKI,            "当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ
+TOUKIZAN LIKE T_CYOHYO-TOUKIZAN,
+ZENKIZAN LIKE T_CYOHYO-ZENKIZAN,
+END   OF     T_RIEKI.
+
+* 97/10/24 追加 **********
+DATA: BEGIN   OF       T_CYOHYOSV.     "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA01.      "(貸借対照表)
+DATA: TOUKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "当期累計実績金額
+ZENKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "前期累計実績金額
+ZOUGEN(15)   TYPE P DECIMALS 2 VALUE 0,  "増減額
+HI1(06)      TYPE P DECIMALS 1 VALUE 0,  "当期構成比
+HI2(06)      TYPE P DECIMALS 1 VALUE 0,  "前期構成比
+ZENKIHI(07)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+END     OF       T_CYOHYOSV.
+* 98/04/06 追加 **********
+DATA: BEGIN   OF       T_CYOHYOSV_A.   "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ 当年度
+INCLUDE STRUCTURE  YFA01.      "(貸借対照表)
+DATA: TOUKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "当期累計実績金額
+ZENKIZAN(15) TYPE P DECIMALS 2 VALUE 0,  "前期累計実績金額
+ZOUGEN(15)   TYPE P DECIMALS 2 VALUE 0,  "増減額
+HI1(06)      TYPE P DECIMALS 1 VALUE 0,  "当期構成比
+HI2(06)      TYPE P DECIMALS 1 VALUE 0,  "前期構成比
+ZENKIHI(07)  TYPE P DECIMALS 1 VALUE 0,  "前期比
+END     OF       T_CYOHYOSV_A.
+**************************
+
+*パラメータ定義
+*2000/06/15 MOD START
+*parameters: p_bukrs(04),               "会社コード
+PARAMETERS: P_BUKRS(04) MEMORY ID BUK, "会社コード
+*2000/06/15 MOD END
+P_GJAHR(04)  TYPE N,       "会計年
+P_PERIO(02)  TYPE N,       "会計月
+P_NENJI AS CHECKBOX.       "年次用フラグ
+*2000/06/06 ADD START
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(13) TEXT-001.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_Z_OUT RADIOBUTTON GROUP GR02 DEFAULT 'X'."零表示FLG(ON)
+SELECTION-SCREEN COMMENT 37(04) TEXT-002.
+SELECTION-SCREEN POSITION 43.
+PARAMETERS: P_Z_OUT2 RADIOBUTTON GROUP GR02.
+SELECTION-SCREEN COMMENT 45(06) TEXT-003.
+SELECTION-SCREEN END   OF LINE.
+*2000/06/06 ADD END
+
+*作業用データ定義
+DATA: W_DATE        LIKE SY-DATUM,
+W_NEN_F       LIKE P_GJAHR,
+W_NEN_T       LIKE P_GJAHR,
+W_TUKI        LIKE P_PERIO,
+W_TUKI3(03)   TYPE N,
+W_BUNBO_D1    LIKE T_CYOHYO-TOUKIZAN,
+W_BUNBO_D2    LIKE T_CYOHYO-TOUKIZAN,
+W_BUNBO_C1    LIKE T_CYOHYO-TOUKIZAN,
+W_BUNBO_C2    LIKE T_CYOHYO-TOUKIZAN,
+W_KINGAKU     LIKE T_CYOHYO-TOUKIZAN,
+W_ZAN         LIKE T_CYOHYO-TOUKIZAN,
+W_HI          LIKE T_CYOHYO-HI1,
+W_FLG_OUT(01) TYPE C,
+W_FUGO        TYPE I,
+W_LOOP_D      TYPE I,
+W_LOOP_C      TYPE I,
+W_CTR         TYPE I  VALUE  0,
+W_CTR_LINE    TYPE I  VALUE 99,
+W_IDX         TYPE I,
+W_IDX_BUNBO_D TYPE I,
+W_IDX_BUNBO_C TYPE I,
+W_IDX_RIEKI   TYPE I,
+W_GJAHR(04)   TYPE N,
+W_PERIO(03)   TYPE N,
+W_SKIP-SW(01) TYPE C.            "98/08/03 改行用フラグ
+
+DATA: BEGIN OF EDT,                    "編集後フォーマット
+MINUS(1) TYPE C,                 "  符号
+HI(6)    TYPE C,                 "  金額
+END OF EDT.
+
+*2000/06/06 ADD START
+DATA : W_CNT           TYPE I."内部テーブル件数
+DATA : W_DC_FLG(1)     TYPE C."DC出力判定
+*2000/06/06 ADD END
+
+INCLUDE:YF01NUMC,                      "金額出力用編集ｻﾌﾞ
+YF01RNK2,                      "ランクごとの金額編集
+YF01SGET.                      "総勘定元帳月別ﾃﾞｰﾀ取込
+************************************************************************
+*  主処理                                                              *
+************************************************************************
+START-OF-SELECTION.
+
+PERFORM  READ_FILES.
+
+GET                 SKC1A.
+MOVE-CORRESPONDING  SKC1A TO T_SKC1A.
+APPEND                       T_SKC1A.
+
+END-OF-SELECTION.
+
+PERFORM  READ_SKC1A.                 "総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ
+PERFORM  SUMM_KINGAKU.               "金額集計処理
+* 97/10/24 追加 **********
+PERFORM  SAIKEI_RIEKI.               "再掲 当期利益
+**************************
+
+
+
+PERFORM  PRNT_LIST.                  "貸借対照表出力処理
+EXIT.
+*======================================================================*
+*  ファイルの読込み                                                    *
+*======================================================================*
+FORM READ_FILES.
+
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS       = P_BUKRS        .
+
+MOVE: P_GJAHR TO W_DATE(4),
+P_PERIO TO W_DATE+4(2),
+'01' TO W_DATE+6(2).
+
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = W_DATE
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = W_GJAHR
+E_POPER        = W_PERIO
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+ENDIF.
+
+CLEAR  : T_CYOHYO,T_SYUKEI,T_RIEKI.
+* 97/10/24 追加 **********
+CLEAR  : T_CYOHYOSV.
+* 98/04/06 追加 **********
+CLEAR  : T_CYOHYOSV_A.
+**************************
+REFRESH: T_CYOHYO,T_SYUKEI.
+*------------------------------------------出力CTLﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA01  INTO  T_CYOHYO.
+
+IF  SY-SUBRC  =  0.
+W_CTR  =  W_CTR  +  1.           "読込件数ｶｳﾝﾀ UP
+ELSE.
+EXIT.
+ENDIF.
+
+T_CYOHYO-TOUKIZAN = 0.             "金額項目ｸﾘｱ
+T_CYOHYO-TOUKIZAN = 0.
+T_CYOHYO-ZOUGEN   = 0.
+T_CYOHYO-HI1      = 0.
+T_CYOHYO-HI2      = 0.
+T_CYOHYO-ZENKIHI  = 0.
+
+APPEND  T_CYOHYO.
+
+CASE    T_CYOHYO-ZBPRKBN.
+WHEN  'B'.
+CASE    T_CYOHYO-ZBDCKBN.
+WHEN  'D'.
+W_IDX_BUNBO_D  =  W_CTR.   "構成比算出用
+WHEN  'C'.
+W_IDX_BUNBO_C  =  W_CTR.
+ENDCASE.
+WHEN  'R'.
+W_IDX_RIEKI  =  W_CTR.         "当期利益の位置取得
+ENDCASE.
+*
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+W_LOOP_D  =  W_CTR.              "借方終了位置取得(出力時使用)
+ENDIF.
+ENDSELECT.
+
+W_LOOP_C  =  W_LOOP_D  +  1.         "貸方終了位置取得(出力時使用)
+*------------------------------------------集計先決定ﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA06  APPENDING  TABLE  T_ZF210.
+
+IF  SY-SUBRC  NE  0.
+EXIT.
+ENDIF.
+*------------------------------------------集計ﾃｰﾌﾞﾙ
+DO  9  TIMES.
+APPEND  T_SYUKEI.
+ENDDO.
+
+ENDFORM.
+*======================================================================*
+*  総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ・当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ              *
+*======================================================================*
+FORM READ_SKC1A.
+
+LOOP AT T_SKC1A.                     "総勘定元帳読込み
+LOOP AT T_ZF210 WHERE HKONT   =  T_SKC1A-SAKNR
+AND ZBBSKEY <>  ''.
+
+PERFORM  ZIMD0016.               "総勘定元帳の対象月データ取得
+PERFORM  SUM_T_RIEKI.            "当期利益計算用金額集計
+PERFORM  SUM_TUKI_DATA.          "対象月の金額集計
+ENDLOOP.
+ENDLOOP.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ金額集計                                      *
+*----------------------------------------------------------------------*
+FORM SUM_T_RIEKI.
+
+IF T_SKC1A-GJAHR = W_GJAHR.
+T_RIEKI-TOUKIZAN = T_RIEKI-TOUKIZAN + ZI16-TOUZAN.
+ELSE.
+T_RIEKI-ZENKIZAN = T_RIEKI-ZENKIZAN + ZI16-TOUZAN.
+ENDIF.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  帳票出力用ﾜｰｸﾃｰﾌﾞﾙ金額集計                                          *
+*----------------------------------------------------------------------*
+FORM SUM_TUKI_DATA.
+
+READ  TABLE T_CYOHYO  INDEX  T_ZF210-ZBBSSEQ.
+
+IF T_SKC1A-GJAHR = W_GJAHR.
+T_CYOHYO-TOUKIZAN = T_CYOHYO-TOUKIZAN + ZI16-TOUZAN.
+ELSE.
+T_CYOHYO-ZENKIZAN = T_CYOHYO-ZENKIZAN + ZI16-TOUZAN.
+ENDIF.
+
+T_CYOHYO-ZOUGEN   = T_CYOHYO-TOUKIZAN - T_CYOHYO-ZENKIZAN.
+
+IF T_CYOHYO-ZENKIZAN = 0.
+T_CYOHYO-ZENKIHI  = 0.
+ELSE.
+T_CYOHYO-ZENKIHI  = T_CYOHYO-TOUKIZAN / T_CYOHYO-ZENKIZAN * 100.
+ENDIF.
+
+MODIFY      T_CYOHYO  INDEX  T_ZF210-ZBBSSEQ.
+
+ENDFORM.
+*======================================================================*
+*  金額集計処理                                                        *
+*======================================================================*
+FORM SUMM_KINGAKU.
+*- - - - - - - - - - - - - - - - - - - - - "当期利益(損失)の金額設定
+READ  TABLE T_CYOHYO  INDEX  W_IDX_RIEKI.
+
+T_RIEKI-TOUKIZAN = T_RIEKI-TOUKIZAN * -1.
+T_RIEKI-ZENKIZAN = T_RIEKI-ZENKIZAN * -1.
+
+T_CYOHYO-ZOUGEN  = T_RIEKI-TOUKIZAN - T_RIEKI-ZENKIZAN.
+
+IF T_RIEKI-ZENKIZAN = 0.
+T_CYOHYO-ZENKIHI = 0.
+ELSE.
+T_CYOHYO-ZENKIHI = T_RIEKI-TOUKIZAN / T_RIEKI-ZENKIZAN * 100.
+ENDIF.
+
+T_CYOHYO-TOUKIZAN = T_RIEKI-TOUKIZAN.
+T_CYOHYO-ZENKIZAN = T_RIEKI-ZENKIZAN.
+
+MODIFY      T_CYOHYO  INDEX  W_IDX_RIEKI.
+*- - - - - - - - - - - - - - - - - - - - - "ランクごとの金額集計
+PERFORM  ZIMD0014.
+*- - - - - - - - - - - - - - - - - - - - - "構成比計算
+PERFORM  KEIS_KOSEIHI.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  構成比計算                                                          *
+*----------------------------------------------------------------------*
+FORM KEIS_KOSEIHI.
+*                                          "構成比計算用分母取得(借方)
+READ  TABLE T_CYOHYO  INDEX  W_IDX_BUNBO_D.
+
+W_BUNBO_D1  =  T_CYOHYO-TOUKIZAN.
+W_BUNBO_D2  =  T_CYOHYO-ZENKIZAN.
+*                                          "構成比計算用分母取得(貸方）
+READ  TABLE T_CYOHYO  INDEX  W_IDX_BUNBO_C.
+
+W_BUNBO_C1  =  T_CYOHYO-TOUKIZAN.
+W_BUNBO_C2  =  T_CYOHYO-ZENKIZAN.
+*
+LOOP AT T_CYOHYO.
+*                                          "構成比計算
+CASE    T_CYOHYO-ZBDCKBN.
+WHEN  'D'.
+IF  W_BUNBO_D1  <>  0.
+T_CYOHYO-HI1  =  T_CYOHYO-TOUKIZAN /  W_BUNBO_D1  *  100.
+ELSE.
+T_CYOHYO-HI1  =  0.
+ENDIF.
+IF  W_BUNBO_D2  <>  0.
+T_CYOHYO-HI2  =  T_CYOHYO-ZENKIZAN /  W_BUNBO_D2  *  100.
+ELSE.
+T_CYOHYO-HI2  =  0.
+ENDIF.
+WHEN  'C'.
+IF  W_BUNBO_C1  <>  0.
+T_CYOHYO-HI1  =  T_CYOHYO-TOUKIZAN  /  W_BUNBO_C1  *  100.
+ELSE.
+T_CYOHYO-HI1  =  0.
+ENDIF.
+IF  W_BUNBO_C2  <>  0.
+T_CYOHYO-HI2  =  T_CYOHYO-ZENKIZAN  /  W_BUNBO_C2  *  100.
+ELSE.
+T_CYOHYO-HI2  =  0.
+ENDIF.
+ENDCASE.
+
+* 97/10/24 追加 **********
+IF T_CYOHYO-ZBPRKBN = 'R'.
+MOVE-CORRESPONDING T_CYOHYO TO T_CYOHYOSV.
+ENDIF.
+* 98/04/06 追加 **********
+IF T_CYOHYO-ZBPRKBN = 'A'.
+MOVE-CORRESPONDING T_CYOHYO TO T_CYOHYOSV_A.
+ENDIF.
+**************************
+
+MODIFY      T_CYOHYO  INDEX  SY-TABIX.
+ENDLOOP.
+
+ENDFORM.
+*======================================================================*
+*  貸借対照表出力処理                                                  *
+*======================================================================*
+FORM PRNT_LIST.
+*                                          "見出し編集
+PERFORM EDT_HEADER.
+*
+*2000/06/06 ADD START
+DESCRIBE TABLE T_CYOHYO LINES W_CNT.     "内部テーブル件数取得
+*2000/06/06 ADD END
+*                                          "出力コントロール
+LOOP AT T_CYOHYO  FROM  1  TO  W_LOOP_D.
+*2000/06/06 ADD START
+W_DC_FLG = 'X'.                        "正常出力
+*2000/06/06 ADD END
+W_FLG_OUT  =  '0'.
+
+IF  W_CTR_LINE  >=  58.
+NEW-PAGE.
+PERFORM  OUT_HEADER.             "見出し出力
+W_CTR_LINE  =  8.
+ENDIF.
+
+IF  T_CYOHYO-ZBPRKBN  <>  'D'.
+PERFORM  OUT_DETAIL.             "明細出力(借方)
+W_FLG_OUT  =  '1'.
+IF  T_CYOHYO-ZBLSNM  = '△                  '.  "98/08/03
+W_SKIP-SW        = '1'.        "98/08/03
+ELSE.                            "98/08/03
+W_SKIP-SW        = '0'.        "98/08/03
+ENDIF.                           "98/08/03
+ENDIF.
+*2000/06/06 MOD START
+*    read  table t_cyohyo  index  w_loop_c.
+IF P_Z_OUT = 'X'.                 "金額ゼロ出力ＯＮ
+READ  TABLE T_CYOHYO  INDEX  W_LOOP_C.
+ELSE.                             "金額ゼロ出力ＯＦＦ
+DO.
+READ  TABLE T_CYOHYO  INDEX  W_LOOP_C."金額がゼロ以外のc方の取得
+IF T_CYOHYO-TOUKIZAN = 0.
+IF  T_CYOHYO-ZBLSNM = '--------------------'
+OR  T_CYOHYO-ZBLSNM  = '===================='.
+IF W_DC_FLG  = 'X'.
+W_LOOP_C = W_LOOP_C + 1.
+ENDIF.
+EXIT.
+ENDIF.
+IF  W_LOOP_C > W_CNT.
+EXIT.                   "C方全件出力完了
+ENDIF.
+W_LOOP_C = W_LOOP_C + 1.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+ENDIF.
+*2000/06/06 MOD END
+
+IF  T_CYOHYO-ZBDCKBN  =   'C'      "明細出力(貸方)
+AND T_CYOHYO-ZBPRKBN  <>  'D'.
+*2000/06/06 MOD START
+*      perform  out_detail.
+IF P_Z_OUT = 'X'.                "金額ゼロ出力ＯＮ
+PERFORM  OUT_DETAIL.
+ELSEIF W_DC_FLG = 'X'.           "D方金額がゼロの時、非出力
+PERFORM  OUT_DETAIL.
+ENDIF.
+*2000/06/06 MOD END
+W_FLG_OUT  =  '1'.
+IF  T_CYOHYO-ZBLSNM  = '△                  '   "98/08/03
+AND W_SKIP-SW        = '1'.      "98/08/03
+SKIP.                          "98/08/03
+ENDIF.                           "98/08/03
+ENDIF.
+
+IF  W_FLG_OUT  =  '1'.
+W_CTR_LINE  =  W_CTR_LINE  +  1. "明細行カウントＵＰ
+ENDIF.
+*2000/06/06 MOD START
+*   w_loop_c  =  w_loop_c  +  1.       "貸方行カウントＵＰ
+IF P_Z_OUT = 'X'.                    "金額ゼロ出力ＯＮ
+W_LOOP_C  =  W_LOOP_C  +  1.       "貸方行カウントＵＰ
+ENDIF.
+*2000/06/06 MOD END
+ENDLOOP.
+
+*2000/06/06 ADD START
+IF P_Z_OUT <> 'X'.                   "金額ゼロ出力ＯＦＦ
+W_DC_FLG = 'E'.                    "C項目残明細出力
+DO.
+READ  TABLE T_CYOHYO  INDEX  W_LOOP_C.
+IF  W_LOOP_C > W_CNT.
+EXIT.
+ELSEIF T_CYOHYO-TOUKIZAN <> 0
+OR  T_CYOHYO-ZBLSNM = '--------------------'
+OR  T_CYOHYO-ZBLSNM = '===================='.
+PERFORM  OUT_DETAIL.
+ENDIF.
+W_LOOP_C = W_LOOP_C + 1.
+ENDDO.
+ENDIF.
+*2000/06/06 ADD END
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し編集処理                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_HEADER.
+*                                          "対象年月編集
+* IF  P_PERIO >=  4.
+*   W_NEN_F   =  P_GJAHR.
+*   W_TUKI    =  P_PERIO - 3.
+* ELSE.
+*   W_NEN_F   =  P_GJAHR - 1.
+*   W_TUKI    =  P_PERIO + 9.
+* ENDIF.
+
+W_NEN_F   =  W_GJAHR.
+W_NEN_T   =  P_GJAHR.
+W_TUKI3   =  W_PERIO.
+*                                          "月末日取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = W_GJAHR
+I_PERIV        = T001-PERIV
+I_POPER        = W_PERIO
+IMPORTING
+E_DATE         = W_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF  SY-SUBRC  >  0.
+MESSAGE A001  WITH  'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+ENDIF.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  見出し出力処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_HEADER.
+*                                          "見出し編集
+WRITE: 164 SY-PAGNO , 160 'ﾍﾟｰｼﾞ '.
+WRITE: /011 W_NEN_F,
+015 '年度',
+073 '比  較  貸  借  対  照  表',
+138 '作成年月日',
+148 SY-DATUM(4),
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+164 SY-UZEIT(2),
+166 ':',
+167 SY-UZEIT+2(2).
+WRITE: /072 '============================',
+162 '単位:円'.
+WRITE: /077 '(',
+078 W_NEN_T,
+082 '年',
+084 P_PERIO NO-ZERO,
+086 '月',
+088 W_DATE+6(2) NO-ZERO,
+090 '日現在)'.
+SKIP.
+WRITE: /007 '科    目',
+022 '当 期 累 計 実 績 (A)前 期 累 計 実 績 (B)',
+065 '(A)-(B)',
+076 '(A)/(B)',
+107 '当 期 累 計 実 績 (A)前 期 累 計 実 績 (B)',
+150 '(A)-(B)',
+161 '(A)/(B)'.
+WRITE: /026 '金  額',
+036 '構成比',
+046 '金  額',
+056 '構成比',
+066 '増 減 額',
+076 '前期比',
+111 '金  額',
+121 '構成比',
+131 '金  額',
+141 '構成比',
+151 '増 減 額',
+161 '前期比'.
+* WRITE: /001 TEXT-L01,                "単線出力
+*         086 TEXT-L01.
+ULINE /001(170).                     "単線出力
+ENDFORM.
+*----------------------------------------------------------------------*
+*  明細出力処理                                                        *
+*----------------------------------------------------------------------*
+FORM OUT_DETAIL.
+*                                          "見出し編集
+CASE    T_CYOHYO-ZBLSNM.
+WHEN  '△                  '.
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE: /001 TEXT-B01.          "ブランク(ダミー)
+ELSE.
+WRITE:  086 TEXT-B01.
+ENDIF.
+WHEN  '--------------------'.
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+ULINE /001(85).                "単線出力
+ELSE.
+ULINE 086(85).
+ENDIF.
+WHEN  '===================='.
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE: /001 '==============================',  "二重線出力
+031 '==============================',
+061 '========================='.
+ELSE.
+WRITE:  086 '==============================',  "二重線出力
+116 '==============================',
+146 '========================='.
+ENDIF.
+WHEN OTHERS.
+*2000/06/06 ADD START
+IF P_Z_OUT <> 'X'.
+IF  T_CYOHYO-ZBDCKBN  =   'C'      "明細出力(貸方)
+AND T_CYOHYO-ZBPRKBN  <>  'D'.
+W_LOOP_C = W_LOOP_C + 1.
+ENDIF.
+IF T_CYOHYO-TOUKIZAN = 0.
+W_DC_FLG = ''.
+W_CTR_LINE  =  W_CTR_LINE  - 1.
+ENDIF.
+CHECK T_CYOHYO-TOUKIZAN <> 0."金額がゼロ以外の明細のみ出力
+ENDIF.
+*2000/06/06 ADD END
+IF  T_CYOHYO-ZBDCKBN  =  'D'.    "勘定科目名称
+WRITE: /001  T_CYOHYO-ZBLSNM.
+ELSE.
+*2000/06/06 MOD START
+*        write:  086  t_cyohyo-zblsnm.
+IF P_Z_OUT = 'X' OR W_DC_FLG <> 'E'.
+WRITE:  086  T_CYOHYO-ZBLSNM.
+ELSEIF W_DC_FLG = 'E'.
+WRITE:  /086  T_CYOHYO-ZBLSNM.
+ENDIF.
+*2000/06/06 MOD END
+ENDIF.
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+W_FUGO  =  1.
+ELSE.
+W_FUGO  =  -1.
+ENDIF.
+
+W_KINGAKU  =  T_CYOHYO-TOUKIZAN  *  W_FUGO * 100.
+PERFORM YF01NUMC USING W_KINGAKU 13 0."当期累計実績金額
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  022  O_NUM USING EDIT MASK 'RR_____________'.
+ELSE.
+WRITE:  107  O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+
+PERFORM EDT_KOSEIHI1.            "当期構成比
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  036  EDT USING EDIT MASK 'RR_____'.
+ELSE.
+WRITE:  121  EDT USING EDIT MASK 'RR_____'.
+ENDIF.
+
+W_KINGAKU  =  T_CYOHYO-ZENKIZAN  *  W_FUGO * 100.
+PERFORM YF01NUMC USING W_KINGAKU 13 0."前期累計実績金額
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  042  O_NUM USING EDIT MASK 'RR_____________'.
+ELSE.
+WRITE:  127  O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+
+PERFORM EDT_KOSEIHI2.            "前期構成比
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  056  EDT USING EDIT MASK 'RR_____'.
+ELSE.
+WRITE:  141  EDT USING EDIT MASK 'RR_____'.
+ENDIF.
+
+W_KINGAKU  =  T_CYOHYO-ZOUGEN  *  W_FUGO * 100.
+PERFORM YF01NUMC USING W_KINGAKU 13 0."増減額
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  062  O_NUM USING EDIT MASK 'RR_____________'.
+ELSE.
+WRITE:  147  O_NUM USING EDIT MASK 'RR_____________'.
+ENDIF.
+
+PERFORM YF01NUMC USING T_CYOHYO-ZENKIHI 5 1.
+
+IF  T_CYOHYO-ZBDCKBN  =  'D'.
+WRITE:  076  O_NUM USING EDIT MASK 'RR_______'.
+ELSE.
+WRITE:  161  O_NUM USING EDIT MASK 'RR_______'.
+ENDIF.
+
+ENDCASE.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  当期構成比編集                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_KOSEIHI1.
+
+IF T_CYOHYO-HI1  <  0.               "負の値の場合
+EDT-MINUS  =  '-'.                 "  -セット
+W_HI     =  T_CYOHYO-HI1  *  -1.   "　絶対値セット
+EDT-HI     =         W_HI.
+ELSE.                                "正の値の場合
+EDT-MINUS  =  ''.
+EDT-HI     =  T_CYOHYO-HI1.
+ENDIF.
+
+CONDENSE  EDT  NO-GAPS.
+
+ENDFORM.
+*----------------------------------------------------------------------*
+*  前期構成比編集                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_KOSEIHI2.
+
+IF T_CYOHYO-HI2  <  0.               "負の値の場合
+EDT-MINUS  =  '-'.                 "  -セット
+W_HI     =  T_CYOHYO-HI2  *  -1.   "　絶対値セット
+EDT-HI     =         W_HI.
+ELSE.                                "正の値の場合
+EDT-MINUS  =  ''.
+EDT-HI     =  T_CYOHYO-HI2.
+ENDIF.
+
+CONDENSE  EDT  NO-GAPS.
+
+ENDFORM.
+
+* 97/10/24 追加 **********
+*----------------------------------------------------------------------*
+*  再掲 当期利益 編集                                                  *
+*----------------------------------------------------------------------*
+FORM SAIKEI_RIEKI.
+
+LOOP AT T_CYOHYO
+WHERE ZBPRKBN = 'R'
+OR ZBPRKBN = 'A'.            "98/04/06 条件追加
+
+T_CYOHYO-TOUKIZAN = T_CYOHYOSV-TOUKIZAN + T_CYOHYOSV_A-TOUKIZAN.
+T_CYOHYO-ZENKIZAN = T_CYOHYOSV-ZENKIZAN + T_CYOHYOSV_A-ZENKIZAN.
+T_CYOHYO-ZOUGEN   = T_CYOHYOSV-ZOUGEN   + T_CYOHYOSV_A-ZOUGEN.
+T_CYOHYO-HI1      = T_CYOHYOSV-HI1      + T_CYOHYOSV_A-HI1.
+T_CYOHYO-HI2      = T_CYOHYOSV-HI2      + T_CYOHYOSV_A-HI2.
+T_CYOHYO-ZENKIHI  = T_CYOHYOSV-ZENKIHI  + T_CYOHYOSV_A-ZENKIHI.
+
+MODIFY T_CYOHYO  INDEX  SY-TABIX.
+
+ENDLOOP.
+
+ENDFORM.
+**************************

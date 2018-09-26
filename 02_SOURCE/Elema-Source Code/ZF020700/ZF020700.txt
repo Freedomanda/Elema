@@ -1,0 +1,1747 @@
+************************************************************************
+* Report ZF020700
+************************************************************************
+* [プログラム名]
+*   ZF020700     売掛金端数処理ＢＤＣ
+*
+* [処理概要]
+*   売掛金の端数を伝票登録する
+* [改定履歴]
+*   YYYY/MM/DD   Programar         Description
+*   2005/10/26   DMC K.ONODA       新規開発　
+*   2009/08/27   SOLFIS T.HAYASHI  変更：勘定コードと勘定科目名の変更
+*   2012/05/29   SOLFIS S.MIKAMI   DMW4318対応
+*&  2012/10/15   ISID              ES-UP
+************************************************************************
+report zf020700
+message-id y1
+line-size 170
+line-count 58
+no standard page heading.
+************************************************************************
+* テーブル定義
+************************************************************************
+tables:t001.                              "会社コード
+*       TCURC,                             "通貨コード
+*       KNA1,                              "得意先マスタ(一般データ)
+*       KNB1,                              "得意先マスタ(会社コード)
+*       SKAT,                              "勘定コードマスタレコード
+*       BKPF.                              "会計伝票ヘッダ
+************************************************************************
+* タイプ定義
+************************************************************************
+* 入力ファイル(変換前)
+types:begin of str_i_csv,
+file(80)      type c,                 "入力ファイル
+end   of str_i_csv.
+* 入力ファイル(変換後)
+types:begin of str_o_csv,
+budat(08)     type c,                 "転記日付
+waers(10)     type c,                 "通貨コード
+kunnr(10)     type c,                 "得意先
+wrbtr(20)     type c,                 "金額
+belnr(14)     type c,                 "登録済伝票番号
+gjahr(18)     type c,                 "登録済伝票会計年度
+end   of str_o_csv.
+* 入力ファイル(変換後)
+types:begin of str_select,
+kunnr         like kna1-kunnr,        "得意先コード
+belnr         like bkpf-belnr,        "会計伝票番号
+gjahr         like bkpf-gjahr,        "会計年度
+end   of str_select.
+* 通貨コード
+types:begin of str_tcurc,
+waers         like tcurc-waers,       "通貨コード
+end   of str_tcurc.
+* 得意先
+types:begin of str_kna1_knb1,
+kunnr         like kna1-kunnr,        "得意先コード
+name1         like kna1-name1,        "名称 1
+xcpdk         like kna1-xcpdk,        "ワンタイム勘定コード
+spras         like kna1-spras,        "言語キー
+akont         like knb1-akont,        "統制勘定
+end   of str_kna1_knb1.
+* 勘定
+types:begin of str_skat,
+saknr         like skat-saknr,        "G/L 勘定ｺｰﾄﾞ
+txt20         like skat-txt20,        "G/L勘定ｺｰﾄﾞﾃｷｽﾄ(短)
+end   of str_skat.
+* 帳票
+types:begin of str_list,
+belnr(10)     type n,                 "伝票NO
+budat(08)     type c,                 "転記日付
+waers(05)     type c,                 "通貨
+kunnr(08)     type c,                 "得意先ｺｰﾄﾞ
+name1(30)     type c,                 "得意先名称
+kari(07)      type n,                 "借方科目
+kari_m(10)    type c,                 "借方勘定科目名
+kari_k_j(15)  type p,                 "借方金額(JPY)
+kari_k_u(15)  type p decimals 2,      "借方金額(USD)
+kashi(07)     type n,                 "貸方科目
+kashi_m(10)   type c,                 "貸方勘定科目名
+kashi_k_j(15) type p,                 "貸方金額(JPY)
+kashi_k_u(15) type p decimals 2,      "貸方金額(USD)
+msg(36)       type c,                 "摘要/エラー内容
+kingaku(15)   type c,                 "エラー金額
+kingaku_f(1)  type c,                 "金額フラグ
+end   of str_list.
+************************************************************************
+* 変数定義
+************************************************************************
+data:wk_i_csv         type str_i_csv.
+data:wk_head          type str_i_csv.
+data:wk_o_csv         type str_o_csv.
+data:wk_select        type str_select.
+data:wk_tcurc         type str_tcurc.
+data:wk_kna1_knb1     type str_kna1_knb1.
+data:wk_skat          type str_skat.
+data:wk_list          type str_list.
+data:wk_bdc           like bdcdata.
+data:wk_bukrs         like t001-bukrs.
+data:wk_file_bak      like rlgrap-filename.
+data:wk_belnr         like bkpf-belnr.
+data:wk_gjahr         like bkpf-gjahr.
+data:wk_newbs_1       like rf05a-newbs.
+data:wk_newbs_2       like rf05a-newbs.
+data:wk_text          like message.
+data:wk_budat_d       like sy-datum.
+data:wk_flg_rec(01)   type c.
+data:wk_flg_list(01)  type c.
+data:wk_flg_up(01)    type c.
+data:wk_flg_page(01)  type c.
+data:wk_flg_wrbtr(01) type c.
+data:wk_flg_space(01) type c.
+data:wk_cnt_s(06)     type n.
+data:wk_cnt_e(06)     type n.
+data:wk_cnt_o(06)     type n.
+data:wk_cnt_keta      type i.
+data:wk_cnt_wrbtr_1   type i.
+data:wk_cnt_wrbtr_2   type i.
+data:wk_wrbtr_be(11)  type c.
+data:wk_wrbtr_af(03)  type c.
+data:wk_wrbtr(15)     type c.
+data:wk_kari(07)      type n.
+data:wk_kari_m(10)    type c.
+data:wk_kashi(07)     type n.
+data:wk_kashi_m(10)   type c.
+data:wk_kunnr_c(10)   type c.
+data:wk_kunnr_n(10)   type n.
+data:wk_belnr_n(10)   type n.
+data:wk_mode(1)       type c.
+data:wk_bktxt(25)     type c.
+data:wk_waers(10)     type c.
+************************************************************************
+* 内部テーブル定義
+************************************************************************
+data:gtab_i_csv       type standard table of str_i_csv.
+data:gtab_o_csv       type standard table of str_o_csv.
+data:gtab_select      type standard table of str_select.
+data:gtab_tcurc       type table of str_tcurc.
+data:gtab_kna1_knb1   type table of str_kna1_knb1.
+data:gtab_skat        type table of str_skat.
+data:gtab_list_s      type table of str_list.
+data:gtab_list_e      type table of str_list.
+data:gtab_bdc         like table of bdcdata.
+************************************************************************
+* 固定値定義
+************************************************************************
+constants:
+cns_def_path(03)  type c value 'C:\',
+cns_mask(70)      type c value '*.CSV,ALL FILES,*.*.',
+cns_mode(01)      type c value 'S',
+cns_title1(06)    type c value '入力元',
+cns_dat(03)       type c value 'DAT',
+cns_bak(04)       type c value '.BAK',
+cns_kanma(1)      type c value ',',
+cns_piri(1)       type c value '.',
+cns_bukrs(10)     type c value '会社コード',
+cns_tcurc(40)     type c
+value '通貨コード(TCURC)にデータがありません',
+cns_kna1_knb1(45) type c
+value '得意先マスタ(KNA1_KNB1)にデータがありません',
+cns_skat(24)      type c value '勘定コードマスタレコード',
+cns_msg_00(28)    type c value '得意先コードがワンタイムです',
+cns_msg_01(36)    type c value '会計伝票と会計年度の組合せエラーです',
+cns_msg_02(20)    type c value '転記日付が未入力です',
+cns_msg_03(22)    type c value 'カレンダ日付は無効です',
+cns_msg_04(24)    type c value '通貨コードが存在しません',
+cns_msg_05(24)    type c value '得意先コードが未入力です',
+cns_msg_06(26)    type c value '得意先コードが存在しません',
+cns_msg_07(16)    type c value '金額が未入力です',
+cns_msg_08(28)    type c value '金額に文字が入力されています',
+cns_msg_09(14)    type c value '金額が無効です',
+cns_msg_10(16)    type c value '金額桁が無効です',
+cns_msg_11(28)    type c value '小数点以下の金額桁が無効です',
+cns_msg_12(28)    type c value '小数点以上の金額桁が無効です'.
+* Add ES-UP 2012/10/15 -->
+constants cns_sjis type string value `shift_jis`.
+* Add ES-UP 2012/10/15 <--
+************************************************************************
+* 入力画面設定
+************************************************************************
+* 会社コード
+parameters:p_bukrs like t001-bukrs obligatory default 'C001'.
+* テスト実行
+parameters:p_test as checkbox default 'X'.
+* 入力ファイル
+selection-screen begin of block bl1 with frame title text-001.
+* 入力元
+parameters:p_file like rlgrap-filename obligatory.
+selection-screen begin of line.
+* ローカル
+parameters:p_local radiobutton group rb1 default 'X'.
+selection-screen: comment 4(8) text-002, position 14.
+* サーバ
+parameters:p_serve radiobutton group rb1.
+selection-screen: comment 17(6) text-003.
+selection-screen end of line.
+selection-screen end of block bl1.
+************************************************************************
+initialization.
+************************************************************************
+clear:wk_i_csv,wk_head,wk_o_csv,wk_select,wk_tcurc,wk_kna1_knb1,
+wk_skat,wk_list,wk_bdc,wk_bukrs,wk_file_bak,wk_belnr,
+wk_gjahr,wk_waers,wk_newbs_1,wk_newbs_2,wk_text,wk_budat_d,
+wk_flg_rec,wk_flg_list,wk_flg_up,wk_flg_page,wk_flg_wrbtr,
+wk_flg_space,wk_cnt_s,wk_cnt_e,wk_cnt_o,wk_cnt_keta,
+wk_cnt_wrbtr_1,wk_cnt_wrbtr_2,wk_wrbtr_be,wk_wrbtr_af,wk_wrbtr,
+wk_kari,wk_kari_m,wk_kashi,wk_kashi_m,wk_kunnr_c,wk_kunnr_n,
+wk_belnr_n,wk_mode,wk_bktxt.
+clear:gtab_i_csv,gtab_o_csv,gtab_select,gtab_tcurc,gtab_kna1_knb1,
+gtab_skat,gtab_list_s,gtab_list_e,gtab_bdc.
+************************************************************************
+at selection-screen.
+************************************************************************
+perform check_t001.                     "会社コードのチェック
+perform check_path.                     "ファイルパスのチェック
+************************************************************************
+at selection-screen on value-request for p_file.
+************************************************************************
+* ファイル入出力先の検索ウィンドウ呼び出し処理
+perform call_ws_filename_get using space
+cns_def_path
+cns_mask
+cns_mode
+cns_title1
+changing p_file.
+************************************************************************
+top-of-page.
+************************************************************************
+perform list_out_1.                     "帳票出力(ヘッダ)
+************************************************************************
+start-of-selection.
+************************************************************************
+* タイムスタンプ
+concatenate 'ZF29' '_' sy-datum '_' sy-uzeit into wk_bktxt.
+* ローカル選択
+if p_local = 'X'.
+perform read_local.                   "入力ﾌｧｲﾙのﾛｰｶﾙ読込み
+if p_test = space.
+perform down_local using 'X'.       "ﾊﾞｯｸｱｯﾌﾟﾌｧｲﾙのﾛｰｶﾙ出力
+endif.
+* サーバ選択
+else.
+perform read_serve.                   "入力ﾌｧｲﾙのｻｰﾊﾞ読込み
+if p_test = space.
+perform down_serve using 'X'.       "ﾊﾞｯｸｱｯﾌﾟﾌｧｲﾙのｻｰﾊﾞ出力
+endif.
+endif.
+*
+perform data_csv.                       "CSVﾌｧｲﾙの変換
+*
+perform get_tcurc.                      "通貨の抽出
+*
+perform get_kna1_knb1.                  "得意先の抽出
+*
+perform get_skat.                       "勘定の抽出
+*
+perform check_data.                     "ﾌｧｲﾙﾁｪｯｸ
+*
+perform list_out_2 tables gtab_list_s
+using  'S'.          "帳票出力(正常)
+*
+perform list_out_2 tables gtab_list_e
+using  'E'.          "帳票出力(エラー)
+*
+perform list_out_2 tables gtab_list_e
+using  'N'.          "帳票出力(件数)
+*
+if p_test = space.
+* ローカル選択
+if p_local = 'X'.
+perform down_local using ' '.       "上書きﾌｧｲﾙのﾛｰｶﾙ出力
+* サーバ選択
+else.
+perform down_serve using ' '.       "上書きﾌｧｲﾙのｻｰﾊﾞ出力
+endif.
+endif.
+************************************************************************
+end-of-page.
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_T001
+*&---------------------------------------------------------------------*
+*       会社コードのチェック
+*----------------------------------------------------------------------*
+form check_t001.
+
+clear:wk_bukrs.
+select single bukrs
+into wk_bukrs
+from t001
+where bukrs = p_bukrs.
+
+if sy-subrc <> 0.
+message e600(z1) with cns_bukrs.
+endif.
+
+endform.                    " CHECK_T001
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PATH
+*&---------------------------------------------------------------------*
+*       ファイルパスのチェック
+*----------------------------------------------------------------------*
+form check_path.
+
+data: lv_return type c.
+* Add ES-UP 2012/10/15 -->
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+* Add ES-UP 2012/10/15 <--
+* サーバーの場合のチェック
+if not p_serve is initial.
+* Mod ES-UP 2012/10/15 -->
+*    OPEN DATASET P_FILE IN TEXT MODE .
+open dataset p_file for input
+in legacy text mode code page l_codepage
+ignoring conversion errors.
+* Mod ES-UP 2012/10/15 <--
+if sy-subrc <> 0.
+message e400
+with '指定の入力ファイルはサーバ上に存在しません'.
+endif.
+close dataset p_file.
+* ローカルPCの場合のチェック
+else.
+perform check_local_in using p_file
+changing lv_return.
+if lv_return = '0'.
+message e400
+with '指定の入力ファイルはローカルPCに存在しません'.
+endif.
+endif.
+
+endform.                    " CHECK_PATH
+*&---------------------------------------------------------------------*
+*&      Form  check_local_in
+*&---------------------------------------------------------------------*
+*       ローカル入力ファイルの存在チェック
+*----------------------------------------------------------------------*
+form check_local_in using pv_file
+changing pv_return.
+* Mod ES-UP 2012/10/15 -->
+*  CALL FUNCTION 'WS_QUERY'
+*       EXPORTING
+*            FILENAME       = PV_FILE
+*            QUERY          = 'FE'
+*       IMPORTING
+*            RETURN         = PV_RETURN
+*       EXCEPTIONS
+*            INV_QUERY      = 1
+*            NO_BATCH       = 2
+*            FRONTEND_ERROR = 3
+*            OTHERS         = 4.
+*
+*  IF SY-SUBRC  <> 0.
+data l_filename type string.
+
+l_filename = pv_file.
+if cl_gui_frontend_services=>file_exist( l_filename ) = abap_false.
+*--- ファイルが存在しないときの処理
+* Mod ES-UP 2012/10/15 <--
+pv_return = '0'.
+endif.
+endform.                    " check_local_in
+*&---------------------------------------------------------------------*
+*&      FORM CALL_WS_FILENAME_GET
+*&---------------------------------------------------------------------*
+*       ファイル入出力先の検索ウィンドウ呼び出し処理
+*----------------------------------------------------------------------*
+form call_ws_filename_get using pv_filename
+pv_path
+pv_mask
+pv_mode
+pv_title
+changing pv_path_c.
+* Mod ES-UP 2012/10/15 -->
+*  CALL FUNCTION 'WS_FILENAME_GET'
+*       EXPORTING
+*            DEF_FILENAME     = PV_FILENAME
+*            DEF_PATH         = PV_PATH
+*            MASK             = PV_MASK
+*            MODE             = PV_MODE
+*            TITLE            = PV_TITLE
+*       IMPORTING
+*            FILENAME         = PV_PATH_C
+*       EXCEPTIONS
+*            INV_WINSYS       = 1
+*            NO_BATCH         = 2
+*            SELECTION_CANCEL = 3
+*            SELECTION_ERROR  = 4
+*            OTHERS           = 5.
+*  IF SY-SUBRC <> 0 AND
+*     SY-SUBRC <> 3.
+data: l_filename    type string,
+l_path        type string,
+l_fullpath    type string,
+l_title       type string,
+l_initial_directory type string,
+l_user_action type i.
+l_title = pv_title.
+l_initial_directory = pv_path.
+cl_gui_frontend_services=>file_save_dialog(
+exporting
+window_title         = l_title
+*      DEFAULT_EXTENSION    = DEFAULT_EXTENSION
+*      DEFAULT_FILE_NAME    = DEFAULT_FILE_NAME
+*      WITH_ENCODING        = WITH_ENCODING
+*      FILE_FILTER          = FILE_FILTER
+initial_directory    = l_initial_directory
+*      PROMPT_ON_OVERWRITE  = 'X'
+changing
+filename             = l_filename
+path                 = l_path
+fullpath             = l_fullpath
+user_action          = l_user_action
+*      FILE_ENCODING        = FILE_ENCODING
+exceptions
+cntl_error           = 1
+error_no_gui         = 2
+not_supported_by_gui = 3
+others               = 4 ).
+if sy-subrc = 0.
+if l_user_action = cl_gui_frontend_services=>action_ok.
+pv_path_c = l_fullpath.
+else.
+* Mod ES-UP 2012/10/15 <--
+message s400 with 'ファイルパスが取得できません'.
+stop.
+endif.
+* Add ES-UP 2012/10/15 -->
+endif.
+* Add ES-UP 2012/10/15 <--
+endform.                    "CALL_WS_FILENAME_GET
+*&---------------------------------------------------------------------*
+*&      Form  READ_LOCAL
+*&---------------------------------------------------------------------*
+*       入力ファイルのローカル読込み
+*----------------------------------------------------------------------*
+form read_local.
+* Mod ES-UP 2012/10/15 -->
+*  call function 'WS_UPLOAD'
+*    exporting
+*      filename                = p_file
+*      filetype                = cns_dat
+*    tables
+*      data_tab                = gtab_i_csv
+*    exceptions
+*      conversion_error        = 1
+*      file_open_error         = 2
+*      file_read_error         = 3
+*      invalid_type            = 4
+*      no_batch                = 5
+*      unknown_error           = 6
+*      invalid_table_width     = 7
+*      gui_refuse_filetransfer = 8
+*      customer_error          = 9
+*      others                  = 10.
+DATA: L_FILENAME TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING.
+L_FILENAME = P_FILE.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILENAME
+FILETYPE                = 'DAT'
+HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER_LENGTH           = 0
+*      READ_BY_LINE            = 'X'
+*      DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+*      IGNORE_CERR             = ABAP_TRUE
+*      REPLACEMENT             = '#'
+*      VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*    IMPORTING
+*      FILELENGTH              = FILELENGTH
+*      HEADER                  = HEADER
+CHANGING
+DATA_TAB                = gtab_i_csv
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+* Mod ES-UP 2012/10/15 <--
+if sy-subrc <> 0.
+message s400 with '入力ファイルの読込みに失敗しました'.
+stop.
+endif.
+
+if gtab_i_csv[] is initial.
+message s400 with '対象となる入力データが存在しません'.
+stop.
+endif.
+
+endform.                    " READ_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  READ_SERVE
+*&---------------------------------------------------------------------*
+*       入力ファイルのサーバ読込み
+*----------------------------------------------------------------------*
+form read_serve.
+* Add ES-UP 2012/10/15 -->
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+* Add ES-UP 2012/10/15 <--
+* テキストモードでファイルをオープン
+* Mod ES-UP 2012/10/15 -->
+*  OPEN DATASET P_FILE IN TEXT MODE.
+open dataset p_file for input
+in legacy text mode code page l_codepage
+ignoring conversion errors.
+* Mod ES-UP 2012/10/15 <--
+if sy-subrc <> 0.
+message s400 with '入力ファイルオープンエラーです'.
+stop.
+endif.
+
+* レコードが無くなるまで読込
+do.
+read dataset p_file into wk_i_csv.
+if  sy-subrc = 0.
+append wk_i_csv to gtab_i_csv.
+else.
+exit.
+endif.
+clear:wk_i_csv.
+enddo.
+
+if gtab_i_csv[] is initial.
+message s400 with '対象となる入力データが存在しません'.
+stop.
+endif.
+
+* ファイルをクローズ
+close dataset p_file.
+if sy-subrc <> 0.
+message s400 with '入力ファイルクローズエラーです'.
+stop.
+endif.
+
+endform.                    " READ_SERVE
+*&---------------------------------------------------------------------*
+*&      Form  DOWN_LOCAL
+*&---------------------------------------------------------------------*
+*       バックアップファイルのローカル出力
+*----------------------------------------------------------------------*
+*      -->P_DOWN   バックアップ/上書き判定フラグ
+*----------------------------------------------------------------------*
+form down_local using p_down.
+* Add ES-UP 2012/10/15 -->
+DATA: L_FILENAME TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING,
+l_rc       type i.
+* Add ES-UP 2012/10/15 <--
+if p_down = 'X'.
+concatenate p_file cns_bak into wk_file_bak.
+else.
+move p_file to wk_file_bak.
+endif.
+* Mod ES-UP 2012/10/15 -->
+*  call function 'WS_DOWNLOAD'
+*    exporting
+*      filename                = wk_file_bak
+*    tables
+*      data_tab                = gtab_i_csv
+*    exceptions
+*      file_open_error         = 1
+*      file_write_error        = 2
+*      invalid_filesize        = 3
+*      invalid_type            = 4
+*      no_batch                = 5
+*      unknown_error           = 6
+*      invalid_table_width     = 7
+*      gui_refuse_filetransfer = 8
+*      customer_error          = 9
+*      others                  = 10.
+L_FILENAME = wk_file_bak.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+CL_GUI_FRONTEND_SERVICES=>GUI_DOWNLOAD(
+EXPORTING
+*      BIN_FILESIZE              = BIN_FILESIZE
+FILENAME                  = L_FILENAME
+*      FILETYPE                  = 'DAT'
+*      APPEND                    = SPACE
+*      WRITE_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER                    = '00'
+*      TRUNC_TRAILING_BLANKS     = L_TRUNC
+*      WRITE_LF                  = 'X'
+*      COL_SELECT                = SPACE
+*      COL_SELECT_MASK           = SPACE
+*      DAT_MODE                  = SPACE
+*      CONFIRM_OVERWRITE         = SPACE
+*      NO_AUTH_CHECK             = SPACE
+CODEPAGE                  = L_CODEPAGE
+*      IGNORE_CERR               = ABAP_TRUE
+*      REPLACEMENT               = '#'
+*      WRITE_BOM                 = SPACE
+*      TRUNC_TRAILING_BLANKS_EOL = L_TRUNC
+*      WK1_N_FORMAT              = SPACE
+*      WK1_N_SIZE                = SPACE
+*      WK1_T_FORMAT              = SPACE
+*      WK1_T_SIZE                = SPACE
+*      SHOW_TRANSFER_STATUS      = 'X'
+*      FIELDNAMES                = FIELDNAMES
+*      WRITE_LF_AFTER_LAST_LINE  = 'X'
+*    IMPORTING
+*      FILELENGTH                = FILELENGTH
+CHANGING
+DATA_TAB                  = gtab_i_csv
+EXCEPTIONS
+FILE_WRITE_ERROR          = 1
+NO_BATCH                  = 2
+GUI_REFUSE_FILETRANSFER   = 3
+INVALID_TYPE              = 4
+NO_AUTHORITY              = 5
+UNKNOWN_ERROR             = 6
+HEADER_NOT_ALLOWED        = 7
+SEPARATOR_NOT_ALLOWED     = 8
+FILESIZE_NOT_ALLOWED      = 9
+HEADER_TOO_LONG           = 10
+DP_ERROR_CREATE           = 11
+DP_ERROR_SEND             = 12
+DP_ERROR_WRITE            = 13
+UNKNOWN_DP_ERROR          = 14
+ACCESS_DENIED             = 15
+DP_OUT_OF_MEMORY          = 16
+DISK_FULL                 = 17
+DP_TIMEOUT                = 18
+FILE_NOT_FOUND            = 19
+DATAPROVIDER_EXCEPTION    = 20
+CONTROL_FLUSH_ERROR       = 21
+NOT_SUPPORTED_BY_GUI      = 22
+ERROR_NO_GUI              = 23
+OTHERS                    = 24 ).
+* Mod ES-UP 2012/10/15 <--
+if sy-subrc <> 0.
+if p_down = 'X'.
+message s400 with 'バックアップファイルの出力に失敗しました'.
+stop.
+else.
+message s400 with '上書きファイルの出力に失敗しました'.
+stop.
+endif.
+endif.
+
+if sy-subrc = 0 and p_down = 'X'.
+* Mod ES-UP 2012/10/15 -->
+*    call function 'WS_FILE_DELETE'
+*      exporting
+*        file = wk_file_bak.
+*    if sy-subrc <> 0.
+L_FILENAME = wk_file_bak.
+cl_gui_frontend_services=>file_delete(
+exporting
+filename             = L_FILENAME
+changing
+rc                   = l_rc
+exceptions
+file_delete_failed   = 1
+cntl_error           = 2
+error_no_gui         = 3
+file_not_found       = 4
+access_denied        = 5
+unknown_error        = 6
+not_supported_by_gui = 7
+wrong_parameter      = 8
+others               = 9 ).
+if l_rc <> 0
+or sy-subrc <> 0.
+* Mod ES-UP 2012/10/15 <--
+message s400 with 'バックアップファイルの削除に失敗しました'.
+stop.
+endif.
+endif.
+
+endform.                    " DOWN_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  DOWN_SERVE
+*&---------------------------------------------------------------------*
+*       バックアップファイルのサーバ出力
+*----------------------------------------------------------------------*
+*      -->P_DOWN   バックアップ/上書き判定フラグ
+*----------------------------------------------------------------------*
+form down_serve using p_down.
+* Add ES-UP 2012/10/15 -->
+data l_codepage type abap_encoding.
+l_codepage = cl_abap_codepage=>sap_codepage( cns_sjis ).
+* Add ES-UP 2012/10/15 <--
+if p_down = 'X'.
+concatenate p_file cns_bak into wk_file_bak.
+else.
+move p_file to wk_file_bak.
+endif.
+
+* テキストモードでファイルをオープン
+* Mod ES-UP 2012/10/15 -->
+*  OPEN DATASET WK_FILE_BAK FOR OUTPUT IN TEXT MODE.
+open dataset wk_file_bak for output
+in legacy text mode code page l_codepage
+ignoring conversion errors.
+* Mod ES-UP 2012/10/15 <--
+if sy-subrc <> 0.
+if p_down = 'X'.
+message s400 with 'バックアップファイルオープンエラーです'.
+stop.
+else.
+message s400 with '上書きファイルオープンエラーです'.
+stop.
+endif.
+endif.
+
+* レコードが無くなるまで転送
+loop at gtab_i_csv into wk_i_csv.
+transfer wk_i_csv to wk_file_bak.
+clear:wk_i_csv.
+endloop.
+
+* ファイルをクローズ
+close dataset wk_file_bak.
+if sy-subrc <> 0.
+if p_down = 'X'.
+message s400 with 'バックアップファイルクローズエラーです'.
+stop.
+else.
+message s400 with '上書きファイルクローズエラーです'.
+stop.
+endif.
+endif.
+
+if sy-subrc = 0 and p_down = 'X'.
+delete dataset wk_file_bak.
+if sy-subrc <> 0.
+message s400 with 'バックアップファイル削除エラーです'.
+stop.
+endif.
+endif.
+
+endform.                    " DOWN_SERVE
+*&---------------------------------------------------------------------*
+*&      Form  DATA_CSV
+*&---------------------------------------------------------------------*
+*       ＣＳＶファイルの変換
+*----------------------------------------------------------------------*
+form data_csv.
+
+loop at gtab_i_csv into wk_i_csv.
+if sy-tabix = 1.
+move wk_i_csv to wk_head.
+else.
+split wk_i_csv at cns_kanma into wk_o_csv-budat   "転記日付
+wk_o_csv-waers   "通貨コード
+wk_o_csv-kunnr   "得意先コード
+wk_o_csv-wrbtr   "金額
+wk_o_csv-belnr   "会計伝票番号
+wk_o_csv-gjahr.  "会計年度
+append wk_o_csv to gtab_o_csv.
+* 得意先コードの前ゼロ編集
+if wk_o_csv-kunnr co '1234567890 '.
+clear:wk_kunnr_n.
+move wk_o_csv-kunnr to wk_kunnr_n.
+move wk_kunnr_n     to wk_select-kunnr.
+else.
+move wk_o_csv-kunnr to wk_select-kunnr.
+endif.
+* 会計伝票番号の前ゼロ編集
+if wk_o_csv-belnr co '1234567890 '.
+clear:wk_belnr_n.
+move wk_o_csv-belnr to wk_belnr_n.
+move wk_belnr_n     to wk_select-belnr.
+else.
+move wk_o_csv-belnr to wk_select-belnr.
+endif.
+
+move wk_o_csv-gjahr to wk_select-gjahr.
+
+append wk_select to gtab_select.
+
+clear:wk_o_csv,wk_select.
+endif.
+endloop.
+
+if gtab_o_csv[] is initial.
+message s400 with '対象となる入力データが存在しません'.
+stop.
+endif.
+
+free:gtab_i_csv.
+
+endform.                    " DATA_CSV
+*&---------------------------------------------------------------------*
+*&      Form  GET_TCURC
+*&---------------------------------------------------------------------*
+*       通貨の抽出
+*----------------------------------------------------------------------*
+form get_tcurc.
+
+select waers                                  "通貨コード
+into table gtab_tcurc
+from tcurc.
+
+if sy-subrc <> 0.
+message s400(z1) with cns_tcurc.
+stop.
+endif.
+
+endform.                    " GET_TCURC
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNA1_KNB1
+*&---------------------------------------------------------------------*
+*       得意先の抽出
+*----------------------------------------------------------------------*
+form get_kna1_knb1.
+
+select kna1~kunnr                             "得意先コード
+kna1~name1                             "名称 1
+kna1~xcpdk                             "ワンタイム勘定コード
+kna1~spras                             "言語キー
+knb1~akont                             "統制勘定
+into corresponding fields of table gtab_kna1_knb1
+from knb1 join kna1
+on knb1~kunnr = kna1~kunnr
+where knb1~bukrs = p_bukrs.                  "会社コード(入力画面)
+
+if sy-subrc <> 0.
+message s400(z1) with cns_kna1_knb1.
+stop.
+endif.
+
+endform.                    " GET_KNA1_KNB1
+*&---------------------------------------------------------------------*
+*&      Form  GET_SKAT
+*&---------------------------------------------------------------------*
+*       勘定の抽出
+*----------------------------------------------------------------------*
+form get_skat.
+
+select saknr                                  "G/L 勘定コード
+txt20                                  "テキスト(短)
+into corresponding fields of table gtab_skat
+from skat
+for all entries in gtab_kna1_knb1
+where spras = gtab_kna1_knb1-spras           "言語キー
+and ktopl = p_bukrs                        "会社コード(入力画面)
+and saknr = gtab_kna1_knb1-akont.          "統制勘定
+
+if sy-subrc <> 0.
+message s600(z1) with cns_skat.
+stop.
+endif.
+
+endform.                    " GET_SKAT
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA
+*&---------------------------------------------------------------------*
+*       ファイルチェック
+*----------------------------------------------------------------------*
+form check_data.
+
+loop at gtab_o_csv into wk_o_csv.
+* クリアー
+clear:wk_tcurc,wk_kna1_knb1,wk_cnt_keta,
+wk_wrbtr_be,wk_wrbtr_af,wk_flg_rec,wk_flg_space.
+* 『金額』のチェック
+perform check_data_0.
+if wk_flg_rec = 'X'.
+continue.
+endif.
+* 『ワンタイム得意先』のチェック
+perform check_data_1.
+if wk_flg_rec = 'X'.
+continue.
+endif.
+* 『登録済伝票番号』と『登録済伝票会計年度』のチェック
+perform check_data_2.
+if wk_flg_rec = 'X'.
+continue.
+endif.
+* 『転記日付』のチェック
+perform check_data_3.
+if wk_flg_rec = 'X'.
+continue.
+endif.
+* 『通貨コード』のチェック
+perform check_data_4.
+if wk_flg_rec = 'X'.
+continue.
+endif.
+* 『得意先』のチェック
+perform check_data_5.
+if wk_flg_rec = 'X'.
+continue.
+endif.
+
+perform check_bdc.                  "ＢＤＣ処理
+clear:wk_o_csv.
+endloop.
+
+endform.                    " CHECK_DATA
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_0
+*&---------------------------------------------------------------------*
+*       『金額』のチェック
+*----------------------------------------------------------------------*
+form check_data_0.
+
+* 【金額が空白の場合】
+if wk_o_csv-wrbtr = space.
+move 'X' to wk_flg_space.
+perform data_make using 'E' cns_msg_07.     "データ作成
+endif.
+
+check wk_flg_rec = space.
+
+* 【数値以外が入力されている場合】
+if wk_o_csv-wrbtr cn '-1234567890. '.
+move 'X' to wk_flg_wrbtr.
+perform data_make using 'E' cns_msg_08.     "データ作成
+endif.
+
+check wk_flg_rec = space.
+
+* 【金額がゼロの場合】
+if wk_o_csv-wrbtr co '-0. '.
+perform data_make using 'E' cns_msg_09.     "データ作成
+endif.
+
+check wk_flg_rec = space.
+
+* 【マイナスが複数の場合】
+clear:wk_cnt_keta,wk_cnt_wrbtr_1,wk_cnt_wrbtr_2.
+wk_cnt_keta = strlen( wk_o_csv-wrbtr ).
+do wk_cnt_keta times.
+if wk_o_csv-wrbtr+wk_cnt_wrbtr_1(1) = '-'.
+wk_cnt_wrbtr_2 = wk_cnt_wrbtr_2 + 1.
+endif.
+wk_cnt_wrbtr_1 = wk_cnt_wrbtr_1 + 1.
+enddo.
+if wk_cnt_wrbtr_2 >= 2.
+move 'X' to wk_flg_wrbtr.
+perform data_make using 'E' cns_msg_09. "データ作成
+endif.
+
+check wk_flg_rec = space.
+
+* 【小数点が複数の場合】
+clear:wk_cnt_keta,wk_cnt_wrbtr_1,wk_cnt_wrbtr_2.
+wk_cnt_keta = strlen( wk_o_csv-wrbtr ).
+do wk_cnt_keta times.
+if wk_o_csv-wrbtr+wk_cnt_wrbtr_1(1) = '.'.
+wk_cnt_wrbtr_2 = wk_cnt_wrbtr_2 + 1.
+endif.
+wk_cnt_wrbtr_1 = wk_cnt_wrbtr_1 + 1.
+enddo.
+if wk_cnt_wrbtr_2 >= 2.
+move 'X' to wk_flg_wrbtr.
+perform data_make using 'E' cns_msg_09. "データ作成
+endif.
+
+check wk_flg_rec = space.
+
+*【通貨コードが'JPY'の場合】
+if wk_o_csv-waers = 'JPY' or
+wk_o_csv-waers = space.
+* 小数点チェック
+search wk_o_csv-wrbtr for '...'.
+if sy-subrc = 0.
+move 'X' to wk_flg_wrbtr.
+perform data_make using 'E' cns_msg_09.   "データ作成
+else.
+clear:wk_cnt_keta.
+wk_cnt_keta = strlen( wk_o_csv-wrbtr ).
+* マイナスチェック
+search wk_o_csv-wrbtr for '-'.
+if sy-subrc = 0.
+wk_cnt_keta = wk_cnt_keta - 1.
+endif.
+* 桁数が１２桁以上の場合
+if wk_cnt_keta > 11.
+perform data_make using 'E' cns_msg_10. "データ作成
+endif.
+endif.
+*【通貨コードが'JPY'以外の場合】
+else.
+split wk_o_csv-wrbtr at cns_piri into wk_wrbtr_be
+wk_wrbtr_af.
+clear:wk_cnt_keta.
+wk_cnt_keta = strlen( wk_wrbtr_af ).
+* マイナスチェック
+search wk_o_csv-wrbtr for '-'.
+if sy-subrc = 0.
+wk_cnt_keta = wk_cnt_keta - 1.
+endif.
+* 小数点以下の桁数が３桁以上の場合
+if wk_cnt_keta > 2.
+perform data_make using 'E' cns_msg_11.   "データ作成
+endif.
+
+check wk_flg_rec = space.
+
+clear:wk_cnt_keta.
+wk_cnt_keta = strlen( wk_wrbtr_be ).
+* マイナスチェック
+search wk_wrbtr_be for '-'.
+if sy-subrc = 0.
+wk_cnt_keta = wk_cnt_keta - 1.
+endif.
+* 小数点以上の桁数が１０桁以上の場合
+if wk_cnt_keta > 9.
+perform data_make using 'E' cns_msg_12.   "データ作成
+endif.
+
+check wk_flg_rec = space.
+
+endif.
+
+endform.                    " CHECK_DATA_0
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_1
+*&---------------------------------------------------------------------*
+*       『ワンタイム得意先』のチェック
+*----------------------------------------------------------------------*
+form check_data_1.
+
+if wk_o_csv-kunnr <> space.
+* 得意先コードの前ゼロ編集
+if wk_o_csv-kunnr co '1234567890 '.
+clear:wk_kunnr_n,wk_kunnr_c.
+move wk_o_csv-kunnr to wk_kunnr_n.
+move wk_kunnr_n     to wk_kunnr_c.
+else.
+move wk_o_csv-kunnr to wk_kunnr_c.
+endif.
+
+* 得意先の読込み
+read table gtab_kna1_knb1 into wk_kna1_knb1
+with key kunnr = wk_kunnr_c.
+
+if sy-subrc = 0 and
+wk_kna1_knb1-xcpdk = 'X'.
+perform data_make using 'E' cns_msg_00.   "データ作成
+endif.
+
+endif.
+
+endform.                    " CHECK_DATA_1
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_2
+*&---------------------------------------------------------------------*
+*       『登録済伝票番号』と『登録済伝票会計年度』のチェック
+*----------------------------------------------------------------------*
+form check_data_2.
+
+clear:wk_belnr,wk_gjahr.
+* ２項目に値が設定されている場合のみ処理を行う
+if wk_o_csv-belnr <> space and
+wk_o_csv-gjahr <> space.
+
+* 会計伝票番号の前ゼロ編集
+if wk_o_csv-belnr co '1234567890 '.
+clear:wk_belnr_n.
+move wk_o_csv-belnr to wk_belnr_n.
+endif.
+
+select single
+belnr                                "会計伝票番号
+gjahr                                "会計年度
+into (wk_belnr,wk_gjahr)
+from bkpf
+where bukrs = p_bukrs                      "入力画面(会社コード)
+and belnr = wk_belnr_n                   "入力ﾌｧｲﾙ(会計伝票番号)
+and gjahr = wk_o_csv-gjahr.              "入力ﾌｧｲﾙ(会計年度)
+
+if sy-subrc = 0.
+perform data_make using space space.      "データ作成
+else.
+perform data_make using 'E' cns_msg_01.   "データ作成
+endif.
+
+endif.
+
+* １項目に値が設定されている場合のみ処理を行う
+if wk_o_csv-belnr <> space and
+wk_o_csv-gjahr = space.
+perform data_make using 'E' cns_msg_01.     "データ作成
+endif.
+
+* １項目に値が設定されている場合のみ処理を行う
+if wk_o_csv-belnr = space and
+wk_o_csv-gjahr <> space.
+perform data_make using 'E' cns_msg_01.     "データ作成
+endif.
+
+endform.                    " CHECK_DATA_2
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_3
+*&---------------------------------------------------------------------*
+*       『転記日付』のチェック
+*----------------------------------------------------------------------*
+form check_data_3.
+
+if wk_o_csv-budat = space.
+perform data_make using 'E' cns_msg_02.     "データ作成
+else.
+
+move wk_o_csv-budat to wk_budat_d.
+
+call function 'DATE_CHECK_PLAUSIBILITY'
+exporting
+date                      = wk_budat_d
+exceptions
+plausibility_check_failed = 1
+others                    = 2.
+
+if sy-subrc <> 0.
+perform data_make using 'E' cns_msg_03.   "データ作成
+endif.
+
+endif.
+
+endform.                    " CHECK_DATA_3
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_4
+*&---------------------------------------------------------------------*
+*       『通貨コード』のチェック
+*----------------------------------------------------------------------*
+form check_data_4.
+
+* ブランクまたはスペースの場合はチェックを行わない
+if wk_o_csv-waers <> space or
+not wk_o_csv-waers is initial.
+
+clear:wk_tcurc,wk_waers.
+move wk_o_csv-waers to wk_waers.
+* 通貨コードの読込み(入力された通貨コード)
+read table gtab_tcurc into wk_tcurc
+with key waers = wk_o_csv-waers.
+
+if sy-subrc <> 0.
+* 小文字⇒大文字の通貨コードへ変換
+translate wk_waers to upper case.
+clear:wk_tcurc.
+* 通貨コードの読込み(変換された通貨コード)
+read table gtab_tcurc into wk_tcurc
+with key waers = wk_waers.
+
+if sy-subrc <> 0.
+perform data_make using 'E' cns_msg_04.   "データ作成
+endif.
+
+endif.
+
+endif.
+
+endform.                    " CHECK_DATA_4
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA_5
+*&---------------------------------------------------------------------*
+*       『得意先』のチェック
+*----------------------------------------------------------------------*
+form check_data_5.
+
+if wk_o_csv-kunnr = space.
+perform data_make using 'E' cns_msg_05.     "データ作成
+else.
+* 得意先コードの前ゼロ編集
+if wk_o_csv-kunnr co '1234567890 '.
+clear:wk_kunnr_n,wk_kunnr_c.
+move wk_o_csv-kunnr to wk_kunnr_n.
+move wk_kunnr_n     to wk_kunnr_c.
+else.
+move wk_o_csv-kunnr to wk_kunnr_c.
+endif.
+
+* 得意先の読込み
+read table gtab_kna1_knb1 into wk_kna1_knb1
+with key kunnr = wk_kunnr_c.
+
+if sy-subrc <> 0.
+perform data_make using 'E' cns_msg_06.   "データ作成
+endif.
+
+endif.
+
+endform.                    " CHECK_DATA_5
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_DATA
+*&---------------------------------------------------------------------*
+*       上書きファイル作成
+*----------------------------------------------------------------------*
+form update_data.
+
+if wk_flg_up = space.
+append wk_head to gtab_i_csv.
+move 'X' to wk_flg_up.
+endif.
+
+clear:wk_i_csv.
+concatenate wk_o_csv-budat                    "転記日付
+wk_o_csv-waers                    "通貨コード
+wk_o_csv-kunnr                    "得意先
+wk_o_csv-wrbtr                    "金額
+wk_o_csv-belnr                    "登録済伝票番号
+wk_o_csv-gjahr                    "登録済伝票会計年度
+into wk_i_csv separated by cns_kanma.
+append wk_i_csv to gtab_i_csv.
+
+endform.                    " UPDATE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  LIST_DATA
+*&---------------------------------------------------------------------*
+*       帳票データ作成
+*----------------------------------------------------------------------*
+*      -->P_FLG_O   正常/エラー判定フラグ
+*      -->P_MSG_O   メッセージ
+*----------------------------------------------------------------------*
+form list_data using value(p_flg_o)
+value(p_msg_o).
+clear:wk_list.
+* 得意先コードのSPACE編集
+if wk_o_csv-kunnr <> space.
+* 得意先コードの前ゼロ編集
+if wk_o_csv-kunnr co '1234567890 '.
+clear:wk_kunnr_n,wk_kunnr_c.
+move wk_o_csv-kunnr to wk_kunnr_n.
+move wk_kunnr_n     to wk_kunnr_c.
+else.
+move wk_o_csv-kunnr to wk_kunnr_c.
+endif.
+else.
+move wk_o_csv-kunnr to wk_kunnr_c.
+endif.
+* 得意先の読込み
+read table gtab_kna1_knb1 into wk_kna1_knb1
+with key kunnr = wk_kunnr_c.
+if sy-subrc <> 0.
+clear:wk_kna1_knb1.
+endif.
+
+* 勘定の読込み
+read table gtab_skat into wk_skat
+with key saknr = wk_kna1_knb1-akont.
+if sy-subrc <> 0.
+clear:wk_skat.
+endif.
+
+clear:wk_wrbtr,wk_kari,wk_kari_m,wk_kashi,wk_kashi_m.
+search wk_o_csv-wrbtr for '-'.
+if sy-subrc = 0.
+move wk_o_csv-wrbtr to wk_wrbtr.
+if wk_flg_wrbtr = space.
+wk_wrbtr = wk_wrbtr * -1.
+endif.
+move wk_kna1_knb1-akont to wk_kari.
+move wk_skat-txt20      to wk_kari_m.
+*modify{
+move '7509005'          to wk_kashi.
+*   MOVE '6143001'          TO WK_KASHI.
+*}modify 2009/08/27 T.HAYASHI
+*modify{
+move '雑損失（その他）' to wk_kashi_m.
+*   MOVE '支払手数料'       TO WK_KASHI_M.
+*}modify 2009/08/27 T.HAYASHI
+else.
+move wk_o_csv-wrbtr to wk_wrbtr.
+*modify{
+move '7509005'          to wk_kari.
+*   MOVE '6143001'          TO WK_KARI.
+*}modify 2009/08/27 T.HAYASHI
+*modify{
+move '雑損失（その他）' to wk_kari_m.
+*   MOVE '支払手数料'       TO WK_KARI_M.
+*}modify 2009/08/27 T.HAYASHI
+move wk_kna1_knb1-akont to wk_kashi.
+move wk_skat-txt20      to wk_kashi_m.
+endif.
+
+* 帳票データ編集
+move wk_o_csv-belnr      to wk_list-belnr.          "伝票NO
+move wk_o_csv-budat      to wk_list-budat.          "転記日付
+move wk_o_csv-waers      to wk_list-waers.          "通貨
+if wk_kunnr_c <> space.
+if wk_kunnr_c co '1234567890 '.
+move wk_kunnr_c+2(8) to wk_list-kunnr.          "得意先ｺｰﾄﾞ
+else.
+move wk_kunnr_c      to wk_list-kunnr.          "得意先ｺｰﾄﾞ
+endif.
+else.
+move wk_kunnr_c        to wk_list-kunnr.          "得意先ｺｰﾄﾞ
+endif.
+move wk_kna1_knb1-name1  to wk_list-name1.          "得意先名称
+move wk_kari             to wk_list-kari.           "借方科目
+move wk_kari_m           to wk_list-kari_m.         "借方勘定科目名
+move wk_kashi            to wk_list-kashi.          "貸方科目
+move wk_kashi_m          to wk_list-kashi_m.        "貸方勘定科目名
+move p_msg_o             to wk_list-msg+0(36).      "摘要/エラー内容
+if wk_o_csv-waers = 'JPY' or
+wk_o_csv-waers = space.
+if wk_flg_wrbtr = space.
+move wk_wrbtr        to wk_list-kari_k_j.       "借方金額
+move wk_wrbtr        to wk_list-kashi_k_j.      "貸方金額
+else.
+move wk_wrbtr        to wk_list-kingaku.        "エラー金額
+endif.
+else.
+if wk_flg_wrbtr = space.
+move wk_wrbtr        to wk_list-kari_k_u.       "借方金額
+move wk_wrbtr        to wk_list-kashi_k_u.      "貸方金額
+else.
+move wk_wrbtr        to wk_list-kingaku.        "エラー金額
+endif.
+endif.
+
+if wk_flg_space = 'X'.
+move 'X' to wk_list-kingaku_f.
+endif.
+
+* 正常データ
+if p_flg_o = 'S'.
+append wk_list to gtab_list_s.
+* エラーデータ
+else.
+append wk_list to gtab_list_e.
+endif.
+
+clear:wk_list,wk_flg_wrbtr,wk_flg_space.
+
+endform.                    " LIST_DATA
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_BDC
+*&---------------------------------------------------------------------*
+*       ＢＤＣ処理
+*----------------------------------------------------------------------*
+form check_bdc.
+
+clear:wk_wrbtr,wk_newbs_1,wk_newbs_2.
+search wk_o_csv-wrbtr for '-'.
+if sy-subrc = 0.
+move wk_o_csv-wrbtr to wk_wrbtr.
+wk_wrbtr = wk_wrbtr * -1.
+move '07'           to wk_newbs_1.
+move '50'           to wk_newbs_2.
+else.
+move wk_o_csv-wrbtr to wk_wrbtr.
+move '17'           to wk_newbs_1.
+move '40'           to wk_newbs_2.
+endif.
+condense wk_wrbtr.
+
+perform dynpro using:
+'X' 'SAPMF05A'        '0100',
+' ' 'BDC_CURSOR'      'RF05A-NEWKO',
+' ' 'BDC_OKCODE'      '/00',
+' ' 'BKPF-BLDAT'      wk_o_csv-budat,       "ﾌｧｲﾙ(転記日付)
+' ' 'BKPF-BLART'      'AB',
+' ' 'BKPF-BUKRS'      p_bukrs,              "画面(会社ｺｰﾄﾞ)
+' ' 'BKPF-BUDAT'      wk_o_csv-budat,       "ﾌｧｲﾙ(転記日付)
+' ' 'BKPF-MONAT'      space.                "自動提案
+if wk_o_csv-waers = space.
+perform dynpro using:
+' ' 'BKPF-WAERS'      'JPY'.              "ﾌｧｲﾙ(通貨ｺｰﾄﾞ)
+else.
+perform dynpro using:
+' ' 'BKPF-WAERS'      wk_o_csv-waers.     "ﾌｧｲﾙ(通貨ｺｰﾄﾞ)
+endif.
+perform dynpro using:
+' ' 'BKPF-BKTXT'      wk_bktxt,
+' ' 'FS006-DOCID'     '*',
+' ' 'RF05A-NEWBS'     wk_newbs_1,           "07 OR 17(転記ｷｰ)
+' ' 'RF05A-NEWKO'     wk_o_csv-kunnr.       "ﾌｧｲﾙ(得意先ｺｰﾄﾞ)
+
+perform dynpro using:
+'X' 'SAPMF05A'        '0301',
+' ' 'BDC_CURSOR'      'RF05A-NEWKO',
+' ' 'BDC_OKCODE'      '/00',
+' ' 'BSEG-HKONT'      wk_kna1_knb1-akont,   "勘定ｺｰﾄﾞ
+' ' 'BSEG-WRBTR'      wk_wrbtr,             "ﾌｧｲﾙ(金額)
+' ' 'BSEG-MWSKZ'      'V1', "
+' ' 'BSEG-GSBER'      space, "
+' ' 'BSEG-ZTERM'      space, "
+' ' 'BSEG-ZFBDT'      wk_o_csv-budat,       "ﾌｧｲﾙ(転記日付)
+' ' 'BSEG-ZUONR'      '端数残高自動処理',
+' ' 'BSEG-SGTXT'      '端数残高自動処理',
+' ' 'RF05A-NEWBS'     wk_newbs_2,           "40 OR 50(転記ｷｰ)
+*modify{
+' ' 'RF05A-NEWKO'     '7509005'.            "雑損失（その他）
+*         ' ' 'RF05A-NEWKO'     '6143001'.            "支払手数料
+*}modify 2009/08/27 T.HAYASHI
+
+
+perform dynpro using:
+'X' 'SAPMF05A'        '0300',
+' ' 'BDC_CURSOR'      'BSEG-SGTXT',
+' ' 'BDC_OKCODE'      '=BS',
+' ' 'BSEG-WRBTR'      wk_wrbtr,             "ﾌｧｲﾙ(金額)
+' ' 'BSEG-MWSKZ'      'V1', "
+' ' 'BSEG-ZUONR'      '端数残高自動処理',
+' ' 'BSEG-SGTXT'      '端数残高自動処理',
+' ' 'BDC_SUBSCR'      'SAPLKACB',
+' ' 'DKACB-FMORE'     'X'.
+
+perform dynpro using:
+'X' 'SAPLKACB'        '0002',
+' ' 'BDC_CURSOR'      'COBL-PRCTR',
+' ' 'BDC_OKCODE'      '=ENTE',
+*   insert 2012/05/29 S.MIKAMI DMW4318 {
+' ' 'COBL-KOSTL'      'GA09',
+' ' 'COBL-PRCTR'      'RA09',
+*          ' ' 'COBL-KOSTL'      'GA03',
+*          ' ' 'COBL-PRCTR'      'GA03',
+* } insert 2012/05/29 S.MIKAMI DMW4318
+' ' 'BDC_SUBSCR'      'SAPLKACB'.
+
+*【本実行の場合】
+if p_test = space.
+perform dynpro using:
+'X' 'SAPMF05A'        '0700',
+' ' 'BDC_CURSOR'      'RF05A-NEWBS',
+' ' 'BDC_OKCODE'      '=BU',
+' ' 'BKPF-BKTXT'      wk_bktxt.
+* 【テスト実行の場合】
+else.
+perform dynpro using:
+'X' 'SAPMF05A'        '0700',
+' ' 'BDC_OKCODE'      '/EEND',
+' ' 'BDC_CURSOR'      'RF05A-NEWBS'.
+
+perform dynpro using:
+'X' 'SAPLSPO1'        '0200',
+' ' 'BDC_OKCODE'      '=YES'.
+endif.
+
+wk_mode = 'N'.
+
+call transaction 'F-02'
+using    gtab_bdc
+mode     wk_mode                                  "非表示
+update   'S'.
+
+if sy-subrc = 0.
+move sy-msgv1 to wk_o_csv-belnr.                  "伝票番号の取得
+if p_test = space and
+wk_o_csv-belnr <> space.
+perform get_bkpf.                               "会計伝票の抽出
+endif.
+perform data_make using 'S' '端数残高自動処理'.   "データ作成
+else.
+perform get_msg.                                  "メッセージ取得
+perform data_make using 'E' wk_text-msgtx.        "データ作成
+endif.
+
+clear:gtab_bdc.
+
+endform.                    " CHECK_BDC
+*&---------------------------------------------------------------------*
+*&      Form  DYNPRO
+*&---------------------------------------------------------------------*
+*       ＢＤＣ作成
+*----------------------------------------------------------------------*
+*      -->DYNBEG   text                                                *
+*      -->NAME     text                                                *
+*      -->VALUE    text                                                *
+*----------------------------------------------------------------------*
+form dynpro using dynbegin name value.
+
+clear:wk_bdc.
+if dynbegin = 'X'.
+move name  to wk_bdc-program.
+move value to wk_bdc-dynpro.
+move 'X'   to wk_bdc-dynbegin.
+else.
+move name  to wk_bdc-fnam.
+move value to wk_bdc-fval.
+endif.
+append wk_bdc to gtab_bdc.
+
+endform.                    " CHECK_BDC
+*&---------------------------------------------------------------------*
+*&      Form  GET_BKPF
+*&---------------------------------------------------------------------*
+*       会計伝票の抽出
+*----------------------------------------------------------------------*
+form get_bkpf.
+
+* 会計伝票番号の前ゼロ編集
+if wk_o_csv-belnr co '1234567890 '.
+clear:wk_belnr_n.
+move wk_o_csv-belnr to wk_belnr_n.
+endif.
+
+clear:wk_gjahr.
+select single gjahr                         "会計年度
+into wk_gjahr
+from bkpf
+where bukrs = p_bukrs                      "入力画面(会社コード)
+and belnr = wk_belnr_n                   "登録済(会計伝票番号)
+and budat = wk_o_csv-budat.              "入力ファイル(転記日付)
+
+if sy-subrc = 0.
+move wk_gjahr to wk_o_csv-gjahr.
+endif.
+
+endform.                    " GET_BKPF
+*&---------------------------------------------------------------------*
+*&      Form  GET_MSG
+*&---------------------------------------------------------------------*
+*       エラーメッセージ取得
+*----------------------------------------------------------------------*
+form get_msg.
+
+clear:wk_text.
+
+call function 'WRITE_MESSAGE'
+exporting
+msgid  = sy-msgid
+msgno  = sy-msgno
+msgty  = sy-msgty
+msgv1  = sy-msgv1
+msgv2  = sy-msgv2
+msgv3  = sy-msgv3
+msgv4  = sy-msgv4
+importing
+messg  = wk_text
+exceptions
+others = 1.
+
+endform.                    " GET_MSG
+*&---------------------------------------------------------------------*
+*&      Form  LIST_OUT_1
+*&---------------------------------------------------------------------*
+*       帳票出力(ヘッダ)
+*----------------------------------------------------------------------*
+form list_out_1.
+
+data:wk_syorimsg(24) type c.
+clear:wk_syorimsg.
+
+if p_test ='X'.
+case wk_flg_list.
+when 'S'.
+wk_syorimsg = '【テスト実行：正常予定】'.
+when 'E'.
+wk_syorimsg = '【テスト実行：エラー】'.
+when others.
+
+endcase.
+else.
+case wk_flg_list.
+when 'S'.
+wk_syorimsg = '【本実行：正常終了】'.
+when 'E'.
+wk_syorimsg = '【本実行：エラー】'.
+when others.
+
+endcase.
+endif.
+
+write: /071(20) '売掛金端数処理ＢＤＣ',
+161(6)  'ページ',
+167     sy-pagno,
+/071(20) '====================',
+138(10) '作成年月日',
+148     sy-datum+0(4) no-zero,
+152(2)  '年',
+154     sy-datum+4(2) no-zero,
+156(2)  '月',
+158     sy-datum+6(2) no-zero,
+160(2)  '日',
+164     sy-uzeit+0(2),
+166(1)  ':',
+167     sy-uzeit+2(2).
+if wk_flg_list = 'S' or
+wk_flg_list = 'E'.
+write: /071(24) wk_syorimsg,
+/001(06) '伝票NO',
+012(08) '転記日付',
+023(04) '通貨',
+028(10) '得意先ｺｰﾄﾞ',
+039(10) '得意先名称',
+072(08) '借方科目',
+081(10) '勘定科目名',
+092(06) '金  額',
+101(01) '/',
+103(08) '貸方科目',
+112(10) '勘定科目名',
+123(06) '金  額'.
+if wk_flg_list = 'S'.
+write:132(04) '摘要'.
+else.
+write:132(10) 'エラー内容'.
+endif.
+uline.
+else.
+uline.
+endif.
+
+endform.                    " LIST_OUT_1
+*&---------------------------------------------------------------------*
+*&      Form  LIST_OUT_2
+*&---------------------------------------------------------------------*
+*       帳票出力(正常/エラー)
+*----------------------------------------------------------------------*
+*      -->P_GTAB_LIST  正常/エラーデータ
+*      -->P_FLG        正常/エラー判定フラグ
+*----------------------------------------------------------------------*
+form list_out_2 tables   p_gtab_list structure wk_list
+using    value(p_flg).
+
+clear:wk_flg_page.
+if p_flg = 'S' or
+p_flg = 'E'.
+loop at p_gtab_list into wk_list.
+if p_test ='X'.
+if p_flg = 'S'.
+move 'S' to wk_flg_list.
+else.
+move 'E' to wk_flg_list.
+if wk_flg_page = space.
+new-page.
+move 'X' to wk_flg_page.
+endif.
+endif.
+write: /001(10) '**********'.           "伝票NO
+else.
+if p_flg = 'S'.
+move 'S' to wk_flg_list.
+write: /001(10) wk_list-belnr.        "伝票NO
+else.
+move 'E' to wk_flg_list.
+if wk_flg_page = space.
+new-page.
+move 'X' to wk_flg_page.
+endif.
+write: /001(10) '**********'.         "伝票NO
+endif.
+endif.
+write:012(04) wk_list-budat+0(4),         "転記日付
+016(01) '/',
+017(02) wk_list-budat+4(2),         "転記日付
+019(01) '/',
+020(02) wk_list-budat+6(2),         "転記日付
+023(05) wk_list-waers,              "通貨
+028(08) wk_list-kunnr,              "得意先ｺｰﾄﾞ
+039(30) wk_list-name1,              "得意先名称
+070(01) '|',
+072(08) wk_list-kari,               "借方科目
+081(10) wk_list-kari_m.             "勘定科目名
+if wk_list-kingaku = space.
+if wk_list-kingaku_f = 'X'.
+write:092(09) wk_list-kingaku.        "エラー金額
+else.
+if wk_list-waers = 'JPY' or
+wk_list-waers = space.
+write:092(09) wk_list-kari_k_j.     "金  額
+else.
+write:092(09) wk_list-kari_k_u.     "金  額
+endif.
+endif.
+else.
+write:092(09) wk_list-kingaku.          "エラー金額
+endif.
+write:101(01) '/',
+103(08) wk_list-kashi,              "貸方科目
+112(10) wk_list-kashi_m.            "勘定科目名
+if wk_list-kingaku = space.
+if wk_list-kingaku_f = 'X'.
+write:123(09) wk_list-kingaku.        "エラー金額
+else.
+if wk_list-waers = 'JPY' or
+wk_list-waers = space.
+write:123(09) wk_list-kashi_k_j.    "金  額
+else.
+write:123(09) wk_list-kashi_k_u.    "金  額
+endif.
+endif.
+else.
+write:123(09) wk_list-kingaku.          "エラー金額
+endif.
+write:132(36) wk_list-msg.                "摘要/エラー内容
+
+clear:wk_list.
+endloop.
+else.
+move 'N' to wk_flg_list.
+new-page.
+write: /002(28) '＊＊＊＊＊＊＊＊＊＊＊＊＊＊'.
+if p_test ='X'.
+write: /002(16) '正常終了（予定）'.
+else.
+write: /002(08) '正常終了'.
+endif.
+write:  018(02) '：',
+020(06) wk_cnt_s,
+027(02) '件',
+/002(06) 'エラー',
+018(02) '：',
+020(06) wk_cnt_e,
+027(02) '件',
+/002(10) '処理対象外',
+018(02) '：',
+020(06) wk_cnt_o,
+027(02) '件',
+/002(28) '＊＊＊＊＊＊＊＊＊＊＊＊＊＊'.
+endif.
+
+endform.                    " LIST_OUT_2
+*&---------------------------------------------------------------------*
+*&      Form  DATA_MAKE
+*&---------------------------------------------------------------------*
+*       データ作成
+*----------------------------------------------------------------------*
+*      -->P_FLG   正常/エラー/対象外判定フラグ
+*      -->P_MSG   メッセージ
+*----------------------------------------------------------------------*
+form data_make using value(p_flg_i)
+value(p_msg_i).
+
+case p_flg_i.
+when 'S'.
+wk_cnt_s = wk_cnt_s + 1.                  "正常件数のカウント
+perform list_data using p_flg_i p_msg_i.  "帳票データ作成
+when 'E'.
+move 'X' to wk_flg_rec.                   "次レコード判定フラグ
+wk_cnt_e = wk_cnt_e + 1.                  "エラー件数のカウント
+perform list_data using p_flg_i p_msg_i.  "帳票データ作成
+when others.
+move 'X' to wk_flg_rec.                   "次レコード判定フラグ
+wk_cnt_o = wk_cnt_o + 1.                  "処理対象外件数
+endcase.
+
+perform update_data.                          "上書きファイル作成
+
+endform.                    " DATA_MAKE

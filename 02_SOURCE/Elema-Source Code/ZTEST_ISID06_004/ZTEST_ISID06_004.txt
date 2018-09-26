@@ -1,0 +1,179 @@
+*&---------------------------------------------------------------------*
+*& Report  ZTEST_ISID06_004
+*&---------------------------------------------------------------------*
+report  ztest_isid06_004.
+type-pools: abap, slis.
+parameters:
+p_tbl   type dd03l-tabname obligatory value check, "テーブル名
+p_field type dd03l-fieldname." OBLIGATORY.           "項目名
+*
+initialization.
+%_p_tbl_%_app_%-text = 'テーブル名'.
+%_p_field_%_app_%-text = '項目名'.
+*
+start-of-selection.
+perform start_of_selection.
+message text-001 type 'S'.
+*&---------------------------------------------------------------------*
+*&      Form START_OF_SELECTION
+*&---------------------------------------------------------------------*
+form start_of_selection.
+data: buff    type ref to data,
+regex   type ref to cl_abap_regex,
+descr   type ref to cl_abap_structdescr,
+x030l   type x030l,
+i_dfies type ddfields,
+i_fcat  type slis_t_fieldcat_alv.
+field-symbols: <buff> type any,
+<tbl>  type standard table.
+cl_progress_indicator=>progress_indicate( i_text = '検索中...' ).
+*--- 指定テーブル情報取得
+descr ?= cl_abap_typedescr=>describe_by_name( p_tbl ).
+x030l   = descr->get_ddic_header( ).
+*  I_X031L = DESCR->GET_DDIC_OBJECT( ).
+i_dfies = descr->get_ddic_field_list(  ).
+sort i_dfies by position.
+create object regex
+exporting
+pattern = '.*[^[:print:][:unicode:]].*'.
+*--- 検索
+if p_field is initial.
+create data buff type standard table of (p_tbl) with default key.
+assign buff->* to <tbl>.
+perform fcat_merge using i_fcat i_dfies.
+perform match2 using i_dfies x030l <tbl> regex i_fcat.
+if lines( <tbl> ) <> 0.
+perform grid using <tbl> i_fcat.
+endif.
+else.
+create data buff type (p_tbl).
+assign buff->* to <buff>.
+perform match1 using i_dfies x030l <buff> regex.
+endif.
+endform."
+*&---------------------------------------------------------------------*
+*&      項目指定のとき
+*&---------------------------------------------------------------------*
+form match1
+using i_dfies type ddfields
+x030l   type x030l
+buffer  type any
+regex   type ref to cl_abap_regex.
+data matcher type ref to cl_abap_matcher.
+field-symbols <field> type any.
+read table i_dfies transporting no fields
+with key fieldname = p_field.
+if sy-subrc <> 0.
+message '指定項目が見つかりません' type 'S' display like 'E'.
+return.
+endif.
+assign component p_field of structure buffer to <field>.
+*--- 指定テーブルの指定項目をチェック
+select * into buffer from (p_tbl).
+matcher = regex->create_matcher( text = <field> ).
+check matcher->match( ) = abap_true.
+*--- 不正文字があったら、キー部と指定項目を表示
+perform put_key using i_dfies x030l buffer.
+write: / p_field, '[' no-gap, <field> no-gap, ']'.
+uline.
+endselect.
+endform.                    "MATCH1
+*&---------------------------------------------------------------------*
+*&      キーの表示
+*&---------------------------------------------------------------------*
+form put_key
+using i_dfies type ddfields
+x030l   type x030l
+buffer  type any.
+data r_dfies type ref to dfies.
+field-symbols <key> type any.
+do x030l-keycnt times.
+read table i_dfies reference into r_dfies index sy-index.
+assign component r_dfies->fieldname of structure buffer to <key>.
+write: / r_dfies->fieldname, '[' no-gap, <key> no-gap, ']'.
+enddo.
+endform.                    "put_key
+*&---------------------------------------------------------------------*
+*&      テーブル指定のとき
+*&---------------------------------------------------------------------*
+form match2
+using i_dfies type ddfields
+x030l   type x030l
+tbl     type standard table
+regex   type ref to cl_abap_regex
+i_fcat  type slis_t_fieldcat_alv.
+data: matcher type ref to cl_abap_matcher,
+r_dfies type ref to dfies,
+l_bool  type abap_bool,
+buff    type ref to data,
+l_from  type i,
+l_fcat  type slis_fieldcat_alv.
+field-symbols: <field> type any,
+<buff>  type any.
+create data buff type (p_tbl).
+assign buff->* to <buff>.
+l_from = x030l-keycnt + 1.
+*--- 指定テーブルの全項目をチェック
+select * into <buff> from (p_tbl).
+l_bool = abap_off.
+loop at i_dfies from l_from reference into r_dfies where inttype = 'C'.
+assign component sy-tabix of structure <buff> to <field>.
+check sy-subrc = 0.
+matcher = regex->create_matcher( text = <field> ).
+if matcher->match( ) = abap_false.
+clear <field>.
+else.
+l_bool = abap_on.
+modify i_fcat from l_fcat transporting tech
+where fieldname = r_dfies->fieldname.
+endif.
+endloop.
+check l_bool = abap_on.
+append <buff> to tbl.
+endselect.
+endform.                    "MATCH2
+*&---------------------------------------------------------------------*
+*&      テーブル指定のときの表示
+*&---------------------------------------------------------------------*
+form grid
+using tbl    type standard table
+i_fcat type slis_t_fieldcat_alv.
+call function 'REUSE_ALV_GRID_DISPLAY'
+exporting
+it_fieldcat = i_fcat
+tables
+t_outtab    = tbl
+exceptions
+others      = 1.
+endform.                    "grid
+*&---------------------------------------------------------------------*
+*&      項目カタログ作成
+*&---------------------------------------------------------------------*
+form fcat_merge
+using i_fcat  type slis_t_fieldcat_alv
+i_dfies type ddfields.
+data: l_fcat type ref to slis_fieldcat_alv,
+l_dfies type ref to dfies.
+call function 'REUSE_ALV_FIELDCATALOG_MERGE'
+exporting
+i_program_name     = sy-repid
+i_internal_tabname = 'I_FCAT'
+i_structure_name   = p_tbl
+changing
+ct_fieldcat        = i_fcat
+exceptions
+others             = 1.
+loop at i_fcat reference into l_fcat.
+if l_fcat->key  = abap_false.
+l_fcat->tech = abap_true.
+endif.
+read table i_dfies reference into l_dfies
+with key fieldname = l_fcat->fieldname.
+concatenate l_dfies->fieldname
+'(' l_dfies->leng ')'
+l_dfies->fieldtext
+into l_fcat->seltext_l.
+l_fcat->ddictxt = 'L'.
+l_fcat->seltext_s = l_fcat->seltext_m = l_fcat->seltext_l.
+endloop.
+endform.                    "fcat_MERGE

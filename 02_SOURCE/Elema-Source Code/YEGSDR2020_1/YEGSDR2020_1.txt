@@ -1,0 +1,736 @@
+*&---------------------------------------------------------------------*
+*& プログラムID : ZEGSDR2020
+*& 作成者       : iSiD Wan
+*& 作成日       : 2014/10/27
+*& 処理概要     : 1.抽出条件を元に承認待ちの受注データを取得する。
+*&                2.受注情報を変更し、一時保存と承認できること。
+*&                3.受注自動登録ジョブエラーを最小限にするため、
+*&                  承認する際に出来る限りにチェックを行い。
+*&                4.リカバリを考慮し、エラーになった受注データを
+*&                  一覧に表示し変更再承認できること。
+*&                5.エラーデータをリカバリするため、オンライン
+*&                  ALVで登録済とエラー一覧を確認する。
+*&                6.承認済一覧（受注自動登録未）を確認できること。
+*&---------------------------------------------------------------------*
+*& 改定履歴
+*& No   DATE       MODIFYED BY   SUMMARY
+*&
+*&---------------------------------------------------------------------*
+REPORT  YEGSDR2020_1 NO STANDARD PAGE HEADING.
+
+INCLUDE ZEGSDR2020_TOP.
+
+*&----------------------------------------------------------------------
+* 選択画面定義(1000)
+*&----------------------------------------------------------------------
+PARAMETERS:
+P_VKORG    TYPE VBAK-VKORG MEMORY ID VKO OBLIGATORY.
+" 販売組織
+SELECT-OPTIONS:
+S_VTWEG    FOR  W_VTWEG MEMORY ID VTW,      " 流通チャネル
+S_SPART    FOR  W_SPART MEMORY ID SPA,      " 製品部門
+S_VKBUR    FOR  W_VKBUR MEMORY ID VKB,      " 営業所
+S_VKGRP    FOR  W_VKGRP,                    " 営業グループ
+S_DATE     FOR  W_ZECREYMD.                 " 登録日付
+
+PARAMETERS:
+RB_APP   RADIOBUTTON GROUP RB1 DEFAULT 'X', " 承認一覧
+RB_ERR   RADIOBUTTON GROUP RB1.             " リカバリ一覧
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:
+RB_LIST  RADIOBUTTON GROUP RB1.        " 承認済一覧（販売伝票未作成）
+SELECTION-SCREEN COMMENT 2(48) TEXT-P01 FOR FIELD RB_LIST.
+SELECTION-SCREEN END OF LINE.
+
+*----------------------------------------------------------------------*
+* AT SELETION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* A-1-1．入力チェック
+PERFORM CHECK_INPUT.
+
+* A-1-2．整合性チェック
+* A-1-2-1．販売エリアの整合性チェック
+PERFORM CHECK_TVTA CHANGING TD_TVTA.
+
+* A-1-3．権限チェック
+PERFORM CHECK_TVTA_AUTH CHANGING TD_TVTA.
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+* 主処理
+PERFORM MAIN_PROCESS.
+
+*&---------------------------------------------------------------------*
+*&       Class (Implementation)  CL_EVENT_RECEIVER
+*&---------------------------------------------------------------------*
+*        クラス:CL_EVENT_RECEIVER
+*----------------------------------------------------------------------*
+CLASS CL_EVENT_RECEIVER DEFINITION.
+
+PUBLIC SECTION.
+CLASS-METHODS:
+*     画面値が変更される時事件
+HANDLE_DATA_CHANGED
+FOR EVENT DATA_CHANGED OF CL_GUI_ALV_GRID
+IMPORTING ER_DATA_CHANGED,
+
+*     画面値が変更された後事件
+HANDLE_DATA_CHANGED_FINISHED
+FOR EVENT DATA_CHANGED_FINISHED OF CL_GUI_ALV_GRID
+IMPORTING E_MODIFIED ET_GOOD_CELLS,
+*     検索F4
+HANDLE_F4
+FOR EVENT ONF4 OF CL_GUI_ALV_GRID
+IMPORTING ER_EVENT_DATA.
+
+ENDCLASS.               "CL_EVENT_RECEIVER
+*&---------------------------------------------------------------------*
+*&       Class (Implementation)  GCL_EVENT_RECEIVER
+*&---------------------------------------------------------------------*
+*        クラス:CL_EVENT_RECEIVER
+*----------------------------------------------------------------------*
+CLASS CL_EVENT_RECEIVER IMPLEMENTATION.
+
+*&---------------------------------------------------------------------*
+*&       Method HANDLE_DATA_CHANGED
+*&---------------------------------------------------------------------*
+*        画面値が変更される時事件
+*----------------------------------------------------------------------*
+METHOD HANDLE_DATA_CHANGED.
+
+DATA:
+LST_MOD      TYPE LVC_S_MODI,
+LST_ZTERM    TYPE TYP_ZTERM,
+LST_ITEM     TYPE TYP_ALV_ITEM,
+LST_MSG      TYPE LVC_S_MSG1,
+LW_VALUE     TYPE DZTERM.
+
+LOOP AT ER_DATA_CHANGED->MT_MOD_CELLS INTO LST_MOD.
+CASE LST_MOD-FIELDNAME.
+WHEN CNS_FNM_ZTERM.
+
+IF LST_MOD-VALUE IS INITIAL.
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID     = '00'
+I_MSGNO     = '055'
+I_MSGTY     = CNS_MSG_E
+I_FIELDNAME = LST_MOD-FIELDNAME
+I_ROW_ID    = LST_MOD-ROW_ID.
+
+CONTINUE.
+
+ENDIF.
+CLEAR LST_ZTERM.
+LW_VALUE = LST_MOD-VALUE.
+
+READ TABLE TD_ZTERM  INTO LST_ZTERM
+WITH KEY ZTERM = LW_VALUE
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+CLEAR LST_ITEM.
+
+READ TABLE TD_ITEM_ALV INTO LST_ITEM INDEX LST_MOD-ROW_ID.
+
+LST_ITEM-TEXT1 = LST_ZTERM-TEXT1.
+
+MODIFY TD_ITEM_ALV FROM LST_ITEM INDEX LST_MOD-ROW_ID.
+ELSE.
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID = 'V1'
+I_MSGNO = '398'
+I_MSGTY = CNS_MSG_E
+I_MSGV1 = LST_MOD-VALUE
+I_FIELDNAME = CNS_FNM_ZTERM
+I_ROW_ID    = LST_MOD-ROW_ID.
+ENDIF.
+
+WHEN CNS_FNM_POSNR
+OR CNS_FNM_MATNR
+OR CNS_FNM_ARKTX
+OR CNS_FNM_KWMENG
+OR CNS_FNM_VRKME
+OR CNS_FNM_NETPR
+OR CNS_FNM_KPEIN
+OR CNS_FNM_KPEIN
+OR CNS_FNM_ZVRKME
+OR CNS_FNM_WERKS
+OR CNS_FNM_EDATU.
+
+IF LST_MOD-VALUE IS INITIAL.
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID     = '00'
+I_MSGNO     = '055'
+I_MSGTY     = CNS_MSG_E
+I_FIELDNAME = LST_MOD-FIELDNAME
+I_ROW_ID    = LST_MOD-ROW_ID.
+ENDIF.
+
+ENDCASE.
+ENDLOOP.
+
+CALL METHOD CI_ALV->ACTIVATE_DISPLAY_PROTOCOL( SPACE ).
+
+CASE OK_CODE.
+WHEN CNS_USER_BACK
+OR  CNS_USER_EXIT.
+*       処理なし
+WHEN OTHERS.
+CLEAR LST_MSG.
+
+READ TABLE ER_DATA_CHANGED->MT_PROTOCOL INTO LST_MSG INDEX 1.
+
+IF ER_DATA_CHANGED->MT_PROTOCOL IS NOT INITIAL.
+MESSAGE ID LST_MSG-MSGID TYPE CNS_MSG_S NUMBER LST_MSG-MSGNO
+WITH LST_MSG-MSGV1
+LST_MSG-MSGV2
+LST_MSG-MSGV3
+LST_MSG-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+ENDIF.
+ENDCASE.
+
+ENDMETHOD.
+*&---------------------------------------------------------------------*
+*&      Method  HANDLE_DATA_CHANGED_FINISHED
+*&---------------------------------------------------------------------*
+*&      データを変更された後
+*&---------------------------------------------------------------------*
+METHOD HANDLE_DATA_CHANGED_FINISHED.
+
+DATA:
+LW_COL       TYPE LVC_S_COL,
+LW_ROW       TYPE LVC_S_ROW,
+LW_MODIFIED  TYPE C,
+LW_KWMENG    TYPE EKPO-MENGE,
+LW_MENG_ALV  TYPE EKPO-MENGE,
+LW_NETWR     TYPE NETWR.
+
+FIELD-SYMBOLS:
+<LFS_ALV>    TYPE TYP_ALV_ITEM.
+
+*  DATA:L_my_handle TYPE  I.
+DATA L_CL_GUI_ALV_GRID  TYPE REF TO CL_GUI_ALV_GRID.
+
+CREATE OBJECT L_CL_GUI_ALV_GRID.
+
+
+CALL METHOD ME->GET_GRID_HANDLE
+IMPORTING
+GRID_HANDLE       = L_my_handle
+*    EXCEPTIONS
+*      CNTL_ERROR        = 1
+*      CNTL_SYSTEM_ERROR = 2
+*      OTHERS            = 3
+.
+IF SY-SUBRC <> 0.
+*   MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*              WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+
+
+
+
+
+
+
+
+E_MODIFIED = ABAP_ON.
+
+IF E_MODIFIED = ABAP_ON.
+CALL METHOD CI_ALV->GET_CURRENT_CELL
+IMPORTING
+ES_ROW_ID    = LW_ROW
+ES_COL_ID    = LW_COL.
+
+CALL METHOD CI_ALV->SET_CURRENT_CELL_VIA_ID
+EXPORTING
+IS_ROW_ID    = LW_ROW
+IS_COLUMN_ID = LW_COL.
+ENDIF.
+
+E_MODIFIED = LW_MODIFIED.
+
+*  E-2-2-2．明細の数量と金額項目が変更された場合、
+*  受注額の再計算処理を行う。
+CLEAR LW_NETWR.
+
+LOOP AT TD_ITEM_ALV ASSIGNING <LFS_ALV>.
+CLEAR:
+LW_KWMENG,
+LW_MENG_ALV.
+
+LW_MENG_ALV = <LFS_ALV>-KWMENG.
+
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR                   = <LFS_ALV>-MATNR
+I_IN_ME                   = <LFS_ALV>-VRKME
+I_OUT_ME                  = <LFS_ALV>-ZVRKME
+I_MENGE                   = LW_MENG_ALV
+IMPORTING
+E_MENGE                   = LW_KWMENG
+EXCEPTIONS
+ERROR_IN_APPLICATION      = 1
+ERROR                     = 2
+OTHERS                    = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+
+CLEAR LW_NETWR.
+EXIT.
+ELSE.
+
+IF <LFS_ALV>-KPEIN = 0.
+
+<LFS_ALV>-NETWR = 0.
+ELSE.
+
+CATCH SYSTEM-EXCEPTIONS ARITHMETIC_ERRORS = 4.
+
+<LFS_ALV>-NETWR = LW_KWMENG
+* <LFS_ALV>-NETPR
+/ <LFS_ALV>-KPEIN.
+LW_NETWR = <LFS_ALV>-NETWR + LW_NETWR.
+ENDCATCH.
+
+IF SY-SUBRC <> 0.
+<LFS_ALV>-NETWR = CNS_NETWR_MAX.
+LW_NETWR        = CNS_NETWR_MAX.
+ENDIF.
+
+ENDIF.
+
+ENDIF.
+
+ENDLOOP.
+
+ST_ZSEGSD0009-NETWR = LW_NETWR.
+
+CALL METHOD CL_GUI_CFW=>SET_NEW_OK_CODE
+EXPORTING
+NEW_CODE = CNS_USER_ENTR.
+
+CALL METHOD CL_GUI_CFW=>FLUSH.
+
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID     = '00'
+I_MSGNO     = '055'
+I_MSGTY     = CNS_MSG_E
+I_FIELDNAME = ''
+I_ROW_ID    = 2.
+ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*&      Method  HANDLE_F4
+*&---------------------------------------------------------------------*
+*&      検索F4
+*&---------------------------------------------------------------------*
+METHOD HANDLE_F4.
+*   検索F4
+PERFORM FRM_F4_SHOW.
+ER_EVENT_DATA->M_EVENT_HANDLED = ABAP_ON.
+
+ENDMETHOD.
+
+ENDCLASS.               "GCL_EVENT_RECEIVER
+
+*INCLUDE ZEGSDR2020_F01.
+*
+*INCLUDE ZEGSDR2020_O01.
+*
+*INCLUDE ZEGSDR2020_I01.
+*Text symbol text・
+*B01:Delete
+*B02:YES
+*B03:NO
+*B04:Confirm
+*P01:Approved List (Sales Order are not created yet.)
+*Selection text・
+*P_VKORG:        Sales Organization
+*RB_APP:        Approve
+*RB_ERR:        Error recovery
+*RB_LIST:        Appr. List(SO are not created)
+*S_DATE:        Create Date
+*S_SPART:        Division
+*S_VKBUR:        Sales Office
+*S_VKGRP:        Sales Group
+*S_VTWEG:        Distribution Channel
+*&---------------------------------------------------------------------*
+*& プログラムID : ZEGSDR2020
+*& 作成者       : iSiD Wan
+*& 作成日       : 2014/10/27
+*& 処理概要     : 1.抽出条件を元に承認待ちの受注データを取得する。
+*&                2.受注情報を変更し、一時保存と承認できること。
+*&                3.受注自動登録ジョブエラーを最小限にするため、
+*&                  承認する際に出来る限りにチェックを行い。
+*&                4.リカバリを考慮し、エラーになった受注データを
+*&                  一覧に表示し変更再承認できること。
+*&                5.エラーデータをリカバリするため、オンライン
+*&                  ALVで登録済とエラー一覧を確認する。
+*&                6.承認済一覧（受注自動登録未）を確認できること。
+*&---------------------------------------------------------------------*
+*& 改定履歴
+*& No   DATE       MODIFYED BY   SUMMARY
+*&
+*&---------------------------------------------------------------------*
+REPORT  YEGSDR2020_1 NO STANDARD PAGE HEADING.
+
+INCLUDE ZEGSDR2020_TOP.
+
+*&----------------------------------------------------------------------
+* 選択画面定義(1000)
+*&----------------------------------------------------------------------
+PARAMETERS:
+P_VKORG    TYPE VBAK-VKORG MEMORY ID VKO OBLIGATORY.
+" 販売組織
+SELECT-OPTIONS:
+S_VTWEG    FOR  W_VTWEG MEMORY ID VTW,      " 流通チャネル
+S_SPART    FOR  W_SPART MEMORY ID SPA,      " 製品部門
+S_VKBUR    FOR  W_VKBUR MEMORY ID VKB,      " 営業所
+S_VKGRP    FOR  W_VKGRP,                    " 営業グループ
+S_DATE     FOR  W_ZECREYMD.                 " 登録日付
+
+PARAMETERS:
+RB_APP   RADIOBUTTON GROUP RB1 DEFAULT 'X', " 承認一覧
+RB_ERR   RADIOBUTTON GROUP RB1.             " リカバリ一覧
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:
+RB_LIST  RADIOBUTTON GROUP RB1.        " 承認済一覧（販売伝票未作成）
+SELECTION-SCREEN COMMENT 2(48) TEXT-P01 FOR FIELD RB_LIST.
+SELECTION-SCREEN END OF LINE.
+
+*----------------------------------------------------------------------*
+* AT SELETION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* A-1-1．入力チェック
+PERFORM CHECK_INPUT.
+
+* A-1-2．整合性チェック
+* A-1-2-1．販売エリアの整合性チェック
+PERFORM CHECK_TVTA CHANGING TD_TVTA.
+
+* A-1-3．権限チェック
+PERFORM CHECK_TVTA_AUTH CHANGING TD_TVTA.
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+* 主処理
+PERFORM MAIN_PROCESS.
+
+*&---------------------------------------------------------------------*
+*&       Class (Implementation)  CL_EVENT_RECEIVER
+*&---------------------------------------------------------------------*
+*        クラス:CL_EVENT_RECEIVER
+*----------------------------------------------------------------------*
+CLASS CL_EVENT_RECEIVER DEFINITION.
+
+PUBLIC SECTION.
+CLASS-METHODS:
+*     画面値が変更される時事件
+HANDLE_DATA_CHANGED
+FOR EVENT DATA_CHANGED OF CL_GUI_ALV_GRID
+IMPORTING ER_DATA_CHANGED,
+
+*     画面値が変更された後事件
+HANDLE_DATA_CHANGED_FINISHED
+FOR EVENT DATA_CHANGED_FINISHED OF CL_GUI_ALV_GRID
+IMPORTING E_MODIFIED ET_GOOD_CELLS,
+*     検索F4
+HANDLE_F4
+FOR EVENT ONF4 OF CL_GUI_ALV_GRID
+IMPORTING ER_EVENT_DATA.
+
+ENDCLASS.               "CL_EVENT_RECEIVER
+*&---------------------------------------------------------------------*
+*&       Class (Implementation)  GCL_EVENT_RECEIVER
+*&---------------------------------------------------------------------*
+*        クラス:CL_EVENT_RECEIVER
+*----------------------------------------------------------------------*
+CLASS CL_EVENT_RECEIVER IMPLEMENTATION.
+
+*&---------------------------------------------------------------------*
+*&       Method HANDLE_DATA_CHANGED
+*&---------------------------------------------------------------------*
+*        画面値が変更される時事件
+*----------------------------------------------------------------------*
+METHOD HANDLE_DATA_CHANGED.
+
+DATA:
+LST_MOD      TYPE LVC_S_MODI,
+LST_ZTERM    TYPE TYP_ZTERM,
+LST_ITEM     TYPE TYP_ALV_ITEM,
+LST_MSG      TYPE LVC_S_MSG1,
+LW_VALUE     TYPE DZTERM.
+
+LOOP AT ER_DATA_CHANGED->MT_MOD_CELLS INTO LST_MOD.
+CASE LST_MOD-FIELDNAME.
+WHEN CNS_FNM_ZTERM.
+
+IF LST_MOD-VALUE IS INITIAL.
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID     = '00'
+I_MSGNO     = '055'
+I_MSGTY     = CNS_MSG_E
+I_FIELDNAME = LST_MOD-FIELDNAME
+I_ROW_ID    = LST_MOD-ROW_ID.
+
+CONTINUE.
+
+ENDIF.
+CLEAR LST_ZTERM.
+LW_VALUE = LST_MOD-VALUE.
+
+READ TABLE TD_ZTERM  INTO LST_ZTERM
+WITH KEY ZTERM = LW_VALUE
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+CLEAR LST_ITEM.
+
+READ TABLE TD_ITEM_ALV INTO LST_ITEM INDEX LST_MOD-ROW_ID.
+
+LST_ITEM-TEXT1 = LST_ZTERM-TEXT1.
+
+MODIFY TD_ITEM_ALV FROM LST_ITEM INDEX LST_MOD-ROW_ID.
+ELSE.
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID = 'V1'
+I_MSGNO = '398'
+I_MSGTY = CNS_MSG_E
+I_MSGV1 = LST_MOD-VALUE
+I_FIELDNAME = CNS_FNM_ZTERM
+I_ROW_ID    = LST_MOD-ROW_ID.
+ENDIF.
+
+WHEN CNS_FNM_POSNR
+OR CNS_FNM_MATNR
+OR CNS_FNM_ARKTX
+OR CNS_FNM_KWMENG
+OR CNS_FNM_VRKME
+OR CNS_FNM_NETPR
+OR CNS_FNM_KPEIN
+OR CNS_FNM_KPEIN
+OR CNS_FNM_ZVRKME
+OR CNS_FNM_WERKS
+OR CNS_FNM_EDATU.
+
+IF LST_MOD-VALUE IS INITIAL.
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID     = '00'
+I_MSGNO     = '055'
+I_MSGTY     = CNS_MSG_E
+I_FIELDNAME = LST_MOD-FIELDNAME
+I_ROW_ID    = LST_MOD-ROW_ID.
+ENDIF.
+
+ENDCASE.
+ENDLOOP.
+
+CALL METHOD CI_ALV->ACTIVATE_DISPLAY_PROTOCOL( SPACE ).
+
+CASE OK_CODE.
+WHEN CNS_USER_BACK
+OR  CNS_USER_EXIT.
+*       処理なし
+WHEN OTHERS.
+CLEAR LST_MSG.
+
+READ TABLE ER_DATA_CHANGED->MT_PROTOCOL INTO LST_MSG INDEX 1.
+
+IF ER_DATA_CHANGED->MT_PROTOCOL IS NOT INITIAL.
+MESSAGE ID LST_MSG-MSGID TYPE CNS_MSG_S NUMBER LST_MSG-MSGNO
+WITH LST_MSG-MSGV1
+LST_MSG-MSGV2
+LST_MSG-MSGV3
+LST_MSG-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+ENDIF.
+ENDCASE.
+
+ENDMETHOD.
+*&---------------------------------------------------------------------*
+*&      Method  HANDLE_DATA_CHANGED_FINISHED
+*&---------------------------------------------------------------------*
+*&      データを変更された後
+*&---------------------------------------------------------------------*
+METHOD HANDLE_DATA_CHANGED_FINISHED.
+
+DATA:
+LW_COL       TYPE LVC_S_COL,
+LW_ROW       TYPE LVC_S_ROW,
+LW_MODIFIED  TYPE C,
+LW_KWMENG    TYPE EKPO-MENGE,
+LW_MENG_ALV  TYPE EKPO-MENGE,
+LW_NETWR     TYPE NETWR.
+
+FIELD-SYMBOLS:
+<LFS_ALV>    TYPE TYP_ALV_ITEM.
+
+*  DATA:L_my_handle TYPE  I.
+DATA L_CL_GUI_ALV_GRID  TYPE REF TO CL_GUI_ALV_GRID.
+
+CREATE OBJECT L_CL_GUI_ALV_GRID.
+
+
+CALL METHOD ME->GET_GRID_HANDLE
+IMPORTING
+GRID_HANDLE       = L_my_handle
+*    EXCEPTIONS
+*      CNTL_ERROR        = 1
+*      CNTL_SYSTEM_ERROR = 2
+*      OTHERS            = 3
+.
+IF SY-SUBRC <> 0.
+*   MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*              WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+
+
+
+
+
+
+
+
+E_MODIFIED = ABAP_ON.
+
+IF E_MODIFIED = ABAP_ON.
+CALL METHOD CI_ALV->GET_CURRENT_CELL
+IMPORTING
+ES_ROW_ID    = LW_ROW
+ES_COL_ID    = LW_COL.
+
+CALL METHOD CI_ALV->SET_CURRENT_CELL_VIA_ID
+EXPORTING
+IS_ROW_ID    = LW_ROW
+IS_COLUMN_ID = LW_COL.
+ENDIF.
+
+E_MODIFIED = LW_MODIFIED.
+
+*  E-2-2-2．明細の数量と金額項目が変更された場合、
+*  受注額の再計算処理を行う。
+CLEAR LW_NETWR.
+
+LOOP AT TD_ITEM_ALV ASSIGNING <LFS_ALV>.
+CLEAR:
+LW_KWMENG,
+LW_MENG_ALV.
+
+LW_MENG_ALV = <LFS_ALV>-KWMENG.
+
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR                   = <LFS_ALV>-MATNR
+I_IN_ME                   = <LFS_ALV>-VRKME
+I_OUT_ME                  = <LFS_ALV>-ZVRKME
+I_MENGE                   = LW_MENG_ALV
+IMPORTING
+E_MENGE                   = LW_KWMENG
+EXCEPTIONS
+ERROR_IN_APPLICATION      = 1
+ERROR                     = 2
+OTHERS                    = 3.
+
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSG_S NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+DISPLAY LIKE CNS_MSG_E.
+
+CLEAR LW_NETWR.
+EXIT.
+ELSE.
+
+IF <LFS_ALV>-KPEIN = 0.
+
+<LFS_ALV>-NETWR = 0.
+ELSE.
+
+CATCH SYSTEM-EXCEPTIONS ARITHMETIC_ERRORS = 4.
+
+<LFS_ALV>-NETWR = LW_KWMENG
+* <LFS_ALV>-NETPR
+/ <LFS_ALV>-KPEIN.
+LW_NETWR = <LFS_ALV>-NETWR + LW_NETWR.
+ENDCATCH.
+
+IF SY-SUBRC <> 0.
+<LFS_ALV>-NETWR = CNS_NETWR_MAX.
+LW_NETWR        = CNS_NETWR_MAX.
+ENDIF.
+
+ENDIF.
+
+ENDIF.
+
+ENDLOOP.
+
+ST_ZSEGSD0009-NETWR = LW_NETWR.
+
+CALL METHOD CL_GUI_CFW=>SET_NEW_OK_CODE
+EXPORTING
+NEW_CODE = CNS_USER_ENTR.
+
+CALL METHOD CL_GUI_CFW=>FLUSH.
+
+CALL METHOD ER_DATA_CHANGED->ADD_PROTOCOL_ENTRY
+EXPORTING
+I_MSGID     = '00'
+I_MSGNO     = '055'
+I_MSGTY     = CNS_MSG_E
+I_FIELDNAME = ''
+I_ROW_ID    = 2.
+ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*&      Method  HANDLE_F4
+*&---------------------------------------------------------------------*
+*&      検索F4
+*&---------------------------------------------------------------------*
+METHOD HANDLE_F4.
+*   検索F4
+PERFORM FRM_F4_SHOW.
+ER_EVENT_DATA->M_EVENT_HANDLED = ABAP_ON.
+
+ENDMETHOD.
+
+ENDCLASS.               "GCL_EVENT_RECEIVER
+
+*INCLUDE ZEGSDR2020_F01.
+*
+*INCLUDE ZEGSDR2020_O01.
+*
+*INCLUDE ZEGSDR2020_I01.
+*Text symbol text・
+*B01:Delete
+*B02:YES
+*B03:NO
+*B04:Confirm
+*P01:Approved List (Sales Order are not created yet.)
+*Selection text・
+*P_VKORG:        Sales Organization
+*RB_APP:        Approve
+*RB_ERR:        Error recovery
+*RB_LIST:        Appr. List(SO are not created)
+*S_DATE:        Create Date
+*S_SPART:        Division
+*S_VKBUR:        Sales Office
+*S_VKGRP:        Sales Group
+*S_VTWEG:        Distribution Channel

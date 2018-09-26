@@ -1,0 +1,1156 @@
+***********************************************************************
+* [プログラム名] 品目単価マスタ一覧表（仕入先別）改訂版
+*   PROGRAM ID :ZM011300
+*
+* [処理概要]
+*   CONTENTS
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/07/17   PSD T.SAITOH      新規開発
+*  2002/08/01   PSD T.SAITOH      得意先条件追加（もれ）　
+*  2002/08/02   PSD T.SAITOH      選択基準日未入力時システム日付を設定
+***********************************************************************
+* --- サイズ及びフッタなどの設定をここでする。
+REPORT ZM011300
+*       LINE-SIZE   65
+*       LINE-COUNT 255(8) "()の中の数値ははフッタ割当行数
+NO STANDARD PAGE HEADING.
+*---------------------------------------------------------------------*
+* データ宣言(グローバル)
+*---------------------------------------------------------------------*
+*--- 定数項目を宣言する
+* CONSTANTS
+
+*--- 構造／テーブル型　宣言
+* ALV用構造
+TYPE-POOLS SLIS.
+* A017(品目購買情報)
+TYPES: BEGIN OF TYP_A017,
+KAPPL TYPE A017-KAPPL,"アプリケーション
+KSCHL TYPE A017-KSCHL,"条件タイプ
+LIFNR TYPE A017-LIFNR,"仕入先勘定コード
+MATNR TYPE A017-MATNR,"品目コード
+EKORG TYPE A017-EKORG,"購買組織
+ESOKZ TYPE A017-ESOKZ,"購買情報区分
+WERKS TYPE A017-WERKS,"プラント
+DATBI TYPE A017-DATBI,"条件マスタ有効終了日
+DATAB TYPE A017-DATAB,"条件マスタ有効開始日
+KNUMH TYPE A017-KNUMH,"条件レコード番号
+END OF TYP_A017.
+* A017 (仕入先主要内部ＴＢＬ・・・Ｌ１）
+DATA: GT_A017 TYPE TABLE OF TYP_A017,
+GF_A017 TYPE TYP_A017.
+
+* KONH KONP(条件)
+TYPES: BEGIN OF TYP_KONH_KONP,
+KNUMH TYPE KONH-KNUMH,"条件レコード番号
+KZBZG TYPE KONP-KZBZG,"スケール区分
+KBETR TYPE KONP-KBETR,"発注単価
+KONWA TYPE KONP-KONWA,"発注通貨
+KMEIN TYPE KONP-KMEIN,"数量単位
+KPEIN TYPE KONP-KPEIN,"価格数量単位
+VAKEY TYPE KONH-VAKEY,"変数キー
+END OF TYP_KONH_KONP.
+* KONH KONP(条件内部ＴＢＬ・・・Ｌ２)
+* 仕入先別
+DATA: GT_KONX_M TYPE TABLE OF TYP_KONH_KONP,
+GF_KONX_M TYPE TYP_KONH_KONP.
+* KONH KONP(条件内部ＴＢＬ・・・Ｌ４)
+* 得意先別
+DATA: GT_KONX_V TYPE TABLE OF TYP_KONH_KONP,
+GF_KONX_V TYPE TYP_KONH_KONP.
+
+* KNMT MVKE
+TYPES: BEGIN OF TYP_KNMT,
+KDMAT TYPE KNMT-KDMAT, "得意先品目コード
+KUNNR TYPE KNMT-KUNNR, "得意先コード
+END OF TYP_KNMT.
+* 品目と得意先品目の紐付け
+DATA: GT_KNMT TYPE TABLE OF TYP_KNMT,
+GF_KNMT TYPE TYP_KNMT.
+
+* A901（販売組織・・・）
+TYPES: BEGIN OF TYP_A901,
+KAPPL    TYPE A901-KAPPL,   "アプリケーション
+KSCHL    TYPE A901-KSCHL,   "条件タイプ
+VKORGAU  TYPE A901-VKORGAU, "販売組織
+VTWEG    TYPE A901-VTWEG,   "流通チャネル
+SPART    TYPE A901-SPART,   "製品部門
+KUNNR    TYPE A901-KUNNR,   "得意先コード
+ZZZKDMAT TYPE A901-ZZZKDMAT,"得意先品目コード
+DATBI    TYPE A901-DATBI,   "条件マスタ有効終了日
+DATAB    TYPE A901-DATAB,   "条件マスタ有効開始日
+KNUMH    TYPE A901-KNUMH,   "条件レコード番号
+END OF TYP_A901.
+* A901 （得意先主要内部ＴＢＬ・・・Ｌ３）
+DATA: GT_A901 TYPE TABLE OF TYP_A901,
+GF_A901 TYPE TYP_A901.
+
+* 内部テーブル
+* ALV関連
+DATA: GT_EXEC   TYPE TABLE OF ZMLIST_V13
+WITH HEADER LINE,"処理用内部ＴＢＬ
+GF_EXEC   TYPE ZMLIST_V13.         "処理出力用構造
+
+* ---カウンタ宣言
+* ループカウンタ（各テーブルごと)※ループアウトごとに初期化すること
+DATA: G_CNT_A017_L1   TYPE I,"A017
+G_CNT_KONX_M_L2 TYPE I,"KONX_M
+G_CNT_A901_L3   TYPE I,"A901
+G_CNT_KONX_V_L4 TYPE I."KONX_V
+
+
+* ---フラグ宣言
+DATA: G_SUBRC LIKE SY-SUBRC."システムリターン値
+
+TABLES:T001W,T024,LFA1,MAKT,MARA,KNA1,KONH.
+*―――――――――――――――――――――――――――――――――――*
+* リストビューア関連
+*―――――――――――――――――――――――――――――――――――*
+DATA: G_REPID     LIKE SY-REPID,            "レポートID
+GF_LAYOUT   TYPE SLIS_LAYOUT_ALV.     "レイアウト構造
+
+** REUSE_ALV_COMMENTARY_WRITE
+DATA: GF_HEAD_ALV   TYPE SLIS_LISTHEADER,    "ヘッダ構造
+GT_T_HEAD_ALV TYPE SLIS_T_LISTHEADER.  "ヘッダ用内部TBL
+
+** ABAPリストビューアヘッダデータ保持
+DATA: GF_HEADER_DATA TYPE ZMLIST_V13.         "ヘッダ表示情報
+
+* ↓ APPEND 2002.02.21 PSD M.Arai 発注単価属性変更対応
+DATA: GT_FIELDCAT TYPE SLIS_T_FIELDCAT_ALV, "フィールドカタログ
+GF_FIELDCAT LIKE LINE OF GT_FIELDCAT. "フィールドカタログ(ヘッダ)
+* ↑
+
+* REUSE_ALV_LIST_DISPLAY
+DATA: TOP_OF_PAGE TYPE SLIS_FORMNAME VALUE 'TOP_OF_PAGE'.
+
+* REUSE_ALV_EVENT
+DATA: GT_EVENT TYPE SLIS_T_EVENT,          "イベント情報内部TBL
+GF_EVENT LIKE LINE OF GT_EVENT.      "イベント情報構造
+
+* ALV用内部ＴＢＬ
+DATA: GT_ALV     TYPE TABLE OF ZMLIST_V13
+WITH HEADER LINE.
+
+* 印刷設定対応
+DATA: GF_PRINT TYPE SLIS_PRINT_ALV.
+
+
+*---------------------------------------------------------------------*
+* 選択画面
+*---------------------------------------------------------------------*
+* 会社コード
+PARAMETERS: PR_BUKRS TYPE T001-BUKRS MEMORY ID BUK OBLIGATORY.
+* 選択基準日
+PARAMETERS: PR_DATUM LIKE SY-DATUM." DEFAULT SY-DATUM.
+
+* 購買関連条件指定
+SELECTION-SCREEN BEGIN OF BLOCK BK01 WITH FRAME TITLE TEXT-001.
+*   購買組織
+PARAMETERS: PR_EKORG TYPE T024E-EKORG MEMORY ID EKO OBLIGATORY.
+*   プラント
+SELECT-OPTIONS: S_WERKS FOR T001W-WERKS MEMORY ID WRK OBLIGATORY,
+*   購買グループ
+S_EKGRP FOR T024-EKGRP,
+*   仕入先
+S_LIFNR FOR LFA1-LIFNR,
+*   品目コード
+S_MATNR FOR MAKT-MATNR,
+*   品目グループ
+S_MATKL FOR MARA-MATKL.
+*   仕入先条件タイプ
+SELECT-OPTIONS: SM_KSCHL FOR KONH-KSCHL.
+SELECTION-SCREEN END   OF BLOCK BK01.
+
+* 販売関連条件指定
+SELECTION-SCREEN BEGIN OF BLOCK BK02 WITH FRAME TITLE TEXT-002.
+*   販売組織
+PARAMETERS: PR_VKORG TYPE TVKO-VKORG MEMORY ID VKO OBLIGATORY,
+*   流通チャネル
+PR_VTWEG TYPE TVTW-VTWEG MEMORY ID VTW OBLIGATORY,
+*   製品部門
+PR_SPART TYPE TSPA-SPART MEMORY ID SPA OBLIGATORY.
+
+*   得意先
+SELECT-OPTIONS: S_KUNNR FOR KNA1-KUNNR.
+*   得意先条件タイプ
+SELECT-OPTIONS: SV_KSCHL FOR KONH-KSCHL.
+SELECTION-SCREEN END   OF BLOCK BK02.
+
+*--------------------------------------------------------------------
+* INITIALIZATION（プログラム起動時）
+*--------------------------------------------------------------------
+INITIALIZATION .
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN OUTPUT(選択画面設定)
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN OUTPUT.
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN(入力チェック時)
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN.
+* 選択オプションボタン押下時は入力チェック処理をしない
+IF SY-UCOMM+0(1) <> '%'.
+*   ここに入力チェック処理を記述
+*---APPEND START PSD T.SAITOH 2002/08/02 ---------------------------*
+*   選択基準日がブランクの時はシステム日付を設定する。
+IF PR_DATUM IS INITIAL.
+PR_DATUM = SY-DATUM.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/08/02 ---------------------------*
+ENDIF.
+*---------------------------------------------------------------------
+* AT LINE-SELECTION(一覧出力行選択時)
+*---------------------------------------------------------------------
+AT LINE-SELECTION.
+*---------------------------------------------------------------------
+* AT USER-COMMAND(ユーザ定義の機能コードを実行時)
+*---------------------------------------------------------------------
+AT USER-COMMAND.
+*---------------------------------------------------------------------
+* TOP-OF-PAGE（改ページ時(ヘッダ等)）
+*---------------------------------------------------------------------
+TOP-OF-PAGE.
+*---------------------------------------------------------------------
+* END-OF-PAGE（改ページ時(フッタ等)）
+*---------------------------------------------------------------------
+END-OF-PAGE.
+
+*---------------------------------------------------------------------
+* START-OF-SELECTION(プログラム開始時)
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+* SELECT NUMBER 01 FORM A017
+PERFORM FRM_SELECT_FROM_A017.
+
+* SET ITEM TO EXEC INTERNAL TABLE.
+PERFORM FRM_SET_EXEC_ITAB.
+
+* SORT
+PERFORM FRM_SORT.
+
+* DELETE DOUBLE KEY RECODES
+PERFORM FRM_DELETE_DKEYREC.
+
+* FUNCTION ALV
+* PERFORM FRM_FUNTION_ALV.
+
+PERFORM FRM_OUTPUT.
+
+*---------------------------------------------------------------------
+* END-OF-SELECTION(プログラム終了時)
+*---------------------------------------------------------------------
+END-OF-SELECTION.
+
+*&--------------------------------------------------------------------*
+*&      Form  FRM_CURRENCY_AMOUNT
+*&--------------------------------------------------------------------*
+*       金額変換処理
+*---------------------------------------------------------------------*
+*      -->P_WAERS    通貨コード
+*      -->P_BEFORE   変換前金額
+*      <--P_AFTER    変換後金額
+*---------------------------------------------------------------------*
+FORM FRM_CURRENCY_AMOUNT             USING    P_WAERS
+P_BEFORE
+CHANGING P_AFTER.
+DATA L_IDOC_AMOUNT(255) TYPE C.
+*--- 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY    = P_WAERS
+SAP_AMOUNT  = P_BEFORE
+IMPORTING
+IDOC_AMOUNT = L_IDOC_AMOUNT
+EXCEPTIONS
+OTHERS      = 1.
+IF SY-SUBRC <> 1.
+P_AFTER = L_IDOC_AMOUNT.
+ENDIF.
+
+ENDFORM.                    " FRM_CURRENCY_AMOUNT
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_A017
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 01 品目購買情報(A017)読込
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_A017.
+
+SELECT KAPPL "アプリケーション
+KSCHL "条件タイプ
+LIFNR "仕入先コード
+MATNR "品目コード
+EKORG "購買組織
+WERKS "プラントコード
+ESOKZ "購買情報区分
+DATBI "有効終了日
+DATAB "有効開始日
+KNUMH "条件レコード番号
+INTO CORRESPONDING FIELDS OF TABLE GT_A017
+FROM A017
+WHERE KAPPL = 'M'          "在庫購買
+AND KSCHL IN SM_KSCHL    "ZPB1 ZPB2 ZPB3(基本的に・・・)
+AND LIFNR IN S_LIFNR     "指定仕入先
+AND MATNR IN S_MATNR     "指定品目
+AND EKORG = PR_EKORG     "指定購買組織
+AND WERKS IN S_WERKS     "指定プラント
+AND ESOKZ IN ('0','3')   "購買情報区分（固定値）
+AND DATBI >= PR_DATUM    "有効終了日
+AND DATAB <= PR_DATUM.   "有効開始日
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4. " NO-DATA
+MESSAGE S616(Z1).  "対象データがありません
+STOP.
+WHEN 8. " SYSTEM ERROR
+MESSAGE A603(Z1) WITH SY-REPID 'A901' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_FROM_A017
+*&-----------------------------------------------------------------*
+*&      Form  FRM_SET_EXEC_ITAB
+*&-----------------------------------------------------------------*
+*       A017内部ＴＢＬを主として、その他の項目を設定する。
+*------------------------------------------------------------------*
+FORM FRM_SET_EXEC_ITAB.
+* A017から取得したレコードをループする（Ｌ１）↓↓↓↓↓↓↓↓↓↓↓↓↓
+LOOP AT GT_A017 INTO GF_A017.
+* 条件テーブル(仕入先)読込
+PERFORM FRM_SELECT_FROM_KONX_M.
+*   条件から取得したレコードをループする（Ｌ２）↓↓↓↓↓↓↓↓↓↓↓↓
+LOOP AT GT_KONX_M INTO GF_KONX_M.
+*     仕入先存在チェック
+PERFORM FRM_SELECT_FROM_LFXX.
+IF G_SUBRC <> 0.
+CONTINUE.
+ENDIF.
+*     購買情報／購買組織存在チェック
+PERFORM FRM_SELECT_FROM_EINX.
+IF G_SUBRC <> 0.
+CONTINUE.
+ENDIF.
+*     品目の存在チェック
+PERFORM FRM_SELECT_FROM_MAXX.
+IF G_SUBRC <> 0.
+CONTINUE.
+ENDIF.
+*     条件から取得したデータを処理用内部ＴＢＬに設定する
+PERFORM FRM_KONX_M_TO_EXEC_TBL.
+*     購買グループ名設定
+PERFORM FRM_SELECT_FROM_T024.
+*     プラント名設定
+PERFORM FRM_SELECT_FROM_T001W.
+*     発注数量単位設定
+PERFORM FRM_SELECT_FROM_T006A USING GF_KONX_M-KMEIN
+CHANGING GF_EXEC-MSEH3_M.
+*     得意先情報設定=======================================
+PERFORM FRM_SELECT_FROM_KNMT.
+IF G_SUBRC <> 0.
+*---    DELETE START NDSC T.SAITOH 2003/03/18---*
+*       得意先データはブランクのまま処理用内部ＴＢＬに追記
+*        APPEND GF_EXEC TO GT_EXEC.
+*---    DELETE END   NDSC T.SAITOH 2003/03/18---*
+PERFORM FRM_CLEAR_V_DATA.
+CONTINUE.
+ENDIF.
+*     販売組織・・・から得意先コード取得
+PERFORM FRM_SELECT_FROM_A901.
+IF G_SUBRC <> 0.
+*---    DELETE START NDSC T.SAITOH 2003/03/18---*
+*       得意先品目無しの時はブランクのまま処理用内部ＴＢＬに追記
+*        APPEND GF_EXEC TO GT_EXEC.
+*---    DELETE END   NDSC T.SAITOH 2003/03/18---*
+PERFORM FRM_CLEAR_V_DATA.
+CONTINUE.
+ENDIF.
+*     A901 得意先ごとのループ（Ｌ３）↓↓↓↓↓↓↓↓↓↓↓↓
+LOOP AT GT_A901 INTO GF_A901.
+*       条件テーブル（得意先）読込
+PERFORM FRM_SELECT_FROM_KONX_V.
+IF G_SUBRC <> 0.
+*         得意先条件無しの時はブランクのまま処理用内部ＴＢＬに追記
+APPEND GF_EXEC TO GT_EXEC.
+PERFORM FRM_CLEAR_V_DATA.
+CONTINUE.
+ENDIF.
+*　　   条件から取得したレコードをループする（Ｌ４）↓↓↓↓↓↓↓↓↓↓
+LOOP AT GT_KONX_V INTO GF_KONX_V.
+*         受注数量単位
+PERFORM FRM_SELECT_FROM_T006A USING GF_KONX_V-KMEIN
+CHANGING GF_EXEC-MSEH3_V.
+*   　    得意先情報の設定
+PERFORM FRM_KONX_V_TO_EXEC_TBL.
+IF G_SUBRC <> 0.
+*---      DELETE START NDSC T.SAITOH 2003/03/18---*
+**           得意先条件無しの時はブランクのまま処理用内部ＴＢＬに追記
+*           APPEND GF_EXEC TO GT_EXEC.
+*---      DELETE END   NDSC T.SAITOH 2003/03/18---*
+PERFORM FRM_CLEAR_V_DATA.
+CONTINUE.
+ENDIF.
+*         得意先マスタチェック
+PERFORM FRM_SELECT_FROM_KNA1.
+IF G_SUBRC <> 0.
+*---      DELETE START NDSC T.SAITOH 2003/03/18---*
+**           得意先条件無しの時はブランクのまま処理用内部ＴＢＬに追記
+*            APPEND GF_EXEC TO GT_EXEC.
+*---      DELETE END   NDSC T.SAITOH 2003/03/18---*
+PERFORM FRM_CLEAR_V_DATA.
+CONTINUE.
+ENDIF.
+*         処理用内部ＴＢＬへ追記
+APPEND GF_EXEC TO GT_EXEC.
+PERFORM FRM_CLEAR_V_DATA.
+ENDLOOP.
+ENDLOOP.
+ENDLOOP.
+ENDLOOP.
+
+ENDFORM.                    " FRM_SET_ALV_ITAB
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_KONX_M
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 02 KONH&KONP（条件）読込
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_KONX_M.
+
+SELECT KONH~KNUMH "条件レコード番号
+KONP~KOPOS "条件レコード明細
+KONH~VAKEY "変数キー
+KONP~KZBZG "スケール区分
+KONP~KBETR "発注単価
+KONP~KONWA "発注通貨
+KONP~KMEIN "数量単位
+KONP~KPEIN "価格条件単位
+INTO CORRESPONDING FIELDS OF TABLE GT_KONX_M
+FROM KONH AS KONH INNER JOIN KONP AS KONP
+ON KONH~KNUMH    = KONP~KNUMH    "条件レコード番号
+WHERE KONH~KNUMH    = GF_A017-KNUMH "同上
+AND KONH~KVEWE    = 'A'           "条件テーブルの用途
+AND KONH~KAPPL    = 'M'           "アプリケーション:在庫購買
+AND KONP~LOEVM_KO = SPACE.        "削除フラグＯＦＦ
+
+CASE SY-SUBRC.
+WHEN 0.
+*      KONX_M件数取得
+*       DESCRIBE TABLE GT_KONX_M LINES G_CNT_KONX_M_L2.
+WHEN 4. " NO-DATA
+*      KONX_M件数０件設定
+*       G_CNT_KONX_M_L2 = 0.
+WHEN 8. " SYSTEM ERROR
+MESSAGE A603(Z1) WITH SY-REPID 'KONH&KONP' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_FROM_KONX_M
+*&--------------------------------------------------------------------*
+*&      Form  FRM_KONX_M_TO_EXEC_TBL
+*&--------------------------------------------------------------------*
+*       条件から取得したレコードを処理用内部ＴＢＬに設定する(購買）
+*---------------------------------------------------------------------*
+FORM FRM_KONX_M_TO_EXEC_TBL.
+* 発注単価用ローカル変数
+DATA: L_EBETR_M(9) TYPE P DECIMALS 2.
+* 仕入先コード変換用
+DATA: L_LIFNR TYPE LFA1-LIFNR.
+
+* 選択基準日（出力項目：０６）
+GF_EXEC-DATUM     = PR_DATUM.
+* 仕入先コード（出力項目：０２）
+GF_EXEC-LIFNR_KEY = GF_KONX_M-VAKEY+0(10).
+* 仕入先コード（出力項目：０７）
+L_LIFNR           = GF_KONX_M-VAKEY+0(10).
+WRITE L_LIFNR TO L_LIFNR.
+PERFORM FRM_RIGHT_JUSTIFIED USING L_LIFNR
+CHANGING GF_EXEC-LIFNR.
+
+* プラント（出力項目：０４）
+GF_EXEC-WERKS_KEY = GF_KONX_M-VAKEY+32(4).
+* プラント（出力項目：０９）
+GF_EXEC-WERKS     = GF_KONX_M-VAKEY+32(4).
+* 品目コード（出力項目：０６）
+GF_EXEC-MATNR_KEY = GF_KONX_M-VAKEY+10(18).
+* 品目コード（出力項目：１１）
+GF_EXEC-MATNR     = GF_KONX_M-VAKEY+10(18).
+* 購買情報区分（出力項目：１２）
+GF_EXEC-ESOKZ_KEY = GF_KONX_M-VAKEY+36(1).
+* 購買情報区分（出力項目：１７）
+CASE GF_KONX_M-VAKEY+36(1).
+WHEN '3'.
+GF_EXEC-ESOKZ_M   = '*'.
+WHEN OTHERS.
+GF_EXEC-ESOKZ_M   = SPACE.
+ENDCASE.
+* スケール区分（出力項目：１３）
+CASE GF_KONX_M-KZBZG.
+WHEN SPACE.
+GF_EXEC-KZBZG_M   = SPACE.
+WHEN OTHERS.
+GF_EXEC-KZBZG_M   = '*'.
+ENDCASE.
+* 発注通貨（出力項目：１０）
+GF_EXEC-KONWA_M = GF_KONX_M-KONWA.
+* 発注単価
+PERFORM FRM_CURRENCY_AMOUNT USING GF_KONX_M-KONWA
+GF_KONX_M-KBETR
+CHANGING L_EBETR_M.
+* 価格数量単位で割る
+L_EBETR_M = L_EBETR_M / GF_KONX_M-KPEIN.
+WRITE L_EBETR_M TO GF_EXEC-KBETR_M.
+
+
+ENDFORM.                    " FRM_KONX_M_TO_EXEC_TBL
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_LFXX
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 06 LFA1&LFB1&LFM1 仕入先存在チェック
+*       SELECT NUMBER 07
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_LFXX.
+*
+SELECT SINGLE LFA1~NAME1   "仕入先名
+INTO   GF_EXEC-LNAME
+FROM ( LFA1 AS LFA1 INNER JOIN LFB1 AS LFB1
+ON   LFA1~LIFNR = LFB1~LIFNR )
+INNER  JOIN LFM1 AS LFM1
+ON   LFA1~LIFNR = LFM1~LIFNR
+WHERE   LFA1~LIFNR = GF_KONX_M-VAKEY+0(10)
+AND   LFA1~LOEVM = SPACE
+AND   LFB1~BUKRS = PR_BUKRS
+AND   LFB1~LOEVM = SPACE
+AND   LFM1~EKORG = GF_A017-EKORG
+AND   LFM1~LOEVM = SPACE.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4. " NO-DATA
+WHEN 8. " SYSTEM ERROR
+MESSAGE A603(Z1) WITH SY-REPID 'LFA1&LFB1&LFM1' SY-SUBRC.
+ENDCASE.
+*  リターン値設定
+G_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " FRM_SELECT_FROM_LFXX
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_EINX
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 05 EINA&EINE 購買情報／購買組織存在チェック
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_EINX.
+
+SELECT SINGLE EINA~IDNLF  "仕入先品目コード
+INTO GF_EXEC-IDNLF
+FROM EINA AS EINA INNER JOIN EINE AS EINE
+ON EINA~INFNR = EINE~INFNR
+WHERE EINA~MATNR = GF_A017-MATNR
+AND EINA~LIFNR = GF_A017-LIFNR
+AND EINA~LOEKZ = SPACE
+AND EINE~EKORG = GF_A017-EKORG
+AND EINE~ESOKZ = GF_A017-ESOKZ
+AND EINE~WERKS = GF_A017-WERKS
+AND EINE~LOEKZ = SPACE.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+WHEN OTHERS.  " システムエラー
+MESSAGE A603(Z1) WITH 'EINA&EINE' SY-SUBRC.
+ENDCASE.
+
+*  リターン値設定
+G_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " FRM_SELECT_FROM_EINX
+*&-------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_MAXX
+*&-------------------------------------------------------------------*
+*       SELECT NUMBER 08 MAKT&MARA&MARC&MARD 品目の存在チェック
+*--------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_MAXX.
+
+SELECT SINGLE MAKT~MAKTX "品目名
+MARA~MATKL "品目グループ
+MARC~EKGRP "購買グループ
+INTO (GF_EXEC-MAKTX,GF_EXEC-MATKL,GF_EXEC-EKGRP)
+FROM   ( ( MAKT AS MAKT INNER JOIN MARA AS MARA
+ON       MAKT~MATNR = MARA~MATNR ) INNER JOIN MARC AS MARC
+ON       MAKT~MATNR = MARC~MATNR ) INNER JOIN MARD AS MARD
+ON       MAKT~MATNR = MARD~MATNR
+WHERE  MAKT~MATNR = GF_KONX_M-VAKEY+10(18)
+AND  MARA~MATKL IN S_MATKL
+AND  MARC~WERKS = GF_KONX_M-VAKEY+32(4)
+AND  MARD~WERKS = GF_KONX_M-VAKEY+32(4)
+AND  MAKT~SPRAS = 'J'
+AND  MARA~LVORM = SPACE
+AND  MARC~LVORM = SPACE
+AND  MARD~LVORM = SPACE
+AND  MARC~EKGRP IN S_EKGRP.
+
+*  SELECT SINGLE MAKT~MAKTX "品目名
+*                MARA~MATKL "品目グループ
+*                MARC~EKGRP "購買グループ
+*                T024~EKNAM "購買グループテキスト
+*         INTO (GF_EXEC-MAKTX,
+*               GF_EXEC-MATKL,
+*               GF_EXEC-EKGRP,
+*               GF_EXEC-EKNAM)
+*         FROM ( ( ( MAKT AS MAKT INNER JOIN MARA AS MARA
+*           ON       MAKT~MATNR = MARA~MATNR ) INNER JOIN MARC AS MARC
+*           ON       MAKT~MATNR = MARC~MATNR ) INNER JOIN MARD AS MARD
+*           ON       MAKT~MATNR = MARD~MATNR ) INNER JOIN T024 AS T024
+*           ON       MARC~EKGRP = T024~EKGRP
+*        WHERE  MAKT~MATNR = GF_KONX_M-VAKEY+10(18)
+*          AND  MARA~MATKL IN S_MATKL
+*          AND  MARC~WERKS = GF_KONX_M-VAKEY+32(4)
+*          AND  MARD~WERKS = GF_KONX_M-VAKEY+32(4)
+*          AND  MAKT~SPRAS = 'J'
+*          AND  MARA~LVORM = SPACE
+*          AND  MARC~LVORM = SPACE
+*          AND  MARD~LVORM = SPACE
+*          AND  MARC~EKGRP IN S_EKGRP.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+WHEN OTHERS.  " システムエラー
+MESSAGE A603(Z1) WITH 'MAKT&MARA&MARC&MARD' SY-SUBRC.
+ENDCASE.
+
+*  リターン値設定
+G_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " FRM_SELECT_FROM_MAXX
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_T024
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 09 T024 購買グループテキスト設定
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_T024.
+
+SELECT SINGLE EKNAM "購買グループテキスト
+INTO GF_EXEC-EKNAM
+FROM T024
+WHERE EKGRP = GF_EXEC-EKGRP.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+G_SUBRC = SY-SUBRC.
+WHEN OTHERS.  " システムエラー
+MESSAGE A603(Z1) WITH 'T024' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_FROM_T024
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_T001W
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 04 T001W プラントテキスト設定
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_T001W.
+
+SELECT SINGLE NAME1 "プラントテキスト
+INTO GF_EXEC-WNAME
+FROM T001W
+WHERE WERKS = GF_KONX_M-VAKEY+32(4).
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+WHEN OTHERS.  " システムエラー
+MESSAGE A603(Z1) WITH 'T001W' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_FROM_T001W
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_T006A
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 03 T006A 発注数量単位設定
+*---------------------------------------------------------------------*
+* --> P_KEMIN 数量単位
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_T006A USING P_KMEIN
+CHANGING P_MSEH3.
+
+SELECT SINGLE MSEH3 "数量単位
+INTO P_MSEH3
+FROM T006A
+WHERE MSEHI = P_KMEIN "仕入先KONH&KONP(数量単位)
+AND SPRAS = 'J'.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+WHEN OTHERS.  " システムエラー
+MESSAGE A603(Z1) WITH 'T006A' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_FROM_T006A
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_KNMT
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 12 KNMT 品目コードから得意先品目への紐付け
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_KNMT.
+
+SELECT KNMT~KDMAT
+KNMT~KUNNR
+INTO CORRESPONDING FIELDS OF TABLE GT_KNMT
+FROM KNMT AS KNMT INNER JOIN MVKE AS MVKE
+ON KNMT~VKORG = MVKE~VKORG
+AND KNMT~VTWEG = MVKE~VTWEG
+AND KNMT~MATNR = MVKE~MATNR
+WHERE KNMT~MATNR = GF_A017-MATNR
+AND MVKE~LVORM = SPACE
+*---APPEND START PSD T.SAITOH 2002/08/01 ---------------------------*
+AND KNMT~KUNNR IN S_KUNNR "指定得意先で抽出
+*---APPEND END   PSD T.SAITOH 2002/08/01 ---------------------------*
+.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+CLEAR: GT_KNMT,GF_KNMT.
+WHEN OTHERS.  " システムエラー
+MESSAGE A603(Z1) WITH 'MVKE&KNMT' SY-SUBRC.
+ENDCASE.
+
+*  リターン値設定
+G_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " FRM_SELECT_FROM_MVKE&KNMT
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_A901
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 10 A901 販売組織・・・
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_A901.
+
+SELECT KAPPL    "アプリケーション
+KSCHL    "条件タイプ
+VKORGAU  "販売組織
+VTWEG    "流通チャネル
+SPART    "製品部門
+KUNNR    "得意先コード
+ZZZKDMAT "得意先品目コード
+DATBI    "有効終了日
+DATAB    "有効開始日
+KNUMH    "条件レコード番号
+INTO CORRESPONDING FIELDS OF TABLE GT_A901
+FROM A901
+FOR ALL ENTRIES IN GT_KNMT
+WHERE KAPPL    = 'V'
+AND KSCHL    IN SV_KSCHL
+AND VKORGAU  = PR_VKORG
+AND VTWEG    = PR_VTWEG
+AND SPART    = PR_SPART
+AND KUNNR    = GT_KNMT-KUNNR
+**---APPEND START PSD T.SAITOH 2002/08/01 ---------------------------*
+*           AND KUNNR   IN S_KUNNR
+**---APPEND END   PSD T.SAITOH 2002/08/01 ---------------------------*
+AND ZZZKDMAT = GT_KNMT-KDMAT
+AND DATBI    >= PR_DATUM
+AND DATAB    <= PR_DATUM.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+CLEAR: GF_A901,GT_A901.
+WHEN OTHERS.  " システムエラー
+MESSAGE A603(Z1) WITH 'A901' SY-SUBRC.
+ENDCASE.
+
+*  リターン値設定
+G_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " FRM_SELECT_FROM_A901
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_KONX_V
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 11 KONH&KONP（条件）読込
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_KONX_V.
+
+SELECT KONH~KNUMH "条件レコード番号
+KONP~KOPOS "条件レコード明細
+KONH~VAKEY "変数キー
+KONP~KZBZG "スケール区分
+KONP~KBETR "受注単価
+KONP~KONWA "受注通貨
+KONP~KMEIN "数量単位
+KONP~KPEIN "価格条件単位
+INTO CORRESPONDING FIELDS OF TABLE GT_KONX_V
+FROM KONH AS KONH INNER JOIN KONP AS KONP
+ON KONH~KNUMH    = KONP~KNUMH    "条件レコード番号
+WHERE KONH~KNUMH    = GF_A901-KNUMH "同上
+AND KONH~KVEWE    = 'A'           "条件テーブルの用途
+AND KONH~KAPPL    = 'V'           "アプリケーション:販売
+AND KONP~LOEVM_KO = SPACE.        "削除フラグＯＦＦ
+
+CASE SY-SUBRC.
+WHEN 0.
+*      KONX_V件数取得
+*       DESCRIBE TABLE GT_KONX_M LINES G_CNT_KONX_V_L2.
+WHEN 4. " NO-DATA
+*      KONX_M件数０件設定
+*       G_CNT_KONX_M_L2 = 0.
+WHEN 8. " SYSTEM ERROR
+MESSAGE A603(Z1) WITH SY-REPID 'KONH&KONP' SY-SUBRC.
+ENDCASE.
+
+*  リターン値設定
+G_SUBRC = SY-SUBRC.
+
+
+ENDFORM.                    " FRM_SELECT_FROM_KONX_V
+*&--------------------------------------------------------------------*
+*&      Form  FRM_KONX_V_TO_EXEC_TBL
+*&--------------------------------------------------------------------*
+*       条件から取得したレコードを処理用内部ＴＢＬに設定する（販売）
+*---------------------------------------------------------------------*
+FORM FRM_KONX_V_TO_EXEC_TBL.
+* 発注単価用ローカル変数
+DATA: L_EBETR_V(9) TYPE P DECIMALS 2.
+* 得意先コード変換用
+DATA: L_KUNNR TYPE LFA1-KUNNR.
+
+* 得意先コード（出力項目：１８）
+L_KUNNR           = GF_KONX_V-VAKEY+8(10).
+WRITE L_KUNNR TO L_KUNNR.
+PERFORM FRM_RIGHT_JUSTIFIED USING L_KUNNR
+CHANGING GF_EXEC-KUNNR.
+* 得意先コード（出力項目：０５）
+GF_EXEC-KUNNR_KEY = GF_KONX_V-VAKEY+8(10).
+* 得意先品目コード（出力項目：２０）
+GF_EXEC-KDMAT     = GF_KONX_V-VAKEY+18(35).
+* 得意先品目コード（出力項目：ＸＸ）
+GF_EXEC-KDMAT_KEY = GF_KONX_V-VAKEY+18(35).
+
+* スケール区分（出力項目：１７）
+CASE GF_KONX_V-KZBZG.
+WHEN SPACE.
+GF_EXEC-KZBZG_V = SPACE.
+WHEN OTHERS.
+GF_EXEC-KZBZG_V = '*'.
+ENDCASE.
+
+* 通貨（出力項目：１５）
+GF_EXEC-KONWA_V = GF_KONX_V-KONWA.
+* 発注単価（出力項目：１４）
+PERFORM FRM_CURRENCY_AMOUNT USING GF_KONX_V-KONWA
+GF_KONX_V-KBETR
+CHANGING L_EBETR_V.
+* 価格数量単位で割る
+CASE GF_KONX_V-KPEIN.
+WHEN 0.
+L_EBETR_V = L_EBETR_V / 1.
+WHEN OTHERS.
+L_EBETR_V = L_EBETR_V / GF_KONX_V-KPEIN.
+ENDCASE.
+
+WRITE L_EBETR_V TO GF_EXEC-KBETR_V.
+
+
+ENDFORM.                    " FRM_KONX_V_TO_EXEC_TBL
+*&--------------------------------------------------------------------*
+*&      Form  FRM_SELECT_FROM_KNA1
+*&--------------------------------------------------------------------*
+*       SELECT NUMBER 13 KNA1&KNB1（得意先チェック）
+*---------------------------------------------------------------------*
+FORM FRM_SELECT_FROM_KNA1.
+
+SELECT SINGLE KNA1~NAME1
+INTO GF_EXEC-KNAME
+FROM KNA1 AS KNA1 INNER JOIN KNB1 AS KNB1
+ON KNA1~KUNNR = KNB1~KUNNR
+WHERE KNA1~KUNNR = GF_KONX_V-VAKEY+8(10)
+AND KNA1~LOEVM = SPACE
+AND KNB1~BUKRS = PR_BUKRS
+AND KNB1~LOEVM = SPACE.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4. " NO-DATA
+WHEN 8. " SYSTEM ERROR
+MESSAGE A603(Z1) WITH SY-REPID 'KNA1&KNB1' SY-SUBRC.
+ENDCASE.
+
+*  リターン値設定
+G_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " FRM_SELECT_FROM_KNA1
+*&-------------------------------------------------------------------*
+*&      Form  FRM_SORT
+*&-------------------------------------------------------------------*
+*       ソート処理
+*--------------------------------------------------------------------*
+*                                                      →  ASCENDING
+*                                                          DESCENDING
+*--------------------------------------------------------------------*
+FORM FRM_SORT.
+* 処理用内部ＴＢＬを昇順ソート
+SORT GT_EXEC BY LIFNR_KEY ASCENDING
+WERKS_KEY ASCENDING
+MATNR_KEY ASCENDING
+ESOKZ_KEY ASCENDING
+KUNNR_KEY ASCENDING
+KDMAT_KEY ASCENDING.
+
+ENDFORM.                    " FRM_SORT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_OUTPUT
+*&---------------------------------------------------------------------*
+*       出力
+*----------------------------------------------------------------------*
+FORM FRM_OUTPUT.
+* ALV用
+GT_ALV[] = GT_EXEC[].
+* 作業用内部ＴＢＬを開放
+FREE GT_EXEC[].
+
+* 印刷設定：ALV統計を印刷しない
+GF_PRINT-NO_PRINT_LISTINFOS = 'X'.
+
+GF_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+* フィールドカタログの設定
+GF_FIELDCAT-JUST = 'R'.
+GF_FIELDCAT-FIELDNAME = 'KBETR_M'.
+APPEND GF_FIELDCAT TO GT_FIELDCAT.
+GF_FIELDCAT-FIELDNAME = 'KBETR_V'.
+APPEND GF_FIELDCAT TO GT_FIELDCAT.
+
+* 使用可能イベントのチェック
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE     = 0
+IMPORTING
+ET_EVENTS       = GT_EVENT  "使用可能なイベント取得
+EXCEPTIONS
+LIST_TYPE_WRONG = 1
+OTHERS          = 2.
+
+* 使用イベントに実行するサブルーチン名を設定
+
+LOOP AT GT_EVENT INTO GF_EVENT.
+CASE GF_EVENT-NAME.
+WHEN 'TOP_OF_PAGE'.
+GF_EVENT-FORM = 'FRM_TOP_OF_PAGE'.
+MODIFY GT_EVENT FROM GF_EVENT.
+WHEN 'CALLER_EXIT'.
+GF_EVENT-FORM = 'FRM_CALLER_EXIT'.
+MODIFY GT_EVENT FROM GF_EVENT.
+ENDCASE.
+ENDLOOP.
+
+*---APPEND START PSD T.SAITOH 2002/07/29 ---------------------------*
+* 強制ALV印刷設定
+*  PERFORM FRM_SET_PRINT_PARAMETERS.
+*---APPEND END   PSD T.SAITOH 2002/07/29 ---------------------------*
+
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM             = 'ZM011301'      "レポートID
+I_CALLBACK_TOP_OF_PAGE         = TOP_OF_PAGE   "G_HEAD_FRM
+I_STRUCTURE_NAME               = 'ZMLIST_V13'  "構造
+IS_LAYOUT                      = GF_LAYOUT     "レイアウト設定
+IT_FIELDCAT                    = GT_FIELDCAT   "カタログ設定
+I_SAVE                         = 'A'           "レイアウト保存
+IT_EVENTS                      = GT_EVENT[]    "イベント設定
+IS_PRINT                       = GF_PRINT      "印刷設定
+TABLES
+T_OUTTAB                       = GT_ALV[]
+EXCEPTIONS
+PROGRAM_ERROR                  = 1
+OTHERS                         = 2.
+
+*---APPEND START PSD T.SAITOH 2002/07/29 ---------------------------*
+*  PERFORM FRM_NEW_PAGE_PRINT_OFF.
+*---APPEND END   PSD T.SAITOH 2002/07/29 ---------------------------*
+
+ENDFORM.                    " FRM_TEST_OUTPUT
+*&-------------------------------------------------------------------*
+* ALV CALLER_EXIT
+*&-------------------------------------------------------------------*
+FORM FRM_CALLER_EXIT USING RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+RS_DATA-CALLBACK_HEADER_TRANSPORT = 'FILITEXTS_TEXT_TRANSPORT'.
+ENDFORM.
+
+*&--------------------------------------------------------------------*
+*&      Form  TOP_OF_PAGE
+*&--------------------------------------------------------------------*
+FORM FRM_TOP_OF_PAGE.
+
+DATA: L_LIFNR TYPE LFA1-LIFNR.
+
+DATA: L_SY-TABIX TYPE P.
+L_SY-TABIX = SY-TABIX.
+
+CASE SY-PAGNO.
+WHEN 1.
+READ TABLE GT_ALV INTO GF_HEADER_DATA INDEX 1.
+WHEN OTHERS.
+READ TABLE GT_ALV INTO GF_HEADER_DATA INDEX L_SY-TABIX.
+ENDCASE.
+
+L_LIFNR = GF_HEADER_DATA-LIFNR_KEY.
+WRITE L_LIFNR TO L_LIFNR.
+PERFORM FRM_RIGHT_JUSTIFIED USING L_LIFNR
+CHANGING GF_HEADER_DATA-LIFNR.
+
+* 帳票タイトル：**品目単価マスタ(仕入先名)**
+WRITE:0 TEXT-003.
+SKIP.
+* 選択基準日
+WRITE: /0 TEXT-004,12 GF_HEADER_DATA-DATUM.
+* 仕入先
+WRITE: /0 TEXT-005,12 GF_HEADER_DATA-LIFNR, 24 GF_HEADER_DATA-LNAME.
+* プラント
+IF NOT S_WERKS IS INITIAL.
+WRITE:/0  TEXT-006,18 GF_HEADER_DATA-WERKS,
+24 GF_HEADER_DATA-WNAME.
+ENDIF.
+
+ENDFORM.
+*&--------------------------------------------------------------------*
+*&      Form  FRM_RIGHT_JUSTIFIED
+*&--------------------------------------------------------------------*
+*       仕入先コード／得意先コード　右寄せ(コードは１０バイト固定)
+*---------------------------------------------------------------------*
+*      -->P_TEXT     ０埋め仕入先コード／得意先コード
+*      <--P_NEW_TEXT 右寄せされたコード
+*---------------------------------------------------------------------*
+FORM FRM_RIGHT_JUSTIFIED USING    P_TEXT
+CHANGING P_NEW_TEXT.
+
+DATA: L_LEN   TYPE I,"文字サイズ
+L_OFF   TYPE I."オフセット
+
+IF P_TEXT IS INITIAL.
+EXIT.
+ENDIF.
+
+CLEAR: P_NEW_TEXT.
+
+L_LEN = STRLEN( P_TEXT ).
+L_OFF = 10 - L_LEN.
+P_NEW_TEXT+L_OFF(L_LEN) = P_TEXT.
+
+ENDFORM.                    " FRM_RIGHT_JUSTIFIED
+*&--------------------------------------------------------------------*
+*&      Form  FRM_DELETE_DKEYREC
+*&--------------------------------------------------------------------*
+*       重複キーレコードの名称削除（同一の名称は表示しない）
+*---------------------------------------------------------------------*
+FORM FRM_DELETE_DKEYREC.
+*
+FIELD-SYMBOLS <FS> LIKE GF_EXEC.
+LOOP AT GT_EXEC ASSIGNING <FS>.
+*   仕入先ＣＤ／部門コード／品目コード／
+AT NEW MATNR_KEY.
+CONTINUE.
+ENDAT.
+*   表示項目削除
+PERFORM FRM_DELETE_DISP_OF_SAME_KEY USING <FS>.
+
+ENDLOOP.
+
+
+ENDFORM.                    " FRM_DELETE_DKEYREC
+*&--------------------------------------------------------------------*
+*&      Form  FRM_DELETE_DISP_OF_SAME_KEY
+*&--------------------------------------------------------------------*
+*       表示項目内容削除（非表示エリア）
+*---------------------------------------------------------------------*
+FORM FRM_DELETE_DISP_OF_SAME_KEY USING PF_EXEC LIKE GF_EXEC.
+
+CLEAR: PF_EXEC-IDNLF,"仕入先品目
+PF_EXEC-MATNR,"品目コード
+PF_EXEC-KBETR_M,"発注単価
+PF_EXEC-KONWA_M,"発注通貨
+PF_EXEC-MSEH3_M,"発注数量単位
+PF_EXEC-MAKTX."品目名
+
+ENDFORM.                    " FRM_DELETE_DISP_OF_SAME_KEY
+*&--------------------------------------------------------------------*
+*&      Form  FRM_CLEAR_V_DATA(A901)
+*&--------------------------------------------------------------------*
+*       初期化（受注単価データ）
+*---------------------------------------------------------------------*
+FORM FRM_CLEAR_V_DATA.
+
+CLEAR: GF_EXEC-KBETR_V,
+GF_EXEC-KONWA_V,
+GF_EXEC-MSEH3_V,
+GF_EXEC-KZBZG_V,
+GF_EXEC-KUNNR,
+GF_EXEC-KNAME,
+GF_EXEC-KDMAT.
+
+*---APPEND START PSD T.SAITOH 2002/08/01 ---------------------------*
+* ソート用項目も削除
+CLEAR: GF_EXEC-KUNNR_KEY,
+GF_EXEC-KDMAT_KEY.
+*---APPEND END   PSD T.SAITOH 2002/08/01 ---------------------------*
+
+ENDFORM.                    " FRM_CLEAR_V_DATA
+*&--------------------------------------------------------------------*
+*&      Form  FRM_CLEAR_V_DATA(KONX)
+*&--------------------------------------------------------------------*
+*       初期化（受注単価データ）
+*---------------------------------------------------------------------*
+*FORM FRM_CLEAR_V_DATA_KONX.
+*
+*  CLEAR: GF_EXEC-KBETR_V,
+*         GF_EXEC-KONWA_V,
+*         GF_EXEC-MSEH3_V,
+*         GF_EXEC-KZBZG_V,
+*         GF_EXEC-KUNNR,
+*         GF_EXEC-KNAME,
+*         GF_EXEC-KDMAT.
+*
+*
+*ENDFORM.                    " FRM_CLEAR_V_DATA
+*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_PRINT_PARAMETERS
+*&---------------------------------------------------------------------*
+*       ALV用強制印刷設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_PRINT_PARAMETERS.
+
+DATA:LF_PRI_PARAMS LIKE PRI_PARAMS.
+TABLES USR01.
+
+SELECT SINGLE * FROM USR01 WHERE BNAME = SY-UNAME.
+
+* プリンタ設定
+LF_PRI_PARAMS-PDEST = USR01-SPLD.
+* 書式設定
+LF_PRI_PARAMS-PAART = 'X_65_255'.
+
+CALL FUNCTION 'SET_PRINT_PARAMETERS'
+EXPORTING
+DESTINATION                 = LF_PRI_PARAMS-PDEST
+IMMEDIATELY                 = 'X'
+LAYOUT                      = LF_PRI_PARAMS-PAART
+LINE_COUNT                  = 65
+LINE_SIZE                   = 255
+NEW_LIST_ID                 = 'X'
+RELEASE                     = USR01-SPDA
+.
+* --- 使用すると落ちるため未使用
+*  NEW-PAGE PRINT ON PARAMETERS LF_PRI_PARAMS NO DIALOG.
+
+ENDFORM.                    " FRM_SET_PRINT_PARAMETERS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NEW_PAGE_PRINT_OFF
+*&---------------------------------------------------------------------*
+*       印刷設定を戻す
+*----------------------------------------------------------------------*
+FORM FRM_NEW_PAGE_PRINT_OFF.
+
+* --- 使用すると落ちるため未使用
+*  NEW-PAGE PRINT OFF.
+
+ENDFORM.                    " FRM_NEW_PAGE_PRINT_OFF

@@ -1,0 +1,1219 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN010900                                                    *
+*&         支払提案一覧（仕入）                                        *
+*&---------------------------------------------------------------------*
+*&  機能     : 自動支払プログラムで提案された内容と、
+*&             支払予定の内容の差異をALV一覧で表示する。
+*&
+*&  作成日   : 2012/02/15
+*&  作成者   : H.KOMIYAMA(SOLFIS)
+*&---------------------------------------------------------------------*
+*&  変更履歴 :
+*&  変更内容 :
+*&---------------------------------------------------------------------*
+REPORT ZN010900
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT  58
+MESSAGE-ID  YN01.
+
+*----------------------------------------------------------------------*
+*   参照先
+*----------------------------------------------------------------------*
+TYPE-POOLS: SLIS.
+
+*----------------------------------------------------------------------*
+*   型定義
+*----------------------------------------------------------------------*
+*-- 支払予定取得用
+TYPES: BEGIN OF T_ZN002,
+BUKRS  TYPE ZN002-BUKRS,           " 会社コード
+LIFNR  TYPE ZN002-LIFNR,           " 仕入先コード(請求先)
+PZLSCH TYPE ZN002-PZLSCH,          " 支払方法
+WAERS  TYPE ZN002-WAERS,           " 通貨コード
+PZFBDT TYPE ZN002-PZFBDT,          " 支払予定日
+PWRBTR TYPE ZN002-PWRBTR,          " 支払予定額
+GJAHR  TYPE ZN002-GJAHR,           " 会計年度
+BELNR  TYPE ZN002-BELNR,           " 会計伝票番号
+END   OF T_ZN002,
+*-- 未消込伝票取得用
+BEGIN OF T_BSIK,
+BUKRS  TYPE BSIK-BUKRS,            " 会社コード
+LIFNR  TYPE BSIK-LIFNR,            " 仕入先コード
+GJAHR  TYPE BSIK-GJAHR,            " 会計年度
+BELNR  TYPE BSIK-BELNR,            " 会計伝票番号
+END   OF T_BSIK,
+*-- 支払提案取得用
+BEGIN OF T_REGUH,
+ZBUKR  TYPE REGUH-ZBUKR,           " 支払会社コード
+LIFNR  TYPE REGUH-LIFNR,           " 仕入先コード
+RZAWE  TYPE REGUH-RZAWE,           " この支払の支払方法
+WAERS  TYPE REGUH-WAERS,           " 通貨コード
+VBLNR  TYPE REGUH-VBLNR,           " 支払伝票の伝票番号
+ZALDT  TYPE REGUH-ZALDT,           " 支払伝票の転記日付
+RWBTR  TYPE REGUH-RWBTR,           " 支払通貨での支払金額
+RWSKT  TYPE REGUH-RWSKT,           " 支払通貨での現金割引合計
+END   OF T_REGUH,
+*-- 仕入先マスタ取得用
+BEGIN OF T_LFA1,
+LIFNR  TYPE LFA1-LIFNR,            " 仕入先コード
+NAME1  TYPE LFA1-NAME1,            " 名称 1
+END   OF T_LFA1,
+*-- ALV出力用
+BEGIN OF T_OUTPUT,
+BUKRS  TYPE ZN002-BUKRS,           " 会社コード
+LIFNR  TYPE ZN002-LIFNR,           " 仕入先(請求先)
+NAME1  TYPE LFA1-NAME1,            " 請求先名称
+PZFBDT TYPE ZN002-PZFBDT,          " 支払日
+ZLSCH  TYPE CHAR4,                 " 支払方法
+WAERS  TYPE ZN002-WAERS,           " 通貨
+PWRBTR TYPE ZN002-PWRBTR,          " 支払予定額
+RWBTR  TYPE REGUH-RWBTR,           " 支払提案金額
+RWSKT  TYPE REGUH-RWSKT,           " 仕入割引
+WRBTR  TYPE ZN002-PWRBTR,          " 差額
+ZALDT  TYPE REGUH-ZALDT,           " 転記日
+END   OF T_OUTPUT.
+
+*----------------------------------------------------------------------*
+*   構造定義
+*----------------------------------------------------------------------*
+DATA: W_ZN002  TYPE T_ZN002,
+W_REGUH  TYPE T_REGUH,
+W_LFA1   TYPE T_LFA1,
+W_OUTPUT TYPE T_OUTPUT.
+
+*------- SAPメモリ取得用 ( Include[F110TABL]より引用 )
+*-- メモリID用
+DATA: BEGIN OF F110ID,
+PROGR(4)          TYPE C VALUE 'F110', " Programmname
+LAUFD             LIKE F110V-LAUFD,    " Laufdatum
+LAUFI             LIKE F110V-LAUFI,    " Laufidentifikation
+OBJKT(4)          TYPE C,              " gespeichertes Objekt
+END OF   F110ID,
+*-- BUKTAB ( 会社コード取得用 )
+BEGIN OF BUKTAB OCCURS 100,
+BUKRS            LIKE T001-BUKRS,    " Buchungskreis
+BUGRP(2)         TYPE N,             " Gruppe
+LAND1            LIKE T001-LAND1,    " Laenderschluessel
+ZBUKR            LIKE T001-BUKRS,    " zahlender Buchungskr.
+XKWES(1)         TYPE C,             " Debitoren-Wechsel
+XDWES(1)         TYPE C,             " Kreditoren-Wechsel
+END OF BUKTAB,
+*-- FKTTAB ( 支払方法/次支払日取得用 )
+BEGIN OF FKTTAB OCCURS 10,
+BUGRP(2)         TYPE N,             " Gruppe
+ZWELS(10)        TYPE C,             " Zahlwege
+NEDAT            TYPE D,             " naechster Lauf
+WDATE            TYPE D,             " Wechsel-Ausstellung
+WFAEL            TYPE D,             " Wechsel-Faelligkeit
+BUKLS(50)        TYPE C,             " Buchungskreise
+XWANF(1)         TYPE C,             " Wechselanforderg.
+XSWEC(1)         TYPE C,             " Scheck-Wechsel
+XWECA(1)         TYPE C,             " Wechsel-Ausgang
+XWECE(1)         TYPE C,             " Wechsel-Eingang
+XWESA(1)         TYPE C,             " Wechsel-Ausgang sof.
+XWESE(1)         TYPE C,             " Wechsel-Eingang sof.
+XWFAI(1)         TYPE C,             " Wechsel-Fael.-int.
+XWFAF(1)         TYPE C,             " Wechsel bei Faellig
+XPRUF(1)         TYPE C,             " Pruefkennzeichen
+XPRUW(1)         TYPE C,             " Pruefkennzeichen
+END OF FKTTAB,
+*-- SLKTAB ( 仕入先コード取得用 )
+BEGIN OF SLKTAB OCCURS 10,
+VONKT(10)        TYPE C,             " Von-Konto
+BISKT(10)        TYPE C,             " Bis-Konto
+XPRUF(1)         TYPE C,             " Pruefkennzeichen
+END OF SLKTAB.
+
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+DATA: I_ZN002  TYPE STANDARD TABLE OF T_ZN002,
+I_BSIK   TYPE SORTED   TABLE OF T_BSIK
+WITH NON-UNIQUE KEY BUKRS LIFNR GJAHR BELNR,
+I_REGUH  TYPE STANDARD TABLE OF T_REGUH,
+I_LFA1   TYPE HASHED   TABLE OF T_LFA1
+WITH UNIQUE KEY LIFNR,
+I_OUTPUT TYPE STANDARD TABLE OF T_OUTPUT.
+
+*----------------------------------------------------------------------*
+*   レンジ構造/テーブル定義
+*----------------------------------------------------------------------*
+DATA:  R_LIFNR TYPE RANGE OF LIFNR,
+W_LIFNR LIKE LINE  OF R_LIFNR,
+R_ZLSCH TYPE RANGE OF DZLSCH,
+W_ZLSCH LIKE LINE  OF R_ZLSCH.
+
+*----------------------------------------------------------------------*
+*   ALV出力用定義
+*----------------------------------------------------------------------*
+*-- ALV出力用
+DATA: W_LAYOUT      TYPE SLIS_LAYOUT_ALV,     " ALV出力レイアウト
+I_FIELDCAT    TYPE SLIS_T_FIELDCAT_ALV, " ALV出力項目設定
+W_REPID       TYPE SY-REPID,            " ALV出力用：プログラムID
+W_EDISVARIANT TYPE DISVARIANT,          " ALV出力バリアント
+I_EVENT       TYPE SLIS_T_EVENT,        " イベント
+W_EVENT       LIKE LINE OF I_EVENT,
+I_HEAD        TYPE SLIS_T_LISTHEADER,   " ヘッダ
+W_HEAD        LIKE LINE OF I_HEAD,
+W_PRINT       TYPE SLIS_PRINT_ALV,
+W_SETTINGS    TYPE LVC_S_GLAY.
+
+*----------------------------------------------------------------------*
+*   変数定義
+*----------------------------------------------------------------------*
+DATA: G_BUKRS TYPE BUKRS,                    " 会社コード
+G_NEDAT TYPE DATUM.                    " 次支払日
+
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_ON         TYPE CHAR1 VALUE 'X',        " フラグON
+C_SAVE       TYPE CHAR1 VALUE 'A',        " SAVE機能ON
+C_TYP1       TYPE CHAR1 VALUE 'H',        " ヘッダ書式(H)
+C_TYP2       TYPE CHAR1 VALUE 'S'.        " ヘッダ書式(S)
+
+*&---------------------------------------------------------------------*
+*&   画面項目定義
+*&---------------------------------------------------------------------*
+*-- データ選択
+SELECTION-SCREEN: BEGIN OF BLOCK BL01 WITH FRAME TITLE TEXT-S01.
+*-- 実行日
+PARAMETERS: P_LAUFD TYPE REGUH-LAUFD OBLIGATORY,
+*-- 認識名
+P_LAUFI TYPE REGUH-LAUFI OBLIGATORY.
+SELECTION-SCREEN: END   OF BLOCK BL01.
+
+*-- 処理オプション
+SELECTION-SCREEN: BEGIN OF BLOCK BL02 WITH FRAME TITLE TEXT-S02.
+*-- ALVレイアウト
+PARAMETERS: P_LAYOUT TYPE SLIS_VARI.
+SELECTION-SCREEN: END   OF BLOCK BL02.
+
+*-- システム項目
+SELECTION-SCREEN: BEGIN OF BLOCK BL03 WITH FRAME TITLE TEXT-S03.
+*-- 支払仮勘定
+PARAMETERS: P_HKONT TYPE BSIK-HKONT OBLIGATORY.
+SELECTION-SCREEN: END   OF BLOCK BL03.
+
+************************************************************************
+INITIALIZATION.
+************************************************************************
+
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LAUFD.
+************************************************************************
+*-- 実行日の検索ヘルプ
+PERFORM F_F4HELP_P_LAUFD.
+
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LAUFI.
+************************************************************************
+*-- 認識名の検索ヘルプ
+PERFORM F_F4HELP_P_LAUFI.
+
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_LAYOUT.
+************************************************************************
+*-- レイアウトのの検索ヘルプ
+PERFORM F_CALL_ALV_VARIANT CHANGING P_LAYOUT.
+
+************************************************************************
+AT SELECTION-SCREEN.
+************************************************************************
+
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+*-- 初期処理
+PERFORM INT_SEC.
+*-- メイン処理
+PERFORM MAIN_SEC.
+*-- 終了処理
+PERFORM END_SEC.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_F4HELP_P_LAUFD
+*&---------------------------------------------------------------------*
+*       実行日の検索ヘルプ
+*----------------------------------------------------------------------*
+FORM F_F4HELP_P_LAUFD.
+
+DATA: L_LAUFD TYPE F110V-LAUFD,
+L_LAUFI TYPE F110V-LAUFI.
+
+CALL FUNCTION 'F4_ZAHLLAUF'
+EXPORTING
+F1TYP = 'D'
+F2NME = 'P_LAUFI'
+IMPORTING
+LAUFD = L_LAUFD
+LAUFI = L_LAUFI.
+
+IF  NOT L_LAUFD IS INITIAL
+AND NOT L_LAUFI IS INITIAL.
+P_LAUFD = L_LAUFD.
+P_LAUFI = L_LAUFI.
+ENDIF.
+
+ENDFORM.                    " F_F4HELP_P_LAUFD
+*&---------------------------------------------------------------------*
+*&      Form  F_F4HELP_P_LAUFI
+*&---------------------------------------------------------------------*
+*       実行日の検索ヘルプ
+*----------------------------------------------------------------------*
+FORM F_F4HELP_P_LAUFI.
+
+DATA: L_LAUFD TYPE F110V-LAUFD,
+L_LAUFI TYPE F110V-LAUFI.
+
+CALL FUNCTION 'F4_ZAHLLAUF'
+EXPORTING
+F1TYP = 'I'
+F2NME = 'P_LAUFD'
+IMPORTING
+LAUFD = L_LAUFD
+LAUFI = L_LAUFI.
+
+IF  NOT L_LAUFD IS INITIAL
+AND NOT L_LAUFI IS INITIAL.
+P_LAUFD = L_LAUFD.
+P_LAUFI = L_LAUFI.
+ENDIF.
+
+ENDFORM.                    " F_F4HELP_P_LAUFI
+*&-------------------------------------------------------------------*
+*&      Form  F_CALL_ALV_VARIANT
+*&-------------------------------------------------------------------*
+*       ALVレイアウト用F4ヘルプ
+*--------------------------------------------------------------------*
+*      <--AO_VARI    ALVレイアウト
+*--------------------------------------------------------------------*
+FORM F_CALL_ALV_VARIANT CHANGING VALUE(AO_VARI) TYPE ANY.
+
+DATA: LW_DISVARIANT TYPE DISVARIANT.
+
+CLEAR: LW_DISVARIANT,
+AO_VARI.
+
+LW_DISVARIANT-REPORT   = SY-REPID.
+LW_DISVARIANT-USERNAME = SY-UNAME.
+
+CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+EXPORTING
+IS_VARIANT         = LW_DISVARIANT
+I_SAVE             = C_SAVE
+I_DISPLAY_VIA_GRID = C_ON
+IMPORTING
+ES_VARIANT         = LW_DISVARIANT
+EXCEPTIONS
+NOT_FOUND          = 1
+PROGRAM_ERROR      = 2
+OTHERS             = 3.
+
+IF SY-SUBRC = 0.
+AO_VARI = LW_DISVARIANT-VARIANT.
+ENDIF.
+
+ENDFORM.                    " F_CALL_ALV_VARIANT
+*&---------------------------------------------------------------------*
+*&      Form  INT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INT_SEC.
+
+CLEAR: W_ZN002,
+W_REGUH,
+W_LFA1,
+W_OUTPUT,
+W_LAYOUT,
+W_REPID,
+W_EDISVARIANT,
+W_EVENT,
+W_HEAD,
+W_PRINT,
+W_SETTINGS,
+W_LIFNR,
+W_ZLSCH,
+G_BUKRS,
+G_NEDAT.
+
+REFRESH: I_ZN002,
+I_BSIK,
+I_REGUH,
+I_LFA1,
+I_OUTPUT,
+I_FIELDCAT,
+I_EVENT,
+I_HEAD,
+R_LIFNR,
+R_ZLSCH,
+BUKTAB,
+FKTTAB,
+SLKTAB.
+
+ENDFORM.                    " INT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_SEC
+*&---------------------------------------------------------------------*
+*      メイン処理
+*----------------------------------------------------------------------*
+FORM MAIN_SEC.
+
+*-- 自動支払プログラムのパラメータ取得
+PERFORM F_GET_F110_PARAMETER.
+
+*-- 支払予定データ取得
+PERFORM F_GET_ZN002_DATA.
+
+*-- 支払提案データ取得
+PERFORM F_GET_REGUH_DATA.
+
+*-- 仕入先名称データ取得
+PERFORM F_GET_LFA1_DATA.
+
+*-- 出力データ編集
+PERFORM F_EDIT_OUTPUT_DATA.
+
+ENDFORM.                    " MAIN_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_F110_PARAMETER
+*&---------------------------------------------------------------------*
+*       自動支払プログラムのパラメータ取得
+*----------------------------------------------------------------------*
+FORM F_GET_F110_PARAMETER.
+
+REFRESH: BUKTAB,
+FKTTAB,
+SLKTAB.
+
+*-- メモリID作成
+F110ID-PROGR = 'F110'.
+F110ID-LAUFD = P_LAUFD.
+F110ID-LAUFI = P_LAUFI.
+F110ID-OBJKT = 'PARM'.
+
+*-- メモリインポート
+IMPORT BUKTAB FKTTAB SLKTAB
+FROM DATABASE RFDT(FB) ID F110ID.
+
+IF SY-SUBRC <> 0.
+*-- 対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_GET_F110_PARAMETER
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_ZN002_DATA
+*&---------------------------------------------------------------------*
+*       支払予定データ取得
+*----------------------------------------------------------------------*
+FORM F_GET_ZN002_DATA.
+
+*-- 支払予定取得条件データ作成
+PERFORM F_EDIT_F110_PARAM_DATA.
+
+*-- 支払予定データ一括取得
+PERFORM F_SELECT_ZN002_DATA.
+
+CHECK NOT I_ZN002[] IS INITIAL.
+
+*-- 未消込データ一括取得
+PERFORM F_SELECT_BSIK_DATA.
+
+*-- 対象支払予定データ特定
+PERFORM F_REFINE_ZN002_DATA.
+
+*-- 金額集計及び重複データ削除
+PERFORM F_SUM_ZN002_DATA.
+
+ENDFORM.                    " F_GET_ZN002_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_F110_PARAM_DATA
+*&---------------------------------------------------------------------*
+*       支払予定取得条件データ作成
+*----------------------------------------------------------------------*
+FORM F_EDIT_F110_PARAM_DATA.
+
+DATA: L_ZWELS(10) TYPE C,
+L_LENGTH    TYPE I.
+
+CLEAR: G_BUKRS,
+G_NEDAT.
+REFRESH: R_LIFNR,
+R_ZLSCH.
+
+*-- 会社コード
+LOOP AT BUKTAB.
+G_BUKRS = BUKTAB-BUKRS.
+EXIT.
+ENDLOOP.
+
+*-- 仕入先コード
+LOOP AT SLKTAB.
+CLEAR: W_LIFNR.
+IF SLKTAB-VONKT = SLKTAB-BISKT.
+W_LIFNR-SIGN   = 'I'.
+W_LIFNR-OPTION = 'EQ'.
+W_LIFNR-LOW    = SLKTAB-VONKT.
+ELSE.
+W_LIFNR-SIGN   = 'I'.
+W_LIFNR-OPTION = 'BT'.
+W_LIFNR-LOW    = SLKTAB-VONKT.
+W_LIFNR-HIGH   = SLKTAB-BISKT.
+ENDIF.
+APPEND W_LIFNR TO R_LIFNR.
+ENDLOOP.
+
+*-- 次支払日
+LOOP AT FKTTAB.
+G_NEDAT = FKTTAB-NEDAT.
+L_ZWELS = FKTTAB-ZWELS.
+EXIT.
+ENDLOOP.
+
+*-- 支払方法
+L_LENGTH = STRLEN( L_ZWELS ).
+DO L_LENGTH TIMES.
+CLEAR: W_ZLSCH.
+W_ZLSCH-SIGN   = 'I'.
+W_ZLSCH-OPTION = 'EQ'.
+W_ZLSCH-LOW    = L_ZWELS+0(1).
+APPEND W_ZLSCH TO R_ZLSCH.
+SHIFT: L_ZWELS.
+ENDDO.
+
+ENDFORM.                    " F_EDIT_F110_PARAM_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_ZN002_DATA
+*&---------------------------------------------------------------------*
+*       支払予定データ一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_ZN002_DATA.
+
+REFRESH: I_ZN002[].
+
+SELECT BUKRS                              " 会社コード
+LIFNR                              " 仕入先コード(請求先)
+PZLSCH                             " 支払方法
+WAERS                              " 通貨コード
+PZFBDT                             " 支払予定日
+PWRBTR                             " 支払予定額
+GJAHR                              " 会計年度
+BELNR                              " 会計伝票番号
+FROM ZN002
+INTO TABLE I_ZN002
+WHERE BUKRS  =  G_BUKRS                  " 会社コード
+AND LIFNR  IN R_LIFNR                  " 仕入先コード
+AND PZFBDT <  G_NEDAT                  " 支払予定日
+AND PZLSCH IN R_ZLSCH                  " 支払方法
+AND PADVNC =  SPACE                    " 前渡済
+AND PLIFNR =  SPACE                    " 振替仕入先
+AND PSTFLG =  C_ON.                    " 会計振替
+
+SELECT BUKRS                              " 会社コード
+PLIFNR                             " 振替仕入先
+PZLSCH                             " 支払方法
+WAERS                              " 通貨コード
+PZFBDT                             " 支払予定日
+PWRBTR                             " 支払予定額
+GJAHR                              " 会計年度
+BELNR                              " 会計伝票番号
+FROM ZN002
+APPENDING TABLE I_ZN002
+WHERE BUKRS  =  G_BUKRS                  " 会社コード
+AND PZFBDT <  G_NEDAT                  " 支払予定日
+AND PZLSCH IN R_ZLSCH                  " 支払方法
+AND PADVNC =  SPACE                    " 前渡済
+AND PLIFNR IN R_LIFNR                  " 振替仕入先
+AND PSTFLG =  C_ON.                    " 会計振替
+
+ENDFORM.                    " F_SELECT_ZN002_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_BSIK_DATA
+*&---------------------------------------------------------------------*
+*       未消込データ一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_BSIK_DATA.
+
+REFRESH: I_BSIK[].
+
+SELECT BUKRS                              " 会社コード
+LIFNR                              " 仕入先コード
+GJAHR                              " 会計年度
+BELNR                              " 会計伝票番号
+FROM BSIK
+INTO CORRESPONDING FIELDS OF TABLE I_BSIK
+FOR ALL ENTRIES IN I_ZN002
+WHERE BUKRS = I_ZN002-BUKRS              " 会社コード
+AND LIFNR = I_ZN002-LIFNR              " 仕入先コード
+AND GJAHR = I_ZN002-GJAHR              " 会計年度
+AND BELNR = I_ZN002-BELNR              " 会計伝票
+AND HKONT = P_HKONT.                   " 総勘定元帳勘定
+
+ENDFORM.                    " F_SELECT_BSIK_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_REFINE_ZN002_DATA
+*&---------------------------------------------------------------------*
+*       対象支払予定データ特定
+*----------------------------------------------------------------------*
+FORM F_REFINE_ZN002_DATA.
+
+LOOP AT I_ZN002 INTO W_ZN002.
+READ TABLE I_BSIK TRANSPORTING NO FIELDS
+WITH KEY BUKRS = W_ZN002-BUKRS
+LIFNR = W_ZN002-LIFNR
+GJAHR = W_ZN002-GJAHR
+BELNR = W_ZN002-BELNR
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+DELETE I_ZN002.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " F_REFINE_ZN002_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_SUM_ZN002_DATA
+*&---------------------------------------------------------------------*
+*       金額集計及び重複データ削除
+*----------------------------------------------------------------------*
+FORM F_SUM_ZN002_DATA.
+
+DATA: L_FLG_END TYPE XFELD,
+L_PWRBTR  TYPE ZN002-PWRBTR,
+LI_ZN002  TYPE STANDARD TABLE OF T_ZN002.
+
+*-- テーブルデータ退避
+LI_ZN002[] = I_ZN002.
+REFRESH: I_ZN002[].
+
+SORT LI_ZN002 ASCENDING BY BUKRS          " 会社コード
+LIFNR          " 仕入先コード
+PZLSCH         " 支払方法
+WAERS.         " 通貨コード
+
+LOOP AT LI_ZN002 INTO W_ZN002.
+*-- 集計&重複キー(会社コード/仕入先コード/ 支払方法/通貨コード)
+AT END OF WAERS.
+CLEAR: L_PWRBTR.
+L_FLG_END = C_ON.
+SUM.
+L_PWRBTR = W_ZN002-PWRBTR.
+ENDAT.
+IF NOT L_FLG_END IS INITIAL.
+CLEAR: L_FLG_END.
+W_ZN002-PWRBTR = L_PWRBTR.
+APPEND W_ZN002 TO I_ZN002[].
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " F_SUM_ZN002_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_REGUH_DATA
+*&---------------------------------------------------------------------*
+*       支払提案データ取得
+*----------------------------------------------------------------------*
+FORM F_GET_REGUH_DATA.
+
+*-- 支払提案データ一括取得
+PERFORM F_SELECT_REGUH_DATA.
+
+IF I_REGUH[] IS INITIAL.
+CHECK I_ZN002[] IS INITIAL.
+*-- 対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ELSE.
+*-- 金額集計及び重複データ削除
+PERFORM F_SUM_REGUH_DATA.
+ENDIF.
+
+ENDFORM.                    " F_GET_REGUH_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_REGUH_DATA
+*&---------------------------------------------------------------------*
+*       支払提案データ一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_REGUH_DATA.
+
+REFRESH: I_REGUH[].
+
+SELECT ZBUKR                              " 支払会社コード
+LIFNR                              " 仕入先コード
+RZAWE                              " この支払の支払方法
+WAERS                              " 通貨コード
+VBLNR                              " 支払伝票の伝票番号
+ZALDT                              " 支払伝票の転記日付
+RWBTR                              " 支払通貨での支払金額
+RWSKT                              " 支払通貨での現金割引合計
+FROM REGUH
+INTO CORRESPONDING FIELDS OF TABLE I_REGUH
+WHERE LAUFD = P_LAUFD                    " 実行日
+AND LAUFI = P_LAUFI                    " 認識名
+AND XVORL = C_ON.                      " フラグ: 提案実行のみ
+
+ENDFORM.                    " F_SELECT_REGUH_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_SUM_REGUH_DATA
+*&---------------------------------------------------------------------*
+*       金額集計及び重複データ削除
+*----------------------------------------------------------------------*
+FORM F_SUM_REGUH_DATA.
+
+DATA: L_FLG_END TYPE XFELD,
+L_RWBTR   TYPE REGUH-RWBTR,
+L_RWSKT   TYPE REGUH-RWSKT,
+LI_REGUH  TYPE STANDARD TABLE OF T_REGUH.
+
+*-- テーブルデータ退避
+LI_REGUH[] = I_REGUH.
+REFRESH: I_REGUH[].
+
+*-- 例外データは集計＆削除対象外
+SORT LI_REGUH ASCENDING BY VBLNR.         " 支払伝票番号
+LOOP AT LI_REGUH INTO W_REGUH WHERE VBLNR = SPACE.
+APPEND W_REGUH TO I_REGUH[].
+DELETE LI_REGUH.
+ENDLOOP.
+
+SORT LI_REGUH ASCENDING BY ZBUKR          " 支払会社コード
+LIFNR          " 仕入先コード
+RZAWE          " この支払の支払方法
+WAERS.         " 通貨コード
+
+LOOP AT LI_REGUH INTO W_REGUH.
+*-- 集計&重複キー(会社コード/仕入先コード/支払方法/通貨コード)
+AT END OF WAERS.
+CLEAR: L_RWBTR,
+L_RWSKT.
+L_FLG_END = C_ON.
+SUM.
+L_RWBTR = W_REGUH-RWBTR.              " 支払提案額
+L_RWSKT = W_REGUH-RWSKT.              " 割引額
+ENDAT.
+IF NOT L_FLG_END IS INITIAL.
+CLEAR: L_FLG_END.
+W_REGUH-RWBTR = L_RWBTR.
+W_REGUH-RWSKT = L_RWSKT.
+APPEND W_REGUH TO I_REGUH[].
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " F_SUM_REGUH_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_LFA1_DATA
+*&---------------------------------------------------------------------*
+*       仕入先名称データ一括取得
+*----------------------------------------------------------------------*
+FORM F_GET_LFA1_DATA.
+
+REFRESH: I_LFA1[].
+
+SELECT LIFNR                              " 仕入先コード
+NAME1                              " 名称１
+FROM LFA1
+INTO CORRESPONDING FIELDS OF TABLE I_LFA1
+WHERE LIFNR IN R_LIFNR.
+
+ENDFORM.                    " F_GET_LFA1_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       出力データ編集
+*----------------------------------------------------------------------*
+FORM F_EDIT_OUTPUT_DATA.
+
+SORT I_REGUH ASCENDING BY ZBUKR                     " 支払会社コード
+LIFNR                     " 仕入先コード
+RZAWE                     " 支払方法
+WAERS                     " 通貨コード
+VBLNR.                    " 支払伝票番号
+*-- 支払予定データあり
+LOOP AT I_ZN002 INTO W_ZN002.
+CLEAR: W_REGUH.
+*-- 支払提案データの読込み
+READ TABLE I_REGUH INTO W_REGUH
+WITH KEY ZBUKR  = W_ZN002-BUKRS  " 会社コード
+LIFNR  = W_ZN002-LIFNR  " 仕入先コード
+RZAWE  = W_ZN002-PZLSCH " 支払方法
+WAERS  = W_ZN002-WAERS  " 通貨コード
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+DELETE I_REGUH INDEX SY-TABIX.
+ENDIF.
+*-- 仕入先名称データの読込み
+CLEAR: W_LFA1.
+READ TABLE I_LFA1 INTO W_LFA1
+WITH TABLE KEY LIFNR = W_ZN002-LIFNR.
+*-- ALV出力用レコード登録
+PERFORM F_APPEND_OUTPUT_DATA USING W_ZN002        " 支払予定
+W_REGUH        " 支払提案
+W_LFA1.        " 仕入先名称
+ENDLOOP.
+
+CLEAR: W_ZN002.
+*-- 支払予定データなし
+LOOP AT I_REGUH INTO W_REGUH.
+*-- 仕入先名称データの読込み
+CLEAR: W_LFA1.
+READ TABLE I_LFA1 INTO W_LFA1
+WITH TABLE KEY LIFNR = W_REGUH-LIFNR.
+*-- ALV出力用レコード登録
+PERFORM F_APPEND_OUTPUT_DATA USING W_ZN002        " 支払予定
+W_REGUH        " 支払提案
+W_LFA1.        " 仕入先名称
+ENDLOOP.
+
+SORT I_OUTPUT ASCENDING BY BUKRS                    " 会社コード
+LIFNR                    " 仕入先コード
+ZLSCH                    " 支払方法
+WAERS.                   " 通貨
+
+ENDFORM.                    " F_EDIT_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_APPEND_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       ALV出力用レコード登録
+*----------------------------------------------------------------------*
+*      --> AI_ZN002   支払予定
+*      --> AI_REGUH   支払提案
+*      --> AI_LFA1    仕入先名称
+*----------------------------------------------------------------------*
+FORM F_APPEND_OUTPUT_DATA USING VALUE(AI_ZN002) TYPE T_ZN002
+VALUE(AI_REGUH) TYPE T_REGUH
+VALUE(AI_LFA1)  TYPE T_LFA1.
+CLEAR: W_OUTPUT.
+
+IF AI_ZN002 IS INITIAL.                   " 支払予定なし
+IF AI_REGUH-VBLNR IS INITIAL.           " 例外データ
+*-- 会社コード
+W_OUTPUT-BUKRS  = AI_REGUH-ZBUKR.
+*-- 仕入先（請求先）
+W_OUTPUT-LIFNR  = AI_REGUH-LIFNR.
+*-- 仕入先名称
+W_OUTPUT-NAME1  = AI_LFA1-NAME1.
+*-- 支払方法
+W_OUTPUT-ZLSCH  = TEXT-C01.
+APPEND W_OUTPUT TO I_OUTPUT.
+EXIT.
+ELSE.
+*-- 会社コード
+W_OUTPUT-BUKRS  = AI_REGUH-ZBUKR.
+*-- 仕入先（請求先）
+W_OUTPUT-LIFNR  = AI_REGUH-LIFNR.
+*-- 支払方法
+W_OUTPUT-ZLSCH  = AI_REGUH-RZAWE.
+*-- 通貨
+W_OUTPUT-WAERS  = AI_REGUH-WAERS.
+ENDIF.
+ELSE.                                     " 支払予定あり
+*-- 会社コード
+W_OUTPUT-BUKRS  = AI_ZN002-BUKRS.
+*-- 仕入先（請求先）
+W_OUTPUT-LIFNR  = AI_ZN002-LIFNR.
+*-- 支払方法
+W_OUTPUT-ZLSCH  = AI_ZN002-PZLSCH.
+*-- 通貨
+W_OUTPUT-WAERS  = AI_ZN002-WAERS.
+*-- 支払日
+W_OUTPUT-PZFBDT = AI_ZN002-PZFBDT.
+*-- 支払予定額
+W_OUTPUT-PWRBTR = AI_ZN002-PWRBTR.
+ENDIF.
+*-- 仕入先名称
+W_OUTPUT-NAME1  = AI_LFA1-NAME1.
+*-- 支払提案金額
+W_OUTPUT-RWBTR  = AI_REGUH-RWBTR.
+*-- 仕入割引
+W_OUTPUT-RWSKT  = AI_REGUH-RWSKT.
+*-- 差額
+W_OUTPUT-WRBTR  = W_OUTPUT-PWRBTR + W_OUTPUT-RWBTR.
+*-- 転記日
+W_OUTPUT-ZALDT  = AI_REGUH-ZALDT.
+
+APPEND W_OUTPUT TO I_OUTPUT.
+
+ENDFORM.                    " F_APPEND_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  END_SEC
+*&---------------------------------------------------------------------*
+*       終了処理
+*----------------------------------------------------------------------*
+FORM END_SEC.
+
+*-- ALVリスト出力
+PERFORM F_OUTPUT_ALV.
+
+ENDFORM.                    " END_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       ALVリスト出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_ALV.
+
+*-- 項目属性編集
+PERFORM F_SET_ALV_FIELDCAT.
+
+*-- その他編集
+PERFORM F_SET_ALV_LAYOUT.
+
+*-- ALV一覧出力
+PERFORM F_CALL_ALV.
+
+ENDFORM.                    " F_OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_ALV_FIELDCAT
+*&---------------------------------------------------------------------*
+*       項目属性編集
+*----------------------------------------------------------------------*
+FORM F_SET_ALV_FIELDCAT.
+
+DATA:L_COL      TYPE I.               "カラム位置
+
+* カラム位置の初期化
+L_COL = 0.
+
+* 項目名を編集する
+PERFORM SET_FIELDCAT USING 'BUKRS'          "項目ID
+TEXT-F01         "項目テキスト(短)
+TEXT-F01         "項目テキスト(中)
+TEXT-F01         "項目テキスト(長)
+4                "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+4                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'LIFNR'          "項目ID
+TEXT-F02         "項目テキスト(短)
+TEXT-F02         "項目テキスト(中)
+TEXT-F02         "項目テキスト(長)
+10               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+10               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'NAME1'          "項目ID
+TEXT-F03         "項目テキスト(短)
+TEXT-F03         "項目テキスト(中)
+TEXT-F03         "項目テキスト(長)
+35               "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+35               "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'PZFBDT'         "項目ID
+TEXT-F04         "項目テキスト(短)
+TEXT-F04         "項目テキスト(中)
+TEXT-F04         "項目テキスト(長)
+10               "出力データ長
+'DATS'           "データ型
+SPACE            "数値データ型
+8                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'ZLSCH'          "項目ID
+TEXT-F05         "項目テキスト(短)
+TEXT-F05         "項目テキスト(中)
+TEXT-F05         "項目テキスト(長)
+4                "出力データ長
+'CHAR'           "データ型
+SPACE            "数値データ型
+4                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'WAERS'          "項目ID
+TEXT-F06         "項目テキスト(短)
+TEXT-F06         "項目テキスト(中)
+TEXT-F06         "項目テキスト(長)
+5                "出力データ長
+'CUKY'           "データ型
+SPACE            "数値データ型
+5                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'PWRBTR'         "項目ID
+TEXT-F07         "項目テキスト(短)
+TEXT-F07         "項目テキスト(中)
+TEXT-F07         "項目テキスト(長)
+16               "出力データ長
+'CURR'           "データ型
+'P'              "数値データ型
+13               "数値データ長
+'WAERS'          "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'RWBTR'          "項目ID
+TEXT-F08         "項目テキスト(短)
+TEXT-F08         "項目テキスト(中)
+TEXT-F08         "項目テキスト(長)
+16               "出力データ長
+'CURR'           "データ型
+'P'              "数値データ型
+13               "数値データ長
+'WAERS'          "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'RWSKT'          "項目ID
+TEXT-F09         "項目テキスト(短)
+TEXT-F09         "項目テキスト(中)
+TEXT-F09         "項目テキスト(長)
+16               "出力データ長
+'CURR'           "データ型
+'P'              "数値データ型
+13               "数値データ長
+'WAERS'          "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'WRBTR'          "項目ID
+TEXT-F10         "項目テキスト(短)
+TEXT-F10         "項目テキスト(中)
+TEXT-F10         "項目テキスト(長)
+16               "出力データ長
+'CURR'           "データ型
+'P'              "数値データ型
+13               "数値データ長
+'WAERS'          "通貨参照項目
+CHANGING L_COL.
+PERFORM SET_FIELDCAT USING 'ZALDT'          "項目ID
+TEXT-F11         "項目テキスト(短)
+TEXT-F11         "項目テキスト(中)
+TEXT-F11         "項目テキスト(長)
+10               "出力データ長
+'DATS'           "データ型
+SPACE            "数値データ型
+8                "数値データ長
+SPACE            "通貨参照項目
+CHANGING L_COL.
+
+ENDFORM.                    " F_SET_ALV_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       FIELD CATALOGの編集
+*----------------------------------------------------------------------*
+*      -->P_FIELDNAME     項目ID　　　　　　　　　　　　　　　　　必須　
+*      -->P_SELLDTEXT_S   項目テキスト(短)　　　　　　　　　　　　必須
+*      -->P_SELLDTEXT_S   項目テキスト(中)　　　　　　　　　　　　必須
+*      -->P_SELLDTEXT_S   項目テキスト(長)　　　　　　　　　　　　必須
+*      -->P_OUTPUTLEN     出力データ長(カンマ、小数点、符号含む)　必須
+*      -->P_DATATYPE      データ型    　　　　　　　　　　　　　　必須
+*      -->P_INTTYPE       数値データ型 　　　　　　　　　　　 金額のみ
+*      -->P_INTLEN        数値データ長                            必須
+*      -->P_CFIELD        金額項目の場合参照する通貨項目名    金額のみ
+*      -->P_COL　　　　　 カラム位置　　　　　　　　　　　　　　　必須
+*----------------------------------------------------------------------*
+FORM SET_FIELDCAT USING P_FIELDNAME   TYPE SLIS_FIELDCAT_ALV-FIELDNAME
+P_SELTEXT_S   TYPE ANY
+P_SELTEXT_M   TYPE ANY
+P_SELTEXT_L   TYPE ANY
+P_OUTPUTLEN   TYPE SLIS_FIELDCAT_ALV-OUTPUTLEN
+P_DATATYPE    TYPE SLIS_FIELDCAT_ALV-DATATYPE
+P_INTTYPE     TYPE SLIS_FIELDCAT_ALV-INTTYPE
+P_INTLEN      TYPE SLIS_FIELDCAT_ALV-INTLEN
+P_CFIELDNAME  TYPE SLIS_FIELDCAT_ALV-CFIELDNAME
+CHANGING P_COL         TYPE I.
+
+DATA:W_FIELDCAT TYPE SLIS_FIELDCAT_ALV.
+
+
+* カラム位置設定
+P_COL = P_COL + 1.
+
+* 見出し設定
+W_FIELDCAT-COL_POS    = P_COL.             "カラム位置
+W_FIELDCAT-FIELDNAME  = P_FIELDNAME.       "項目ID
+W_FIELDCAT-SELTEXT_S  = P_SELTEXT_S.       "項目テキスト(短)
+W_FIELDCAT-SELTEXT_M  = P_SELTEXT_M.       "項目テキスト(中)
+W_FIELDCAT-SELTEXT_L  = P_SELTEXT_L.       "項目テキスト(長)
+W_FIELDCAT-OUTPUTLEN  = P_OUTPUTLEN.       "出力データ長
+W_FIELDCAT-DATATYPE   = P_DATATYPE.        "データ型
+W_FIELDCAT-INTTYPE    = P_INTTYPE.         "数値のデータ型
+W_FIELDCAT-INTLEN     = P_INTLEN.          "データ長
+W_FIELDCAT-CFIELDNAME = P_CFIELDNAME.      "参照通貨
+
+
+APPEND W_FIELDCAT TO I_FIELDCAT.
+
+ENDFORM.                    " SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*       その他編集
+*----------------------------------------------------------------------*
+FORM F_SET_ALV_LAYOUT.
+
+*-- プログラムID取得
+W_REPID = SY-REPID.
+
+*-- レイアウト設定
+W_LAYOUT-COLWIDTH_OPTIMIZE    = C_ON.  "ALV コントロール: 列幅の最適化
+W_LAYOUT-DETAIL_INITIAL_LINES = C_ON.
+W_LAYOUT-ZEBRA                = C_ON.
+W_LAYOUT-GROUP_CHANGE_EDIT    = C_ON.
+
+*-- バリアント
+IF NOT P_LAYOUT IS INITIAL.
+W_EDISVARIANT-REPORT  = W_REPID.
+W_EDISVARIANT-VARIANT = P_LAYOUT.
+ENDIF.
+
+*-- ALV印刷時用 設定項目
+W_PRINT-NO_PRINT_LISTINFOS = C_ON.
+
+*-- 印刷プレビュー設定
+W_SETTINGS-NO_COLWOPT = C_ON.  "自動最適化禁止
+
+*-- 処理イベントの取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE           = 0
+IMPORTING
+ET_EVENTS             = I_EVENT.
+
+*-- イベント時にコールされるFORM名を設定
+CLEAR: W_EVENT.
+READ TABLE I_EVENT INTO W_EVENT WITH KEY NAME = 'TOP_OF_PAGE'.
+IF SY-SUBRC = 0.
+W_EVENT-FORM = 'HEADER_WRITE'.
+MODIFY I_EVENT INDEX SY-TABIX FROM W_EVENT.
+ENDIF.
+
+ENDFORM.                    " F_SET_ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_ALV
+*&---------------------------------------------------------------------*
+*       ALV一覧出力
+*----------------------------------------------------------------------*
+FORM F_CALL_ALV.
+
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM      = W_REPID         " プログラム名
+I_GRID_SETTINGS         = W_SETTINGS      "グリッド設定
+IS_LAYOUT               = W_LAYOUT        " レイアウト定義
+IS_PRINT                = W_PRINT
+IT_FIELDCAT             = I_FIELDCAT      " 構造定義
+I_DEFAULT               = C_ON
+I_SAVE                  = C_SAVE
+IS_VARIANT              = W_EDISVARIANT
+IT_EVENTS               = I_EVENT
+TABLES
+T_OUTTAB                = I_OUTPUT        " 出力データ
+EXCEPTIONS
+PROGRAM_ERROR           = 1
+OTHERS                  = 2.
+
+IF SY-SUBRC <> 0.
+*-- システムエラーが発生しました
+MESSAGE S000 WITH TEXT-E01.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_CALL_ALV
+*&---------------------------------------------------------------------*
+*&      Form  HEADER_WRITE
+*&---------------------------------------------------------------------*
+*       ALVヘッダ編集
+*----------------------------------------------------------------------*
+FORM HEADER_WRITE.
+
+DATA:LW_WORK     TYPE CHAR100,
+LW_PAGNO(4) TYPE C.
+
+*-- タイトル
+PERFORM SET_HEADER USING C_TYP1
+TEXT-H01
+SPACE.
+
+*-- ページ
+CLEAR: LW_WORK,
+LW_PAGNO.
+LW_PAGNO = SY-PAGNO.
+CONDENSE LW_PAGNO.
+CONCATENATE TEXT-H02
+LW_PAGNO
+INTO LW_WORK.
+PERFORM SET_HEADER USING C_TYP2
+SPACE
+LW_WORK.
+
+*-- 処理日付
+CLEAR: LW_WORK.
+WRITE: SY-DATUM TO LW_WORK.
+CONCATENATE TEXT-H03
+LW_WORK
+INTO LW_WORK.
+PERFORM SET_HEADER USING C_TYP2
+SPACE
+LW_WORK.
+
+*-- 処理時刻
+CLEAR: LW_WORK.
+WRITE: SY-UZEIT TO LW_WORK.
+CONCATENATE TEXT-H04
+LW_WORK
+INTO LW_WORK.
+PERFORM SET_HEADER USING C_TYP2
+SPACE
+LW_WORK.
+
+*--- ユーザID
+CLEAR: LW_WORK.
+CONCATENATE TEXT-H05
+SY-UNAME
+INTO LW_WORK.
+PERFORM SET_HEADER USING C_TYP2
+SPACE
+LW_WORK.
+
+*--- 実行日
+CLEAR: LW_WORK.
+WRITE: P_LAUFD TO LW_WORK.
+CONCATENATE TEXT-H07
+LW_WORK
+INTO LW_WORK.
+PERFORM SET_HEADER USING C_TYP2
+LW_WORK
+TEXT-H06.
+
+*--- 認識名
+CLEAR: LW_WORK.
+WRITE: P_LAUFI TO LW_WORK.
+CONCATENATE TEXT-H08
+LW_WORK
+INTO LW_WORK.
+PERFORM SET_HEADER USING C_TYP2
+LW_WORK
+SPACE.
+
+* ヘッダ出力
+CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+EXPORTING
+IT_LIST_COMMENTARY       = I_HEAD.
+
+REFRESH: I_HEAD.
+
+ENDFORM.                    " HEADER_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  SET_HEADER
+*&---------------------------------------------------------------------*
+*       ヘッダ編集
+*----------------------------------------------------------------------*
+*      -->L_TYP    タイプ
+*      -->L_INFO   編集内容2
+*      -->L_KEY    編集内容1
+*----------------------------------------------------------------------*
+FORM SET_HEADER  USING     L_TYP
+L_INFO
+L_KEY.
+CLEAR: W_HEAD.
+W_HEAD-TYP  = L_TYP.
+W_HEAD-KEY  = L_KEY.
+W_HEAD-INFO = L_INFO.
+APPEND W_HEAD TO I_HEAD.
+
+ENDFORM.                    " SET_HEADER

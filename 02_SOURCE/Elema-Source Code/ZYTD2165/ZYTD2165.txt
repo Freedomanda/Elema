@@ -1,0 +1,548 @@
+REPORT YI021600 MESSAGE-ID Y1.
+************************************************************************
+***  REPORT      YI021600
+***  PROGRAM     ＳＤ価格登録／変更ＢＩ用ファイル作成（移行用）
+***  MAKE DATE   1998.12.21
+***  CODED BY    S.AOYAGI
+***  変更履歴
+***  1999.07.30  4.0用に仕様変更 Nakai(PSS)
+***  2001.01.31  入力項目に通貨、有効終了日を追加
+***              数量の100倍を削除
+***              キュー開始日のクリア
+***              変数キー(VAKEY)作成方法変更 Kajisa(NDSC)
+*&   2012/09/03  ISID              ES-UP
+*&   2012/10/29  ISID              ES-UP
+*&   2013/08/27  GSL     選択条件にセッション名を追加
+*&   2014/09/01  ISID11  コードページUTF-8の改修
+*&   2014/09/19  ISID11  グローバルかの対応
+*&   2015/02/03  ISID18  コードページUTF-8再改修
+************************************************************************
+TABLES:MVKE.              "品目マスタ: 販売データ
+************************************************************************
+**** START ADD 2014/09/19 ISID11 ****
+PARAMETERS P_BUKRS TYPE T001-BUKRS OBLIGATORY.
+**** END ADD 2014/09/19 ISID11 ****
+PARAMETERS P_KSCHL LIKE T685-KSCHL OBLIGATORY
+DEFAULT 'YPR0'.
+PARAMETERS:P_VKORG LIKE MVKE-VKORG OBLIGATORY,  "販売組織
+P_VTWEG LIKE MVKE-VTWEG OBLIGATORY.  "流通チャネル
+PARAMETERS:P_IFILE(60) LOWER CASE OBLIGATORY
+*          DEFAULT '\\STTE001\EDI\MST\ORIG\SD_KAKAKU.DAT'.
+DEFAULT '\\PCX31756\IKOU\YI021600.DAT'.
+PARAMETERS:P_OFILE(60) LOWER CASE OBLIGATORY
+*          DEFAULT '\\STTE001\EDI\MST\ORIG\SD_KAKAKU.WRK',
+DEFAULT '\\PCX31756\IKOU\YI021600.WRK'.
+*          P_KYOTEN(2) OBLIGATORY.     "拠点コード
+*2013/08/27 ADD START
+PARAMETERS:P_GROUP TYPE BGR00-GROUP OBLIGATORY. "セッション名
+*2013/08/27 ADD END
+************************************************************************
+INCLUDE YI02TOKU.                    "データ宣言
+************************************************************************
+DATA:BEGIN OF TAB OCCURS 1,
+KEY LIKE BKOND2-VAKEY,       "変数キー
+DATE LIKE SY-DATUM,          "有効開始日
+TANKA(15),                   "単価
+SURYO(7),                    "数量
+*2001/01/31 ADD START
+KONWA(5)     TYPE C,        "通貨
+DATBI(8)     TYPE C,        "有効終了日
+KMEIN(3)     TYPE C,
+*2001/01/31 ADD END
+END OF TAB.
+* 読み込みファイル
+DATA:BEGIN OF IN_FILE OCCURS 1,
+KUNNR(10)    TYPE C,       "得意先コード
+DATAB(8)     TYPE C,       "有効開始日
+MATNR(35)    TYPE C,       "品目コード
+KINGA(11)    TYPE C,       "金額
+*2001/01/31 ADD START
+KONWA(5)     TYPE C,       "通貨
+*2001/01/31 ADD END
+TANI(5)      TYPE C,       "単位数量
+*2001/01/31 ADD START
+DATBI(8)     TYPE C,       "有効終了日
+KMEIN(3)     TYPE C ,
+*2001/01/31 ADD END
+END OF IN_FILE.
+DATA:BEGIN OF MVK OCCURS 1,
+MATNR LIKE MVKE-MATNR,       "品目コード
+VKORG LIKE MVKE-VKORG,       "販売組織
+END OF MVK.
+TABLES:BGR00,                      "セッションレコード
+BKOND1,                     "ヘッダデータのためのバッチインプット
+BKOND2.                     "メインデータのためのバッチインプット
+************************************************************************
+DATA:OK_CNT TYPE I,                "ＯＫカウント
+NG_CNT TYPE I,                "ＮＧカウント
+TOTAL  TYPE I.                "全レコード数
+DATA:W_KEY LIKE BKOND2-VAKEY.      "変数キー
+DATA:ADATE LIKE SY-DATUM,
+TANKA(12).
+* Mod ES-UP 2012/09/03 -->
+*Constants : W_TAB Type X Value '09' .
+*-----------------------------------------------------------------------
+*  固定値
+*-----------------------------------------------------------------------
+**** START DEL 2014/09/01 ISID11 ****
+*CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+**** END DEL 2014/09/01 ISID11 ****
+* Mod ES-UP 2012/09/03 <--
+
+**** START ADD 2014/09/19 ISID11 ****
+************************************************************************
+INITIALIZATION.
+GET PARAMETER ID 'BUK' FIELD P_BUKRS.
+************************************************************************
+AT SELECTION-SCREEN.
+PERFORM CHK_BUKRS.            "会社関連チェック
+
+**** END ADD 2014/09/19 ISID11 ****
+
+************************************************************************
+START-OF-SELECTION.
+PERFORM OPEN_FILE.            "OPEN FILE
+PERFORM READ_FILE.            "ｲﾝﾀﾌｪｰｽﾌｧｲﾙREAD
+PERFORM DATA_CHK.             "単価０円チェック
+PERFORM DATA_EDIT.            "データ編集とﾌｧｲﾙへ書込み
+PERFORM CLOSE_FILE.           "ファイルクローズ
+PERFORM DISP.                 "件数の表示
+
+END-OF-SELECTION.
+************************************************************************
+***  ファイルオープン
+************************************************************************
+FORM OPEN_FILE.
+
+**** START ADD 2015/02/03 ISID18 ****
+DATA:
+L_Z_OUTPUT_CP TYPE ZTEGZZM001-Z_OUTPUT_CP,
+L_CODEPAGE    TYPE ABAP_ENCODING,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8     TYPE FLAG.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = P_BUKRS
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+
+IF L_FLGUTF8 IS INITIAL.
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+TRY.
+OPEN DATASET P_IFILE FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+**** END ADD 2015/02/03 ISID18 ****
+
+* Mod ES-UP 2012/09/03 -->
+**** START DEL 2014/09/01 ISID11 ****
+**  OPEN DATASET P_IFILE  FOR  INPUT IN TEXT MODE.
+*  DATA L_CODEPAGE TYPE ABAP_ENCODING.
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** END DEL 2014/09/01 ISID11 ****
+OPEN DATASET P_IFILE  FOR  INPUT
+**** START UPD 2014/09/01 ISID11 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/09/01 ISID11 ****
+**** BEGIN OF ADD 2015/02/03 ISID18 ****
+SKIPPING BYTE-ORDER MARK
+**** END OF ADD 2015/02/03 ISID18 ****
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/09/03 <--
+**** BEGIN OF ADD 2015/02/03 ISID18 ****
+ENDIF.
+**** END OF ADD 2015/02/03 ISID18 ****
+
+IF SY-SUBRC <> 0.
+**** START UPD 2014/09/19 ISID11 ****
+*    MESSAGE E402 WITH 'キットマスタファイル'
+*                       'オープンエラー'  P_IFILE.
+MESSAGE E054(Z3) WITH P_IFILE.
+*   キットマスタファイルオープンエラー &1
+**** END UPD 2014/09/19 ISID11 ****
+STOP.
+ENDIF.
+DELETE DATASET  P_OFILE.
+* Mod ES-UP 2012/09/03 -->
+*  OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE.
+* Mod ES-UP 2012/10/29 -->
+*  OPEN DATASET P_OFILE FOR OUTPUT
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+*    IGNORING CONVERSION ERRORS.
+**** BEGIN OF UPD 2015/02/03 ISID18 ***
+*  OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
+IF L_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_OFILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_OFILE FOR OUTPUT
+IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS.
+ENDIF.
+**** END OF UPD 2015/02/03 ISID18 ****
+* Mod ES-UP 2012/10/29 <--
+* Mod ES-UP 2012/09/03 <--
+IF SY-SUBRC <> 0.
+**** START UPD 2014/09/19 ISID11 ****
+*    MESSAGE I402 WITH 'ファイルオープンエラー'  P_OFILE.
+MESSAGE I055(Z3) WITH P_OFILE.
+*   ファイルオープンエラー &1
+**** END UPD 2014/09/19 ISID11 ****
+STOP.
+ENDIF.
+ENDFORM.                    "OPEN_FILE
+************************************************************************
+***  ファイルの読込み
+************************************************************************
+FORM READ_FILE.
+DATA : D_LINE(1000) TYPE C .
+REFRESH IN_FILE.
+DO.
+*    READ DATASET P_IFILE INTO IN_FILE.
+READ DATASET P_IFILE INTO D_LINE .
+IF SY-SUBRC <> 0. EXIT. ENDIF.
+PERFORM SPLIT_DATA USING D_LINE .
+APPEND IN_FILE.
+TOTAL = TOTAL + 1.
+ENDDO.
+CLOSE DATASET P_IFILE.
+ENDFORM.                    "READ_FILE
+************************************************************************
+***  ファイルのクローズ
+************************************************************************
+FORM CLOSE_FILE.
+CLOSE DATASET P_OFILE.
+ENDFORM.                    "CLOSE_FILE
+************************************************************************
+***  品目コードより販売組織を取得する
+************************************************************************
+FORM GET_MVKE.
+DATA:W_MATNR LIKE MVKE-MATNR.
+REFRESH MVK. CLEAR MVK.
+W_MATNR = KITM-MATNR.
+SELECT * FROM MVKE WHERE MATNR = W_MATNR.
+MOVE-CORRESPONDING MVKE TO MVK.
+APPEND MVK.
+ENDSELECT.
+ENDFORM.                    "GET_MVKE
+************************************************************************
+***  単価の０円チェック（０円は対象外）
+************************************************************************
+FORM DATA_CHK.
+DATA P1 TYPE P.
+REFRESH TAB.
+LOOP AT IN_FILE.
+CLEAR TAB.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = IN_FILE-KUNNR
+IMPORTING
+OUTPUT = IN_FILE-KUNNR.
+
+*   CONCATENATE '1000' '10' INTO TAB-KEY.
+*2001/01/31 MOD START
+*    CONCATENATE P_VKORG P_VTWEG IN_FILE-KUNNR IN_FILE-MATNR
+*                INTO TAB-KEY.
+TAB-KEY(4)     = P_VKORG.
+TAB-KEY+4(2)   = P_VTWEG.
+TAB-KEY+6(2)   = '10' .
+TAB-KEY+8(10)  = IN_FILE-KUNNR.
+TAB-KEY+18(35) = IN_FILE-MATNR.
+*2001/01/31 MOD END
+*   TAB-KEY+6(2) = P_KYOTEN.
+*   TAB-KEY+8(8) = KITM-KUNNR.          "得意先コード
+*   TAB-KEY+16   = KITM-MATNR.          "品目コード
+*   PERFORM DATE_CHK.                   "日付／単価の変換
+P1 = IN_FILE-KINGA.
+IF P1 EQ 0.
+NG_CNT = NG_CNT + 1.
+CONTINUE.
+ELSE.
+TAB-DATE  = IN_FILE-DATAB.
+TAB-TANKA = IN_FILE-KINGA.
+TAB-SURYO = IN_FILE-TANI.
+TAB-KMEIN = IN_FILE-KMEIN .
+*2001/01/31 ADD START
+TAB-KONWA = IN_FILE-KONWA. "通貨ｺｰﾄﾞ
+TAB-DATBI = IN_FILE-DATBI."有効終了日
+*2001/01/31 ADD END
+APPEND TAB.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    "DATA_CHK
+************************************************************************
+***  データ変換（Ｒ３標準レイアウトに編集）
+************************************************************************
+FORM DATA_EDIT.
+CLEAR:OK_CNT.
+LOOP AT TAB.
+IF SY-TABIX = 1.
+PERFORM MAKE_BGR00.        "セッションレコード作成
+ENDIF.
+PERFORM MAKE_BKOND1.          "ヘッダレコード作成
+PERFORM MAKE_BKOND2.          "メインデータ作成
+OK_CNT = OK_CNT + 1.
+ENDLOOP.
+ENDFORM.                    "DATA_EDIT
+************************************************************************
+***  セッションレコードの作成
+************************************************************************
+FORM MAKE_BGR00.
+BGR00-STYPE  = '0'.          "レコードタイプ
+*2013/08/27 MOD START
+*  BGR00-GROUP  = 'VK15'.       "グループ名
+BGR00-GROUP  = P_GROUP.       "セッション名
+*2013/08/27 MOD END
+BGR00-MANDT  = SY-MANDT.     "クライアント
+BGR00-USNAM  = SY-UNAME.     "ＵＳＥＲ　ＩＤ
+*2001/01/31 MOD START
+*  BGR00-START  = '/'.          "開始日
+CLEAR BGR00-START.           "開始日
+*2001/01/31 MOD END
+BGR00-XKEEP  = 'X'.          "保持フラグ
+BGR00-NODATA = '/'.          "バッチインプットなし項目
+TRANSFER BGR00 TO P_OFILE.
+ENDFORM.                    "MAKE_BGR00
+************************************************************************
+***  ヘッダレコードの作成
+************************************************************************
+FORM MAKE_BKOND1.
+BKOND1-STYPE = '1'.          "レコードタイプ
+BKOND1-TCODE = 'VK15'.       "トランザクションコード
+BKOND1-KVEWE = 'A'.          "条件テーブルの用途
+BKOND1-KOTABNR = '901'.      "バッチインプット条件テーブル
+BKOND1-KAPPL = 'V'.          "アプリケーション
+BKOND1-KSCHL = P_KSCHL.      "条件タイプ
+TRANSFER BKOND1 TO P_OFILE.
+ENDFORM.                    "MAKE_BKOND1
+************************************************************************
+***  メインデータの作成
+************************************************************************
+FORM MAKE_BKOND2.
+DATA:PP TYPE P,CH(5) TYPE C.
+BKOND2-STYPE = '2'.          "レコードタイプ
+BKOND2-VAKEY = TAB-KEY.      "変数キー
+*2001/01/31 MOD START
+* BKOND2-DATBI = '99991231'.   "条件マスタ有効終了日
+BKOND2-DATBI = TAB-DATBI.    "条件マスタ有効終了日
+*2001/01/31 MOD END
+BKOND2-DATAB = TAB-DATE.     "条件マスタ有効開始日
+BKOND2-KBETR = TAB-TANKA.    "バッチインプットに対する金額項
+*2001/01/31 MOD START
+*  BKOND2-KONWA = 'JPY'.        "R/2 table
+BKOND2-KONWA = TAB-KONWA.    "通貨ｺｰﾄﾞ
+*2001/01/31 MOD END
+PP = TAB-SURYO.              "数量
+*2001/01/31 DEL START
+*  PP = PP * 100.               "1999.01.08
+*2001/01/31 DEL END
+CH = PP.                     "1999.01.08
+BKOND2-KPEIN = CH.           "R/2 table
+* BKOND2-KMEIN = '/'.          "3 バイトの項目
+BKOND2-KMEIN = TAB-KMEIN .   "3 バイトの項目
+BKOND2-MWSK1 = '/'.          "税コード
+BKOND2-KONMS = '/'.          "スケール単位
+BKOND2-MXWRT = '/'.          "バッチインプットに対する金額項
+BKOND2-GKWRT = '/'.          "バッチインプットに対する金額項
+BKOND2-STFKZ = '/'.          "スケールタイプ
+BKOND2-KZNEP = '/'.          "条件除外区分
+BKOND2-LOEVM_KO = '/'.       "条件明細削除区分
+BKOND2-SKONWA = '/'.         "R/2 table
+TRANSFER BKOND2 TO P_OFILE.
+ENDFORM.                    "MAKE_BKOND2
+************************************************************************
+*** 有効開始日の選択
+************************************************************************
+FORM DATE_CHK.
+DATA:PP TYPE P,P1 TYPE P,P2 TYPE P.
+DATA FLAG TYPE I.
+P1 = KITM-TANKA1.
+P2 = KITM-TANKA2.
+IF P1 = 0 AND P2 = 0.
+TANKA = P1.
+EXIT.
+ENDIF.
+FLAG = 1.
+IF KITM-DATAB2 <> '999999' AND         "実施日２を優先
+KITM-INPUT2 <> SPACE.               "入力日２
+IF P2 <> 0.
+IF KITM-DATAB2(2) = '00'.
+ADATE = '2000'.
+ADATE+4(4) = KITM-DATAB2+2(4).   "実施日２
+ELSE.
+ADATE = '19'.
+ADATE+2(6) = KITM-DATAB2.
+ENDIF.
+TANKA = P2.
+CLEAR FLAG.
+ENDIF.
+ENDIF.
+IF FLAG = 1.
+IF KITM-DATAB1 <> '999999' AND         "実施日１
+KITM-INPUT1 <> SPACE.               "入力日１
+IF P1 <> 0.
+IF KITM-DATAB1(2) = '00'.
+ADATE = '2000'.
+ADATE+4(4) = KITM-DATAB1+2(4).
+ELSE.
+ADATE = '19'.
+ADATE+2(6) = KITM-DATAB1.
+ENDIF.
+TANKA = P1.
+ELSE.
+FLAG = 2.                           "登録対象外
+ENDIF.
+ELSE.
+FLAG = 2.                             "登録対象外
+ENDIF.
+ENDIF.
+IF FLAG = 2.
+PP = 0.
+TANKA = PP.
+ENDIF.
+ENDFORM.                    "DATE_CHK
+************************************************************************
+***   件数の表示
+************************************************************************
+FORM DISP.
+**** START UPD 2014/09/19 ISID11 ****
+*  MESSAGE I402 WITH '読込件数=' TOTAL   '件'.
+*  MESSAGE I402 WITH '登録件数=' OK_CNT  '件'.
+*  MESSAGE I402 WITH 'エラー件数=' NG_CNT '件'.
+
+MESSAGE I056(Z3) WITH TOTAL.
+* 読込件数= &1 件
+MESSAGE I057(Z3) WITH OK_CNT.
+* 登録件数= &1 件
+MESSAGE I058(Z3) WITH NG_CNT.
+* エラー件数= &1 件
+
+**** END UPD 2014/09/19 ISID11 ****
+ENDFORM.                    "DISP
+*** END OF PROGRAM ***
+*&---------------------------------------------------------------------*
+*&      Form  Split_Data
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_D_LINE  text
+*----------------------------------------------------------------------*
+FORM SPLIT_DATA USING    F_LINE.
+DATA : DUMMY TYPE C .
+* Mod ES-UP 2012/09/03 -->
+*  Split F_Line At W_TAB
+SPLIT F_LINE AT CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB
+* Mod ES-UP 2012/09/03 <--
+INTO  DUMMY
+DUMMY
+DUMMY
+IN_FILE-KUNNR
+IN_FILE-MATNR
+DUMMY
+IN_FILE-KINGA
+IN_FILE-KONWA
+IN_FILE-TANI
+IN_FILE-KMEIN
+DUMMY
+DUMMY
+IN_FILE-DATAB
+IN_FILE-DATBI
+DUMMY
+DUMMY
+DUMMY
+DUMMY
+DUMMY
+DUMMY
+DUMMY
+DUMMY
+DUMMY
+DUMMY
+.
+
+
+
+
+ENDFORM.                    " Split_Data
+**** START ADD 2014/09/19 ISID11 ****
+*&---------------------------------------------------------------------*
+*&      Form  CHK_BUKRS
+*&---------------------------------------------------------------------*
+*       会社関連チェック
+*----------------------------------------------------------------------*
+FORM CHK_BUKRS .
+DATA:
+WL_WAERS   TYPE T001-WAERS,      "通貨コード
+WL_VKORG   TYPE TVKO-VKORG,      "販売組織
+WL_VTWEG   TYPE TVKBZ-VTWEG.     "流通チャネル
+* 選択画面の会社コードの存在チェックを行う
+SELECT SINGLE WAERS
+INTO WL_WAERS
+FROM T001
+WHERE BUKRS = P_BUKRS.
+
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E016(Z3) WITH P_BUKRS.
+*   会社コード & が存在しません
+ENDIF.
+
+* 選択画面の会社コードの権限チェックを行う
+AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+ID 'BUKRS' FIELD P_BUKRS          "対象会社コード
+ID 'ACTVT' FIELD '03'.
+
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E015(Z3) WITH P_BUKRS.
+*   会社コード & では実行する権限がありません。
+ENDIF.
+
+* 会社コードと販売組織の関連チェック
+SELECT SINGLE VKORG                "販売組織
+INTO WL_VKORG
+FROM TVKO
+WHERE BUKRS = P_BUKRS             "会社コード
+AND VKORG = P_VKORG.            "販売組織
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E077(Z3) WITH P_BUKRS P_VKORG.
+*   会社コード&と販売組織&の組合せチェックが失敗しました。
+ENDIF.
+
+* 流通チャネルの存在チェック
+SELECT SINGLE VTWEG                       "流通チャネル
+INTO WL_VTWEG
+FROM TVTW
+WHERE VTWEG = P_VTWEG.            "流通チャネル
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_VKORG'.
+MESSAGE E013(VK) WITH P_VTWEG.
+*   流通チャネル & が定義されていません
+ENDIF.
+
+ENDFORM.                    " CHK_BUKRS
+
+*Selection text・
+*P_BUKRS:        Company Code
+*P_GROUP:        Session Name
+*P_IFILE:        Input File Name
+*P_KSCHL:        Condition Type
+*P_OFILE:        Output File Name
+*P_VKORG:        Sales Organization
+*P_VTWEG:        Distribution Channel

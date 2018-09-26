@@ -1,0 +1,3297 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN011500                                                    *
+*&         入金自動消込（売上）                                        *
+*&---------------------------------------------------------------------*
+*&  機能    指定した照合締日期間の照合金額をもとに、
+*&          支払予定データを作成する。
+*&  作成日   : 2012/03/09
+*&  作成者   : K.KAJISA(SOLFIS)
+*&  変更履歴 : 2012/03/27 K.KAJISA(SOLFIS)
+*&  変更内容 : インデックス対応
+*&  変更履歴 : 2012/05/21 K.FURUYA(SOLFIS)
+*&  変更内容 : アンマッチ入金予定にアンマッチ入金実績の口座名義人を表示
+*&  変更履歴 : 2012/06/13 K.FURUYA(SOLFIS)
+*&  変更内容 :1得意先で同じ名義人が複数ある場合の対応
+*&            消込可能分もエラーリストに表示をする
+*&  変更履歴 : 2012/06/15 K.FURUYA(SOLFIS)
+*&  変更内容 :伝票日付は転記日付と同じにする
+*&  変更履歴 : 2012/10/19 K.FURUYA(SOLFIS)
+*&  変更内容 :メッセージ番号修正
+*&[改定履歴]
+*& YYYY/MM/DD  Programar         Description
+*& 2012/11/07  ISID              ES-UP
+*&---------------------------------------------------------------------*
+REPORT ZN011500
+NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID YN01.
+*----------------------------------------------------------------------*
+*  　消込処理共通インクルード
+*----------------------------------------------------------------------*
+INCLUDE :ZN090200.
+INCLUDE <ICON>.
+*----------------------------------------------------------------------*
+*   構造/テーブル定義
+*----------------------------------------------------------------------*
+TABLES:KNA1,TCURC,BSID.
+
+TYPES:BEGIN OF TYP_MACH_ZN005,
+GRP(6)     TYPE N,           "グループ番号
+KEY_CZFBDT TYPE D,           "照合締日
+KEY_KUNNR  TYPE ZN005-KUNNR, "得意先
+KEY_WAERS  TYPE ZN005-WAERS, "通貨
+KEY_SEQ    TYPE ZN005-SEQ,   "SEQ
+STS(1)     TYPE C,           "処理ステータス
+KEKA(100)  TYPE C,           "処理結果
+KOINH      TYPE KNBK-KOINH.  "口座名義人
+INCLUDE STRUCTURE ZN005.
+TYPES:END OF TYP_MACH_ZN005.
+
+* 集計比較用外部データ
+TYPES:BEGIN OF TYP_YN110,
+VRFCTON  TYPE YN110-VRFCTON, "得意先
+CZFBDT   TYPE YN110-CZFBDT,  "照合締日
+WAERS    TYPE YN110-WAERS,   "通貨コード
+GJAHR    TYPE YN110-GJAHR,   "会計年度
+SLPDOC   TYPE YN110-SLPDOC,  "外部番号
+DTLDOC   TYPE YN110-DTLDOC,  "外部明細
+KNETXAMT TYPE YN110-KNETXAMT,"税込金額
+END OF TYP_YN110.
+
+* 集計用内部テーブル
+TYPES:BEGIN OF TYP_SUM_ZN005,
+CZFBDT TYPE D,           "照合締日
+KUNNR  TYPE ZN005-KUNNR, "得意先
+WAERS  TYPE ZN005-WAERS, "通貨
+IWRBTR     TYPE ZN005-IWRBTR,"入金予定額
+END OF TYP_SUM_ZN005.
+
+* 入金実績用内部テーブル
+TYPES:BEGIN OF TYP_BSID_READ,
+BUKRS TYPE BSID-BUKRS, "会社コード
+KUNNR TYPE BSID-KUNNR, "得意先コード
+UMSKS TYPE BSID-UMSKS, "特殊仕訳取引タイプ
+UMSKZ TYPE BSID-UMSKZ, "特殊仕訳コード
+AUGDT TYPE BSID-AUGDT, "決済日付
+AUGBL TYPE BSID-AUGBL, "決済伝票番号
+ZUONR TYPE BSID-ZUONR, "ソートキー
+GJAHR TYPE BSID-GJAHR, "会計年度
+BELNR TYPE BSID-BELNR, "会計伝票番号
+BUZEI TYPE BSID-BUZEI, "会計伝票内の明細番号
+BUDAT TYPE BSID-BUDAT, "伝票の転記日付
+WAERS TYPE BSID-WAERS, "通貨コード
+BLART TYPE BSID-BLART, "伝票タイプ
+SHKZG TYPE BSID-SHKZG, "貸借フラグ
+WRBTR TYPE BSID-WRBTR, "伝票通貨額
+SGTXT TYPE BSID-SGTXT, "明細テキスト
+ZTERM TYPE BSID-ZTERM, "支払条件キー
+ZLSCH TYPE BSID-ZLSCH, "支払方法
+END OF TYP_BSID_READ.
+*  入金実績データ内部テーブル
+DATA:T_BSID_READ TYPE STANDARD TABLE OF TYP_BSID_READ,
+W_BSID_READ TYPE TYP_BSID_READ.
+
+* マッチング用入金実績
+TYPES:BEGIN OF TYP_BSID_MACH,
+GRP(6)     TYPE N,           "グループ番号
+STS(1)     TYPE C,           "処理ステータス
+KOINH      TYPE KNBK-KOINH,  "口座名義人
+KEKA(100)  TYPE C,           "処理結果
+ZNTCH      TYPE ZN008-ZNTCH."手形通信費
+INCLUDE STRUCTURE W_BSID_READ.
+TYPES:END OF TYP_BSID_MACH.
+*  入金実績データ内部テーブル
+DATA:T_BSID_MACH TYPE STANDARD TABLE OF TYP_BSID_MACH,
+W_BSID_MACH TYPE TYP_BSID_MACH.
+
+*  グループ制御内部テーブル
+TYPES:BEGIN OF TYP_GRP_CONT,
+GRP(6)     TYPE N,           "グループ番号
+KEY_CZFBDT TYPE D,           "照合締日
+KEY_KUNNR  TYPE ZN005-KUNNR, "得意先
+KEY_WAERS  TYPE ZN005-WAERS, "通貨
+IWRBTR     TYPE ZN005-IWRBTR,"入金予定額
+END OF TYP_GRP_CONT.
+
+* 口座名義人テーブル
+TYPES:BEGIN OF TYP_KNBK,
+KOINH TYPE KNBK-KOINH, "口座名義人
+KUNNR TYPE KNBK-KUNNR, "得意先
+BANKS TYPE KNBK-BANKS, "キー項目
+BANKL TYPE KNBK-BANKL, "キー項目
+BANKN TYPE KNBK-BANKN, "キー項目
+END OF TYP_KNBK.
+DATA:T_KNBK TYPE SORTED TABLE OF TYP_KNBK
+WITH UNIQUE KEY KOINH KUNNR BANKS BANKL BANKN,
+W_KNBK TYPE TYP_KNBK.
+
+* マッチング結果テーブル
+TYPES:BEGIN OF TYP_MACH,
+BUKRS   TYPE ZN005-BUKRS, "会社コード
+KUNNR   TYPE ZN005-KUNNR, "得意先コード
+CZFBDT  TYPE ZN005-CZFBDT,"照合締日
+SEQ     TYPE ZN005-SEQ,   "SEQ
+WAERS   TYPE ZN005-WAERS, "通貨
+KOINH   TYPE KNBK-KOINH,  "口座名義人
+WRBTR   TYPE BSID-WRBTR,  "貸借考慮後の金額
+END OF TYP_MACH.
+DATA:T_MACH TYPE STANDARD TABLE OF TYP_MACH,
+W_MACH TYPE TYP_MACH.
+
+* 外部集計比較用入金予定
+TYPES:BEGIN OF TYP_TAIGAIBU_ZN005,
+BUKRS   TYPE ZN005-BUKRS, "会社コード
+KUNNR   TYPE ZN005-KUNNR, "得意先コード
+CZFBDT  TYPE ZN005-CZFBDT,"照合締日
+WAERS   TYPE ZN005-WAERS, "通貨コード
+SEQ     TYPE ZN005-SEQ,   "SEQ
+IWRBTR  TYPE ZN005-IWRBTR,"入金予定額
+END OF TYP_TAIGAIBU_ZN005.
+
+DATA:T_RANGE_KUN TYPE RANGE OF ZN005-KUNNR WITH HEADER LINE.
+
+* 入金予定データ内部テーブル
+TYPES:BEGIN OF TYP_ZN005_READ,
+KEY_KUNNR TYPE ZN005-KUNNR, "得意先コード
+KEY_WAERS TYPE ZN005-WAERS. "通貨コード
+INCLUDE STRUCTURE ZN005.
+TYPES:END OF TYP_ZN005_READ.
+
+* 規定外マスタテーブル(売上)
+TYPES:BEGIN OF TYP_ZN008,
+KUNNR TYPE ZN008-KUNNR, "得意先コード
+WAERS TYPE ZN008-WAERS, "通貨コード
+ZNTCH TYPE ZN008-ZNTCH, "手形通信費
+END OF TYP_ZN008.
+
+* 手形実績まとめキー
+TYPES:BEGIN OF TYP_KEY,
+KUNNR TYPE BSID-KUNNR,
+GJAHR TYPE BSID-GJAHR,
+BELNR TYPE BSID-BELNR,
+WAERS TYPE BSID-WAERS,
+END OF  TYP_KEY.
+DATA:W_KEY TYPE TYP_KEY.
+
+* カウンタ
+TYPES:BEGIN OF TYP_CNT,
+OK    TYPE I,
+ERR   TYPE I,
+END OF TYP_CNT.
+DATA:W_CNT TYPE TYP_CNT.
+
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+
+* 入金予定データ内部テーブル
+DATA:T_ZN005_READ TYPE SORTED TABLE OF TYP_ZN005_READ
+WITH UNIQUE KEY KEY_KUNNR KEY_WAERS
+BUKRS KUNNR CZFBDT SEQ,
+W_ZN005_READ  TYPE TYP_ZN005_READ.
+
+* 確認用入金予定データ
+DATA:T_ZN005_CHECK TYPE STANDARD TABLE OF ZN005,
+W_ZN005_CHECK TYPE ZN005.
+
+* 確認用入金実績データ
+DATA:T_BSID_CHECK TYPE STANDARD TABLE OF TYP_BSID_READ,
+W_BSID_CHECK TYPE TYP_BSID_READ.
+
+* 入金予定集計額内部テーブル
+DATA:T_SUM_ZN005 TYPE SORTED TABLE OF TYP_SUM_ZN005
+WITH UNIQUE KEY  CZFBDT KUNNR WAERS,
+W_SUM_ZN005 TYPE TYP_SUM_ZN005.
+
+*  マッチング用入金データ内部テーブル
+DATA:T_ZN005_MACH TYPE SORTED TABLE OF TYP_MACH_ZN005
+WITH UNIQUE KEY GRP KEY_CZFBDT KEY_KUNNR KEY_WAERS
+KEY_SEQ,
+W_ZN005_MACH TYPE TYP_MACH_ZN005.
+
+*  グループ制御内部テーブル
+DATA:T_GRP_CONT TYPE SORTED TABLE OF TYP_GRP_CONT
+WITH UNIQUE KEY GRP KEY_CZFBDT
+KEY_KUNNR
+KEY_WAERS,
+W_GRP_CONT TYPE TYP_GRP_CONT.
+
+*  手形通信費
+DATA:T_ZN008 TYPE SORTED TABLE OF TYP_ZN008
+WITH UNIQUE KEY KUNNR WAERS,
+W_ZN008 TYPE TYP_ZN008.
+
+*----------------------------------------------------------------------*
+*   変数定義
+*----------------------------------------------------------------------*
+DATA:
+G_GRPNO(6)       TYPE N,                 "グループ番号
+W_KTOPL          TYPE KTOPL,             "勘定コード表
+G_END_FLG(1)     TYPE C.                 "終了フラグ
+
+DATA:
+G_SUM_IWRBTR  TYPE ZN005-IWRBTR,         "GRP集計 入金予定額
+G_SUM_JISSEKI TYPE BSID-WRBTR,
+G_STS(1)    TYPE C,                      "処理ステータス
+G_FROM_DATE TYPE D,
+G_TO_DATE   TYPE D.
+
+DATA: G_SAGA1      TYPE BSID-WRBTR,
+G_SAGA2      TYPE BSID-WRBTR.
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_KARI           TYPE BSID-SHKZG VALUE 'S',
+C_KASI           TYPE BSID-SHKZG VALUE 'H',
+C_INIT_DAY       TYPE D          VALUE '00000000',
+C_INIT_SEQ       TYPE ZN008-SEQ  VALUE '00001',
+C_OK(1)          TYPE C          VALUE '1',
+C_ERR(1)         TYPE C          VALUE 'E'.
+
+*★★★★★★↓↓ALV一覧時にコピー↓↓★★★★★★
+*----------------------------------------------------------------------*
+*   ALV一覧表示にて必要な変数
+*----------------------------------------------------------------------*
+TYPES:BEGIN OF TYP_OUTPUT,        "出力用構造
+* Mod ES-UP 2012/11/07 -->
+*      ICON         TYPE ICON,      "信号機
+ICON         TYPE ICON-id,      "信号機
+* Mod ES-UP 2012/11/07 <--
+GRP(6)       TYPE N,          "グループ番号
+BUKRS        TYPE BSID-BUKRS, "会社コード
+KUNNR        TYPE BSID-KUNNR, "得意先コード
+NAME1        TYPE KNA1-NAME1, "得意先名称1
+KUBUN(2)     TYPE C,          "区分
+KUBUN_MEI(6) TYPE C,          "区分名
+BUDAT        TYPE BSID-BUDAT, "入金日
+WAERS        TYPE BSID-WAERS, "通貨コード
+WRBTR        TYPE BSID-WRBTR, "金額
+KOINH        TYPE BSID-SGTXT, "口座名義人
+SGTXT        TYPE BSID-SGTXT, "明細テキスト
+HOHO(10)     TYPE C,          "入金方法
+BELNR        TYPE BSID-BELNR, "会計伝票
+GJAHR        TYPE BSID-GJAHR, "会計伝票
+BUZEI        TYPE BSID-BUZEI, "会計明細
+KEKKA(100)   TYPE C,          "処理結果
+END   OF TYP_OUTPUT.
+
+* ALV出力データ用
+DATA: T_OUTPUT   TYPE STANDARD TABLE OF TYP_OUTPUT,
+W_OUTPUT   TYPE TYP_OUTPUT.
+* PGID退避用
+DATA: G_PGID     TYPE SYCPROG.
+* ALV出力用
+TYPE-POOLS SLIS.
+DATA: W_LAYOUT      TYPE SLIS_LAYOUT_ALV,     "ALV出力レイアウト
+W_FIELDCAT    TYPE SLIS_FIELDCAT_ALV,   "ALV出力項目設定
+T_FIELDCAT    TYPE SLIS_T_FIELDCAT_ALV, "ALV出力項目設定
+W_REPID       TYPE SY-REPID,            "ALV出力用：プログラムID
+W_EDISVARIANT TYPE DISVARIANT,          "ALV出力バリアント
+T_EVENT       TYPE SLIS_T_EVENT,        "イベント
+W_EVENT       LIKE LINE OF T_EVENT,
+T_HEAD        TYPE SLIS_T_LISTHEADER,   "ヘッダ
+W_HEAD        LIKE LINE OF T_HEAD,
+W_PRINT       TYPE SLIS_PRINT_ALV,
+W_SETTINGS    TYPE LVC_S_GLAY.
+
+
+*----------------------------------------------------------------------*
+*    選択画面
+*----------------------------------------------------------------------*
+*--- データ選択
+SELECTION-SCREEN:BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+PARAMETERS    :P_BUKRS   TYPE BUKRS OBLIGATORY         "会社コード
+MEMORY ID BUK.
+PARAMETERS    :P_DAY   TYPE BSID-AUGDT OBLIGATORY.     "入金日
+SELECT-OPTIONS:S_KUNNR FOR  KNA1-KUNNR,                "得意先コード
+S_WAERS FOR  TCURC-WAERS NO INTERVALS.  "通貨
+
+* 入金予定
+*  SELECTION-SCREEN:BEGIN OF LINE.
+*    SELECTION-SCREEN:COMMENT 1(8) TEXT-002.
+*  SELECTION-SCREEN:END OF LINE.
+
+SELECTION-SCREEN BEGIN OF BLOCK BL01 WITH FRAME
+TITLE TEXT-002.
+SELECTION-SCREEN:BEGIN OF LINE,
+POSITION 3.
+*     振込(FB)
+PARAMETERS:P_C_FB TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 5(10) TEXT-003.
+*     振込(FB外)
+PARAMETERS:P_C_FBG TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 18(10) TEXT-004.
+*     手形
+PARAMETERS:P_C_TEGA TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 31(10) TEXT-005.
+*     その他
+PARAMETERS:P_C_ETC TYPE C AS CHECKBOX.
+SELECTION-SCREEN:COMMENT 44(10) TEXT-006.
+SELECTION-SCREEN:END   OF LINE.
+SELECTION-SCREEN END   OF BLOCK BL01.
+SELECTION-SCREEN:END   OF BLOCK BL1.
+
+*--- 処理オプション
+SELECTION-SCREEN:BEGIN OF BLOCK BL2 WITH FRAME TITLE TEXT-007.
+PARAMETERS:P_TEST TYPE C AS CHECKBOX DEFAULT 'X',
+P_SAGA1(4)   TYPE P,
+P_SAGA2(4)   TYPE P,
+P_KYOYO(2)   TYPE N.
+PARAMETERS:P_BLART      TYPE T003-BLART OBLIGATORY."伝票タイプ
+PARAMETERS:P_TXT        TYPE CHAR20 OBLIGATORY "伝票ヘッダTXT
+LOWER CASE.
+* ALVバリアント項目
+PARAMETERS    :P_VARI   TYPE SLIS_VARI.
+
+SELECTION-SCREEN:END   OF BLOCK BL2.
+
+*--- システム項目
+SELECTION-SCREEN:BEGIN OF BLOCK BL3 WITH FRAME TITLE TEXT-008.
+SELECT-OPTIONS:S_D_KUN    FOR  BSID-KUNNR NO INTERVALS  "ダミー得意先
+OBLIGATORY.
+* 入金伝票タイプ
+SELECTION-SCREEN:BEGIN OF BLOCK BL4  WITH FRAME TITLE TEXT-009.
+SELECT-OPTIONS:S_BLA_1  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "振込(FB)　
+SELECT-OPTIONS:S_BLA_2  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "振込(FB外)　
+SELECT-OPTIONS:S_BLA_3  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "手形入金　
+SELECT-OPTIONS:S_BLA_4  FOR BSID-BLART
+NO INTERVALS OBLIGATORY. "その他入金　
+SELECTION-SCREEN:END   OF BLOCK BL4.
+
+* 差額勘定
+SELECTION-SCREEN:BEGIN OF BLOCK BL5 WITH FRAME TITLE TEXT-010.
+*   振込手数料　
+PARAMETERS:P_HKONT1  TYPE BSID-HKONT OBLIGATORY
+MATCHCODE OBJECT SAKO.      "勘定コード
+PARAMETERS:P_MWSKZ1  TYPE BSID-MWSKZ OBLIGATORY."税コード
+PARAMETERS:P_KOSTL1  TYPE BSID-KOSTL OBLIGATORY
+MATCHCODE OBJECT KOST.      "原価センタ
+*   通信費　
+PARAMETERS:P_HKONT2  TYPE BSID-HKONT OBLIGATORY
+MATCHCODE OBJECT SAKO.      "勘定コード
+PARAMETERS:P_MWSKZ2  TYPE BSID-MWSKZ OBLIGATORY."税コード
+PARAMETERS:P_KOSTL2  TYPE BSID-KOSTL OBLIGATORY
+MATCHCODE OBJECT KOST.      "原価センタ
+*   雑収入勘定
+PARAMETERS:P_HKONT3  TYPE BSID-HKONT OBLIGATORY
+MATCHCODE OBJECT SAKO.      "勘定コード
+PARAMETERS:P_MWSKZ3  TYPE BSID-MWSKZ OBLIGATORY."税コード
+*   雑損益勘定
+PARAMETERS:P_HKONT4  TYPE BSID-HKONT OBLIGATORY
+MATCHCODE OBJECT SAKO.      "勘定コード
+PARAMETERS:P_MWSKZ4  TYPE BSID-MWSKZ OBLIGATORY."税コード
+
+PARAMETERS:P_KOSTL  TYPE BSID-KOSTL OBLIGATORY
+MATCHCODE OBJECT KOST.      "原価センタ
+SELECTION-SCREEN:END   OF BLOCK BL5.
+
+SELECTION-SCREEN:END   OF BLOCK BL3.
+
+
+*----------------------------------------------------------------------*
+*  AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON P_BUKRS.
+
+* 会社コード入力値チェック
+CLEAR W_KTOPL.
+SELECT SINGLE KTOPL
+INTO W_KTOPL
+FROM T001
+WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD P_BUKRS.
+MESSAGE E750 WITH P_BUKRS.
+ENDIF.
+
+AT SELECTION-SCREEN ON P_SAGA1.
+* 許容差額のマイナスチェック
+IF P_SAGA1 < 0.
+* Del ES-UP 2012/11/07 -->
+*    SET CURSOR FIELD P_SAGA1.
+* Del ES-UP 2012/11/07 <--
+*   負の値は使用できません
+MESSAGE E126(00).
+ENDIF.
+
+AT SELECTION-SCREEN ON P_SAGA2.
+* 許容差額のマイナスチェック
+IF P_SAGA2 < 0.
+* Del ES-UP 2012/11/07 -->
+*    SET CURSOR FIELD P_SAGA2.
+* Del ES-UP 2012/11/07 <--
+*   負の値は使用できません
+MESSAGE E126(00).
+ENDIF.
+
+AT SELECTION-SCREEN ON BLOCK BL01.
+* 処理対象伝票タイプチェック
+IF  P_C_FB    IS INITIAL  "FB入金
+AND P_C_FBG   IS INITIAL  "FB入金外
+AND P_C_TEGA  IS INITIAL  "手形
+AND P_C_ETC   IS INITIAL. "その他
+* 全部未入力ならエラー
+*   入金方法を選択してください
+SET CURSOR FIELD P_C_FB.
+MESSAGE E935.
+ENDIF.
+
+*----------------------------------------------------------------------*
+*    バリアント検索ヘルプ
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VARI.
+PERFORM VARIANT_F4_HELP  CHANGING P_VARI.
+
+
+*----------------------------------------------------------------------*
+*  START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+PERFORM INIT_PROC.
+
+PERFORM MAIN_PROC.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  VARIANT_F4_HELP
+*&---------------------------------------------------------------------*
+*       バリアント検索ヘルプ
+*----------------------------------------------------------------------*
+*      <--P_P_VARI  検索ヘルプで選択されたバリアント名
+*----------------------------------------------------------------------*
+FORM VARIANT_F4_HELP CHANGING P_P_VARI.
+DATA:
+LW_DISVARIANT TYPE DISVARIANT.
+
+CLEAR:
+LW_DISVARIANT,
+P_P_VARI.
+
+LW_DISVARIANT-REPORT = SY-REPID.
+
+CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+EXPORTING
+IS_VARIANT         = LW_DISVARIANT
+I_SAVE             = C_SAVE
+I_DISPLAY_VIA_GRID = C_ON
+IMPORTING
+ES_VARIANT         = LW_DISVARIANT
+EXCEPTIONS
+NOT_FOUND          = 1
+PROGRAM_ERROR      = 2
+OTHERS             = 3.
+
+IF SY-SUBRC = 0.
+P_P_VARI = LW_DISVARIANT-VARIANT.
+ENDIF.
+
+ENDFORM.                    " VARIANT_F4_HELP
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INIT_PROC.
+DATA:L_WAERS TYPE WAERS.
+DATA:LW_DECIMAL(11)  TYPE P DECIMALS 2,
+LW_AMO_EX       TYPE BAPICURR_D,
+LW_AMOUNT(23)   TYPE C.
+
+REFRESH: T_ZN005_READ,
+T_ZN005_MACH,
+T_ZN005_CHECK,
+T_SUM_ZN005,
+T_BSID_READ,
+T_BSID_MACH,
+T_GRP_CONT,
+T_KNBK,
+T_MACH,
+T_ZN008,
+T_OUTPUT,
+T_RETURN.
+
+CLEAR:   W_ZN005_READ,
+W_ZN005_MACH,
+W_ZN005_CHECK,
+W_RETURN,
+W_CNT,
+W_ZN005_CHECK.
+* 許容日付考慮の日付範囲
+G_FROM_DATE = P_DAY - P_KYOYO .    "許容日
+G_TO_DATE   = P_DAY + P_KYOYO .    "許容日
+
+* グループ番号初期化
+CLEAR:G_GRPNO.
+
+
+* 許容差額の円換算
+L_WAERS = TEXT-019."JPY
+LW_AMO_EX = P_SAGA1.
+CLEAR:LW_AMOUNT.
+* 日本円の内部換算
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_INTERNAL'
+EXPORTING
+CURRENCY                   = L_WAERS
+AMOUNT_EXTERNAL            = LW_AMO_EX
+MAX_NUMBER_OF_DIGITS       = 22
+IMPORTING
+AMOUNT_INTERNAL            = LW_AMOUNT.
+G_SAGA1 = LW_AMOUNT.
+
+LW_AMO_EX = P_SAGA2.
+CLEAR:LW_AMOUNT.
+* 日本円の内部換算
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_INTERNAL'
+EXPORTING
+CURRENCY                   = L_WAERS
+AMOUNT_EXTERNAL            = LW_AMO_EX
+MAX_NUMBER_OF_DIGITS       = 22
+IMPORTING
+AMOUNT_INTERNAL            = LW_AMOUNT.
+G_SAGA2 = LW_AMOUNT.
+
+
+ENDFORM.                    " INIT_PROC
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_PROC
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM MAIN_PROC.
+
+*-- 入金実績/入金予定マッチング
+*   入金予定データの取得
+PERFORM GET_ZN005.     "入金予定データの取得
+
+*   FB入金実績の取得
+PERFORM GET_FB_NYUKIN. "FB入金実績データ
+FREE:T_MACH,T_ZN005_CHECK,T_BSID_CHECK,
+T_SUM_ZN005,T_ZN008. "T_KNBK,
+
+*   手形入金の取得
+PERFORM GET_TEGATA.    "手形入金実績データ
+FREE:T_MACH,T_ZN005_CHECK,T_BSID_CHECK,
+T_SUM_ZN005,T_ZN008."T_KNBK,
+
+*   その他の伝票データ取得
+PERFORM GET_SONOTA.    "その他実績データ
+FREE:T_MACH,T_ZN005_CHECK,T_BSID_CHECK,
+T_SUM_ZN005,T_ZN008."T_KNBK,
+
+*   相手なしの入金予定
+PERFORM LOOP_ZN005_END.
+
+*-- 共通インクルードによるBDC
+PERFORM BDC_PROC.
+
+*-- ALV出力
+IF  T_BSID_MACH[] IS INITIAL   "両方
+AND T_ZN005_MACH[] IS INITIAL. "ゼロ件
+*   対象データがありません
+MESSAGE S762.
+EXIT.
+ENDIF.
+PERFORM ALV_PROC.
+
+ENDFORM.                    " MAIN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN005
+*&---------------------------------------------------------------------*
+*       入金予定 データ取得
+*----------------------------------------------------------------------*
+FORM GET_ZN005.
+
+SELECT KUNNR WAERS  "キー
+MANDT
+BUKRS
+KUNNR
+CZFBDT
+SEQ
+IZFBDT
+IZLSCH
+IZTERM
+WAERS
+IWRBTR
+IKUNNR
+ILIFNR
+IMEMO
+INSDT
+INSTM
+INSUSR
+AUFLG
+AUDAT
+AUTIM
+AUUSR
+IBELNER
+IGJAHR
+IBUDAT
+INTO TABLE T_ZN005_READ
+FROM ZN005
+WHERE BUKRS   = P_BUKRS
+AND KUNNR   IN S_KUNNR
+AND IZFBDT  >= G_FROM_DATE
+AND IZFBDT  =< G_TO_DATE
+AND WAERS   IN S_WAERS
+AND AUFLG   = SPACE.      "(未消込)
+
+IF T_ZN005_READ[] IS INITIAL.
+EXIT.
+ENDIF.
+
+* ロック処理
+PERFORM ENQ_ZN005.
+
+* 外部データ集計チェック
+PERFORM SUM_CHECK_YN110.
+
+* 使用済み内部テーブル開放
+FREE: T_SUM_ZN005.
+
+ENDFORM.                                                    " GET_ZN005
+*&---------------------------------------------------------------------*
+*&      Form  SET_MACH_ZN005
+*&---------------------------------------------------------------------*
+*       マッチング用入金予定テーブル作成
+*----------------------------------------------------------------------*
+*      -->V_GRP    グループ番号
+*      -->V_STS    ステータス
+*      -->V_KOINH  口座名義人
+*      -->V_KEKA   処理結果
+*----------------------------------------------------------------------*
+FORM SET_MACH_ZN005 USING    V_GRP   TYPE NUMC06
+V_STS   TYPE CHAR1
+V_KOINH TYPE ANY
+V_KEKA  TYPE CHAR100.
+CLEAR:W_ZN005_MACH.
+MOVE-CORRESPONDING W_ZN005_READ TO W_ZN005_MACH.
+
+W_ZN005_MACH-GRP        = V_GRP.                  "グループ番号
+W_ZN005_MACH-KEY_CZFBDT = W_ZN005_READ-CZFBDT.    "照合締日
+W_ZN005_MACH-KEY_KUNNR  = W_ZN005_READ-KUNNR.     "得意先
+W_ZN005_MACH-KEY_WAERS  = W_ZN005_READ-WAERS.     "通貨
+W_ZN005_MACH-STS        = V_STS.                  "処理ステータス
+W_ZN005_MACH-KEY_SEQ    = W_ZN005_READ-SEQ.       "SEQ
+W_ZN005_MACH-KEKA       = V_KEKA.                 "処理結果
+W_ZN005_MACH-KOINH      = V_KOINH.                "口座名義人
+INSERT W_ZN005_MACH  INTO TABLE T_ZN005_MACH.
+
+ENDFORM.                    " SET_MACH_ZN005
+*&---------------------------------------------------------------------*
+*&      Form  ENQ_ZN005
+*&---------------------------------------------------------------------*
+*       入金予定データ ロック処理
+*----------------------------------------------------------------------*
+FORM ENQ_ZN005.
+DATA:L_ENQ_ERR(1)   TYPE C,
+L_MESSAGE(100) TYPE C,
+L_W_INDEX      TYPE SY-TABIX,
+L_W_KEY        TYPE ZN005,
+L_T_ZN005_READ TYPE STANDARD TABLE OF TYP_ZN005_READ.
+
+L_T_ZN005_READ[] =  T_ZN005_READ[].
+SORT L_T_ZN005_READ BY KUNNR CZFBDT.
+
+CLEAR:L_W_KEY.
+LOOP AT L_T_ZN005_READ INTO W_ZN005_READ.
+L_W_INDEX = SY-TABIX.
+*   集計
+MOVE-CORRESPONDING W_ZN005_READ TO W_SUM_ZN005.
+COLLECT W_SUM_ZN005 INTO T_SUM_ZN005.
+
+*   得意先単位での口座名義人取得
+IF L_W_KEY-KUNNR  <> W_ZN005_READ-KUNNR.
+CLEAR:W_KNBK.
+READ TABLE T_KNBK INTO W_KNBK
+WITH KEY KUNNR = W_ZN005_READ-KUNNR.
+IF SY-SUBRC <> 0. "初得意先
+SELECT  KOINH
+KUNNR
+BANKS
+BANKL
+BANKN
+APPENDING TABLE T_KNBK
+FROM KNBK
+WHERE KUNNR = W_ZN005_READ-KUNNR.
+ENDIF.
+ENDIF.
+
+*   ロック処理
+IF L_W_KEY-KUNNR   <> W_ZN005_READ-KUNNR   "得意先
+OR L_W_KEY-CZFBDT  <> W_ZN005_READ-CZFBDT. "照合締日
+CLEAR: L_ENQ_ERR,L_MESSAGE.
+CALL FUNCTION 'ENQUEUE_EZN005'
+EXPORTING
+*          MODE_ZN005           = 'E'
+*          MANDT                = SY-MANDT
+BUKRS                = P_BUKRS
+KUNNR                = W_ZN005_READ-KUNNR
+CZFBDT               = W_ZN005_READ-CZFBDT
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+G_GRPNO = G_GRPNO + 1.
+L_ENQ_ERR = C_ON.
+L_MESSAGE = SY-MSGV1.
+MESSAGE I756(YN01) WITH 'ZN005' L_MESSAGE
+INTO L_MESSAGE.
+DELETE T_SUM_ZN005 WHERE CZFBDT = W_ZN005_READ-CZFBDT
+AND KUNNR  = W_ZN005_READ-KUNNR.
+ENDIF.
+W_ZN005_CHECK-CZFBDT  = W_ZN005_READ-CZFBDT."照合締日
+W_ZN005_CHECK-KUNNR   = W_ZN005_READ-KUNNR."得意先
+
+ENDIF.
+
+IF L_ENQ_ERR = C_ON. "ロックエラーの得意先/照合締日
+PERFORM SET_MACH_ZN005 USING G_GRPNO   "グループ
+C_ERR      "ステータス
+SPACE      "口座名義人
+L_MESSAGE. "処理結果
+
+DELETE T_ZN005_READ WHERE CZFBDT = W_ZN005_READ-CZFBDT
+AND KUNNR  = W_ZN005_READ-KUNNR.
+
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                                                    " ENQ_ZN005
+*&---------------------------------------------------------------------*
+*&      Form  SUM_CHECk_YN110
+*&---------------------------------------------------------------------*
+*       外部データの集計チェック
+*----------------------------------------------------------------------*
+FORM SUM_CHECK_YN110.
+DATA:L_SUM_GAIBU    TYPE ZN005-IWRBTR,
+L_SUM_YOTEI    TYPE ZN005-IWRBTR,
+L_MESSAGE(100) TYPE C.
+
+* 対外部データ集計値用入金予定
+DATA:L_T_TAIGAIBU_ZN005 TYPE SORTED TABLE OF TYP_TAIGAIBU_ZN005
+WITH UNIQUE KEY BUKRS  KUNNR
+CZFBDT WAERS SEQ,
+L_W_TAIGAIBU_ZN005 TYPE TYP_TAIGAIBU_ZN005.
+
+
+DATA:L_T_YN110 TYPE SORTED TABLE OF TYP_YN110
+WITH UNIQUE KEY VRFCTON  "得意先
+CZFBDT   "照合締日
+WAERS    "通貨コード
+GJAHR    "会計年度
+SLPDOC   "外部番号
+DTLDOC,  "外部明細
+L_W_YN110 TYPE TYP_YN110.
+
+CHECK NOT T_ZN005_READ[] IS INITIAL. "まだ対象あり
+
+* 外部データ取得
+SELECT VRFCTON  "得意先
+CZFBDT   "照合締日
+WAERS    "通貨コード
+GJAHR    "会計年度
+SLPDOC   "外部番号
+DTLDOC   "外部明細
+KNETXAMT "税込金額
+INTO TABLE L_T_YN110
+FROM YN110
+FOR ALL ENTRIES IN T_SUM_ZN005
+* 2012/03/27 MOD インデックス対応 START
+*  WHERE VRFCTON = T_SUM_ZN005-KUNNR
+*     AND BUKRS   = P_BUKRS
+*     AND CZFBDT  = T_SUM_ZN005-CZFBDT
+*     AND DELFLG  = SPACE.
+WHERE BUKRS   = P_BUKRS
+AND CZFBDT  = T_SUM_ZN005-CZFBDT
+AND VRFCTON = T_SUM_ZN005-KUNNR
+AND DELFLG  = SPACE.
+* 2012/03/27 MOD インデックス対応 END
+* 入金予定データ取得
+SELECT BUKRS
+KUNNR
+CZFBDT
+WAERS
+SEQ
+IWRBTR
+INTO TABLE L_T_TAIGAIBU_ZN005
+FROM ZN005
+FOR ALL ENTRIES IN  T_SUM_ZN005
+WHERE BUKRS  = P_BUKRS
+AND KUNNR  = T_SUM_ZN005-KUNNR
+AND CZFBDT = T_SUM_ZN005-CZFBDT.
+
+
+LOOP AT T_SUM_ZN005 INTO W_SUM_ZN005.
+CLEAR:L_SUM_YOTEI,L_SUM_GAIBU.
+
+LOOP AT L_T_YN110 INTO L_W_YN110
+WHERE VRFCTON = W_SUM_ZN005-KUNNR
+AND CZFBDT  = W_SUM_ZN005-CZFBDT
+AND WAERS   = W_SUM_ZN005-WAERS.
+L_SUM_GAIBU = L_SUM_GAIBU + L_W_YN110-KNETXAMT.
+ENDLOOP.
+
+LOOP AT L_T_TAIGAIBU_ZN005 INTO L_W_TAIGAIBU_ZN005
+WHERE BUKRS  = P_BUKRS
+AND KUNNR  = W_SUM_ZN005-KUNNR
+AND CZFBDT = W_SUM_ZN005-CZFBDT
+AND WAERS  = W_SUM_ZN005-WAERS.
+L_SUM_YOTEI = L_SUM_YOTEI + L_W_TAIGAIBU_ZN005-IWRBTR.
+ENDLOOP.
+
+IF L_SUM_YOTEI <> L_SUM_GAIBU.
+G_GRPNO = G_GRPNO + 1.
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE CZFBDT = W_SUM_ZN005-CZFBDT
+AND KUNNR  = W_SUM_ZN005-KUNNR
+AND WAERS  = W_SUM_ZN005-WAERS.
+*       照合締日/得意先/通貨コードで、外部データと合計金額が一致しません
+L_MESSAGE = TEXT-E02.
+PERFORM SET_MACH_ZN005 USING G_GRPNO    "グループ
+C_ERR      "ステータス
+SPACE      "口座名義人
+L_MESSAGE. "処理結果
+ENDLOOP.
+DELETE T_ZN005_READ
+WHERE CZFBDT = W_SUM_ZN005-CZFBDT
+AND KUNNR  = W_SUM_ZN005-KUNNR
+AND WAERS  = W_SUM_ZN005-WAERS.
+ENDIF.
+ENDLOOP.
+
+FREE:L_T_YN110,L_T_TAIGAIBU_ZN005 .
+ENDFORM.                    " SUM_CHECk_YN110
+*&---------------------------------------------------------------------*
+*&      Form  GET_FB_NYUKIN
+*&---------------------------------------------------------------------*
+*       FB入金実績データ
+*----------------------------------------------------------------------*
+FORM GET_FB_NYUKIN.
+
+CHECK NOT P_C_FB IS INITIAL. "選択画面でFB入金がON
+* FB入金実績読み込み
+PERFORM GET_JISSEKI_FB.
+
+
+* FB入金実績 ループ処理(実績:予定=1:1)
+PERFORM LOOP_BSID_FB.
+
+* FB入金実績 ループ処理(実績:予定=1:得意先合計)
+PERFORM LOOP_BSID_FB2.
+
+* FB入金実績 ループ処理(実績:予定=1:口座名義人合計)
+PERFORM LOOP_BSID_FB3.
+CHECK NOT T_BSID_READ[]  IS INITIAL. "まだFB入金実績が残ってる
+
+* 相手なし
+PERFORM LOOP_BSID_END.
+
+
+ENDFORM.                    " GET_FB_NYUKIN
+*&---------------------------------------------------------------------*
+*&      Form  GET_JISSEKI_DB
+*&---------------------------------------------------------------------*
+*       入金実績読み込み
+*----------------------------------------------------------------------*
+FORM GET_JISSEKI_FB.
+REFRESH:T_BSID_READ.
+SELECT BUKRS "会社コード
+KUNNR "得意先コード
+UMSKS "特殊仕訳取引タイプ
+UMSKZ "特殊仕訳コード
+AUGDT "決済日付
+AUGBL "決済伝票番号
+ZUONR "ソートキー
+GJAHR "会計年度
+BELNR "会計伝票番号
+BUZEI "会計伝票内の明細番号
+BUDAT "伝票の転記日付
+WAERS "通貨コード
+BLART "伝票タイプ
+SHKZG "貸借フラグ
+WRBTR "伝票通貨額
+SGTXT "明細テキスト
+ZTERM "支払条件キー
+ZLSCH "支払方法
+FROM BSID
+INTO TABLE T_BSID_READ
+WHERE BUKRS =  P_BUKRS
+AND KUNNR IN  S_D_KUN
+AND UMSKS =  SPACE
+AND UMSKZ =  SPACE
+AND AUGDT =  C_INIT_DAY
+AND AUGBL =  SPACE
+AND BUDAT >= G_FROM_DATE
+AND BUDAT =< G_TO_DATE
+AND WAERS IN S_WAERS
+AND BLART IN S_BLA_1.
+* FB入金実績内部テーブルを会計年度/会計伝票/得意先/通貨でソート
+SORT T_BSID_READ BY GJAHR BELNR KUNNR WAERS.
+
+ENDFORM.                    " GET_JISSEKI_FB
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_FB
+*&---------------------------------------------------------------------*
+*       FB入金実績 ループ処理 FB① 実績：予定=1:1
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      FB入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  -->  T_KNBK           口座名義人/得意先内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_FB.
+DATA:      L_W_INDEX      TYPE SY-TABIX.
+
+CHECK NOT T_BSID_READ[] IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+LOOP AT T_BSID_READ INTO W_BSID_READ.
+L_W_INDEX = SY-TABIX.
+*   初期化
+REFRESH:T_MACH.
+G_STS = 1.
+*   貸借で金額反転
+IF  W_BSID_READ-SHKZG = C_KARI."貸借がS
+W_BSID_READ-WRBTR = W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+*   口座名義人で得意先指定
+PERFORM GET_RANGE_KUN.
+
+* 口座名義人の得意先をキーに、入金予定データをループし、マッチTB作成
+PERFORM MACH_CHECK_FB01.
+
+*   マッチしたデータが１件でもある場合
+IF NOT T_MACH[] IS  INITIAL.
+G_GRPNO = G_GRPNO + 1.
+*   マッチング結果をマッチング用内部テーブルに反映
+*   --入金予定
+PERFORM EDIT_MACH_ITAB_ZN005 USING W_BSID_READ-SGTXT
+TEXT-S01  "FB① 実績
+TEXT-E01.
+*   --入金実績
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+TEXT-S01  "FB① 実績
+TEXT-E01.
+DELETE T_BSID_READ INDEX L_W_INDEX. "格納した源レコード削除
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " LOOP_BSID_FB
+*&---------------------------------------------------------------------*
+*&      Form  GET_RANGE_KUN
+*&---------------------------------------------------------------------*
+*       口座名義人にひもつく得意先群作成
+*----------------------------------------------------------------------*
+FORM GET_RANGE_KUN.
+REFRESH:T_RANGE_KUN.
+LOOP AT T_KNBK INTO W_KNBK
+WHERE KOINH = W_BSID_READ-SGTXT.
+T_RANGE_KUN-SIGN   = 'I'.
+T_RANGE_KUN-OPTION = 'EQ'.
+T_RANGE_KUN-LOW    = W_KNBK-KUNNR.
+APPEND T_RANGE_KUN.
+ENDLOOP.
+
+*1得意先で同じ名義人が複数ある場合の対応
+DELETE ADJACENT DUPLICATES FROM T_RANGE_KUN.  "2012/06/13 ADD
+
+ENDFORM.                    " GET_RANGE_KUN
+*&---------------------------------------------------------------------*
+*&      Form  MACH_CHECK_FB01
+*&---------------------------------------------------------------------*
+*       入金予定チェック（FB入金その１）
+*----------------------------------------------------------------------*
+FORM MACH_CHECK_FB01.
+DATA:L_MACH_OK(1) TYPE C,
+L_WRBTR TYPE BSID-WRBTR.
+
+CHECK NOT T_RANGE_KUN[] IS INITIAL.
+* 入金予定ループ開始
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE KEY_KUNNR IN T_RANGE_KUN
+AND KEY_WAERS = W_BSID_READ-WAERS.
+CLEAR:L_MACH_OK,L_WRBTR.
+
+IF W_BSID_READ-WRBTR = W_ZN005_READ-IWRBTR. "金額一致
+L_MACH_OK = C_ON.
+ELSE.
+*     許容差額
+IF  W_ZN005_READ-IWRBTR > W_BSID_READ-WRBTR. "予定 ＞実績
+L_WRBTR = W_ZN005_READ-IWRBTR - W_BSID_READ-WRBTR.
+IF G_SAGA1 >= L_WRBTR.                     "許容差額以内ならOK
+L_MACH_OK = C_ON.
+ENDIF.
+*     許容差額
+ELSEIF  W_ZN005_READ-IWRBTR < W_BSID_READ-WRBTR. "予定 ＜実績
+L_WRBTR = W_BSID_READ-WRBTR - W_ZN005_READ-IWRBTR.
+IF G_SAGA2 >= L_WRBTR.                     "許容差額以内ならOK
+L_MACH_OK = C_ON.
+ENDIF.
+ENDIF.
+ENDIF.
+
+IF L_MACH_OK = C_ON.
+CLEAR:W_MACH.
+READ TABLE T_MACH INTO W_MACH INDEX 1.
+*            WITH KEY BUKRS  = W_ZN005_READ-BUKRS   "会社コード
+*                     KUNNR  = W_ZN005_READ-KUNNR   "得意先コード
+*                     CZFBDT = W_ZN005_READ-CZFBDT  "照合締日
+*                     SEQ    = W_ZN005_READ-SEQ.    "SEQ
+IF SY-SUBRC = 0.
+G_STS = C_ERR.
+ENDIF.
+W_MACH-BUKRS  = W_ZN005_READ-BUKRS.   "会社コード
+W_MACH-KUNNR  = W_ZN005_READ-KUNNR.   "得意先コード
+W_MACH-CZFBDT = W_ZN005_READ-CZFBDT.  "照合締日
+W_MACH-SEQ    = W_ZN005_READ-SEQ.     "SEQ
+W_MACH-WAERS  = W_ZN005_READ-WAERS.   "通貨
+W_MACH-KOINH  = W_BSID_READ-SGTXT.    "口座名義人
+W_MACH-WRBTR  = W_BSID_READ-WRBTR.    "貸借考慮後の金額
+APPEND W_MACH TO T_MACH.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " MACH_CHECK_FB01
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_MACH_ITAB_ZN005
+*&---------------------------------------------------------------------*
+*       マッチング用内部テーブル 更新(入金予定)
+*----------------------------------------------------------------------*
+*      -->V_KOINH     口座名義人
+*      -->V_OK_TEXT   正常メッセージ
+*      -->V_ERR_TEXT  エラーメッセージ
+*----------------------------------------------------------------------*
+FORM EDIT_MACH_ITAB_ZN005  USING    V_KOINH    TYPE ANY
+V_OK_TEXT  TYPE ANY
+V_ERR_TEXT TYPE ANY.
+* 入金予定反映
+LOOP AT T_MACH INTO W_MACH.
+CLEAR:W_ZN005_MACH,W_ZN005_READ.
+
+READ TABLE T_ZN005_READ INTO  W_ZN005_READ
+WITH TABLE KEY
+KEY_KUNNR = W_MACH-KUNNR
+KEY_WAERS = W_MACH-WAERS
+BUKRS     = W_MACH-BUKRS   "会社コード
+KUNNR     = W_MACH-KUNNR   "得意先コード
+CZFBDT    = W_MACH-CZFBDT  "照合締日
+SEQ       = W_MACH-SEQ.    "SEQ
+IF SY-SUBRC = 0.
+MOVE-CORRESPONDING W_ZN005_READ TO W_ZN005_MACH.
+W_ZN005_MACH-GRP        = G_GRPNO.                "グループ番号
+W_ZN005_MACH-KEY_CZFBDT = W_ZN005_READ-CZFBDT.    "照合締日
+W_ZN005_MACH-KEY_KUNNR  = W_ZN005_READ-KUNNR.     "得意先
+W_ZN005_MACH-KEY_WAERS  = W_ZN005_READ-WAERS.     "通貨
+W_ZN005_MACH-KEY_SEQ    = W_ZN005_READ-SEQ.       "SEQ
+W_ZN005_MACH-KOINH      = V_KOINH.                "口座名義人
+W_ZN005_MACH-STS        = G_STS.                  "処理STS
+IF G_STS = C_ERR.
+W_ZN005_MACH-KEKA     = V_ERR_TEXT.             "処理結果(E)
+ELSE.
+W_ZN005_MACH-KEKA     = V_OK_TEXT.              "処理結果(O)
+ENDIF.
+INSERT W_ZN005_MACH  INTO TABLE T_ZN005_MACH.
+
+*     グループテーブル制御
+CLEAR:W_GRP_CONT.
+IF G_STS <> C_ERR. "正常のみ
+W_GRP_CONT-GRP        = G_GRPNO.
+W_GRP_CONT-KEY_CZFBDT = W_ZN005_READ-CZFBDT.    "照合締日
+W_GRP_CONT-KEY_KUNNR  = W_ZN005_READ-KUNNR.     "得意先
+W_GRP_CONT-KEY_WAERS  = W_ZN005_READ-WAERS.     "通貨
+W_GRP_CONT-IWRBTR     = W_ZN005_READ-IWRBTR.    "入金予定額
+COLLECT W_GRP_CONT INTO T_GRP_CONT.
+ENDIF.
+*     データ源削除
+DELETE TABLE T_ZN005_READ WITH TABLE KEY
+KEY_KUNNR = W_MACH-KUNNR
+KEY_WAERS = W_MACH-WAERS
+BUKRS     = W_ZN005_READ-BUKRS   "会社コード
+KUNNR     = W_ZN005_READ-KUNNR   "得意先コード
+CZFBDT    = W_ZN005_READ-CZFBDT  "照合締日
+SEQ       = W_ZN005_READ-SEQ.    "SEQ
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " EDIT_MACH_ITAB
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_MACH_ITAB_BSID
+*&---------------------------------------------------------------------*
+*       マッチング用内部テーブル 更新(入金実績)
+*----------------------------------------------------------------------*
+*      -->V_ZNTCH     手形通信費
+*      -->V_OK_TEXT   正常メッセージ
+*      -->V_ERR_TEXT  エラーメッセージ
+*----------------------------------------------------------------------*
+FORM EDIT_MACH_ITAB_BSID  USING     V_ZNTCH    TYPE ANY
+V_OK_TEXT  TYPE ANY
+V_ERR_TEXT TYPE ANY.
+CLEAR:W_BSID_MACH.
+MOVE-CORRESPONDING W_BSID_READ TO W_BSID_MACH.
+W_BSID_MACH-GRP    = G_GRPNO.               "グループ番号
+W_BSID_MACH-STS    = G_STS.                 "処理ステータス
+W_BSID_MACH-KOINH  = W_BSID_READ-SGTXT.     "口座名義人
+IF G_STS = C_ERR.
+W_BSID_MACH-KEKA = V_ERR_TEXT.            "処理結果
+ELSE.
+W_BSID_MACH-KEKA = V_OK_TEXT.             "処理結果
+ENDIF.
+W_BSID_MACH-WRBTR = W_BSID_READ-WRBTR.      "伝票通貨額
+IF V_ZNTCH <> 0.
+*   手形通信費
+W_BSID_MACH-ZNTCH = V_ZNTCH.
+ENDIF.
+APPEND W_BSID_MACH TO T_BSID_MACH.
+
+
+ENDFORM.                    " EDIT_MACH_ITAB_BSID
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_FB2
+*&---------------------------------------------------------------------*
+*       FB入金実績 ループ処理 FB② 実績：予定=1:N
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      FB入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  -->  T_KNBK           口座名義人/得意先内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_FB2.
+DATA:      L_W_INDEX      TYPE SY-TABIX.
+
+CHECK NOT T_BSID_READ[] IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+LOOP AT T_BSID_READ INTO W_BSID_READ.
+L_W_INDEX = SY-TABIX.
+*   初期化
+REFRESH:T_MACH.
+G_STS = 1.
+*   貸借で金額反転
+IF  W_BSID_READ-SHKZG = C_KARI."貸借がS
+W_BSID_READ-WRBTR = W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+*   口座名義人で得意先指定
+PERFORM GET_RANGE_KUN.
+
+* 口座名義人の得意先をキーに、入金予定データをループし、マッチTB作成
+PERFORM MACH_CHECK_FB02.
+
+*   マッチしたデータが１件でもある場合
+IF NOT T_MACH[] IS  INITIAL.
+G_GRPNO = G_GRPNO + 1.
+*   マッチング結果をマッチング用内部テーブルに反映
+*   --入金予定
+PERFORM EDIT_MACH_ITAB_ZN005 USING W_BSID_READ-SGTXT
+TEXT-S02  "FB②
+TEXT-E04.
+*   --入金実績
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+TEXT-S02 "FB②
+TEXT-E04.
+DELETE T_BSID_READ INDEX L_W_INDEX. "格納した源レコード削除
+ENDIF.
+
+ENDLOOP.
+
+ENDFORM.                    " LOOP_BSID_FB2
+*&---------------------------------------------------------------------*
+*&      Form  MACH_CHECK_FB02
+*&---------------------------------------------------------------------*
+*       入金予定チェック（FB入金その２）
+*----------------------------------------------------------------------*
+FORM MACH_CHECK_FB02.
+DATA:L_MACH_OK(1) TYPE C,
+L_WRBTR TYPE BSID-WRBTR.
+
+
+* 初期化
+REFRESH:T_ZN005_CHECK,T_MACH.
+
+* 口座名義人ループ
+LOOP AT T_RANGE_KUN.
+REFRESH:T_ZN005_CHECK.
+CLEAR:L_WRBTR, L_MACH_OK.
+
+*   入金予定 ループ処理
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE KEY_KUNNR = T_RANGE_KUN-LOW
+AND KEY_WAERS = W_BSID_READ-WAERS.
+*      集計
+L_WRBTR = L_WRBTR  + W_ZN005_READ-IWRBTR.
+*      確認用内部テーブル
+MOVE-CORRESPONDING W_ZN005_READ TO W_ZN005_CHECK.
+APPEND W_ZN005_CHECK TO T_ZN005_CHECK.
+ENDLOOP.
+
+*   得意先レベルでの集計値と、入金実績額を比較
+IF W_BSID_READ-WRBTR = L_WRBTR . "金額一致
+L_MACH_OK = C_ON.
+ELSE.
+*     許容差額
+IF  L_WRBTR  > W_BSID_READ-WRBTR. "予定 ＞実績
+L_WRBTR = L_WRBTR  - W_BSID_READ-WRBTR.
+IF G_SAGA1 >= L_WRBTR.                     "許容差額以内ならOK
+L_MACH_OK = C_ON.
+ENDIF.
+*     許容差額
+ELSEIF  L_WRBTR  < W_BSID_READ-WRBTR. "予定 ＜実績
+L_WRBTR = W_BSID_READ-WRBTR - L_WRBTR .
+IF G_SAGA2 >= L_WRBTR.                     "許容差額以内ならOK
+L_MACH_OK = C_ON.
+ENDIF.
+ENDIF.
+ENDIF.
+*   マッチングOKの場合
+IF L_MACH_OK = C_ON.
+CLEAR:W_MACH.
+READ TABLE T_MACH INTO W_MACH INDEX 1.
+*               WITH KEY BUKRS  = W_ZN005_CHECK-BUKRS   "会社コード
+*                        KUNNR  = W_ZN005_CHECK-KUNNR   "得意先コード
+*                        CZFBDT = W_ZN005_CHECK-CZFBDT  "照合締日
+*                        SEQ    = W_ZN005_CHECK-SEQ.    "SEQ
+IF SY-SUBRC = 0.
+G_STS = C_ERR.
+ENDIF.
+LOOP AT T_ZN005_CHECK INTO W_ZN005_CHECK.
+W_MACH-BUKRS  = W_ZN005_CHECK-BUKRS.   "会社コード
+W_MACH-KUNNR  = W_ZN005_CHECK-KUNNR.   "得意先コード
+W_MACH-CZFBDT = W_ZN005_CHECK-CZFBDT.  "照合締日
+W_MACH-SEQ    = W_ZN005_CHECK-SEQ.     "SEQ
+W_MACH-WAERS  = W_ZN005_CHECK-WAERS.   "通貨
+W_MACH-KOINH  = W_BSID_READ-SGTXT.    "口座名義人
+W_MACH-WRBTR  = W_BSID_READ-WRBTR.    "貸借考慮後の金額
+APPEND W_MACH TO T_MACH.
+ENDLOOP.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " MACH_CHECK_FB02
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_FB3
+*&---------------------------------------------------------------------*
+*       FB入金実績 ループ処理 FB③ 実績：予定=1:N(口座名義人）
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      FB入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  -->  T_KNBK           口座名義人/得意先内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_FB3.
+DATA:      L_W_INDEX      TYPE SY-TABIX.
+
+CHECK NOT T_BSID_READ[] IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+LOOP AT T_BSID_READ INTO W_BSID_READ.
+L_W_INDEX = SY-TABIX.
+*   初期化
+REFRESH:T_MACH.
+G_STS = 1.
+*   貸借で金額反転
+IF  W_BSID_READ-SHKZG = C_KARI."貸借がS
+W_BSID_READ-WRBTR = W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+*   口座名義人で得意先指定
+PERFORM GET_RANGE_KUN.
+* 口座名義人の得意先をキーに、入金予定データをループし、マッチTB作成
+PERFORM MACH_CHECK_FB03.
+
+*   マッチしたデータが１件でもある場合
+IF NOT T_MACH[] IS  INITIAL.
+G_GRPNO = G_GRPNO + 1.
+*   マッチング結果をマッチング用内部テーブルに反映
+*   --入金予定
+PERFORM EDIT_MACH_ITAB_ZN005 USING W_BSID_READ-SGTXT
+TEXT-S03 "FB③
+SPACE.
+*   --入金実績
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+TEXT-S03 "FB③
+SPACE.
+DELETE T_BSID_READ INDEX L_W_INDEX. "格納した源レコード削除
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " LOOP_BSID_FB3
+*&---------------------------------------------------------------------*
+*&      Form  MACH_CHECK_FB03
+*&---------------------------------------------------------------------*
+*       入金予定チェック（FB入金その3）
+*----------------------------------------------------------------------*
+FORM MACH_CHECK_FB03.
+DATA:L_MACH_OK(1) TYPE C,
+L_WRBTR TYPE BSID-WRBTR.
+
+* 初期化
+REFRESH:T_ZN005_CHECK,T_MACH.
+CHECK NOT T_RANGE_KUN[] IS INITIAL.
+
+CLEAR:L_WRBTR.
+* 口座名義人ループ
+LOOP AT T_RANGE_KUN.
+*   入金予定 ループ処理
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE KEY_KUNNR = T_RANGE_KUN-LOW
+AND KEY_WAERS = W_BSID_READ-WAERS.
+*      集計
+L_WRBTR = L_WRBTR  + W_ZN005_READ-IWRBTR.
+*      確認用内部テーブル
+MOVE-CORRESPONDING W_ZN005_READ TO W_ZN005_CHECK.
+APPEND W_ZN005_CHECK TO T_ZN005_CHECK.
+ENDLOOP.
+ENDLOOP.
+
+* 口座名義人レベルでの集計値と、入金実績額を比較
+IF W_BSID_READ-WRBTR = L_WRBTR . "金額一致
+L_MACH_OK = C_ON.
+ELSE.
+*   許容差額
+IF  L_WRBTR  > W_BSID_READ-WRBTR. "予定 ＞実績
+L_WRBTR = L_WRBTR  - W_BSID_READ-WRBTR.
+IF G_SAGA1 >= L_WRBTR.                     "許容差額以内ならOK
+L_MACH_OK = C_ON.
+ENDIF.
+*   許容差額
+ELSEIF  L_WRBTR  < W_BSID_READ-WRBTR. "予定 ＜実績
+L_WRBTR = W_BSID_READ-WRBTR - L_WRBTR .
+IF G_SAGA2 >= L_WRBTR.                     "許容差額以内ならOK
+L_MACH_OK = C_ON.
+ENDIF.
+ENDIF.
+ENDIF.
+
+*   マッチングOKの場合
+IF L_MACH_OK = C_ON.
+LOOP AT T_ZN005_CHECK INTO W_ZN005_CHECK.
+CLEAR:W_MACH.
+*       READ TABLE T_MACH INTO W_MACH
+*              WITH KEY BUKRS  = W_ZN005_CHECK-BUKRS   "会社コード
+*                       KUNNR  = W_ZN005_CHECK-KUNNR   "得意先コード
+*                       CZFBDT = W_ZN005_CHECK-CZFBDT  "照合締日
+*                       SEQ    = W_ZN005_CHECK-SEQ.    "SEQ
+*      IF SY-SUBRC = 0.
+*        G_STS = C_ERR.
+*      ENDIF.
+W_MACH-BUKRS  = W_ZN005_CHECK-BUKRS.   "会社コード
+W_MACH-KUNNR  = W_ZN005_CHECK-KUNNR.   "得意先コード
+W_MACH-CZFBDT = W_ZN005_CHECK-CZFBDT.  "照合締日
+W_MACH-SEQ    = W_ZN005_CHECK-SEQ.     "SEQ
+W_MACH-WAERS  = W_ZN005_CHECK-WAERS.   "通貨
+W_MACH-KOINH  = W_BSID_READ-SGTXT.    "口座名義人
+W_MACH-WRBTR  = W_BSID_READ-WRBTR.    "貸借考慮後の金額
+APPEND W_MACH TO T_MACH.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " MACH_CHECK_FB03
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_END
+*&---------------------------------------------------------------------*
+*       入金実績 相手なしデータ
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_END.
+G_STS = C_ERR. "全件エラー
+LOOP AT T_BSID_READ INTO W_BSID_READ.
+G_GRPNO = G_GRPNO + 1.
+*   貸借で金額反転
+IF  W_BSID_READ-SHKZG = C_KARI."貸借がS
+W_BSID_READ-WRBTR = W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+SPACE
+TEXT-E03.
+ENDLOOP.
+
+* 読み込んだ入金実績を全開放
+FREE T_BSID_READ.
+
+ENDFORM.                    " LOOP_BSID_END
+*&---------------------------------------------------------------------*
+*&      Form  GET_TEGATA
+*&---------------------------------------------------------------------*
+*       手形入金実績の取得
+*----------------------------------------------------------------------*
+FORM GET_TEGATA.
+
+CHECK NOT P_C_TEGA IS INITIAL. "選択画面で手形入金がON
+* 手形実績読み込み
+PERFORM GET_JISSEKI_TEGATA.
+CHECK NOT T_BSID_READ[] IS INITIAL.
+SORT T_BSID_READ BY KUNNR GJAHR BELNR WAERS.
+
+* マイナス入金除外
+PERFORM LOOP_BSID_TEGATA_MAINAS.
+
+* 手形入金実績 ループ処理(実績:予定= 1伝票合計:1件)
+PERFORM LOOP_BSID_TEGATA1.
+
+* 手形入金実績 ループ処理(実績:予定= 1伝票合計:1得意先合計)
+PERFORM LOOP_BSID_TEGATA2.
+
+* 手形入金実績 ループ処理(実績:予定= 1得意先合計:1件)
+PERFORM LOOP_BSID_TEGATA3.
+
+* 手形入金実績 ループ処理(実績:予定= 1得意先合計:1得意先合計)
+PERFORM LOOP_BSID_TEGATA4.
+
+* 相手なし
+PERFORM LOOP_BSID_END.
+
+ENDFORM.                    " GET_TEGATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_JISSEKI_TEGATA
+*&---------------------------------------------------------------------*
+*       手形実績読込
+*----------------------------------------------------------------------*
+FORM GET_JISSEKI_TEGATA.
+REFRESH:T_BSID_READ.
+SELECT BUKRS "会社コード
+KUNNR "得意先コード
+UMSKS "特殊仕訳取引タイプ
+UMSKZ "特殊仕訳コード
+AUGDT "決済日付
+AUGBL "決済伝票番号
+ZUONR "ソートキー
+GJAHR "会計年度
+BELNR "会計伝票番号
+BUZEI "会計伝票内の明細番号
+BUDAT "伝票の転記日付
+WAERS "通貨コード
+BLART "伝票タイプ
+SHKZG "貸借フラグ
+WRBTR "伝票通貨額
+SGTXT "明細テキスト
+ZTERM "支払条件キー
+ZLSCH "支払方法
+FROM BSID
+INTO TABLE T_BSID_READ
+WHERE BUKRS =  P_BUKRS
+AND KUNNR IN  S_KUNNR
+AND UMSKS =  SPACE
+AND UMSKZ =  SPACE
+AND AUGDT =  C_INIT_DAY
+AND AUGBL =  SPACE
+AND BUDAT >= G_FROM_DATE
+AND BUDAT =< G_TO_DATE
+AND WAERS IN S_WAERS
+AND BLART IN S_BLA_3.
+* FB入金実績内部テーブルを得意先/通貨/会計年度/会計伝票/でソート
+SORT T_BSID_READ BY KUNNR WAERS GJAHR BELNR  .
+
+ENDFORM.                    " GET_JISSEKI_TEGATA
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_TEGATA_MAINAS
+*&---------------------------------------------------------------------*
+*       マイナス手形の除外
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_TEGATA_MAINAS.
+DATA:      L_W_INDEX      TYPE SY-TABIX.
+CHECK NOT T_BSID_READ[] IS INITIAL.
+G_STS = C_ERR.               "エラー
+LOOP AT T_BSID_READ INTO W_BSID_READ.
+L_W_INDEX = SY-TABIX.
+IF W_BSID_READ-SHKZG = C_KARI. "貸借S はマイナス入金でエラー
+G_GRPNO = G_GRPNO + 1.
+W_BSID_READ-WRBTR = W_BSID_READ-WRBTR  * -1.
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+SPACE
+TEXT-E05.
+DELETE T_BSID_READ INDEX L_W_INDEX. "格納した源レコード削除
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " LOOP_BSID_TEGATA_MAINAS
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_TEGATA1
+*&---------------------------------------------------------------------*
+*       手形入金実績 ループ処理 ① 実績：予定=1伝票:1件
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_TEGATA1.
+DATA:L_WRBTR TYPE BSID-WRBTR,
+L_W_BSID_READ TYPE TYP_BSID_READ.
+
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO L_W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING L_W_BSID_READ TO W_KEY.
+LOOP AT T_BSID_READ INTO L_W_BSID_READ.
+IF W_KEY-KUNNR <> L_W_BSID_READ-KUNNR
+OR W_KEY-WAERS <> L_W_BSID_READ-WAERS
+OR W_KEY-GJAHR <> L_W_BSID_READ-GJAHR
+OR W_KEY-BELNR <> L_W_BSID_READ-BELNR.
+*     キーブレイク処理
+PERFORM KEY_BLAEK_TEGA01 USING L_WRBTR
+C_ON
+TEXT-S04
+TEXT-E06.
+W_KEY-KUNNR = L_W_BSID_READ-KUNNR.
+W_KEY-WAERS = L_W_BSID_READ-WAERS.
+W_KEY-GJAHR = L_W_BSID_READ-GJAHR.
+W_KEY-BELNR = L_W_BSID_READ-BELNR.
+REFRESH:T_BSID_CHECK.
+CLEAR:L_WRBTR.
+ENDIF.
+W_BSID_READ = L_W_BSID_READ.
+PERFORM SET_BSID_CHECK.
+L_WRBTR = L_WRBTR + L_W_BSID_READ-WRBTR. "実績額集計
+ENDLOOP.
+
+* キーブレイク処理(最終レコード用)
+PERFORM KEY_BLAEK_TEGA01 USING L_WRBTR
+C_ON
+TEXT-S04
+TEXT-E06.
+REFRESH:T_BSID_CHECK.
+
+ENDFORM.                    " LOOP_BSID_TEGATA1
+*&---------------------------------------------------------------------*
+*&      Form  SET_BSID_CHECK
+*&---------------------------------------------------------------------*
+*       確認用内部テーブルに実績データを確保
+*----------------------------------------------------------------------*
+FORM SET_BSID_CHECK.
+CLEAR:W_BSID_CHECK.
+MOVE-CORRESPONDING W_BSID_READ TO W_BSID_CHECK.
+APPEND W_BSID_CHECK TO T_BSID_CHECK.
+
+ENDFORM.                    " SET_BSID_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  MACH_CHECK_TEGATA1
+*&---------------------------------------------------------------------*
+*       入金予定チェック（手形その１）
+*----------------------------------------------------------------------*
+*      -->V_WRBTR  入金実績合計額
+*----------------------------------------------------------------------*
+FORM MACH_CHECK_TEGATA1 USING V_WRBTR
+L_TEGATA TYPE I."手形の会計伝票数
+DATA:L_MACH_OK(1) TYPE C,
+L_SUM_JISSEKI TYPE BSID-WRBTR,
+L_SUM_YOTEI   TYPE BSID-WRBTR.
+
+REFRESH:T_MACH.
+* 手形通信費の取得
+CLEAR W_ZN008.
+IF L_TEGATA = 0.
+L_SUM_JISSEKI = V_WRBTR.
+ELSE.
+READ TABLE T_ZN008 INTO W_ZN008
+WITH TABLE KEY KUNNR = W_KEY-KUNNR
+WAERS = W_KEY-WAERS.
+IF SY-SUBRC <> 0.
+SELECT SINGLE KUNNR WAERS ZNTCH
+FROM ZN008
+INTO W_ZN008
+WHERE KUNNR = W_KEY-KUNNR
+AND WAERS = W_KEY-WAERS
+AND SEQ   = C_INIT_SEQ.
+IF SY-SUBRC = 0.
+APPEND W_ZN008 TO T_ZN008.
+ENDIF.
+ENDIF.
+W_ZN008-ZNTCH = W_ZN008-ZNTCH * L_TEGATA.
+L_SUM_JISSEKI = V_WRBTR + W_ZN008-ZNTCH. "手形通信費加算
+ENDIF.
+
+* 入金予定ループ開始
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE KEY_KUNNR = W_KEY-KUNNR
+AND KEY_WAERS = W_KEY-WAERS.
+CLEAR:L_MACH_OK,L_SUM_YOTEI.
+
+IF L_SUM_JISSEKI = W_ZN005_READ-IWRBTR. "金額一致
+L_MACH_OK = C_ON.
+ENDIF.
+
+IF L_MACH_OK = C_ON.
+CLEAR:W_MACH.
+READ TABLE T_MACH INTO W_MACH INDEX 1.
+*            WITH KEY BUKRS  = W_ZN005_READ-BUKRS   "会社コード
+*                     KUNNR  = W_ZN005_READ-KUNNR   "得意先コード
+*                     CZFBDT = W_ZN005_READ-CZFBDT  "照合締日
+*                     SEQ    = W_ZN005_READ-SEQ.    "SEQ
+IF SY-SUBRC = 0.
+G_STS = C_ERR.
+ENDIF.
+W_MACH-BUKRS  = W_ZN005_READ-BUKRS.   "会社コード
+W_MACH-KUNNR  = W_ZN005_READ-KUNNR.   "得意先コード
+W_MACH-CZFBDT = W_ZN005_READ-CZFBDT.  "照合締日
+W_MACH-SEQ    = W_ZN005_READ-SEQ.     "SEQ
+W_MACH-WAERS  = W_ZN005_READ-WAERS.   "通貨
+*      W_MACH-KOINH  = W_BSID_READ-SGTXT.    "口座名義人
+W_MACH-WRBTR  = L_SUM_JISSEKI .       "貸借考慮後の金額
+APPEND W_MACH TO T_MACH.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " MACH_CHECK_TEGATA1
+*&---------------------------------------------------------------------*
+*&      Form  KEY_BLAEK_TEGA01
+*&---------------------------------------------------------------------*
+*       キーブレイク処理 手形①
+*----------------------------------------------------------------------*
+FORM KEY_BLAEK_TEGA01 USING L_WRBTR TYPE ANY
+L_TEGATA
+L_TEXT_OK
+L_TEXT_NG.
+
+DATA:L_BELNR TYPE BSID-BELNR.
+DATA:L_DENPYOSU TYPE I.
+REFRESH:T_MACH.
+
+* 手形の場合、何伝票分のデータなのかを確認
+IF L_TEGATA IS INITIAL.
+L_DENPYOSU = 0.
+ELSE.
+SORT T_BSID_CHECK BY BELNR.
+CLEAR:L_BELNR.
+LOOP AT T_BSID_CHECK INTO W_BSID_CHECK.
+IF L_BELNR <> W_BSID_CHECK-BELNR.
+L_DENPYOSU =  L_DENPYOSU + 1.
+L_BELNR = W_BSID_CHECK-BELNR.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+G_STS = C_OK.             "フラグ初期化
+
+* 入金予定と実績マッチング
+PERFORM MACH_CHECK_TEGATA1 USING L_WRBTR
+L_DENPYOSU.
+* マッチしたデータが１件でもある場合
+IF NOT T_MACH[] IS  INITIAL.
+G_GRPNO = G_GRPNO + 1.
+* マッチング結果をマッチング用内部テーブルに反映
+* --入金予定
+PERFORM EDIT_MACH_ITAB_ZN005 USING SPACE
+L_TEXT_OK
+L_TEXT_NG.
+* --入金実績
+LOOP AT T_BSID_CHECK INTO W_BSID_READ.
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+L_TEXT_OK
+L_TEXT_NG.
+DELETE T_BSID_READ WHERE KUNNR = W_BSID_READ-KUNNR
+AND GJAHR = W_BSID_READ-GJAHR
+AND BELNR = W_BSID_READ-BELNR
+AND WAERS = W_BSID_READ-WAERS.
+ENDLOOP.
+*   手形通信費
+IF W_ZN008-ZNTCH <> 0.  "手形通信費あり
+CLEAR:W_BSID_READ-WRBTR.
+PERFORM EDIT_MACH_ITAB_BSID USING  W_ZN008-ZNTCH
+L_TEXT_OK
+L_TEXT_NG.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " KEY_BLAEK_TEGA01
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_TEGATA2
+*&---------------------------------------------------------------------*
+*      手形入金実績 ループ処理(実績:予定=1伝票合計:1得意先合計)
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_TEGATA2.
+DATA:L_WRBTR TYPE BSID-WRBTR,
+L_W_BSID_READ TYPE TYP_BSID_READ.
+
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO L_W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING L_W_BSID_READ TO W_KEY.
+LOOP AT T_BSID_READ INTO L_W_BSID_READ.
+IF W_KEY-KUNNR <> L_W_BSID_READ-KUNNR
+OR W_KEY-GJAHR <> L_W_BSID_READ-GJAHR
+OR W_KEY-BELNR <> L_W_BSID_READ-BELNR
+OR W_KEY-WAERS <> L_W_BSID_READ-WAERS.
+*     キーブレイク処理
+PERFORM KEY_BLAEK_TEGA02 USING L_WRBTR
+C_ON
+TEXT-S06 "手形②
+SPACE.   "エラーありえない
+W_KEY-KUNNR = L_W_BSID_READ-KUNNR.
+W_KEY-GJAHR = L_W_BSID_READ-GJAHR.
+W_KEY-BELNR = L_W_BSID_READ-BELNR.
+W_KEY-WAERS = L_W_BSID_READ-WAERS.
+REFRESH:T_BSID_CHECK.
+CLEAR:L_WRBTR.
+ENDIF.
+W_BSID_READ = L_W_BSID_READ.
+PERFORM SET_BSID_CHECK.                "確認用実績確保
+L_WRBTR = L_WRBTR + L_W_BSID_READ-WRBTR. "実績額集計
+ENDLOOP.
+
+* キーブレイク処理(最終レコード用)
+PERFORM KEY_BLAEK_TEGA02 USING L_WRBTR
+C_ON
+TEXT-S06 "手形②
+SPACE.   "エラーありえない
+REFRESH:T_BSID_CHECK.
+
+ENDFORM.                    " LOOP_BSID_TEGATA2
+*&---------------------------------------------------------------------*
+*&      Form  KEY_BLAEK_TEGA02
+*&---------------------------------------------------------------------*
+*       キーブレイク処理 手形②(得意先で集計した入金予定と比較）
+*----------------------------------------------------------------------*
+FORM KEY_BLAEK_TEGA02 USING L_WRBTR TYPE ANY
+L_TEGATA
+L_TEXT_OK
+L_TEXT_ERR.
+G_STS = C_OK.             "フラグ初期化
+* 入金予定と実績マッチング
+REFRESH:T_MACH.
+PERFORM MACH_CHECK_TEGATA2 USING L_WRBTR L_TEGATA.
+* マッチしたデータが１件でもある場合
+IF NOT T_MACH[] IS  INITIAL.
+G_GRPNO = G_GRPNO + 1.
+* マッチング結果をマッチング用内部テーブルに反映
+* --入金予定
+PERFORM EDIT_MACH_ITAB_ZN005 USING SPACE
+L_TEXT_OK
+L_TEXT_ERR.
+* --入金実績
+LOOP AT T_BSID_CHECK INTO W_BSID_READ.
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+L_TEXT_OK
+L_TEXT_ERR.
+DELETE T_BSID_READ WHERE KUNNR = W_BSID_READ-KUNNR
+AND GJAHR = W_BSID_READ-GJAHR
+AND BELNR = W_BSID_READ-BELNR
+AND WAERS = W_BSID_READ-WAERS.
+ENDLOOP.
+*   手形通信費
+IF W_ZN008-ZNTCH <> 0.  "手形通信費あり
+CLEAR:W_BSID_READ-WRBTR.
+PERFORM EDIT_MACH_ITAB_BSID USING  W_ZN008-ZNTCH
+L_TEXT_OK
+L_TEXT_ERR.
+ENDIF.
+ENDIF.
+ENDFORM.                    " KEY_BLAEK_TEGA02
+*&---------------------------------------------------------------------*
+*&      Form  MACH_CHECK_TEGATA2
+*&---------------------------------------------------------------------*
+*       入金予定チェック（手形その2）
+*----------------------------------------------------------------------*
+*      -->V_WRBTR  入金実績合計額
+*      -->V_TEGATA 手形=X
+*----------------------------------------------------------------------*
+FORM MACH_CHECK_TEGATA2 USING   V_WRBTR
+V_TEGATA.
+DATA:L_MACH_OK(1) TYPE C,
+L_SUM_JISSEKI TYPE BSID-WRBTR,
+L_SUM_YOTEI   TYPE BSID-WRBTR.
+
+L_SUM_JISSEKI = V_WRBTR.
+* 手形通信費の取得
+CLEAR W_ZN008.
+IF V_TEGATA = C_ON.
+READ TABLE T_ZN008 INTO W_ZN008
+WITH TABLE KEY KUNNR = W_KEY-KUNNR
+WAERS = W_KEY-WAERS.
+IF SY-SUBRC = 0.
+L_SUM_JISSEKI = L_SUM_JISSEKI + W_ZN008-ZNTCH. "手形通信費加算
+ENDIF.
+ENDIF.
+REFRESH:T_ZN005_CHECK.
+
+* 入金予定ループ開始
+CLEAR:L_MACH_OK,L_SUM_YOTEI.
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE KEY_KUNNR = W_KEY-KUNNR
+AND KEY_WAERS = W_KEY-WAERS.
+L_SUM_YOTEI = L_SUM_YOTEI + W_ZN005_READ-IWRBTR.
+*     確認用内部テーブル
+MOVE-CORRESPONDING W_ZN005_READ TO W_ZN005_CHECK.
+APPEND W_ZN005_CHECK TO T_ZN005_CHECK.
+ENDLOOP.
+
+IF L_SUM_JISSEKI = L_SUM_YOTEI. "金額一致
+L_MACH_OK = C_ON.
+ENDIF.
+
+IF L_MACH_OK = C_ON.
+CLEAR:W_MACH.
+IF L_SUM_JISSEKI <> 0. "ゼロ円以外でマッチングならOK
+G_STS = C_OK.
+ELSE.
+G_STS = C_ERR.
+ENDIF.
+LOOP AT T_ZN005_CHECK INTO W_ZN005_CHECK.
+CLEAR:W_MACH.
+W_MACH-BUKRS  = W_ZN005_CHECK-BUKRS.   "会社コード
+W_MACH-KUNNR  = W_ZN005_CHECK-KUNNR.   "得意先コード
+W_MACH-CZFBDT = W_ZN005_CHECK-CZFBDT.  "照合締日
+W_MACH-SEQ    = W_ZN005_CHECK-SEQ.     "SEQ
+W_MACH-WAERS  = W_ZN005_CHECK-WAERS.   "通貨
+*    W_MACH-KOINH  = W_BSID_READ-SGTXT.    "口座名義人
+W_MACH-WRBTR  = W_BSID_READ-WRBTR.    "貸借考慮後の金額
+APPEND W_MACH TO T_MACH.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " MACH_CHECK_TEGATA2
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_TEGATA3
+*&---------------------------------------------------------------------*
+*       手形入金実績 ループ処理 ③ 実績：予定=1得意先:1件
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_TEGATA3.
+DATA:L_WRBTR TYPE BSID-WRBTR,
+L_W_BSID_READ TYPE TYP_BSID_READ,
+L_TEGATA TYPE I.          "伝票数
+
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO L_W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING L_W_BSID_READ TO W_KEY.
+CLEAR:L_WRBTR,L_TEGATA.
+LOOP AT T_BSID_READ INTO L_W_BSID_READ.
+IF W_KEY-KUNNR <> L_W_BSID_READ-KUNNR
+OR W_KEY-WAERS <> L_W_BSID_READ-WAERS.   "得意先/通貨レべルで集計
+*     キーブレイク処理
+PERFORM KEY_BLAEK_TEGA01 USING L_WRBTR
+C_ON
+TEXT-S05
+TEXT-E07.
+W_KEY-KUNNR = L_W_BSID_READ-KUNNR.
+W_KEY-WAERS = L_W_BSID_READ-WAERS.
+REFRESH:T_BSID_CHECK.
+CLEAR:L_WRBTR.
+ENDIF.
+W_BSID_READ = L_W_BSID_READ.
+PERFORM SET_BSID_CHECK.                "確認用実績確保
+L_WRBTR = L_WRBTR + L_W_BSID_READ-WRBTR. "実績額集計
+ENDLOOP.
+
+* キーブレイク処理(最終レコード用)
+PERFORM KEY_BLAEK_TEGA01 USING L_WRBTR
+C_ON
+TEXT-S05
+TEXT-E07.
+REFRESH:T_BSID_CHECK.
+ENDFORM.                    " LOOP_BSID_TEGATA3
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_TEGATA4
+*&---------------------------------------------------------------------*
+*       手形入金実績 ループ処理 ④ 実績：予定= 得意先合計:得意先合計
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_TEGATA4.
+DATA:L_WRBTR TYPE BSID-WRBTR,
+L_W_BSID_READ TYPE TYP_BSID_READ.
+
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO L_W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING L_W_BSID_READ TO W_KEY.
+CLEAR:L_WRBTR.
+LOOP AT T_BSID_READ INTO L_W_BSID_READ.
+IF W_KEY-KUNNR <> L_W_BSID_READ-KUNNR
+OR W_KEY-WAERS <> L_W_BSID_READ-WAERS.   "得意先/通貨レべルで集計
+*     キーブレイク処理
+PERFORM KEY_BLAEK_TEGA02 USING L_WRBTR
+C_ON
+TEXT-S11  "手形④
+TEXT-E12. "ゼロ円
+
+W_KEY-KUNNR = L_W_BSID_READ-KUNNR.
+W_KEY-WAERS = L_W_BSID_READ-WAERS.
+REFRESH:T_BSID_CHECK.
+CLEAR:L_WRBTR.
+ENDIF.
+W_BSID_READ = L_W_BSID_READ.
+PERFORM SET_BSID_CHECK.                "確認用実績確保
+L_WRBTR = L_WRBTR + L_W_BSID_READ-WRBTR. "実績額集計
+ENDLOOP.
+
+* キーブレイク処理(最終レコード用)
+PERFORM KEY_BLAEK_TEGA02 USING L_WRBTR
+C_ON
+TEXT-S11  "手形④
+TEXT-E12. "ゼロ円
+REFRESH:T_BSID_CHECK.
+ENDFORM.                    " LOOP_BSID_TEGATA4
+*&---------------------------------------------------------------------*
+*&      Form  GET_SONOTA
+*&---------------------------------------------------------------------*
+*       その他データの取得
+*----------------------------------------------------------------------*
+FORM GET_SONOTA.
+DATA:L_T_RANGE_BLART TYPE RANGE OF BSID-BLART WITH HEADER LINE.
+REFRESH:L_T_RANGE_BLART.
+REFRESH:T_BSID_READ.
+
+CHECK P_C_FBG  = C_ON
+OR P_C_ETC  = C_ON.
+
+IF P_C_FBG  = C_ON."振込(FB外) あり
+L_T_RANGE_BLART[] = S_BLA_2[].
+ENDIF.
+
+IF P_C_ETC  = C_ON."その他 あり
+INSERT LINES OF S_BLA_4 INTO TABLE L_T_RANGE_BLART.
+ENDIF.
+
+SELECT BUKRS "会社コード
+KUNNR "得意先コード
+UMSKS "特殊仕訳取引タイプ
+UMSKZ "特殊仕訳コード
+AUGDT "決済日付
+AUGBL "決済伝票番号
+ZUONR "ソートキー
+GJAHR "会計年度
+BELNR "会計伝票番号
+BUZEI "会計伝票内の明細番号
+BUDAT "伝票の転記日付
+WAERS "通貨コード
+BLART "伝票タイプ
+SHKZG "貸借フラグ
+WRBTR "伝票通貨額
+SGTXT "明細テキスト
+ZTERM "支払条件キー
+ZLSCH "支払方法
+FROM BSID
+INTO TABLE T_BSID_READ
+WHERE BUKRS =  P_BUKRS
+AND KUNNR IN  S_KUNNR
+AND UMSKS =  SPACE
+AND UMSKZ =  SPACE
+AND AUGDT =  C_INIT_DAY
+AND AUGBL =  SPACE
+AND BUDAT >= G_FROM_DATE
+AND BUDAT =< G_TO_DATE
+AND WAERS IN S_WAERS
+AND BLART IN L_T_RANGE_BLART.
+* 内部テーブルを会計年度/会計伝票/得意先/通貨でソート
+CHECK NOT T_BSID_READ[] IS INITIAL.
+SORT T_BSID_READ BY GJAHR BELNR KUNNR WAERS.
+
+* その他入金実績 ループ処理(実績:予定= 1件:1件)
+PERFORM LOOP_BSID_SONOTA1.
+
+* その他入金実績 ループ処理(実績:予定= 1件:得意先集計件)
+PERFORM LOOP_BSID_SONOTA2.
+
+* その他入金実績 ループ処理(実績:予定= 得意先集計:1件)
+SORT T_BSID_READ BY KUNNR WAERS GJAHR BELNR.
+PERFORM LOOP_BSID_SONOTA3.
+
+* その他入金実績 ループ処理(実績:予定= 得意先集計どうし)
+PERFORM LOOP_BSID_SONOTA4.
+
+* 相手なし
+PERFORM LOOP_BSID_END.
+
+ENDFORM.                 " GET_SONOTA
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_SONOTA1
+*&---------------------------------------------------------------------*
+*       その他入金実績 ループ処理 ① 実績：予定= 1:1
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_SONOTA1.
+
+DATA:L_WRBTR        TYPE BSID-WRBTR.
+DATA:L_W_INDEX      TYPE SY-TABIX.
+
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING W_BSID_READ TO W_KEY.
+CLEAR:L_WRBTR.
+LOOP AT T_BSID_READ INTO W_BSID_READ.
+L_W_INDEX = SY-TABIX.
+*   初期化
+REFRESH:T_MACH.
+G_STS = 1.
+*   貸借で金額反転
+IF  W_BSID_READ-SHKZG = C_KARI."貸借がS
+W_BSID_READ-WRBTR = W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+
+*   入金予定マッチング
+PERFORM MACH_CHECK_SONOTA01.
+
+*   マッチしたデータが１件でもある場合
+IF NOT T_MACH[] IS  INITIAL.
+G_GRPNO = G_GRPNO + 1.
+*   マッチング結果をマッチング用内部テーブルに反映
+*   --入金予定
+PERFORM EDIT_MACH_ITAB_ZN005 USING SPACE
+TEXT-S07 "その他①
+TEXT-E08.
+*   --入金実績
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+TEXT-S07 "その他①
+TEXT-E08.
+DELETE T_BSID_READ INDEX L_W_INDEX. "格納した源レコード削除
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " LOOP_BSID_SONOTA1
+*&---------------------------------------------------------------------*
+*&      Form  MACH_CHECK_SONOTA01
+*&---------------------------------------------------------------------*
+*       入金予定チェック（その他入金その１）
+*----------------------------------------------------------------------*
+FORM MACH_CHECK_SONOTA01.
+DATA:L_MACH_OK(1) TYPE C.
+
+* 入金予定ループ開始
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE KEY_KUNNR = W_BSID_READ-KUNNR
+AND KEY_WAERS = W_BSID_READ-WAERS.
+CLEAR:L_MACH_OK.
+
+IF W_BSID_READ-WRBTR = W_ZN005_READ-IWRBTR. "金額一致
+L_MACH_OK = C_ON.
+ENDIF.
+
+IF L_MACH_OK = C_ON.
+CLEAR:W_MACH.
+READ TABLE T_MACH INTO W_MACH INDEX 1.
+*            WITH KEY BUKRS  = W_ZN005_READ-BUKRS   "会社コード
+*                     KUNNR  = W_ZN005_READ-KUNNR   "得意先コード
+*                     CZFBDT = W_ZN005_READ-CZFBDT  "照合締日
+*                     SEQ    = W_ZN005_READ-SEQ.    "SEQ
+IF SY-SUBRC = 0.
+G_STS = C_ERR.
+ENDIF.
+W_MACH-BUKRS  = W_ZN005_READ-BUKRS.   "会社コード
+W_MACH-KUNNR  = W_ZN005_READ-KUNNR.   "得意先コード
+W_MACH-CZFBDT = W_ZN005_READ-CZFBDT.  "照合締日
+W_MACH-SEQ    = W_ZN005_READ-SEQ.     "SEQ
+W_MACH-WAERS  = W_ZN005_READ-WAERS.   "通貨
+W_MACH-KOINH  = W_BSID_READ-SGTXT.    "口座名義人
+W_MACH-WRBTR  = W_BSID_READ-WRBTR.    "貸借考慮後の金額
+APPEND W_MACH TO T_MACH.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " MACH_CHECK_SONOTA01
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_SONOTA2
+*&---------------------------------------------------------------------*
+*       その他入金実績 ループ処理 ② 実績：予定= 1:1得意先合計
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_SONOTA2.
+DATA:L_WRBTR        TYPE BSID-WRBTR.
+DATA:L_W_INDEX      TYPE SY-TABIX.
+
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING W_BSID_READ TO W_KEY.
+CLEAR:L_WRBTR.
+LOOP AT T_BSID_READ INTO W_BSID_READ.
+L_W_INDEX = SY-TABIX.
+*   初期化
+REFRESH:T_MACH.
+G_STS = 1.
+*   貸借で金額反転
+IF  W_BSID_READ-SHKZG = C_KARI."貸借がS
+W_BSID_READ-WRBTR = W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+
+*   入金予定マッチング
+PERFORM MACH_CHECK_SONOTA02.
+
+*   マッチしたデータが１件でもある場合
+IF NOT T_MACH[] IS  INITIAL.
+G_GRPNO = G_GRPNO + 1.
+*   マッチング結果をマッチング用内部テーブルに反映
+*   --入金予定
+PERFORM EDIT_MACH_ITAB_ZN005 USING W_BSID_READ-SGTXT
+TEXT-S08  "その他②
+TEXT-E09.
+*   --入金実績
+PERFORM EDIT_MACH_ITAB_BSID USING  0
+TEXT-S08 "その他②
+TEXT-E09.
+DELETE T_BSID_READ INDEX L_W_INDEX. "格納した源レコード削除
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " LOOP_BSID_SONOTA2
+*&---------------------------------------------------------------------*
+*&      Form  MACH_CHECK_SONOTA02
+*&---------------------------------------------------------------------*
+*       入金予定チェック（その他入金その２）
+*----------------------------------------------------------------------*
+FORM MACH_CHECK_SONOTA02.
+DATA:L_MACH_OK(1) TYPE C,
+L_WRBTR TYPE BSID-WRBTR.
+
+
+* 初期化
+REFRESH:T_ZN005_CHECK,T_MACH.
+
+*   入金予定 ループ処理
+LOOP AT T_ZN005_READ INTO W_ZN005_READ
+WHERE KEY_KUNNR = W_BSID_READ-KUNNR
+AND KEY_WAERS = W_BSID_READ-WAERS.
+*    集計
+L_WRBTR = L_WRBTR  + W_ZN005_READ-IWRBTR.
+*    確認用内部テーブル
+MOVE-CORRESPONDING W_ZN005_READ TO W_ZN005_CHECK.
+APPEND W_ZN005_CHECK TO T_ZN005_CHECK.
+ENDLOOP.
+
+* 得意先レベルでの集計値と、入金実績額を比較
+IF W_BSID_READ-WRBTR = L_WRBTR . "金額一致
+L_MACH_OK = C_ON.
+ENDIF.
+
+*   マッチングOKの場合
+IF L_MACH_OK = C_ON.
+LOOP AT T_ZN005_CHECK INTO W_ZN005_CHECK.
+CLEAR:W_MACH.
+*      READ TABLE T_MACH INTO W_MACH
+*             WITH KEY BUKRS  = W_ZN005_CHECK-BUKRS   "会社コード
+*                      KUNNR  = W_ZN005_CHECK-KUNNR   "得意先コード
+*                      CZFBDT = W_ZN005_CHECK-CZFBDT  "照合締日
+*                      SEQ    = W_ZN005_CHECK-SEQ.    "SEQ
+*      IF SY-SUBRC = 0.
+*        G_STS = C_ERR.
+*      ENDIF.
+W_MACH-BUKRS  = W_ZN005_CHECK-BUKRS.   "会社コード
+W_MACH-KUNNR  = W_ZN005_CHECK-KUNNR.   "得意先コード
+W_MACH-CZFBDT = W_ZN005_CHECK-CZFBDT.  "照合締日
+W_MACH-SEQ    = W_ZN005_CHECK-SEQ.     "SEQ
+W_MACH-WAERS  = W_ZN005_CHECK-WAERS.   "通貨
+*        W_MACH-KOINH  = W_BSID_READ-SGTXT.    "口座名義人
+W_MACH-WRBTR  = W_BSID_READ-WRBTR.    "貸借考慮後の金額
+APPEND W_MACH TO T_MACH.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " MACH_CHECK_SONOTA02
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_SONOTA3
+*&---------------------------------------------------------------------*
+*       その他入金実績 ループ処理 ③ 実績：予定= 1得意先:1件
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_SONOTA3.
+DATA:L_WRBTR TYPE BSID-WRBTR,
+L_W_BSID_READ TYPE TYP_BSID_READ.
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING W_BSID_READ TO W_KEY.
+CLEAR:L_WRBTR.
+REFRESH:T_BSID_CHECK.
+LOOP AT T_BSID_READ INTO L_W_BSID_READ.
+IF W_KEY-KUNNR <> L_W_BSID_READ-KUNNR
+OR W_KEY-WAERS <> L_W_BSID_READ-WAERS.   "得意先/通貨レべルで集計
+*     キーブレイク処理
+PERFORM KEY_BLAEK_TEGA01 USING L_WRBTR
+SPACE
+TEXT-S09
+TEXT-E10.
+W_KEY-KUNNR = L_W_BSID_READ-KUNNR.
+W_KEY-WAERS = L_W_BSID_READ-WAERS.
+REFRESH:T_BSID_CHECK.
+CLEAR:L_WRBTR.
+ENDIF.
+*   貸借で金額反転
+IF  L_W_BSID_READ-SHKZG = C_KARI."貸借がS
+L_W_BSID_READ-WRBTR = L_W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+W_BSID_READ = L_W_BSID_READ.
+PERFORM SET_BSID_CHECK.                  "確認用実績確保
+L_WRBTR = L_WRBTR + L_W_BSID_READ-WRBTR. "実績額集計
+ENDLOOP.
+
+* キーブレイク処理(最終レコード用)
+PERFORM KEY_BLAEK_TEGA01 USING L_WRBTR
+SPACE
+TEXT-S09
+TEXT-E10.
+REFRESH:T_BSID_CHECK.
+ENDFORM.                    " LOOP_BSID_SONOTA3
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_BSID_SONOTA4
+*&---------------------------------------------------------------------*
+*       その他入金実績 ループ処理 ④ 実績：予定= 得意先合計:得意先合計
+*----------------------------------------------------------------------*
+*  -->  T_BSID_READ      入金実績内部テーブル
+*  -->  T_ZN005_READ     読込用入金予定内部テーブル
+*  <--  T_ZN005_MACH     マッチング用入金予定内部テーブル
+*  <--  T_BSID_MACH      マッチング用入金実績内部テーブル
+*  <--  T_GRP_CONT       グループ制御内部テーブル
+*----------------------------------------------------------------------*
+FORM LOOP_BSID_SONOTA4.
+
+DATA:L_WRBTR TYPE BSID-WRBTR,
+L_W_BSID_READ TYPE TYP_BSID_READ.
+
+CHECK NOT T_BSID_READ[]  IS INITIAL.
+CHECK NOT T_ZN005_READ[] IS INITIAL.
+
+READ TABLE T_BSID_READ INTO W_BSID_READ INDEX 1.
+MOVE-CORRESPONDING W_BSID_READ TO W_KEY.
+CLEAR:L_WRBTR.
+REFRESH:T_BSID_CHECK.
+LOOP AT T_BSID_READ INTO L_W_BSID_READ.
+IF W_KEY-KUNNR <> L_W_BSID_READ-KUNNR
+OR W_KEY-WAERS <> L_W_BSID_READ-WAERS.   "得意先/通貨レべルで集計
+*     キーブレイク処理
+PERFORM KEY_BLAEK_TEGA02 USING L_WRBTR
+SPACE
+TEXT-S10  "その他④
+TEXT-E11. "ゼロ円
+W_KEY-KUNNR = L_W_BSID_READ-KUNNR.
+W_KEY-WAERS = L_W_BSID_READ-WAERS.
+REFRESH:T_BSID_CHECK.
+CLEAR:L_WRBTR.
+ENDIF.
+*   貸借で金額反転
+IF  L_W_BSID_READ-SHKZG = C_KARI."貸借がS
+L_W_BSID_READ-WRBTR = L_W_BSID_READ-WRBTR * -1. "符号反転
+ENDIF.
+W_BSID_READ = L_W_BSID_READ.
+PERFORM SET_BSID_CHECK.                  "確認用実績確保
+L_WRBTR = L_WRBTR + L_W_BSID_READ-WRBTR. "実績額集計
+ENDLOOP.
+
+* キーブレイク処理(最終レコード用)
+PERFORM KEY_BLAEK_TEGA02 USING L_WRBTR
+SPACE
+TEXT-S10  "その他④
+TEXT-E11. "ゼロ円
+REFRESH:T_BSID_CHECK.
+ENDFORM.                    " LOOP_BSID_SONOTA4
+*&---------------------------------------------------------------------*
+*&      Form  BDC_PROC
+*&---------------------------------------------------------------------*
+*       バッチインプット処理
+*----------------------------------------------------------------------*
+FORM BDC_PROC.
+CHECK P_TEST = SPACE.              "テストOFF
+CHECK NOT T_GRP_CONT[] IS INITIAL. "正常データあり
+
+CLEAR:W_NG_DBUPLOD.
+LOOP AT T_GRP_CONT INTO W_GRP_CONT.
+AT NEW GRP.
+CLEAR G_SUM_IWRBTR.
+ENDAT.
+G_SUM_IWRBTR =  G_SUM_IWRBTR + W_GRP_CONT-IWRBTR.
+AT END OF GRP.
+IF W_NG_DBUPLOD IS INITIAL.
+PERFORM INIT_BDC.        "バッチインプット項目初期化
+PERFORM BDC_SET_JISSEKI. "入金実績データ セット
+PERFORM BDC_SET_YOTEI.   "入金予定データ セット
+PERFORM BDC_SET_SONOTA.  "その他の項目セット
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+* テーブル更新エラーが発生した場合、そこより後ろは強制破棄
+IF NOT W_NG_DBUPLOD IS INITIAL.
+DELETE T_BSID_MACH WHERE GRP >= W_GRP_CONT-GRP.
+DELETE T_ZN005_MACH WHERE GRP >= W_GRP_CONT-GRP.
+ENDIF.
+
+ENDFORM.                    " BDC_PROC
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_ZN005_END
+*&---------------------------------------------------------------------*
+*       入金予定 相手なしデータ
+*----------------------------------------------------------------------*
+FORM LOOP_ZN005_END.
+G_STS = C_ERR. "全件エラー
+LOOP AT T_ZN005_READ INTO W_ZN005_READ.
+CLEAR:W_ZN005_MACH.
+G_GRPNO = G_GRPNO + 1.
+MOVE-CORRESPONDING W_ZN005_READ TO W_ZN005_MACH.
+W_ZN005_MACH-GRP        = G_GRPNO.                "グループ番号
+W_ZN005_MACH-KEY_CZFBDT = W_ZN005_READ-CZFBDT.    "照合締日
+W_ZN005_MACH-KEY_KUNNR  = W_ZN005_READ-KUNNR.     "得意先
+W_ZN005_MACH-KEY_WAERS  = W_ZN005_READ-WAERS.     "通貨
+W_ZN005_MACH-KEY_SEQ    = W_ZN005_READ-SEQ.       "SEQ
+W_ZN005_MACH-STS        = G_STS.                  "処理STS
+W_ZN005_MACH-KEKA       = TEXT-E03.                "処理結果(E
+*2012/05/21 ADD START "マッチしなかった入金予定に口座名義人出力
+CLEAR: W_KNBK.
+W_ZN005_MACH-KOINH  = '候補なし'.
+LOOP AT T_KNBK INTO  W_KNBK
+WHERE KUNNR   = W_ZN005_READ-KUNNR.
+CLEAR:W_BSID_MACH.
+READ TABLE T_BSID_MACH INTO     W_BSID_MACH
+WITH KEY KOINH =  W_KNBK-KOINH
+KEKA  =  TEXT-E03.   "ヒットなし
+IF ( SY-SUBRC  = 0 ).
+W_ZN005_MACH-KOINH      = W_KNBK-KOINH.
+EXIT.  "入金実績がヒットしたところで終了
+*      ELSE.
+*       W_ZN005_MACH-KOINH      = W_KNBK-KOINH.
+ENDIF.
+ENDLOOP.
+*2012/05/21 ADD END
+
+INSERT W_ZN005_MACH  INTO TABLE T_ZN005_MACH.
+ENDLOOP.
+
+* 読み込んだ入金実績を全開放
+FREE T_ZN005_READ.
+
+ENDFORM.                    " LOOP_ZN005_END
+*&---------------------------------------------------------------------*
+*&      Form  INIT_BDC
+*&---------------------------------------------------------------------*
+*       バッチインプット項目初期化
+*----------------------------------------------------------------------*
+FORM INIT_BDC.
+* 処理モード設定
+W_TYPE = '1'.           "自動消し込み
+
+* 内部テーブル初期化
+REFRESH:T_NYUKIN,       "入金データ用
+T_TARGET_ZN005,
+T_RETURN .
+
+* 変数初期化
+CLEAR:
+G_SUM_JISSEKI,
+*  ＜差額用＞
+W_HKONTA,"(2雑収入勘定)
+W_MWSKZA,"(税コード(雑収入勘定))
+W_HKONTB,"（雑損失勘定）
+W_MWSKZB,"（税コード(雑損失勘定)）
+W_KOSTL,"（原価センタ）
+*  <振込手数料>
+G_SAKNR_1,"(勘定コード)
+G_WRBTR_1,"(金額)
+G_SHKZG_1,"(貸借フラグ)
+G_MWSKZ_1,"(税コード)
+G_KOSTL_1,"(原価センタ)
+*<手形通信費>
+G_SAKNR_2,"(勘定コード)
+G_WRBTR_2,"(金額)
+G_SHKZG_2,"(貸借フラグ)
+G_MWSKZ_2,"(税コード)
+G_KOSTL_2,"(原価センタ)
+*<その他の変数>
+W_YEAR,"(会計年度)
+W_PERIOD,"(会計期間)
+W_ERR_FLG,"(エラーフラグ)
+W_BLART,"(伝票タイプ)
+W_BLDAT,"(伝票日付)
+W_BUDAT,"(転記日)
+G_BUDAT,"(転記日)
+W_TXT,"伝票ヘッダTXT)
+G_BUKRS,
+G_WAERS.
+
+ENDFORM.                    " INIT_BDC
+*&---------------------------------------------------------------------*
+*&      Form  BDC_SET_JISSEKI
+*&---------------------------------------------------------------------*
+*       BDC用項目セット 入金実績
+*----------------------------------------------------------------------*
+FORM BDC_SET_JISSEKI.
+LOOP AT T_BSID_MACH INTO W_BSID_MACH
+WHERE GRP = W_GRP_CONT-GRP.
+CLEAR:W_NYUKIN.
+IF W_BSID_MACH-ZNTCH <> 0.
+G_WRBTR_2 = G_WRBTR_2 + W_BSID_MACH-ZNTCH. "手形通信費集計
+ELSEIF W_BSID_MACH-WRBTR <> 0.
+W_NYUKIN-CEL      = C_ON."(行選択ボタン)
+*      W_NYUKIN-DAY     = セットなし."(入金日)
+W_NYUKIN-KINGAKU  = W_BSID_MACH-WRBTR."(入金金額)
+W_NYUKIN-KUNNR    = W_BSID_MACH-KUNNR."(得意先コード)
+W_NYUKIN-BELNR    = W_BSID_MACH-BELNR."(会計伝票番号)
+W_NYUKIN-SGTXT    = W_BSID_MACH-SGTXT."(明細テキスト)
+W_NYUKIN-GJAHR    = W_BSID_MACH-GJAHR."(会計年度)
+W_NYUKIN-BUZEI    = W_BSID_MACH-BUZEI."(明細番号)
+APPEND W_NYUKIN TO T_NYUKIN.
+G_SUM_JISSEKI = G_SUM_JISSEKI + W_NYUKIN-KINGAKU.
+ENDIF.
+IF G_BUDAT < W_BSID_MACH-BUDAT. "グループ内で最大の転記日取得
+G_BUDAT = W_BSID_MACH-BUDAT.
+ENDIF.
+ENDLOOP.
+G_WAERS   = W_BSID_MACH-WAERS."通貨コード
+
+ENDFORM.                    " BDC_SET_JISSEKI
+*&---------------------------------------------------------------------*
+*&      Form  BDC_SET_YOTEI
+*&---------------------------------------------------------------------*
+*       BDC用項目セット 入金予定
+*----------------------------------------------------------------------*
+FORM BDC_SET_YOTEI.
+DATA:L_W_ZN005 TYPE ZN005.
+LOOP AT T_ZN005_MACH INTO W_ZN005_MACH
+WHERE GRP = W_GRP_CONT-GRP.
+CLEAR:L_W_ZN005.
+MOVE-CORRESPONDING W_ZN005_MACH TO L_W_ZN005.
+APPEND L_W_ZN005 TO T_TARGET_ZN005.
+ENDLOOP.
+ENDFORM.                    " BDC_SET_YOTEI
+*&---------------------------------------------------------------------*
+*&      Form  BDC_SET_SONOTA
+*&---------------------------------------------------------------------*
+*       BDC用項目セット その他
+*----------------------------------------------------------------------*
+FORM BDC_SET_SONOTA.
+DATA:L_KEKKA(100) TYPE C,
+LW_MONAT  TYPE FRPER.    "会計期間(属性変更)
+DATA:L_WRBTR TYPE BSID-WRBTR,
+L_KIKAN TYPE BAPI0002_4-FISCAL_PERIOD.
+
+CHECK NOT  T_NYUKIN[] IS INITIAL.
+CHECK NOT  T_TARGET_ZN005[] IS INITIAL.
+
+*＜差額用＞	
+W_HKONTA = P_HKONT3. "雑収入勘定
+W_MWSKZA = P_MWSKZ3. "税コード(雑収入勘定)
+W_HKONTB = P_HKONT4. "雑損失勘定
+W_MWSKZB = P_MWSKZ4. "税コード(雑損失勘定)
+W_KOSTL  = P_KOSTL.  "原価センタ
+*<振込手数料>	
+G_SUM_JISSEKI = G_SUM_JISSEKI + G_WRBTR_2."手形手数料合算
+IF G_SUM_JISSEKI > G_SUM_IWRBTR.
+G_WRBTR_1 = G_SUM_JISSEKI - G_SUM_IWRBTR."金額
+G_SHKZG_1 = C_KASI."貸借フラグ H
+ELSEIF G_SUM_JISSEKI < G_SUM_IWRBTR.
+G_WRBTR_1 = G_SUM_IWRBTR - G_SUM_JISSEKI."金額
+G_SHKZG_1 = C_KARI."貸借フラグS
+ENDIF.
+
+IF NOT G_SHKZG_1 IS INITIAL.
+G_SAKNR_1 = P_HKONT1."勘定コード
+G_MWSKZ_1 = P_MWSKZ1."税コード
+G_KOSTL_1 = P_KOSTL1."原価センタ
+ENDIF.
+
+*<手形通信費>
+IF NOT G_WRBTR_2 IS INITIAL.
+G_SAKNR_2 = P_HKONT2. "勘定コード
+*    G_WRBTR_2 = ."金額
+G_SHKZG_2 = C_KARI.   "貸借フラグS
+G_MWSKZ_2 = P_MWSKZ2. "税コード
+G_KOSTL_2 = P_KOSTL2. "原価センタ
+ENDIF.
+
+*<その他の変数>	
+W_BUDAT   = G_BUDAT."転記日
+CLEAR:L_KIKAN.
+CALL FUNCTION 'BAPI_COMPANYCODE_GET_PERIOD'
+EXPORTING
+COMPANYCODEID       = P_BUKRS
+POSTING_DATE        = G_BUDAT
+IMPORTING
+FISCAL_YEAR         = W_YEAR "会計年度
+FISCAL_PERIOD       = L_KIKAN.
+
+W_PERIOD  = L_KIKAN.            "会計期間
+*  W_ERR_FLG = ."エラーフラグ
+W_BLART   = P_BLART.            "伝票タイプ
+*20120/06/06 MOD START  "伝票日付=転記日付
+W_BLDAT   = G_BUDAT.            "伝票日付=転記日付
+*  W_BLDAT   = SY-DATUM.           "伝票日付
+*2012/06/06 MOD END
+W_TXT     = P_TXT.              "伝票ヘッダTXT
+G_BUKRS   = P_BUKRS.            "会社コード
+
+LW_MONAT = W_PERIOD.
+
+*  会計期間オープンチェック
+CALL FUNCTION 'FI_PERIOD_CHECK'
+EXPORTING
+I_BUKRS                = P_BUKRS
+I_GJAHR                = W_YEAR
+I_KOART                = 'D'
+I_MONAT                = LW_MONAT
+EXCEPTIONS
+ERROR_PERIOD           = 1
+ERROR_PERIOD_ACC       = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE E201(F5) WITH  W_YEAR LW_MONAT
+INTO L_KEKKA.
+ENDIF.
+
+IF L_KEKKA IS INITIAL.
+REFRESH T_RETURN.
+PERFORM CLEAR_DOCUMENT.  "BDC実行
+ENDIF.
+
+* テーブル更新エラー確認
+IF NOT W_NG_DBUPLOD IS INITIAL.
+MESSAGE E936 WITH W_BELNR INTO L_KEKKA.
+*   入金実績に反映
+CLEAR:W_BSID_MACH.
+W_BSID_MACH-KEKA = L_KEKKA.
+W_BSID_MACH-STS  = C_ERR.
+MODIFY T_BSID_MACH FROM W_BSID_MACH TRANSPORTING STS KEKA
+WHERE GRP = W_GRP_CONT-GRP.
+
+*   入金予定に反映
+CLEAR:W_ZN005_MACH.
+W_ZN005_MACH-KEKA = L_KEKKA.
+W_ZN005_MACH-STS  = C_ERR.
+MODIFY T_ZN005_MACH FROM W_ZN005_MACH TRANSPORTING STS KEKA
+WHERE GRP = W_GRP_CONT-GRP.
+EXIT.
+ENDIF.
+
+* BDCエラー確認
+CHECK W_BELNR IS INITIAL. "決済伝票が取れなかったときのみ
+CLEAR:W_RETURN.
+
+IF NOT T_RETURN[] IS INITIAL.
+READ TABLE T_RETURN INTO W_RETURN
+WITH KEY MSGTYP = 'A'.
+IF SY-SUBRC <> 0.
+READ TABLE T_RETURN INTO W_RETURN
+WITH KEY MSGTYP = C_ERR.
+IF SY-SUBRC <> 0.
+LOOP AT T_RETURN INTO W_RETURN
+WHERE MSGTYP = 'S'.         "S最後
+ENDLOOP.
+ENDIF.
+ENDIF.
+
+IF W_RETURN IS INITIAL.
+*     '消込エラーが発生しました'
+MESSAGE E999(YN01) WITH TEXT-E13 INTO L_KEKKA.
+ELSE.
+MESSAGE ID     W_RETURN-MSGID
+TYPE   'E'
+NUMBER W_RETURN-MSGNR
+WITH   W_RETURN-MSGV1
+W_RETURN-MSGV2
+W_RETURN-MSGV3
+W_RETURN-MSGV4
+INTO   L_KEKKA.
+ENDIF.
+ENDIF.
+
+* 入金実績に反映
+CLEAR:W_BSID_MACH.
+W_BSID_MACH-KEKA = L_KEKKA.
+W_BSID_MACH-STS  = C_ERR.
+MODIFY T_BSID_MACH FROM W_BSID_MACH TRANSPORTING STS KEKA
+WHERE GRP = W_GRP_CONT-GRP.
+
+* 入金予定に反映
+CLEAR:W_ZN005_MACH.
+W_ZN005_MACH-KEKA = L_KEKKA.
+W_ZN005_MACH-STS  = C_ERR.
+MODIFY T_ZN005_MACH FROM W_ZN005_MACH TRANSPORTING STS KEKA
+WHERE GRP = W_GRP_CONT-GRP.
+
+ENDFORM.                    " BDC_SET_SONOTA
+
+*&---------------------------------------------------------------------*
+*&      Form  ALV_PROC
+*&---------------------------------------------------------------------*
+*       ALV処理
+*----------------------------------------------------------------------*
+FORM ALV_PROC.
+*★★★★★★↓↓ALV一覧時にコピー↓↓★★★★★★
+* データ取得部
+PERFORM MAKE_ALV_DATA.
+
+* ALVリスト出力
+PERFORM OUTPUT_ALV.
+*★★★★★★↑↑ALV一覧時にコピー↑↑★★★★★★
+
+ENDFORM.                    " ALV_PROC
+*★★★★★★↓↓ALV一覧時にコピー↓↓★★★★★★
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       ALVリスト出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_ALV.
+
+* 項目属性編集
+PERFORM ALV_SET_FIELDCAT.
+* その他編集
+PERFORM ALV_LAYOUT.
+* ALV一覧出力
+PERFORM ALV_CALL.
+
+ENDFORM.                    " OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  HEADER_WRITE
+*&---------------------------------------------------------------------*
+*       ALVヘッダ編集
+*----------------------------------------------------------------------*
+FORM HEADER_WRITE.
+
+DATA:LW_KEY      TYPE SLIS_LISTHEADER-KEY,
+LW_INFO     TYPE SLIS_LISTHEADER-INFO,
+LW_PAGNO(4) TYPE C.
+
+* ヘッダに出力させたい文言を設定
+* 見出し
+PERFORM SET_HEADER USING 'H' '入金自動消込エラーリスト' SPACE.
+
+*--- ページ
+CLEAR: LW_INFO,
+LW_KEY,
+LW_PAGNO.
+
+LW_PAGNO = SY-PAGNO.
+CONDENSE LW_PAGNO.
+CONCATENATE 'ページ　：'
+LW_PAGNO
+INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- 処理日付
+CLEAR LW_KEY.
+CONCATENATE '処理日付：'
+SY-DATUM+0(4) '/'
+SY-DATUM+4(2) '/'
+SY-DATUM+6(2)
+INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- 処理時刻
+CLEAR LW_KEY.
+CONCATENATE '処理時刻：'
+SY-UZEIT+0(2) ':'
+SY-UZEIT+2(2) ':'
+SY-UZEIT+4(2)
+INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- ユーザID
+CLEAR LW_KEY.
+CONCATENATE 'ユーザID：' SY-UNAME INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- 入金日(選択画面の画面表示されているデータをヘッダに出力)
+CLEAR:LW_INFO,LW_KEY.
+
+WRITE P_DAY TO LW_INFO.
+CONCATENATE TEXT-014 LW_INFO INTO LW_INFO.
+PERFORM SET_HEADER USING 'S' LW_INFO '<<実行条件>>'.
+
+* テスト実行
+IF P_TEST = C_ON.
+LW_INFO = TEXT-015.
+PERFORM SET_HEADER USING 'S' LW_INFO SPACE.
+ENDIF.
+
+*--- 消込件数
+WRITE W_CNT-OK TO LW_INFO.
+CONDENSE LW_INFO NO-GAPS.
+IF P_TEST = C_ON.
+CONCATENATE TEXT-016 LW_INFO INTO LW_INFO.
+ELSE.
+CONCATENATE TEXT-017 LW_INFO INTO LW_INFO.
+ENDIF.
+PERFORM SET_HEADER USING 'S' LW_INFO '<<実行結果>>'.
+CLEAR:LW_INFO,LW_KEY.
+
+
+*--- エラー件数
+WRITE W_CNT-ERR TO LW_INFO.
+CONDENSE LW_INFO NO-GAPS.
+CONCATENATE TEXT-018 LW_INFO INTO LW_INFO.
+PERFORM SET_HEADER USING 'S' LW_INFO SPACE.
+CLEAR:LW_INFO,LW_KEY.
+
+* ヘッダ出力
+CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+EXPORTING
+IT_LIST_COMMENTARY       = T_HEAD.
+
+CLEAR:T_HEAD.
+
+ENDFORM.                    " HEADER_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  SET_HEADER
+*&---------------------------------------------------------------------*
+*       ヘッダ編集
+*----------------------------------------------------------------------*
+*      -->L_TYP    タイプ
+*      -->L_INFO   編集内容2
+*      -->L_KEY    編集内容1
+*----------------------------------------------------------------------*
+FORM SET_HEADER  USING     L_TYP   TYPE SLIS_LISTHEADER-TYP
+L_INFO  TYPE SLIS_LISTHEADER-INFO
+L_KEY   TYPE SLIS_LISTHEADER-KEY.
+CLEAR W_HEAD.
+W_HEAD-TYP  = L_TYP.
+W_HEAD-INFO = L_INFO.
+W_HEAD-KEY = L_KEY.
+APPEND W_HEAD TO T_HEAD.
+
+ENDFORM.                    " SET_HEADER
+
+*&---------------------------------------------------------------------*
+*&      Form  ALV_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       項目属性編集
+*----------------------------------------------------------------------*
+FORM ALV_SET_FIELDCAT.
+DATA:L_COL   TYPE I.             "カラム位置
+* PGID退避
+G_PGID = SY-REPID.
+
+* その他変更する内容がある場合はこのサブルーチンを設定
+***設定必要項目***
+*カラム位置　　　　　必須　　　　　COL　　　　　FOMR上でカウント
+*項目ID　　　　　　　必須　　　　　FIELDNAME　　現状のまま
+*項目テキスト（短）　必須　　　　　FIELDTEXT_S　新規
+*項目テキスト（中）　必須　　　　　FIELDTEXT_M　新規
+*項目テキスト（長）　必須　　　　　FIELDTEXT_L　現状のまま
+*データ長　　　　　　金額項目必須　INTLEN　　　 現状のまま
+*出力データ長　　　　必須　　　　　OUTPUTLEN　　ドメイン　　　　　
+*データ型　　　　　　必須　　　　　DATATYPE　　 ドメイン　
+*数値のデータ型　　　金額項目必須　INTTYPE 　　 現状のまま　
+*通貨参照項目　　　　金額項目必須　CFIELDNAM　　現状のまま
+
+*カラム位置　初期化
+L_COL = 0.
+
+*カタログ作成
+* アイコン
+PERFORM SET_FIELDCAT   USING 'ICON'        "項目ID
+''            "項目テキストS
+''            "項目テキストM
+''            "項目テキストL
+4            "出力データ長(カンマ含む)
+'ICON'        "データ型
+SPACE        "数値のデータ型
+4            "データ長
+SPACE        "通貨参照項目
+CHANGING L_COL.       "カラム位置
+* グループ番号
+PERFORM SET_FIELDCAT   USING 'GRP'         "項目ID
+'グループ'    "項目テキストS
+'グループ'    "項目テキストM
+'グループ'    "項目テキストL
+6            "出力データ長(カンマ含む)
+'NUMC'        "データ型
+SPACE        "数値のデータ型
+6            "データ長
+SPACE        "通貨参照項目
+CHANGING L_COL.       "カラム位置
+
+* 会社コード
+PERFORM SET_FIELDCAT   USING 'BUKRS'         "項目ID
+'会社コード'    "項目テキストS
+'会社コード'    "項目テキストM
+'会社コード'    "項目テキストL
+4              "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+4              "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 得意先コード
+PERFORM SET_FIELDCAT   USING 'KUNNR'         "項目ID
+'得意先'        "項目テキストS
+'得意先'        "項目テキストM
+'得意先コード'  "項目テキストL
+10             "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+10             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 得意先名称
+PERFORM SET_FIELDCAT   USING 'NAME1'         "項目ID
+'得意先名称'    "項目テキストS
+'得意先名称'    "項目テキストM
+'得意先名称'    "項目テキストL
+35             "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+35             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 区分
+PERFORM SET_FIELDCAT   USING 'KUBUN'         "項目ID
+'区分'          "項目テキストS
+'区分'          "項目テキストM
+'区分'          "項目テキストL
+4              "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+2             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 区分名
+PERFORM SET_FIELDCAT   USING 'KUBUN_MEI'     "項目ID
+'区分名'        "項目テキストS
+'区分名'        "項目テキストM
+'区分名'        "項目テキストL
+6              "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+6             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 入金日
+PERFORM SET_FIELDCAT   USING 'BUDAT'         "項目ID
+'入金日'        "項目テキストS
+'入金日'        "項目テキストM
+'入金日'        "項目テキストL
+10             "出力データ長(カンマ含む)
+'DATS'          "データ型
+SPACE          "数値のデータ型
+8             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+* 通貨コード
+PERFORM SET_FIELDCAT    USING 'WAERS'      "項目ID
+'通貨'       "項目テキストS
+'通貨CD'     "項目テキストM
+'通貨コード' "項目テキストL
+5            "出力データ長(カンマ含む)
+'CUKY'       "データ型
+SPACE        "数値のデータ型
+5            "数値データ長
+SPACE        "通貨参照項目
+CHANGING L_COL.       "カラム位置
+* 金額
+PERFORM SET_FIELDCAT    USING 'WRBTR'    "項目ID
+'金額'       "項目テキストS
+'金額'       "項目テキストM
+'金額'       "項目テキストL
+16           "出力データ長(カンマ含む)
+'CURR'       "データ型
+'P'          "数値のデータ型
+13           "数値データ長
+'WAERS'      "通貨参照項目
+CHANGING L_COL.       "カラム位置
+
+* 口座名義人
+PERFORM SET_FIELDCAT   USING 'KOINH'         "項目ID
+'口座名義人'    "項目テキストS
+'口座名義人'    "項目テキストM
+'口座名義人'    "項目テキストL
+50             "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+50             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 明細テキスト
+PERFORM SET_FIELDCAT   USING 'SGTXT'         "項目ID
+'明細TXT'       "項目テキストS
+'明細テキスト'  "項目テキストM
+'明細テキスト'  "項目テキストL
+50             "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+50             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 入金方法
+PERFORM SET_FIELDCAT   USING 'HOHO'         "項目ID
+'入金方法'       "項目テキストS
+'入金方法'  "項目テキストM
+'入金方法'  "項目テキストL
+10             "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+10             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+* 会計伝票
+PERFORM SET_FIELDCAT   USING 'BELNR'         "項目ID
+'会計伝票'       "項目テキストS
+'会計伝票'  "項目テキストM
+'会計伝票'  "項目テキストL
+10             "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+10             "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 会計年度
+PERFORM SET_FIELDCAT   USING 'GJAHR'         "項目ID
+'会計年度'      "項目テキストS
+'会計年度'      "項目テキストM
+'会計年度'      "項目テキストL
+4              "出力データ長(カンマ含む)
+'NUMC'          "データ型
+SPACE          "数値のデータ型
+4              "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 明細番号
+PERFORM SET_FIELDCAT   USING 'BUZEI'         "項目ID
+'明細番号'      "項目テキストS
+'明細番号'      "項目テキストM
+'明細番号'      "項目テキストL
+3              "出力データ長(カンマ含む)
+'NUMC'          "データ型
+SPACE          "数値のデータ型
+3              "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+* 処理結果
+PERFORM SET_FIELDCAT   USING 'KEKKA'         "項目ID
+'処理結果'      "項目テキストS
+'処理結果'      "項目テキストM
+'処理結果'      "項目テキストL
+100            "出力データ長(カンマ含む)
+'CHAR'          "データ型
+SPACE          "数値のデータ型
+100            "データ長
+SPACE          "通貨参照項目
+CHANGING L_COL.         "カラム位置
+
+
+ENDFORM.                    " ALV_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       FIELD CATALOGの編集
+*----------------------------------------------------------------------*
+*      -->P_FIELDNAME     項目ID
+*      -->P_FIELDTEXT_L    項目テキスト(見出し)
+*      -->P_FIELDTEXT_M    項目テキスト(見出し)
+*      -->P_FIELDTEXT_S    項目テキスト(見出し)
+*      -->P_CURR_FLG      金額項目フラグ('X'->金額、SPACE->金額以外)
+*      -->P_INTLEN        金額項目の桁数(数値のみ)
+*      -->P_OUTPUTLEN     金額項目の出力桁数(カンマ、小数点、符号含む)
+*      -->P_CFIELD        金額項目の場合参照する通貨項目名
+*      <--P_COL           項目のカラム位置
+*----------------------------------------------------------------------*
+FORM SET_FIELDCAT USING P_FIELDNAME   TYPE SLIS_FIELDCAT_ALV-FIELDNAME
+P_SELTEXT_S TYPE SLIS_FIELDCAT_ALV-SELTEXT_S
+P_SELTEXT_M TYPE SLIS_FIELDCAT_ALV-SELTEXT_M
+P_SELTEXT_L TYPE SLIS_FIELDCAT_ALV-SELTEXT_L
+P_OUTPUTLEN   TYPE SLIS_FIELDCAT_ALV-OUTPUTLEN
+P_DATATYPE    TYPE SLIS_FIELDCAT_ALV-DATATYPE
+P_INTTYPE     TYPE SLIS_FIELDCAT_ALV-INTTYPE
+P_INTLEN      TYPE SLIS_FIELDCAT_ALV-INTLEN
+P_CFIELDNAME  TYPE SLIS_FIELDCAT_ALV-CFIELDNAME
+CHANGING P_COL         TYPE I.
+
+DATA:W_FIELDCAT TYPE SLIS_FIELDCAT_ALV.
+
+
+* カラム位置設定
+P_COL = P_COL + 1.
+
+* 見出し設定
+W_FIELDCAT-COL_POS    = P_COL.             "カラム位置
+W_FIELDCAT-FIELDNAME  = P_FIELDNAME.       "項目ID
+W_FIELDCAT-SELTEXT_S  = P_SELTEXT_S.       "項目テキスト(短)
+W_FIELDCAT-SELTEXT_M  = P_SELTEXT_M.       "項目テキスト(中)
+W_FIELDCAT-SELTEXT_L  = P_SELTEXT_L.       "項目テキスト(長)
+W_FIELDCAT-OUTPUTLEN  = P_OUTPUTLEN.       "出力データ長
+W_FIELDCAT-DATATYPE   = P_DATATYPE.        "データ型
+W_FIELDCAT-INTTYPE    = P_INTTYPE.         "数値のデータ型
+W_FIELDCAT-INTLEN     = P_INTLEN.          "データ長
+W_FIELDCAT-CFIELDNAME = P_CFIELDNAME.      "参照通貨
+
+
+
+APPEND W_FIELDCAT TO T_FIELDCAT.
+
+ENDFORM.                    " SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*       その他編集
+*----------------------------------------------------------------------*
+FORM ALV_LAYOUT.
+
+* プログラムID取得
+W_REPID = SY-REPID.
+* レイアウト設定
+W_LAYOUT-COLWIDTH_OPTIMIZE    = 'X'.   "ALV コントロール: 列幅の最適化
+W_LAYOUT-DETAIL_INITIAL_LINES = 'X'.
+W_LAYOUT-ZEBRA                = 'X'.
+
+W_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+
+* バリアント
+IF NOT P_VARI IS INITIAL.
+W_EDISVARIANT-REPORT  = G_PGID.
+W_EDISVARIANT-VARIANT = P_VARI.
+ENDIF.
+
+* ALV印刷時用 設定項目
+W_PRINT-NO_PRINT_LISTINFOS = 'X'.
+
+* 印刷プレビュー設定
+W_SETTINGS-NO_COLWOPT = C_ON.  "自動最適化禁止
+
+* 処理イベントの取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE           = 0
+IMPORTING
+ET_EVENTS             = T_EVENT.
+
+* イベント時にコールされるFORM名を設定
+CLEAR W_EVENT.
+READ TABLE T_EVENT INTO W_EVENT WITH KEY NAME = 'TOP_OF_PAGE'.
+IF SY-SUBRC = 0.
+W_EVENT-FORM = 'HEADER_WRITE'.
+MODIFY T_EVENT INDEX SY-TABIX FROM W_EVENT.
+ENDIF.
+
+ENDFORM.                    " ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_CALL
+*&---------------------------------------------------------------------*
+*       ALV一覧出力
+*----------------------------------------------------------------------*
+FORM ALV_CALL.
+
+* ロック解除
+CALL FUNCTION 'DEQUEUE_ALL'.
+
+* ALV出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM      = W_REPID     "プログラム名
+I_GRID_SETTINGS         = W_SETTINGS  "グリッド設定
+IS_LAYOUT               = W_LAYOUT    "レイアウト定義
+IS_PRINT                = W_PRINT
+IT_FIELDCAT             = T_FIELDCAT  "構造定義
+I_DEFAULT               = 'X'
+I_SAVE                  = 'A'
+IS_VARIANT              = W_EDISVARIANT
+IT_EVENTS               = T_EVENT
+TABLES
+T_OUTTAB                = T_OUTPUT     "出力データ
+EXCEPTIONS
+PROGRAM_ERROR           = 1
+OTHERS                  = 2.
+
+IF SY-SUBRC <> 0.
+*2012/10/19 MOD START
+MESSAGE S000 WITH 'システムエラーが発生しました'.
+*    MESSAGE S400 WITH 'システムエラーが発生しました'.
+*2012/10/19 MOD END
+STOP.
+ENDIF.
+
+ENDFORM.                    " ALV_CALL
+*★★★★★★↑↑ALV一覧時にコピー↑↑★★★★★★
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_ALV_DATA
+*&---------------------------------------------------------------------*
+*       ALV出力用データ作成
+*----------------------------------------------------------------------*
+FORM MAKE_ALV_DATA.
+CLEAR:G_STS.
+G_STS = C_ERR. "エラーのみ
+REFRESH:T_OUTPUT.
+
+* 入金実績データのALVセット
+PERFORM  SET_ALV_JISSEKI.
+
+* 入金予定データのALVセット
+PERFORM  SET_ALV_YOTEI.
+
+SORT T_OUTPUT BY GRP KUBUN KUNNR.
+
+ENDFORM.                    " MAKE_ALV_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_JISSEKI
+*&---------------------------------------------------------------------*
+*       入金実績データのALVセット
+*----------------------------------------------------------------------*
+FORM SET_ALV_JISSEKI.
+*  IF NOT G_STS IS INITIAL. "ステータス指定あり
+*    IF G_STS = C_ERR.    "エラーのみ
+*      DELETE T_BSID_MACH WHERE STS = C_OK.
+*    ELSEIF G_STS = C_OK. "OKのみ
+*      DELETE T_BSID_MACH WHERE STS = C_ERR.
+*    ENDIF.
+*  ENDIF.
+LOOP AT  T_BSID_MACH INTO W_BSID_MACH.
+CLEAR: W_OUTPUT.
+W_OUTPUT-GRP        = W_BSID_MACH-GRP.  "グループ番号
+W_OUTPUT-BUKRS      = W_BSID_MACH-BUKRS."会社コード
+W_OUTPUT-KUNNR      = W_BSID_MACH-KUNNR."得意先コード
+SELECT SINGLE NAME1 INTO W_OUTPUT-NAME1 FROM KNA1
+WHERE KUNNR = W_BSID_MACH-KUNNR.
+W_OUTPUT-KUBUN      = '02'.             "区分(実績)
+W_OUTPUT-BUDAT      = W_BSID_MACH-BUDAT."入金日
+W_OUTPUT-WAERS      = W_BSID_MACH-WAERS."通貨コード
+W_OUTPUT-SGTXT      = W_BSID_MACH-SGTXT.  "明細テキスト
+W_OUTPUT-BELNR      = W_BSID_MACH-BELNR.  "会計伝票
+W_OUTPUT-GJAHR      = W_BSID_MACH-GJAHR.  "会計伝票
+W_OUTPUT-BUZEI      = W_BSID_MACH-BUZEI.  "会計明細
+W_OUTPUT-KEKKA      = W_BSID_MACH-KEKA.   "処理結果
+*    W_OUTPUT-HOHO       = W_BSID_MACH-   "入金方法
+IF W_BSID_MACH-BLART IN S_BLA_1.
+W_OUTPUT-HOHO   = TEXT-003.           "振込(FB)
+W_OUTPUT-KOINH  = W_BSID_MACH-KOINH.  "口座名義人
+ELSEIF W_BSID_MACH-BLART IN S_BLA_2.
+W_OUTPUT-HOHO = TEXT-004.          "振込(FB外)
+ELSEIF W_BSID_MACH-BLART IN S_BLA_3.
+W_OUTPUT-HOHO = TEXT-005.          "手形
+ELSEIF W_BSID_MACH-BLART IN S_BLA_4.
+W_OUTPUT-HOHO = TEXT-006.          "その他
+ENDIF.
+* 手形通信費コントロール(非表示でOK)
+IF W_BSID_MACH-ZNTCH = 0.
+W_OUTPUT-KUBUN_MEI  = TEXT-011.  "区分名(実績)
+W_OUTPUT-WRBTR      = W_BSID_MACH-WRBTR."金額
+ELSE.
+CONTINUE.
+*     W_OUTPUT-HOHO       = TEXT-005.  "手形
+*     W_OUTPUT-KUBUN_MEI  = TEXT-012.  "区分名(通信費)
+*     W_OUTPUT-WRBTR      = W_BSID_MACH-ZNTCH."手形通信費
+*     CLEAR:W_OUTPUT-BUDAT,
+*           W_OUTPUT-BUZEI,W_OUTPUT-BELNR,W_OUTPUT-GJAHR.
+ENDIF.
+
+* ALV出力コントロール
+*2012/06/13 MOD START
+IF W_BSID_MACH-STS = C_OK. "OK
+W_CNT-OK = W_CNT-OK + 1.
+WRITE ICON_GREEN_LIGHT AS ICON TO W_OUTPUT-ICON. "青信号
+ELSE.
+W_CNT-ERR = W_CNT-ERR + 1.
+WRITE ICON_RED_LIGHT AS ICON TO W_OUTPUT-ICON. "赤信号
+ENDIF.
+
+*    IF W_BSID_MACH-STS = C_OK.
+*      W_CNT-OK = W_CNT-OK + 1.
+*      IF G_STS = C_ERR. "エラーのみ表示
+*        CONTINUE.
+*      ENDIF.
+*    ELSE.
+*      W_CNT-ERR = W_CNT-ERR + 1.
+*      IF G_STS = C_OK.
+*        CONTINUE.
+*      ENDIF.
+*    ENDIF.
+*    WRITE ICON_RED_LIGHT AS ICON TO W_OUTPUT-ICON.
+
+*2012/06/13 MOD END
+
+IF W_OUTPUT-KEKKA = TEXT-E03."マッチング相手なし
+WRITE ICON_YELLOW_LIGHT AS ICON TO W_OUTPUT-ICON. "黄信号
+ENDIF.
+APPEND W_OUTPUT TO T_OUTPUT.
+ENDLOOP.
+ENDFORM.                    " SET_ALV_JISSEKI
+*&---------------------------------------------------------------------*
+*&      Form  SET_ALV_YOTEI
+*&---------------------------------------------------------------------*
+*       入金実績データのALVセット
+*----------------------------------------------------------------------*
+FORM SET_ALV_YOTEI.
+
+LOOP AT  T_ZN005_MACH INTO W_ZN005_MACH.
+CLEAR: W_OUTPUT.
+W_OUTPUT-GRP        = W_ZN005_MACH-GRP.  "グループ番号
+W_OUTPUT-BUKRS      = W_ZN005_MACH-BUKRS."会社コード
+W_OUTPUT-KUNNR      = W_ZN005_MACH-KUNNR."得意先コード
+SELECT SINGLE NAME1 INTO W_OUTPUT-NAME1 FROM KNA1
+WHERE KUNNR = W_ZN005_MACH-KUNNR.
+W_OUTPUT-KUBUN      = '01'.             "区分(予定)
+W_OUTPUT-BUDAT      = W_ZN005_MACH-IZFBDT."入金日
+W_OUTPUT-WAERS      = W_ZN005_MACH-WAERS. "通貨コード
+W_OUTPUT-KUBUN_MEI  = TEXT-013.           "区分名(実績)
+W_OUTPUT-WRBTR      = W_ZN005_MACH-IWRBTR * -1."金額
+W_OUTPUT-KOINH      = W_ZN005_MACH-KOINH. "口座名義人
+*    W_OUTPUT-SGTXT      = W_BSID_MACH-SGTXT.  "明細テキスト
+*    W_OUTPUT-BELNR      = W_BSID_MACH-BELNR.  "会計伝票
+*    W_OUTPUT-GJAHR      = W_BSID_MACH-GJAHR.  "会計伝票
+*    W_OUTPUT-BUZEI      = W_BSID_MACH-BUZEI.  "会計明細
+W_OUTPUT-KEKKA      = W_ZN005_MACH-KEKA.   "処理結果
+*    W_OUTPUT-HOHO       = W_BSID_MACH-   "入金方法
+
+*2012/06/31 MOD START
+IF W_ZN005_MACH-STS = C_OK. "OK
+WRITE ICON_GREEN_LIGHT AS ICON TO W_OUTPUT-ICON. "青信号
+ELSE.
+WRITE ICON_RED_LIGHT AS ICON TO W_OUTPUT-ICON. "赤信号
+ENDIF.
+
+*    IF W_ZN005_MACH-STS = C_OK.
+**      W_CNT-OK = W_CNT-OK + 1.
+*      IF G_STS = C_ERR. "エラーのみ表示
+*        CONTINUE.
+*      ENDIF.
+*    ELSE.
+**      W_CNT-ERR = W_CNT-ERR + 1.
+*      IF G_STS = C_OK. "OKのみ表示
+*        CONTINUE.
+*      ENDIF.
+*    ENDIF.
+*    WRITE ICON_RED_LIGHT AS ICON TO W_OUTPUT-ICON. "赤信号
+*2012/06/30 MOD END
+
+IF W_OUTPUT-KEKKA = TEXT-E03."マッチング相手なし
+WRITE ICON_YELLOW_LIGHT AS ICON TO W_OUTPUT-ICON. "赤信号
+ENDIF.
+
+APPEND W_OUTPUT TO T_OUTPUT.
+ENDLOOP.
+
+ENDFORM.                    " SET_ALV_YOTEI

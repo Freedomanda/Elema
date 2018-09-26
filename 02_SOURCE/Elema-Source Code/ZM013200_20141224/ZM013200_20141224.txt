@@ -1,0 +1,1005 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZM013200　                                                  *
+*&         発注参照入庫一括登録                                        *
+*&---------------------------------------------------------------------*
+*&  機能     : 発注参照入庫一括登録のバッチインプット(MIGO)処理を行う
+*&  作成日   : 2012/05/26
+*&  作成者   : C.MARUTA(solfis)
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/06/14
+*&  変更内容 :仕様追加：実行結果をテキストファイルに出力する
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/06/22
+*&  変更内容 :①入力項目追加(単価)
+*&            ②入庫数量チェックロジック追加
+*&            ③処理結果のヘッダ行修正(数量、在庫タイプ)
+*& YYYY/MM/DD  Programar         Description
+*& 2012/10/23  ISID              ES-UP
+*& 2014/08/29  ISID18            コードページを"UTF-8"に修正
+*&---------------------------------------------------------------------*
+REPORT ZM013200 LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING
+MESSAGE-ID Y1.
+*&---------------------------------------------------------------------*
+*& 属性定義                                                            *
+*&---------------------------------------------------------------------*
+TYPES:
+* ファイル読込用構造
+BEGIN OF T_S_FILE,
+EBELN         TYPE EBELN,       "購買伝票番号
+EBELP         TYPE EBELP,       "購買伝票の明細番号
+BLDAT(08)     TYPE C,           "伝票日付
+BUDAT(08)     TYPE C,           "転記日付
+ERFMG(14)     TYPE C,           "数量
+INSMK(1)      TYPE C,           "在庫タイプ
+LFSNR(16)     TYPE C,           "納品書
+*   insert 2012/6/22 H.JO DMW4139{
+NETPR(12)     TYPE C,           "正味価格
+* } insert 2012/6/22 H.JO DMW4139
+END   OF T_S_FILE,
+T_I_FILE        TYPE TABLE OF T_S_FILE,  "内部テーブル定義
+
+* 出力用構造
+* 画面出力構造
+BEGIN OF T_S_OUT,
+EBELN         TYPE EBELN,       "購買伝票番号
+EBELP         TYPE EBELP,       "購買伝票の明細番号
+BLDAT         TYPE BLDAT,       "伝票日付
+BUDAT         TYPE BUDAT,       "転記日付
+*   modify 2012/6/14 C.MARUTA DMW4139{
+*    ERFMG         TYPE MB_ERFMG,    "数量
+ERFMG(14)     TYPE C,           "数量
+* } modify 2012/6/14 C.MARUTA DMW4139
+INSMK         TYPE INSMK,       "在庫タイプ
+LFSNR         TYPE LFSNR,       "納品書
+MSG(100)      TYPE C,           "メッセージ
+* 非表示項目(内部処理用)
+EFLG          TYPE C,           "エラーフラグ
+END   OF T_S_OUT,
+T_I_OUT        TYPE TABLE OF T_S_OUT,   "内部テーブル定義
+
+* 購買伝票情報構造
+BEGIN OF T_S_EKPO,
+EBELN         TYPE EBELN,       "購買伝票番号
+EBELP         TYPE EBELP,       "購買伝票の明細番号
+WERKS         TYPE EWERK,       "プラント
+*   insert 2012/6/22 H.JO DMW4139{
+MENGE         TYPE BSTMG,       "購買発注数量
+NETPR         TYPE BPREI,       "正味価格
+WAERS         TYPE WAERS,       "通貨コード
+ETENR         TYPE EETEN,       "納入日程行
+WEMNG         TYPE WEEMG,       "入庫数量合計
+* } insert 2012/6/22 H.JO DMW4139
+END   OF T_S_EKPO,
+T_I_EKPO        TYPE TABLE OF T_S_EKPO,  "内部テーブル定義
+
+*   insert 2012/6/14 C.MARUTA DMW4139{
+* 出力ファイル構造(実行結果出力用)
+BEGIN OF T_S_DFILE,
+TEXT(200)     TYPE C,           "テキスト
+END   OF T_S_DFILE,
+T_I_DFILE        TYPE TABLE OF T_S_DFILE.  "内部テーブル定義
+* } insert 2012/6/14 C.MARUTA DMW4139
+
+*&---------------------------------------------------------------------*
+*& 内部テーブル定義                                                    *
+*&---------------------------------------------------------------------*
+DATA:
+*-内部テーブル
+G_I_BDC     TYPE TABLE OF BDCDATA.     "BDCテーブル
+
+*&---------------------------------------------------------------------*
+*& コンスタント定義
+*&---------------------------------------------------------------------*
+CONSTANTS:
+* トランザクションコード
+CNS_TR_MIGO     TYPE TCODE VALUE 'MIGO',  "入出庫
+CNS_LGOBE_H000  TYPE LGOBE VALUE 'H000',  "保管場所
+CNS_BWART_101   TYPE BWART VALUE '101',   "移動タイプ
+
+* 処理フラグ
+BEGIN OF CNS_FLG,
+ON(1)         TYPE C     VALUE 'X',     "フラグON
+OFF(1)        TYPE C     VALUE ' ',     "フラグOFF
+END   OF CNS_FLG.
+* Add ES-UP 2012/10/23 -->
+****START UPD 2014/08/29 ISID18****
+*CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+CONSTANTS CNS_UTF TYPE STRING VALUE `UTF-8`.
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/10/23 <--
+
+*&---------------------------------------------------------------------*
+*& 選択画面定義                                                        *
+*&---------------------------------------------------------------------*
+PARAMETERS:
+P_FILE(128)  LOWER CASE OBLIGATORY.          "ファイル
+
+SELECTION-SCREEN SKIP.
+
+PARAMETERS:
+P_WERKS      TYPE T001W-WERKS OBLIGATORY.    "プラント
+
+*&---------------------------------------------------------------------*
+*& AT SELECTION-SCREEN                                                 *
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+PERFORM FILE_OPEN_DIALOG.
+
+*&---------------------------------------------------------------------*
+*& START-OF-SELECTION                                                  *
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+PERFORM MAIN.
+
+*&---------------------------------------------------------------------*
+*& TOP-OF-PAGE                                                         *
+*&---------------------------------------------------------------------*
+TOP-OF-PAGE.
+
+WRITE:/047 TEXT-T01,
+/092 TEXT-T10,
+102(10) SY-DATUM USING EDIT MASK '____/__/__'.
+SKIP.
+WRITE:/003 TEXT-T02,
+015 TEXT-T03,
+023 TEXT-T04,
+036 TEXT-T05,
+051 TEXT-T06,
+071 TEXT-T07,
+091 TEXT-T08,
+0106 TEXT-T09.
+*   insert 2012/6/22 H.JO DMW4139{
+WRITE:/051 TEXT-T11,
+071 TEXT-T11,
+* } insert 2012/6/22 H.JO DMW4139
+SY-ULINE.
+
+*&---------------------------------------------------------------------*
+*&      Form  MAIN
+*&---------------------------------------------------------------------*
+*       メイン処理
+*----------------------------------------------------------------------*
+FORM MAIN .
+
+DATA:
+LIT_FILE    TYPE T_I_FILE,     "内部TBL:入力ファイル
+LIT_EKPO    TYPE T_I_EKPO,     "内部TBL:購買伝票情報
+LIT_EDIT    TYPE T_I_OUT,      "内部TBL:編集用
+LIT_OUT     TYPE T_I_OUT.      "内部TBL:画面出力用
+
+*-入力ファイル処理
+PERFORM FILE_PROC
+CHANGING LIT_FILE.     "内部TBL:入力ファイル
+
+*- データ一括取得
+PERFORM GET_PROC
+USING LIT_FILE        "内部TBL:入力ファイル
+CHANGING LIT_EKPO.       "内部TBL:購買伝票情報
+
+*- チェック処理
+PERFORM CHECK_PROC
+USING LIT_FILE      "内部TBL:入力ファイル
+LIT_EKPO      "内部TBL:購買伝票情報
+CHANGING LIT_EDIT.     "内部TBL:編集用
+
+*- 更新処理
+PERFORM BDC_PROC
+CHANGING LIT_EDIT      "内部TBL:編集用
+LIT_OUT.      "内部TBL:画面出力用
+
+*- 出力処理
+PERFORM OUTPUT_PROC
+USING LIT_OUT.      "内部TBL:画面出力用
+
+ENDFORM.                    " MAIN
+*&---------------------------------------------------------------------*
+*&      Form  file_open_dialog_sv
+*&---------------------------------------------------------------------*
+*       ファイルダイアログ表示
+*----------------------------------------------------------------------*
+FORM FILE_OPEN_DIALOG.
+
+DATA:
+LV_FILENAME  TYPE STRING,
+LV_FILETABLE TYPE FILETABLE,
+LV_RC TYPE I.
+
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+EXPORTING
+FILE_FILTER             = '*.txt'
+INITIAL_DIRECTORY       = 'C:\'
+CHANGING
+FILE_TABLE              = LV_FILETABLE
+RC                      = LV_RC
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+OTHERS                  = 4
+.
+
+READ TABLE LV_FILETABLE INTO LV_FILENAME INDEX 1.
+P_FILE = LV_FILENAME.
+
+ENDFORM.                    " file_open_dialog
+*&---------------------------------------------------------------------*
+*&      Form  FILE_PROC
+*&---------------------------------------------------------------------*
+*       ファイル読込
+*----------------------------------------------------------------------*
+FORM FILE_PROC CHANGING PIT_FILE TYPE T_I_FILE.
+DATA LV_FILENAME TYPE STRING.
+* Add ES-UP 2012/10/23 -->
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/10/23 <--
+LV_FILENAME = P_FILE.
+
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                = LV_FILENAME
+HAS_FIELD_SEPARATOR     = CNS_FLG-ON
+* Add ES-UP 2012/10/23 -->
+*      CODEPAGE                = L_CODEPAGE
+* Add ES-UP 2012/10/23 <--
+TABLES
+DATA_TAB                = PIT_FILE
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+OTHERS                  = 17.
+
+IF SY-SUBRC <> 0.
+MESSAGE S401 WITH '入力ファイルオープンエラー'
+P_FILE.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* データなしの場合、終了処理へ
+CHECK PIT_FILE IS INITIAL.
+MESSAGE S400 WITH '入力ファイルが０件です'.
+LEAVE LIST-PROCESSING.
+
+ENDFORM.                    " FILE_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_PROC
+*&---------------------------------------------------------------------*
+*       text　マスタ情報取得処理
+*----------------------------------------------------------------------*
+FORM GET_PROC    USING PIT_FILE    TYPE T_I_FILE
+CHANGING PIT_EKPO    TYPE T_I_EKPO.
+
+DATA:
+*   insert 2012/6/22 H.JO DMW4139{
+LIT_EKPO    TYPE T_I_EKPO,     "内部TBL:購買発注
+LS_EKPO     TYPE T_S_EKPO,     "購買発注(LOOP処理用)
+LS_EKPO_S   TYPE T_S_EKPO,     "購買発注(保存用)
+L_EBELN     TYPE EKKO-EBELN,   "購買発注番号
+L_EBELP     TYPE EKPO-EBELP,   "購買発注明細
+L_WEMNG     TYPE EKET-WEMNG,   "入庫数量
+* } insert 2012/6/22 H.JO DMW4139
+LIT_WORK    TYPE T_I_FILE.     "内部TBL:入力ファイルWORK
+
+LIT_WORK = PIT_FILE.
+
+* 重複削除
+SORT LIT_WORK BY EBELN
+EBELP.
+DELETE ADJACENT DUPLICATES FROM LIT_WORK
+COMPARING EBELN
+EBELP.
+* 購買伝票情報の取得
+*   modify 2012/6/22 H.JO DMW4139{
+*  SELECT EBELN
+*         EBELP
+*         WERKS
+*    INTO TABLE PIT_EKPO
+*    FROM EKPO
+*     FOR ALL ENTRIES IN LIT_WORK
+*   WHERE EBELN = LIT_WORK-EBELN
+*     AND EBELP = LIT_WORK-EBELP.
+SELECT EKKO~EBELN
+EKPO~EBELP
+EKPO~WERKS
+EKPO~MENGE
+EKPO~NETPR
+EKKO~WAERS
+EKET~ETENR
+EKET~WEMNG
+INTO CORRESPONDING FIELDS OF TABLE PIT_EKPO
+FROM EKKO
+INNER JOIN EKPO
+ON EKPO~EBELN = EKKO~EBELN
+INNER JOIN EKET
+ON EKET~EBELN = EKPO~EBELN
+AND EKET~EBELP = EKPO~EBELP
+FOR ALL ENTRIES IN LIT_WORK
+WHERE EKKO~EBELN = LIT_WORK-EBELN
+AND EKPO~EBELP = LIT_WORK-EBELP.
+* } modify 2012/6/22 H.JO DMW4139
+
+SORT PIT_EKPO BY EBELN
+EBELP.
+
+*   insert 2012/6/22 H.JO DMW4139{
+LIT_EKPO[] = PIT_EKPO[].
+
+REFRESH PIT_EKPO.
+
+LOOP AT LIT_EKPO INTO LS_EKPO.
+
+LS_EKPO_S = LS_EKPO.
+L_WEMNG = L_WEMNG + LS_EKPO-WEMNG.
+
+AT END OF EBELP.
+LS_EKPO_S-WEMNG = L_WEMNG.
+APPEND LS_EKPO_S TO PIT_EKPO.
+CLEAR L_WEMNG.
+ENDAT.
+ENDLOOP.
+* } insert 2012/6/22 H.JO DMW4139
+
+ENDFORM.                    " GET_PROC
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PROC
+*&---------------------------------------------------------------------*
+*       text  チェック処理
+*----------------------------------------------------------------------*
+FORM CHECK_PROC    USING PIT_FILE    TYPE T_I_FILE
+PIT_EKPO    TYPE T_I_EKPO
+CHANGING PIT_EDIT    TYPE T_I_OUT.
+
+* ローカル定義
+FIELD-SYMBOLS:
+<LFS_FILE>   TYPE T_S_FILE.
+DATA:
+*   insert 2012/6/22 H.JO DMW4139{
+L_OBMNG      TYPE OBMNG,          "未処理数量
+* } insert 2012/6/22 H.JO DMW4139
+LS_EKPO      TYPE T_S_EKPO,
+LS_EDIT      TYPE T_S_OUT.
+
+LOOP AT PIT_FILE ASSIGNING <LFS_FILE>.
+
+CLEAR:
+LS_EKPO,
+LS_EDIT.
+
+*   insert 2012/6/22 H.JO DMW4139{
+IF <LFS_FILE> IS INITIAL.
+CONTINUE.
+ENDIF.
+* } insert 2012/6/22 H.JO DMW4139
+
+*   前ゼロ処理
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = <LFS_FILE>-EBELP
+IMPORTING
+OUTPUT = <LFS_FILE>-EBELP.
+
+*   購買情報の読込
+READ TABLE PIT_EKPO
+INTO LS_EKPO
+WITH KEY EBELN = <LFS_FILE>-EBELN
+EBELP = <LFS_FILE>-EBELP
+BINARY SEARCH.
+
+*   ループ初回のみプラントチェック
+AT FIRST.
+IF LS_EKPO-WERKS <> P_WERKS.
+MESSAGE S402 WITH '選択画面のプラントと購買伝票のプラント:'
+LS_EKPO-WERKS
+'が等しくありません'.
+LEAVE LIST-PROCESSING.
+
+ENDIF.
+ENDAT.
+
+*   カンマを削除
+TRANSLATE <LFS_FILE>-ERFMG USING ', '.
+CONDENSE  <LFS_FILE>-ERFMG NO-GAPS.
+*   insert 2012/6/22 H.JO DMW4139{
+*   単価
+TRANSLATE <LFS_FILE>-NETPR USING ', '.
+CONDENSE  <LFS_FILE>-NETPR NO-GAPS.
+* } insert 2012/6/22 H.JO DMW4139
+MOVE-CORRESPONDING <LFS_FILE> TO LS_EDIT.
+
+*   伝票の存在チェック
+IF LS_EKPO IS INITIAL.
+LS_EDIT-MSG = TEXT-E01.
+ENDIF.
+
+*   insert 2012/6/22 H.JO DMW4139{
+IF LS_EDIT-MSG IS INITIAL.
+*     数量チェック
+CLEAR L_OBMNG.
+L_OBMNG = LS_EKPO-MENGE - LS_EKPO-WEMNG.
+IF <LFS_FILE>-ERFMG > L_OBMNG.
+LS_EDIT-MSG = TEXT-E03.
+ENDIF.
+ENDIF.
+
+IF LS_EDIT-MSG IS INITIAL.
+*     入力ファイルに単価を設定した場合のみ単価チェック実施
+IF NOT <LFS_FILE>-NETPR IS INITIAL.
+*       正味価格変換(内部→外部)
+PERFORM CONVERT_NETPR USING    LS_EKPO-WAERS
+CHANGING LS_EKPO-NETPR.
+*       単価チェック
+IF LS_EKPO-NETPR <> <LFS_FILE>-NETPR.
+LS_EDIT-MSG = TEXT-E04.
+ENDIF.
+ENDIF.
+ENDIF.
+* } insert 2012/6/22 H.JO DMW4139
+
+APPEND LS_EDIT TO PIT_EDIT.
+
+ENDLOOP.
+
+SORT PIT_EDIT BY EBELN
+EBELP.
+
+ENDFORM.                    " CHECK_PROC
+*&---------------------------------------------------------------------*
+*&      Form  BDC_PROC
+*&---------------------------------------------------------------------*
+*       text  BDC処理
+*----------------------------------------------------------------------*
+FORM BDC_PROC  CHANGING  PIT_EDIT  TYPE T_I_OUT
+PIT_OUT   TYPE T_I_OUT.
+
+* ローカル定義
+FIELD-SYMBOLS:
+<LFS_EDIT>     TYPE T_S_OUT.
+DATA:
+LIT_WORK      TYPE T_I_OUT,   "内部TBL:作業用(MSG処理)
+LW_ZEILE_CNT  TYPE MBLPO,     "入出庫明細カウントフラグ
+LW_FLG        TYPE C.         "エラー判定フラグ
+
+LOOP AT PIT_EDIT ASSIGNING <LFS_EDIT>.
+
+AT NEW EBELN.
+*     初期化
+CLEAR:
+LW_FLG,
+LW_ZEILE_CNT.
+REFRESH:
+LIT_WORK,
+G_I_BDC.
+
+*     共通部BDCデータセット
+PERFORM SET_BDC_COMMON.
+ENDAT.
+
+IF NOT <LFS_EDIT>-MSG IS INITIAL.
+LW_FLG = CNS_FLG-ON.
+<LFS_EDIT>-EFLG = CNS_FLG-ON.
+ENDIF.
+
+*   カウントアップ
+LW_ZEILE_CNT = LW_ZEILE_CNT + 1.
+
+*   明細部BDCデータセット
+PERFORM SET_BDC_DETAIL
+USING <LFS_EDIT>
+LW_ZEILE_CNT.
+
+AT END OF EBELN.
+
+*     エラーなし
+CHECK LW_FLG IS INITIAL.
+
+*     保存BDCデータセット
+PERFORM SET_BDC_END.
+
+*     トランザクション起動
+PERFORM CALL_TRAN
+USING CNS_TR_MIGO
+CHANGING <LFS_EDIT>.
+ENDAT.
+ENDLOOP.
+
+* 画面出力用加工処理
+PERFORM MAKE_OUTDATA
+USING PIT_EDIT      "内部TBL:編集用
+CHANGING PIT_OUT.      "内部TBL:画面出力用
+
+ENDFORM.                    " BDC_PROC
+*&---------------------------------------------------------------------*
+*&      Form  bdc_dataset
+*&---------------------------------------------------------------------*
+*       BDCデータ編集
+*----------------------------------------------------------------------*
+*  -->  pi_begin  Dynpro 開始
+*       pi_name   BDC モジュールプール / 項目名
+*       pi_value  BDC Dynpro 番号 / 項目値
+*----------------------------------------------------------------------*
+FORM BDC_DATASET USING PI_BEGIN TYPE CHAR1
+PI_NAME  TYPE ANY
+PI_VALUE TYPE ANY.
+DATA:
+L_S_BDC     TYPE BDCDATA.              "BDCテーブル
+
+IF PI_BEGIN = 'X'.
+L_S_BDC-PROGRAM   = PI_NAME.
+L_S_BDC-DYNPRO    = PI_VALUE.
+L_S_BDC-DYNBEGIN  = PI_BEGIN.
+APPEND L_S_BDC TO G_I_BDC.
+ELSE.
+L_S_BDC-FNAM      = PI_NAME.
+L_S_BDC-FVAL      = PI_VALUE.
+APPEND L_S_BDC TO G_I_BDC.
+ENDIF.
+
+ENDFORM.                    " bdc_dataset
+*&---------------------------------------------------------------------*
+*&      Form  call_tran
+*&---------------------------------------------------------------------*
+*       トランザクション起動
+*----------------------------------------------------------------------*
+FORM CALL_TRAN   USING PW_TCD
+CHANGING PS_EDIT   TYPE T_S_OUT.
+
+* ローカル定義
+FIELD-SYMBOLS:
+<LFS_WORK>   TYPE T_S_OUT.
+
+DATA:
+LIT_MSG       TYPE STANDARD TABLE OF BDCMSGCOLL,
+LS_MSG        TYPE BDCMSGCOLL,
+LW_SUBRC      TYPE SUBRC,
+LW_MODE       TYPE CTU_MODE,
+LW_MSGTX      TYPE MSGTX.
+
+LW_MODE = 'N'.
+
+* トランザクション起動
+CALL TRANSACTION PW_TCD
+USING G_I_BDC
+MODE LW_MODE
+UPDATE 'S'
+MESSAGES INTO LIT_MSG.
+
+* 製常時
+IF SY-SUBRC = 0
+AND NOT LIT_MSG IS INITIAL.
+
+* 　メッセージ取得
+CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+EXPORTING
+MSGID               = SY-MSGID
+MSGNR               = SY-MSGNO
+MSGV1               = SY-MSGV1
+MSGV2               = SY-MSGV2
+MSGV3               = SY-MSGV3
+MSGV4               = SY-MSGV4
+IMPORTING
+MESSAGE_TEXT_OUTPUT = LW_MSGTX.
+
+PS_EDIT-MSG = LW_MSGTX.
+
+* 入出庫伝票登録失敗の場合
+ELSE.
+
+PS_EDIT-EFLG = CNS_FLG-ON.
+
+READ TABLE LIT_MSG INTO LS_MSG INDEX 1.
+
+IF SY-SUBRC <> 0.
+PS_EDIT-MSG = TEXT-E02.
+ELSE.
+MESSAGE ID     LS_MSG-MSGID
+TYPE   'S'
+NUMBER LS_MSG-MSGNR
+WITH   LS_MSG-MSGV1
+LS_MSG-MSGV2
+LS_MSG-MSGV3
+LS_MSG-MSGV4
+INTO LW_MSGTX.
+
+PS_EDIT-MSG = LW_MSGTX.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " call_tran
+*&---------------------------------------------------------------------*
+*&      Form  SET_BDC_COMMON
+*&---------------------------------------------------------------------*
+*       text  BDCのセット
+*----------------------------------------------------------------------*
+FORM SET_BDC_COMMON.
+
+PERFORM BDC_DATASET USING:
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '=MIGO_OK_ACTION',
+' '   'GODYNPRO-ACTION'     'A01',
+' '   'GODYNPRO-REFDOC'     'R01',
+
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '=MIGO_OK_HEADER_OPEN'.
+
+
+ENDFORM.                    " SET_BDC_COMMON
+*&---------------------------------------------------------------------*
+*&      Form  SET_BDC_DETAIL
+*&---------------------------------------------------------------------*
+*       text  BDCのセット
+*----------------------------------------------------------------------*
+FORM SET_BDC_DETAIL USING PS_OUT  TYPE T_S_OUT
+PW_ZEILE_CNT.
+
+DATA :
+LW_ERFMG(14)  TYPE C.
+
+WRITE PS_OUT-ERFMG TO LW_ERFMG.
+
+PERFORM BDC_DATASET USING:
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '=OK_GO',
+' '   'GODEFAULT_TV-BWART'  CNS_BWART_101,
+' '   'GOHEAD-BLDAT'        PS_OUT-BLDAT,
+' '   'GOHEAD-BUDAT'        PS_OUT-BUDAT,
+' '   'BDC_CURSOR'          'GOHEAD-LFSNR',
+' '   'GOHEAD-LFSNR'        PS_OUT-LFSNR,
+' '   'BDC_CURSOR'          'GODYNPRO-PO_NUMBER',
+' '   'GODYNPRO-PO_NUMBER'  PS_OUT-EBELN,
+' '   'GODYNPRO-PO_ITEM'    PS_OUT-EBELP,
+
+*         詳細タブOPEN
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '=MIGO_OK_DETAIL_OPEN',
+
+*         入出庫明細番号の設定
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '=MIGO_OK_LOCATE',
+' '   'GODYNPRO-DETAIL_ZEILE' PW_ZEILE_CNT,
+
+*         明細詳細の設定
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '=OK_GO',
+' '   'GOITEM-ERFMG'        LW_ERFMG,
+' '   'GOITEM-MIGO_INSMK'   PS_OUT-INSMK,
+' '   'GOITEM-BWART'        CNS_BWART_101,
+' '   'BDC_CURSOR'          'GOITEM-LGOBE',
+' '   'GOITEM-LGOBE'        CNS_LGOBE_H000,
+' '   'BDC_CURSOR'          'GODYNPRO-DETAIL_TAKE',
+' '   'GODYNPRO-DETAIL_TAKE' CNS_FLG-ON.
+
+ENDFORM.                    " SET_BDC_DETAIL
+*&---------------------------------------------------------------------*
+*&      Form  SET_BDC_END
+*&---------------------------------------------------------------------*
+*       text  BDCのセット
+*----------------------------------------------------------------------*
+FORM SET_BDC_END.
+
+PERFORM BDC_DATASET USING:
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '=OK_POST1',
+
+'X'   'SAPMSSY0'            '0120',
+' '   'BDC_OKCODE'          '=&ONT',
+
+'X'   'SAPLMIGO'            '0001',
+' '   'BDC_OKCODE'          '/EOK_END',
+
+'X'   'SAPLSPO1'            '0100',
+' '   'BDC_OKCODE'          '=NO'.
+
+ENDFORM.                    " SET_BDC_DETAIL
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_PROC
+*&---------------------------------------------------------------------*
+*       text  画面出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_PROC USING  PIT_OUT  TYPE T_I_OUT.
+
+* ローカル定義
+*   insert 2012/6/14 C.MARUTA DMW4139{
+DATA:
+LIT_DFILE  TYPE T_I_DFILE.     "内部TBL:ダウンロードFILE
+* } insert 2012/6/14 C.MARUTA DMW4139
+
+FIELD-SYMBOLS:
+<LFS_OUT>       TYPE T_S_OUT.
+
+* 画面出力
+LOOP AT PIT_OUT ASSIGNING <LFS_OUT>.
+
+*   insert 2012/6/14 C.MARUTA DMW4139{
+AT FIRST.
+*     ヘッダ部の書き込み
+PERFORM WRITE_FL_HEADER
+CHANGING LIT_DFILE.
+ENDAT.
+*     データ部の書き込み
+PERFORM WRITE_FL_DATA
+USING <LFS_OUT>
+CHANGING LIT_DFILE.
+* } insert 2012/6/14 C.MARUTA DMW4139
+
+WRITE:/002 <LFS_OUT>-EBELN.
+
+IF NOT <LFS_OUT>-EBELP IS INITIAL.
+WRITE:014 <LFS_OUT>-EBELP.
+ENDIF.
+WRITE: 022 <LFS_OUT>-BLDAT USING EDIT MASK '____/__/__',
+035 <LFS_OUT>-BUDAT USING EDIT MASK '____/__/__'.
+IF NOT <LFS_OUT>-EBELP IS INITIAL.
+WRITE:
+048 <LFS_OUT>-ERFMG RIGHT-JUSTIFIED,
+075 <LFS_OUT>-INSMK.
+ENDIF.
+WRITE: 091 <LFS_OUT>-LFSNR,
+106 <LFS_OUT>-MSG.
+ENDLOOP.
+
+*   insert 2012/6/14 C.MARUTA DMW4139{
+*- ファイルダウンロード
+PERFORM FILE_DOWNLOAD
+USING LIT_DFILE.   "内部TBL:DL用データ
+* } insert 2012/6/14 C.MARUTA DMW4139
+
+ENDFORM.                    " OUTPUT_PROC
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_OUTDATA
+*&---------------------------------------------------------------------*
+*       text  出力用編集処理
+*----------------------------------------------------------------------*
+FORM MAKE_OUTDATA USING    PIT_EDIT   TYPE T_I_OUT
+CHANGING PIT_OUT    TYPE T_I_OUT.
+
+* ローカル定義
+FIELD-SYMBOLS:
+<LFS_EDIT>     TYPE T_S_OUT.
+DATA:
+LIT_WORK      TYPE T_I_OUT,   "内部TBL:作業用(MSG処理)
+LW_MSG(100)   TYPE C,         "退避:MSG
+LW_FLG        TYPE C.         "エラー判定フラグ
+
+LOOP AT PIT_EDIT ASSIGNING <LFS_EDIT>.
+
+AT NEW EBELN.
+*     初期化
+CLEAR:
+LW_FLG,
+LW_MSG.
+REFRESH:
+LIT_WORK.
+ENDAT.
+
+*   フラグ判定-エラーがある場合-
+IF <LFS_EDIT>-EFLG = CNS_FLG-ON.
+LW_FLG = CNS_FLG-ON.
+ENDIF.
+
+*   メッセージ退避
+IF NOT <LFS_EDIT>-MSG IS INITIAL.
+LW_MSG = <LFS_EDIT>-MSG.
+ENDIF.
+
+APPEND <LFS_EDIT> TO LIT_WORK.
+
+AT END OF EBELN.
+
+IF LW_FLG IS INITIAL.
+
+CLEAR:
+<LFS_EDIT>-EBELP,    "購買伝票の明細番号
+<LFS_EDIT>-ERFMG,    "数量
+<LFS_EDIT>-INSMK.    "在庫タイプ
+*       正常終了のレコードにメッセージがない場合
+IF <LFS_EDIT>-MSG IS INITIAL.
+<LFS_EDIT>-MSG = LW_MSG.
+ENDIF.
+APPEND <LFS_EDIT> TO PIT_OUT.
+ELSE.
+*       エラーデータの移行
+APPEND LINES OF LIT_WORK TO PIT_OUT.
+
+ENDIF.
+
+ENDAT.
+
+ENDLOOP.
+ENDFORM.                    " MAKE_OUTDATA
+*   insert 2012/6/14 C.MARUTA DMW4139{
+*&---------------------------------------------------------------------*
+*&      Form  FILE_DOWNLOAD
+*&---------------------------------------------------------------------*
+*       text  ダウンロード処理
+*----------------------------------------------------------------------*
+FORM FILE_DOWNLOAD USING PIT_DLFILE TYPE T_I_DFILE.
+
+DATA:
+LW_FILENAME TYPE STRING.
+* Add ES-UP 2012/10/23 -->
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/10/23 <--
+
+LW_FILENAME = P_FILE.
+
+* ファイルのダウンロード
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+FILENAME                = LW_FILENAME
+FILETYPE                = 'ASC'
+* Add ES-UP 2012/10/23 -->
+CODEPAGE                  = L_CODEPAGE
+* Add ES-UP 2012/10/23 <--
+TABLES
+DATA_TAB                = PIT_DLFILE
+EXCEPTIONS
+FILE_WRITE_ERROR        = 1
+NO_BATCH                = 2
+GUI_REFUSE_FILETRANSFER = 3
+INVALID_TYPE            = 4
+NO_AUTHORITY            = 5
+UNKNOWN_ERROR           = 6
+HEADER_NOT_ALLOWED      = 7
+SEPARATOR_NOT_ALLOWED   = 8
+FILESIZE_NOT_ALLOWED    = 9
+HEADER_TOO_LONG         = 10
+DP_ERROR_CREATE         = 11
+DP_ERROR_SEND           = 12
+DP_ERROR_WRITE          = 13
+UNKNOWN_DP_ERROR        = 14
+ACCESS_DENIED           = 15
+DP_OUT_OF_MEMORY        = 16
+DISK_FULL               = 17
+DP_TIMEOUT              = 18
+FILE_NOT_FOUND          = 19
+DATAPROVIDER_EXCEPTION  = 20
+CONTROL_FLUSH_ERROR     = 21
+OTHERS                  = 22.
+
+* メッセージの出力
+CHECK SY-SUBRC <> 0.
+MESSAGE S401 WITH 'ファイルのダウンロードに失敗しました'
+P_FILE.
+
+ENDFORM.                    " FILE_DOWNLOAD
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_FL_HEADER
+*&---------------------------------------------------------------------*
+*       text  ファイル出力用ヘッダ書込み
+*----------------------------------------------------------------------*
+FORM WRITE_FL_HEADER CHANGING PIT_DLFILE TYPE T_I_DFILE.
+
+DATA:
+LS_DFILE   TYPE T_S_DFILE.
+
+WRITE  TEXT-T01 TO LS_DFILE+047(20).
+APPEND LS_DFILE TO PIT_DLFILE.
+CLEAR: LS_DFILE.
+WRITE: TEXT-T10 TO LS_DFILE+092(08),
+SY-DATUM USING EDIT MASK '____/__/__'
+TO LS_DFILE+102(10).
+APPEND LS_DFILE TO PIT_DLFILE.
+CLEAR: LS_DFILE.
+APPEND LS_DFILE TO PIT_DLFILE.
+
+WRITE: TEXT-T02 TO LS_DFILE+003(08),
+TEXT-T03 TO LS_DFILE+015(04),
+TEXT-T04 TO LS_DFILE+023(08),
+TEXT-T05 TO LS_DFILE+036(08),
+TEXT-T06 TO LS_DFILE+051(04),
+TEXT-T07 TO LS_DFILE+073(10),
+TEXT-T08 TO LS_DFILE+093(06),
+TEXT-T09 TO LS_DFILE+0108(10).
+APPEND LS_DFILE TO PIT_DLFILE.
+*   insert 2012/6/22 H.JO DMW4139{
+CLEAR: LS_DFILE.
+WRITE: TEXT-T11 TO LS_DFILE+051(18),
+TEXT-T11 TO LS_DFILE+072(18).
+APPEND LS_DFILE TO PIT_DLFILE.
+* } insert 2012/6/22 H.JO DMW4139
+CLEAR: LS_DFILE.
+WRITE: SY-ULINE TO LS_DFILE+000(150).
+APPEND LS_DFILE TO PIT_DLFILE.
+
+ENDFORM.                    " WRITE_FL_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_FL_DATA
+*&---------------------------------------------------------------------*
+*       text  ファイル出力用データ書込み
+*----------------------------------------------------------------------*
+FORM WRITE_FL_DATA   USING PS_OUT     TYPE T_S_OUT
+CHANGING PIT_DLFILE TYPE T_I_DFILE.
+
+* ローカル定義
+DATA:
+LS_DFILE   TYPE T_S_DFILE.     "構造ダウンロードFILE
+
+* 購買発注伝票
+WRITE: PS_OUT-EBELN TO LS_DFILE-TEXT+2(10).
+
+
+* 購買明細
+IF NOT PS_OUT-EBELP IS INITIAL.
+WRITE: PS_OUT-EBELP TO LS_DFILE-TEXT+14(5).
+ENDIF.
+
+WRITE:
+
+* 伝票日付
+PS_OUT-BLDAT TO LS_DFILE-TEXT+22(10)
+USING EDIT MASK '____/__/__',
+* 転記日付
+PS_OUT-BUDAT TO LS_DFILE-TEXT+35(10)
+USING EDIT MASK '____/__/__'.
+
+IF NOT PS_OUT-EBELP IS INITIAL.
+
+WRITE:
+*     　数量
+PS_OUT-ERFMG TO LS_DFILE-TEXT+45(20)
+RIGHT-JUSTIFIED,
+* 　    在庫タイプ
+PS_OUT-INSMK TO LS_DFILE-TEXT+76(3).
+
+ENDIF.
+
+WRITE:
+*   納品書
+PS_OUT-LFSNR TO LS_DFILE-TEXT+93(10),
+*   メッセージ
+PS_OUT-MSG   TO LS_DFILE-TEXT+108(100).
+
+APPEND LS_DFILE TO PIT_DLFILE.
+
+ENDFORM.                    " WRITE_FL_DATA
+* } insert 2012/6/14 C.MARUTA DMW4139
+*   insert 2012/6/22 H.JO DMW4139{
+*&---------------------------------------------------------------------*
+*&      Form  CONVERT_NETPR
+*&---------------------------------------------------------------------*
+*       正味価格変換(内部→外部)
+*----------------------------------------------------------------------*
+*      -->P_WAERS  通貨コード
+*      <--P_NETPR  通貨コード
+*----------------------------------------------------------------------*
+FORM CONVERT_NETPR USING    P_WAERS
+CHANGING P_NETPR.
+
+DATA:
+L_AMOUNT TYPE BAPICURR-BAPICURR.
+
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_EXTERNAL'
+EXPORTING
+CURRENCY        = P_WAERS
+AMOUNT_INTERNAL = P_NETPR
+IMPORTING
+AMOUNT_EXTERNAL = L_AMOUNT.
+
+P_NETPR = L_AMOUNT.
+
+ENDFORM.                    " CONVERT_NETPR
+* } insert 2012/6/22 H.JO DMW4139

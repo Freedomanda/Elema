@@ -1,0 +1,1369 @@
+*&---------------------------------------------------------------------*
+*& Report  ZYTD6016_0310
+*&
+*&---------------------------------------------------------------------*
+*&
+*&
+*&---------------------------------------------------------------------
+*&---------------------------------------------------------------------*
+*& Report   ZYTD6016
+*&
+*&---------------------------------------------------------------------*
+*&  機能     ： 得意先マスタテキスト更新
+*&              (DMW2424)
+*&  作成日   ： 2010/12/16
+*&  作成者   ： DMK 加治佐
+*&  変更履歴 ：
+*&  変更内容 ：
+* [改定履歴]
+*  2012/08/14   ISID                  ES-UP
+*  2014/08/29   ISID11                コードページを"UTF-8"に修正
+*  2015/02/04   ISID11                コードページ処理の再修正
+*&---------------------------------------------------------------------*
+REPORT ZYTD6016_0310  MESSAGE-ID Y1 LINE-SIZE 255.
+*                 NO STANDARD PAGE HEADING.
+*----------------------------------------------------------------------*
+*  型定義
+*----------------------------------------------------------------------*
+TABLES:TTXID. "テキストID検索ヘルプ用
+
+* 入力ファイル用
+TYPES:BEGIN OF T_INFILE,
+FNAME(10)   TYPE C, "テキスト名
+FID(4)      TYPE C, "テキストID
+FLINE(3)    TYPE C, "テキスト行数
+TDLINE(134) TYPE C, "テキスト内容(桁チェック用)
+END OF T_INFILE.
+
+* ダウンロードファイル用
+TYPES:BEGIN OF T_DFILE,
+* Mod ES-UP 2012/10/25 -->
+*      LTEXT(1000) TYPE C,
+LTEXT TYPE STRING,
+* Mod ES-UP 2012/10/25 <--
+END OF T_DFILE.
+* エラーデータ用
+TYPES:BEGIN OF T_EDATA,
+FNAME(10)   TYPE C, "テキスト名
+FID(4)      TYPE C, "テキストID
+TDLINE(200) TYPE C, "テキスト内容
+END OF T_EDATA.
+
+* 処理対象得意先格納用
+TYPES:BEGIN OF T_KNA1,
+KUNNR TYPE KNA1-KUNNR,
+END OF T_KNA1.
+
+* 処理対象テキストID格納用
+TYPES:BEGIN OF T_TTXID,
+TDID TYPE TTXID-TDID,
+END OF T_TTXID.
+
+
+*----------------------------------------------------------------------*
+*  内部テーブル・構造定義
+*----------------------------------------------------------------------*
+* ファイル用
+DATA: IT_FILE           TYPE STANDARD TABLE OF T_INFILE,
+WA_FILE           TYPE T_INFILE.
+
+* 出力ファイル用
+DATA: IT_DFILE           TYPE STANDARD TABLE OF T_DFILE,
+WA_DFILE           TYPE T_DFILE.
+
+* エラーデータ用
+DATA: IT_EDATA           TYPE STANDARD TABLE OF T_EDATA,
+WA_EDATA           TYPE T_EDATA.
+
+* 処理対象の得意先格納用
+DATA: IT_KNA1           TYPE HASHED TABLE OF T_KNA1
+WITH UNIQUE KEY KUNNR,
+WA_KNA1           TYPE T_KNA1.
+
+* 処理対象のテキストID格納用
+DATA: IT_TTXID           TYPE STANDARD TABLE OF T_TTXID,
+WA_TTXID           TYPE T_TTXID.
+
+* CREATE_TEXT用
+DATA: IT_TLINE           TYPE STANDARD TABLE OF TLINE,
+WA_TLINE           TYPE TLINE,
+WA_THEAD           TYPE THEAD.
+
+*----------------------------------------------------------------------*
+*  変数定義
+*----------------------------------------------------------------------*
+DATA:V_LINECNT(3)       TYPE N,       "テーブル行数
+V_M_CNT            TYPE I,       "得意先/テキストIDの組合数
+V_ERR_NAME_FLG(1)  TYPE C,       "エラー判定(得意先単位1)
+"1:マスタなし 2:ロックエラー
+V_ERR_ID_FLG(1)    TYPE C,       "エラー判定(テキストID単位)
+V_ETEXT(200)       TYPE C,       "エラーテキスト
+* Mod ES-UP 2012/10/25 -->
+*     V_LONGTXT(1000)    TYPE C,       "ファイル編集領域
+V_LONGTXT          TYPE STRING,       "ファイル編集領域
+* Mod ES-UP 2012/10/25 <--
+V_LOCAL(1)         TYPE C,       "ローカル限定F4ヘルプ処理用
+V_DOWN(1)          TYPE C.       "ローカル限定F4ヘルプ処理用
+
+* READ_TEXT文字化対策用
+DATA:V_STEXT            TYPE STRING,
+IT_L_TEXT          LIKE TABLE OF V_STEXT.
+*----------------------------------------------------------------------*
+*  定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+CNS_LOCAL(7)          TYPE C VALUE 'R_LOCAL',
+CNS_DOWN(6)           TYPE C VALUE 'R_DOWN',
+CNS_ON(1)             TYPE C VALUE 'X',
+**** START ADD 2014/09/01 ISID11 ****
+**** START DEL 2015/02/04 ISID11 ****
+*  CNS_UTF TYPE STRING VALUE 'UTF-8',
+**** END DEL 2015/02/04 ISID11 ****
+**** END ADD 2014/09/01 ISID11 ****
+* Mod ES-UP 2012/08/21 -->
+*  CNS_TAB(1)            TYPE X VALUE '09',
+CNS_TAB               TYPE STRING VALUE
+CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB,
+* Mod ES-UP 2012/08/21 <--
+CNS_ASTER(1)          TYPE C VALUE '*',
+CNS_FILTER(21)        TYPE C VALUE '全ファイル (*.*)|*.*|'.
+
+*----------------------------------------------------------------------*
+*  選択画面定義
+*----------------------------------------------------------------------*
+*--枠１ ファイル系
+SELECTION-SCREEN:BEGIN OF BLOCK B01 WITH FRAME."TITLE なし.
+SELECTION-SCREEN BEGIN OF LINE.
+*  ローカル
+SELECTION-SCREEN POSITION 1.
+PARAMETERS R_LOCAL  RADIOBUTTON GROUP RD01 DEFAULT 'X'.
+SELECTION-SCREEN POSITION 4.
+SELECTION-SCREEN COMMENT (12) TEXT-001.
+*  サーバ
+PARAMETERS R_SERVER RADIOBUTTON GROUP RD01.
+SELECTION-SCREEN POSITION 20.
+SELECTION-SCREEN COMMENT (12) TEXT-002.
+SELECTION-SCREEN END OF LINE.
+*  入力ファイル
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN POSITION 1.
+SELECTION-SCREEN COMMENT (12) TEXT-005.
+SELECTION-SCREEN POSITION 14.
+PARAMETERS P_FILE(128) TYPE C OBLIGATORY.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN:END OF BLOCK B01.
+
+*--枠２ 処理選択（アップ or ダウン)
+SELECTION-SCREEN:BEGIN OF BLOCK B02 WITH FRAME."TITLE なし.
+SELECTION-SCREEN BEGIN OF LINE.
+*  ダウンロード
+SELECTION-SCREEN POSITION 1.
+PARAMETERS R_DOWN  RADIOBUTTON GROUP RD02  DEFAULT 'X'.
+SELECTION-SCREEN POSITION 4.
+SELECTION-SCREEN COMMENT (12) TEXT-003.
+*  アップロード
+PARAMETERS R_UP    RADIOBUTTON GROUP RD02.
+SELECTION-SCREEN POSITION 20.
+SELECTION-SCREEN COMMENT (12) TEXT-004.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN:END OF BLOCK B02.
+
+*--枠３ 選択条件
+SELECTION-SCREEN:BEGIN OF BLOCK B03 WITH FRAME."TITLE なし.
+*  テキストオブジェクト
+PARAMETERS P_OBJ    TYPE TTXID-TDOBJECT DEFAULT 'KNA1' OBLIGATORY.
+*  言語
+PARAMETERS P_LANG   TYPE THEAD-TDSPRAS DEFAULT 'JA' OBLIGATORY.
+*  チェックのみ（アップロード用）
+PARAMETERS P_CHK    TYPE C AS CHECKBOX  DEFAULT 'X'.
+*  得意先コード（ダウンロード用）
+SELECT-OPTIONS S_KUNNR FOR WA_KNA1-KUNNR.
+*  テキストID（ダウンロード用）
+SELECT-OPTIONS S_TDID   FOR TTXID-TDID NO INTERVALS.
+SELECTION-SCREEN:END OF BLOCK B03.
+
+*----------------------------------------------------------------------*
+*  AT SELECTION-SCREEN ON VALUE-REQUEST
+*----------------------------------------------------------------------*
+* 入力ファイル
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+
+* 選択画面最新値の取得
+PERFORM DYNP_VALUES_READ.
+IF V_DOWN = CNS_ON.
+* ファイル保存ダイアログ表示
+PERFORM FILE_SAVE_DIALOG CHANGING P_FILE.
+ELSE.
+* ファイル選択ダイアログ表示
+PERFORM FILE_OPEN_DIALOG CHANGING P_FILE.
+ENDIF.
+
+*----------------------------------------------------------------------*
+*  START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+PERFORM INTI_PROC.
+* ダウンロード処理
+IF R_DOWN = CNS_ON.
+PERFORM DOWN_PROC.
+* アップロード処理
+ELSE.
+PERFORM UP_PROC.
+ENDIF.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  DYNP_VALUES_READ
+*&---------------------------------------------------------------------*
+*       選択画面最新値の取得
+*----------------------------------------------------------------------*
+FORM DYNP_VALUES_READ.
+
+DATA : LV_DYNAME  TYPE D020S-PROG,
+LV_DYNUMB  TYPE D020S-DNUM,
+LT_FIELD   TYPE STANDARD TABLE OF DYNPREAD,
+LW_FIELD   TYPE DYNPREAD.
+
+CLEAR:V_LOCAL,V_DOWN.
+
+LV_DYNAME = SY-REPID.
+LV_DYNUMB = SY-DYNNR.
+
+LW_FIELD-FIELDNAME = CNS_LOCAL.  "R_LOCAL
+LW_FIELD-STEPL     = 0.
+APPEND LW_FIELD TO LT_FIELD.
+
+LW_FIELD-FIELDNAME = CNS_DOWN.  "R_DOWN
+LW_FIELD-STEPL     = 0.
+APPEND LW_FIELD TO LT_FIELD.
+
+CALL FUNCTION 'DYNP_VALUES_READ'
+EXPORTING
+DYNAME               = LV_DYNAME
+DYNUMB               = LV_DYNUMB
+TABLES
+DYNPFIELDS           = LT_FIELD
+EXCEPTIONS
+INVALID_ABAPWORKAREA = 1
+INVALID_DYNPROFIELD  = 2
+INVALID_DYNPRONAME   = 3
+INVALID_DYNPRONUMMER = 4
+INVALID_REQUEST      = 5
+NO_FIELDDESCRIPTION  = 6
+INVALID_PARAMETER    = 7
+UNDEFIND_ERROR       = 8
+DOUBLE_CONVERSION    = 9
+STEPL_NOT_FOUND      = 10
+OTHERS               = 11.
+
+IF SY-SUBRC = 0.
+CLEAR LW_FIELD.
+READ TABLE LT_FIELD INTO LW_FIELD
+WITH KEY FIELDNAME = CNS_LOCAL.
+V_LOCAL = LW_FIELD-FIELDVALUE.
+
+CLEAR LW_FIELD.
+READ TABLE LT_FIELD INTO LW_FIELD
+WITH KEY FIELDNAME = CNS_DOWN.
+V_DOWN = LW_FIELD-FIELDVALUE.
+ENDIF.
+
+ENDFORM.                    " DYNP_VALUES_READ
+*&---------------------------------------------------------------------*
+*&      Form  FILE_SAVE_DIALOG
+*&---------------------------------------------------------------------*
+*       ファイル保存ダイアログ表示
+*----------------------------------------------------------------------*
+*      <--O_FILE  ファイル名
+*----------------------------------------------------------------------*
+FORM FILE_SAVE_DIALOG CHANGING O_FILE.
+DATA : LV_FILENAME TYPE STRING,
+LV_PATH     TYPE STRING,
+LV_FULLPATH TYPE STRING,
+LV_FILTER   TYPE STRING.
+
+* ローカル選択時のみ
+CHECK V_LOCAL = CNS_ON.
+
+LV_FILTER = CNS_FILTER.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_SAVE_DIALOG
+EXPORTING
+FILE_FILTER  = LV_FILTER
+CHANGING
+FILENAME     = LV_FILENAME
+PATH         = LV_PATH
+FULLPATH     = LV_FULLPATH
+EXCEPTIONS
+CNTL_ERROR   = 1
+ERROR_NO_GUI = 2
+OTHERS       = 3.
+
+IF SY-SUBRC = 0.
+O_FILE = LV_FULLPATH.
+ELSE.
+*   ファイル名取得に失敗しました
+MESSAGE S400 WITH TEXT-M01.
+ENDIF.
+
+ENDFORM.                    " FILE_SAVE_DIALOG
+*&---------------------------------------------------------------------*
+*&      Form  FILE_OPEN_DIALOG
+*&---------------------------------------------------------------------*
+*       ファイル選択ダイアログ表示
+*----------------------------------------------------------------------*
+*      <--O_FILE ファイル名
+*----------------------------------------------------------------------*
+FORM FILE_OPEN_DIALOG CHANGING O_FILE.
+
+DATA : LT_FILE TYPE FILETABLE,
+LW_FILE LIKE LINE OF LT_FILE,
+LV_RC   TYPE I.
+
+* ローカル選択時のみ
+CHECK V_LOCAL = CNS_ON.
+
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+CHANGING
+FILE_TABLE              = LT_FILE
+RC                      = LV_RC
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+OTHERS                  = 4.
+
+IF SY-SUBRC = 0.
+READ TABLE LT_FILE INTO LW_FILE INDEX 1.
+O_FILE = LW_FILE-FILENAME.
+ELSE.
+*   ファイル名取得に失敗しました
+MESSAGE S400 WITH TEXT-M01.
+ENDIF.
+
+ENDFORM.                    " FILE_OPEN_DIALOG
+*&---------------------------------------------------------------------*
+*&      Form  INTI_PROC
+*&---------------------------------------------------------------------*
+*       初期化処理
+*----------------------------------------------------------------------*
+FORM INTI_PROC.
+* 内部テーブル初期化
+REFRESH: IT_FILE ,
+IT_DFILE,
+IT_EDATA,
+IT_KNA1 ,
+IT_TLINE,
+IT_TTXID,
+IT_L_TEXT.
+
+*作業領域初期化
+CLEAR:  WA_FILE,
+WA_EDATA,
+WA_DFILE,
+WA_KNA1,
+WA_TLINE,
+WA_THEAD,
+WA_TTXID,
+V_M_CNT,
+V_LINECNT.
+
+ENDFORM.                    " INTI_PROC
+*&---------------------------------------------------------------------*
+*&      Form  DOWN_PROC
+*&---------------------------------------------------------------------*
+*       ダウンロード処理
+*----------------------------------------------------------------------*
+FORM DOWN_PROC.
+DATA:L_MSG(50) TYPE C.
+
+* 処理対象データ取得
+PERFORM GET_DATA.
+* テキスト取得処理
+PERFORM READ_TEXT_DATA.
+* 結果処理
+*-- エラーがある場合
+IF NOT IT_EDATA[] IS INITIAL.
+PERFORM WRITE_ERR_SPOOL.
+EXIT.                   "処理終了
+ENDIF.
+*-- エラーが無い場合、ファイル出力
+PERFORM OUT_FILE.
+*-- ファイル出力まで正常に終了したら、メッセージを出力して終了
+*   XX件、ダウンロードしました。
+L_MSG = V_M_CNT * 1.
+MESSAGE S401 WITH L_MSG TEXT-M02.
+
+ENDFORM.                    " DOWN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNA1
+*&---------------------------------------------------------------------*
+*       処理対象データ取得
+*----------------------------------------------------------------------*
+FORM GET_DATA.
+SELECT KUNNR INTO TABLE IT_KNA1 FROM KNA1
+WHERE KUNNR IN S_KUNNR.
+SORT IT_KNA1 BY KUNNR.
+
+SELECT TDID INTO TABLE IT_TTXID FROM TTXID
+WHERE TDOBJECT = P_OBJ
+AND TDID    IN S_TDID.
+SORT IT_TTXID BY TDID.
+
+ENDFORM.                    " GET_DATA
+*&---------------------------------------------------------------------*
+*&      Form  READ_TEXT_DATA
+*&---------------------------------------------------------------------*
+*       テキストデータ取得
+*----------------------------------------------------------------------*
+FORM READ_TEXT_DATA.
+CHECK NOT IT_KNA1[] IS INITIAL.   "該当得意先が無ければ処理しない
+CHECK NOT IT_TTXID[] IS INITIAL.  "該当テキストIDが無ければ処理しない
+* 得意先ループ
+LOOP AT IT_KNA1 INTO WA_KNA1.
+CLEAR:WA_FILE,WA_THEAD.
+WA_FILE-FNAME   = WA_KNA1-KUNNR.
+WA_THEAD-TDNAME = WA_KNA1-KUNNR.
+*   テキストIDループ
+LOOP AT IT_TTXID INTO WA_TTXID.
+CLEAR:V_LINECNT.             "得意先/テキストIDごとに行番リセット
+REFRESH:IT_TLINE.            "テキスト取得用内部テーブル初期化
+WA_FILE-FNAME     = WA_KNA1-KUNNR.
+WA_FILE-FID       = WA_TTXID-TDID.
+WA_THEAD-TDID     = WA_TTXID-TDID.
+WA_THEAD-TDSPRAS  = P_LANG.
+WA_THEAD-TDOBJECT = P_OBJ.
+*     テキストを取得し、内部テーブルに格納
+PERFORM EDIT_FILE.
+ENDLOOP.
+ENDLOOP.
+ENDFORM.                    " READ_TEXT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_FILE
+*&---------------------------------------------------------------------*
+*       テキスト読み込み→改行で編集
+*----------------------------------------------------------------------*
+FORM EDIT_FILE.
+*ローカルデータ
+DATA: L_TEXT_S        TYPE STRING,
+L_TEXT          TYPE STRING,            "ロングテキスト
+L_TEXT2         TYPE STRING,            "(1行の出力桁数）
+L_TEXT3         TYPE STRING,            "(1行の出力桁数）
+L_TEXT132(134)  TYPE C,                 "132桁編集
+*        L_CRLF(2)       TYPE C.                 "改行コード
+* Mod ES-UP 2012/08/21 -->
+*        L_CRLF = CL_ABAP_CHAR_UTILITIES=>CR_LF.
+*        L_CR          TYPE X VALUE '0A',
+L_CR          TYPE C VALUE CL_ABAP_CHAR_UTILITIES=>NEWLINE,
+*        L_LF          TYPE X VALUE '0D',
+L_LF          TYPE C VALUE CL_ABAP_CHAR_UTILITIES=>CR_LF,
+* Mod ES-UP 2012/08/21 -->
+L_SUBRC       TYPE SY-SUBRC.
+*
+*  CALL FUNCTION 'AMDS_READ_SAPSCRIPT_TEXT'
+*       EXPORTING
+*            I_ID       = WA_THEAD-TDID
+*            I_LANGUAGE = WA_THEAD-TDSPRAS
+*            I_NAME     = WA_THEAD-TDNAME
+*            I_OBJECT   = WA_THEAD-TDOBJECT
+*       TABLES
+*            T_NETEXT   = LI_L_TEXT
+*       EXCEPTIONS
+*            NOT_FOUND  = 1
+*            OTHERS     = 2.
+CLEAR L_SUBRC.
+PERFORM Z_AMDS_READ_SAPSCRIPT_TEXT USING  L_SUBRC.
+IF  L_SUBRC = 0.
+V_M_CNT = V_M_CNT + 1.  "得意先/テキストIDの組合数カウント
+ELSEIF  L_SUBRC = 1 .      "未入力はスルー
+EXIT.
+ELSE.   "正常、もしくは未入力以外のみエラー
+CLEAR V_ETEXT.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+INTO V_ETEXT.
+PERFORM WRITE_ERR USING V_ETEXT.
+EXIT.
+ENDIF.
+
+* 横１行のテキストに全件格納
+CLEAR: L_TEXT_S.
+LOOP AT IT_L_TEXT INTO V_STEXT.
+CONCATENATE  L_TEXT_S V_STEXT INTO  L_TEXT_S.
+ENDLOOP.
+
+*改行コードで分解
+DO.
+CLEAR:L_TEXT2,L_TEXT3.
+SPLIT L_TEXT_S AT L_CR INTO L_TEXT2  L_TEXT_S.
+IF NOT L_TEXT2 IS INITIAL.
+SPLIT L_TEXT2 AT L_LF INTO L_TEXT2 L_TEXT3.
+V_LINECNT = V_LINECNT + 1.
+
+WA_FILE-FLINE  = V_LINECNT.
+L_TEXT132      = L_TEXT2.
+WA_FILE-TDLINE = L_TEXT132(132).
+CLEAR WA_DFILE.
+CONCATENATE WA_FILE-FNAME
+WA_FILE-FID
+WA_FILE-FLINE
+WA_FILE-TDLINE
+INTO WA_DFILE-LTEXT
+SEPARATED BY CNS_TAB.
+APPEND WA_DFILE TO IT_DFILE.
+ENDIF.
+IF  L_TEXT_S IS INITIAL.
+EXIT.
+ENDIF.
+ENDDO.
+
+ENDFORM.                    " EDIT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_ERR
+*&---------------------------------------------------------------------*
+*       エラーデータ内部テーブル格納
+*----------------------------------------------------------------------*
+FORM WRITE_ERR USING V_ETEXT.
+CLEAR WA_EDATA.
+WA_EDATA-FNAME  = WA_FILE-FNAME.
+WA_EDATA-FID    = WA_FILE-FID.
+WA_EDATA-TDLINE = V_ETEXT.
+
+APPEND WA_EDATA TO IT_EDATA.
+
+ENDFORM.                    " WRITE_ERR
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_ERR_SPOOL
+*&---------------------------------------------------------------------*
+*       エラーデータありの場合の処理
+*----------------------------------------------------------------------*
+FORM WRITE_ERR_SPOOL.
+* ヘッダ
+WRITE:/1  TEXT-H01, "得意先コード
+15 TEXT-H02, "テキストID
+27 TEXT-H03. "エラー内容
+ULINE.
+LOOP AT IT_EDATA INTO WA_EDATA.
+WRITE:/1  WA_EDATA-FNAME,  "得意先コード
+17 WA_EDATA-FID,    "テキストID
+27 WA_EDATA-TDLINE. "エラー内容
+ENDLOOP.
+
+ENDFORM.                    " WRITE_ERR_SPOOL
+*&---------------------------------------------------------------------*
+*&      Form  OUT_FILE
+*&---------------------------------------------------------------------*
+*       ファイル出力
+*----------------------------------------------------------------------*
+FORM OUT_FILE.
+* データが存在する場合のみ
+IF IT_DFILE[] IS INITIAL.
+*   処理対象データがありません
+MESSAGE S204.
+STOP.
+ENDIF.
+CHECK NOT IT_DFILE IS INITIAL.
+IF R_SERVER = CNS_ON.
+*   サーバ選択時
+PERFORM OUT_FILE_SERVER.
+ELSE.
+*   ローカル選択時
+PERFORM OUT_FILE_LOCAL.
+ENDIF.
+
+ENDFORM.                    " OUT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  OUT_FILE_SERVER
+*&---------------------------------------------------------------------*
+*       サーバファイル出力
+*----------------------------------------------------------------------*
+FORM OUT_FILE_SERVER.
+**** START DEL 2014/09/01 ISID11 ****
+** ファイルオープン1
+** Mod ES-UP 2012/08/21 -->
+**  OPEN DATASET P_FILE FOR OUTPUT IN TEXT MODE.
+*  CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+*  DATA L_CODEPAGE TYPE CPCODEPAGE.
+*
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** END DEL 2014/09/01 ISID11 ****
+**** START ADD 2015/02/04 ISID11 ****
+DATA:
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8  TYPE  FLAG,
+L_SUBRC    TYPE SY-SUBRC,
+L_CODEPAGE TYPE ABAP_ENCODING.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-006
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+
+IF L_FLGUTF8 IS INITIAL.
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+TRY .
+OPEN DATASET P_FILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+
+L_SUBRC = 8.
+
+ENDTRY.
+
+ELSE.
+**** END ADD 2015/02/04 ISID11 ****
+OPEN DATASET P_FILE FOR OUTPUT
+**** START UPD 2014/08/31 ISID19 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/08/31 ISID19 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID11 ****
+L_SUBRC = SY-SUBRC.
+
+ENDIF.
+**** END ADD 2015/02/04 ISID11 ****
+**** START UPD 2015/02/04 ISID11 ****
+*  IF SY-SUBRC <> 0.
+IF L_SUBRC <> 0 .
+**** END UPD 2015/02/04 ISID11 ****
+*   ファイルのオープンでエラーが発生しました
+MESSAGE S400 WITH TEXT-M04.
+STOP.
+ENDIF.
+
+* 出力
+LOOP AT IT_DFILE INTO WA_DFILE.
+TRANSFER WA_DFILE-LTEXT TO P_FILE.
+ENDLOOP.
+
+* ファイルクローズ
+CLOSE DATASET P_FILE.
+
+ENDFORM.                    " OUT_FILE_SERVER
+*&---------------------------------------------------------------------*
+*&      Form  OUT_FILE_LOCAL
+*&---------------------------------------------------------------------*
+*       ローカルファイル出力
+*----------------------------------------------------------------------*
+FORM OUT_FILE_LOCAL.
+
+* Add ES-UP 2012/09/11 -->
+DATA: L_CODEPAGE  TYPE ABAP_ENCODING,
+LV_FILENAME TYPE STRING.
+
+**** START ADD 2015/02/04 ISID11 ****
+DATA:
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-006
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP.
+**** END ADD 2015/02/04 ISID11 ****
+LV_FILENAME = P_FILE.
+
+*--- シフトJISのコードページを取得
+**** START UPD 2014/09/01 ISID11 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( 'shift_jis' ).
+**** START ADD 2015/02/04 ISID11 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+**** END UPD 2014/09/01 ISID11 ****
+
+CL_GUI_FRONTEND_SERVICES=>GUI_DOWNLOAD(
+EXPORTING
+*    BIN_FILESIZE              = BIN_FILESIZE
+FILENAME                  = LV_FILENAME
+*    FILETYPE                  = 'ASC'
+*    APPEND                    = SPACE
+*    WRITE_FIELD_SEPARATOR     = SPACE
+*    HEADER                    = '00'
+*    TRUNC_TRAILING_BLANKS     = SPACE
+*    WRITE_LF                  = 'X'
+*    COL_SELECT                = SPACE
+*    COL_SELECT_MASK           = SPACE
+*    DAT_MODE                  = SPACE
+*    CONFIRM_OVERWRITE         = SPACE
+*    NO_AUTH_CHECK             = SPACE
+CODEPAGE                  = L_CODEPAGE
+IGNORE_CERR               = ABAP_FALSE
+*    REPLACEMENT               = '#'
+*    WRITE_BOM                 = SPACE
+*    TRUNC_TRAILING_BLANKS_EOL = 'X'
+*    WK1_N_FORMAT              = SPACE
+*    WK1_N_SIZE                = SPACE
+*    WK1_T_FORMAT              = SPACE
+*    WK1_T_SIZE                = SPACE
+*    SHOW_TRANSFER_STATUS      = 'X'
+*    FIELDNAMES                = FIELDNAMES
+*    WRITE_LF_AFTER_LAST_LINE  = 'X'
+*  IMPORTING
+*    FILELENGTH                = FILELENGTH
+CHANGING
+DATA_TAB                  = IT_DFILE
+EXCEPTIONS
+FILE_WRITE_ERROR          = 1
+NO_BATCH                  = 2
+GUI_REFUSE_FILETRANSFER   = 3
+INVALID_TYPE              = 4
+NO_AUTHORITY              = 5
+UNKNOWN_ERROR             = 6
+HEADER_NOT_ALLOWED        = 7
+SEPARATOR_NOT_ALLOWED     = 8
+FILESIZE_NOT_ALLOWED      = 9
+HEADER_TOO_LONG           = 10
+DP_ERROR_CREATE           = 11
+DP_ERROR_SEND             = 12
+DP_ERROR_WRITE            = 13
+UNKNOWN_DP_ERROR          = 14
+ACCESS_DENIED             = 15
+DP_OUT_OF_MEMORY          = 16
+DISK_FULL                 = 17
+DP_TIMEOUT                = 18
+FILE_NOT_FOUND            = 19
+DATAPROVIDER_EXCEPTION    = 20
+CONTROL_FLUSH_ERROR       = 21
+NOT_SUPPORTED_BY_GUI      = 22
+ERROR_NO_GUI              = 23
+OTHERS                    = 24 ).
+
+* Add ES-UP 2012/09/11 <--
+
+* Del ES-UP 2012/09/11 -->
+*  DATA : LV_FILENAME TYPE STRING.
+*
+*  LV_FILENAME = P_FILE.
+*
+*  CALL FUNCTION 'GUI_DOWNLOAD'
+*       EXPORTING
+*            FILENAME                = LV_FILENAME
+*       TABLES
+*            DATA_TAB                = IT_DFILE
+*       EXCEPTIONS
+*            FILE_WRITE_ERROR        = 1
+*            NO_BATCH                = 2
+*            GUI_REFUSE_FILETRANSFER = 3
+*            INVALID_TYPE            = 4
+*            NO_AUTHORITY            = 5
+*            UNKNOWN_ERROR           = 6
+*            HEADER_NOT_ALLOWED      = 7
+*            SEPARATOR_NOT_ALLOWED   = 8
+*            FILESIZE_NOT_ALLOWED    = 9
+*            HEADER_TOO_LONG         = 10
+*            DP_ERROR_CREATE         = 11
+*            DP_ERROR_SEND           = 12
+*            DP_ERROR_WRITE          = 13
+*            UNKNOWN_DP_ERROR        = 14
+*            ACCESS_DENIED           = 15
+*            DP_OUT_OF_MEMORY        = 16
+*            DISK_FULL               = 17
+*            DP_TIMEOUT              = 18
+*            FILE_NOT_FOUND          = 19
+*            DATAPROVIDER_EXCEPTION  = 20
+*            CONTROL_FLUSH_ERROR     = 21
+*            OTHERS                  = 22.
+
+* Del ES-UP 2012/09/11 -->
+
+IF SY-SUBRC <> 0.
+*   ファイルの出力でエラーが発生しました
+MESSAGE S400 WITH TEXT-M05.
+STOP.
+ENDIF.
+
+ENDFORM.                    " OUT_FILE_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  UP_PROC
+*&---------------------------------------------------------------------*
+*       アップロード処理
+*----------------------------------------------------------------------*
+FORM UP_PROC.
+DATA:L_MSG(50) TYPE C.
+
+* ファイル読込み
+PERFORM GET_FILE.
+
+IF IT_FILE[] IS INITIAL.
+*   処理対象データがありません
+MESSAGE S204.
+EXIT.
+ENDIF.
+
+* テキスト書き込み
+PERFORM CREATE_DATA.
+
+* 結果処理
+*-- エラーがない場合
+IF IT_EDATA[] IS INITIAL.
+*---- チェックのみでない場合
+IF P_CHK IS INITIAL. "実実行
+COMMIT WORK.
+*     XX件、更新しました
+L_MSG = V_M_CNT * 1.
+MESSAGE S401 WITH L_MSG TEXT-M07.
+*---- チェックのみの場合
+ELSE.
+ROLLBACK WORK.
+*     エラーはありません
+MESSAGE S400 WITH TEXT-M03.
+ENDIF.
+*-- エラーがある場合
+ELSE.
+ROLLBACK WORK.
+PERFORM WRITE_ERR_SPOOL.
+EXIT.                   "処理終了
+ENDIF.
+ENDFORM.                    " UP_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE
+*&---------------------------------------------------------------------*
+*       入力ファイル読みこみ
+*----------------------------------------------------------------------*
+FORM GET_FILE.
+CASE CNS_ON.
+*   サーバ選択時
+WHEN R_SERVER.
+PERFORM GET_FILE_SERVER.
+
+*   ローカル選択時
+WHEN R_LOCAL.
+PERFORM GET_FILE_LOCAL.
+
+WHEN OTHERS.
+ENDCASE.
+
+
+ENDFORM.                    " GET_FILE
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_SERVER
+*&---------------------------------------------------------------------*
+*       サーバファイル読込み
+*----------------------------------------------------------------------*
+FORM GET_FILE_SERVER.
+
+**** START ADD 2015/02/04 ISID11 ****
+DATA:
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8  TYPE  FLAG,
+L_SUBRC    TYPE SY-SUBRC,
+L_CODEPAGE TYPE ABAP_ENCODING.
+**** END ADD 2015/02/04 ISID11 ****
+
+REFRESH IT_FILE.
+
+**** START ADD 2015/02/04 ISID11 ****
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-006
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+**** END ADD 2015/02/04 ISID11 ****
+* ファイルオープン
+*  OPEN DATASET P_FILE FOR INPUT IN TEXT MODE.
+
+**** START UPD 2014/08/31 ISID19 ****
+*  CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+*  OPEN DATASET P_FILE FOR OUTPUT
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+*    IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID11 ****
+IF L_FLGUTF8 IS INITIAL.
+
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+TRY .
+OPEN DATASET P_FILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+
+L_SUBRC = 8.
+
+ENDTRY.
+
+ELSE.
+**** END ADD 2015/02/04 ISID11 ****
+OPEN DATASET P_FILE FOR OUTPUT IN TEXT MODE ENCODING UTF-8
+**** START ADD 2015/02/04 ISID11 ****
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+ENDIF.
+**** END ADD 2015/02/04 ISID11 ****
+**** END UPD 2014/08/31 ISID19 ****
+**** START UPD 2015/02/04 ISID11 ****
+*  IF SY-SUBRC <> 0.
+IF L_SUBRC <> 0 .
+**** END UPD 2015/02/04 ISID11 ****
+*   入力ファイルのオープンでエラーが発生しました
+MESSAGE S400 WITH TEXT-M06.
+STOP.
+ENDIF.
+
+* 読込み
+DO.
+CLEAR V_LONGTXT.
+READ DATASET P_FILE INTO V_LONGTXT.
+
+IF SY-SUBRC = 0.
+*     内部テーブルに追加
+CLEAR WA_FILE.
+SPLIT V_LONGTXT
+AT CNS_TAB
+INTO WA_FILE-FNAME   "テキスト名
+WA_FILE-FID     "テキストID
+WA_FILE-FLINE   "テキスト行数
+WA_FILE-TDLINE. "テキスト内容
+PERFORM ZERO_CONV.    "ゼロ埋め
+APPEND WA_FILE TO IT_FILE.
+ELSE.
+*     取得終了
+EXIT.
+ENDIF.
+ENDDO.
+
+* ファイルクローズ
+CLOSE DATASET P_FILE.
+
+ENDFORM.                    " GET_FILE_SERVER
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_LOCAL
+*&---------------------------------------------------------------------*
+*       ローカルファイル読込み
+*----------------------------------------------------------------------*
+FORM GET_FILE_LOCAL.
+
+DATA : LV_FILENAME TYPE STRING.
+
+REFRESH IT_DFILE.
+
+LV_FILENAME = P_FILE.
+
+* Mod ES-UP 2012/09/11 -->
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+**** START ADD 2015/02/04 ISID11 ****
+DATA:
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_SAPCODEPAGE TYPE STRING.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-006
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP.
+**** END ADD 2015/02/04 ISID11 ****
+*--- シフトJISのコードページを取得
+**** START UPD 2014/09/01 ISID11 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( 'shift_jis' ).
+**** START ADD 2015/02/04 ISID11 ****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+**** END UPD 2014/09/01 ISID11 ****
+
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = LV_FILENAME
+*    FILETYPE                = 'DAT'
+*    HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*    HEADER_LENGTH           = 0
+*    READ_BY_LINE            = 'X'
+*    DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+IGNORE_CERR             = ABAP_FALSE
+*    REPLACEMENT             = '#'
+*    VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*  IMPORTING
+*    FILELENGTH              = FILELENGTH
+*    HEADER                  = HEADER
+CHANGING
+DATA_TAB                = IT_DFILE
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+
+*  CALL FUNCTION 'GUI_UPLOAD'
+*       EXPORTING
+*            FILENAME                = LV_FILENAME
+*       TABLES
+*            DATA_TAB                = IT_DFILE
+*       EXCEPTIONS
+*            FILE_OPEN_ERROR         = 1
+*            FILE_READ_ERROR         = 2
+*            NO_BATCH                = 3
+*            GUI_REFUSE_FILETRANSFER = 4
+*            INVALID_TYPE            = 5
+*            NO_AUTHORITY            = 6
+*            UNKNOWN_ERROR           = 7
+*            BAD_DATA_FORMAT         = 8
+*            HEADER_NOT_ALLOWED      = 9
+*            SEPARATOR_NOT_ALLOWED   = 10
+*            HEADER_TOO_LONG         = 11
+*            UNKNOWN_DP_ERROR        = 12
+*            ACCESS_DENIED           = 13
+*            DP_OUT_OF_MEMORY        = 14
+*            DISK_FULL               = 15
+*            DP_TIMEOUT              = 16
+*            OTHERS                  = 17.
+
+* Mod ES-UP 2012/09/11 <--
+
+IF SY-SUBRC <> 0.
+*   入力ファイルのアップロードでエラーが発生しました
+MESSAGE S400 WITH TEXT-M10.
+STOP.
+ENDIF.
+
+* 入力ファイルゼロ件
+IF IT_DFILE IS INITIAL.
+*   処理対象データがありません
+MESSAGE S204.
+STOP.
+ELSE.
+*   タブで区切って編集
+LOOP AT IT_DFILE INTO WA_DFILE.
+CLEAR WA_FILE.
+SPLIT WA_DFILE-LTEXT
+AT CNS_TAB
+INTO WA_FILE-FNAME   "テキスト名
+WA_FILE-FID     "テキストID
+WA_FILE-FLINE   "テキスト行数
+WA_FILE-TDLINE. "テキスト内容
+PERFORM ZERO_CONV.    "ゼロ埋め
+APPEND WA_FILE TO IT_FILE.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " GET_FILE_LOCAL
+*&---------------------------------------------------------------------*
+*&      Form  CREATE_DATA
+*&---------------------------------------------------------------------*
+*       テキスト書き込み
+*----------------------------------------------------------------------*
+FORM CREATE_DATA.
+DATA:L_CNT TYPE I.
+
+* マスタチェック用得意先取得
+PERFORM GET_KNA1_CHK.
+
+CLEAR:V_M_CNT.
+* 入力ファイルの内容でループ
+LOOP AT IT_FILE INTO WA_FILE.
+*   得意先コード 開始ブレイク
+AT NEW FNAME.
+*     得意先コード 入力チェック
+PERFORM CHK_NAME_UPLOAD.
+ENDAT.
+*   得意先コード&テキストID 開始ブレイク
+AT NEW FID.
+REFRESH:IT_TLINE.
+CLEAR:V_ERR_ID_FLG.
+ENDAT.
+
+*   テキスト内容桁数チェック(132を越えたらエラー)
+L_CNT = STRLEN( WA_FILE-TDLINE ).
+IF  L_CNT > 132.
+V_ERR_ID_FLG = CNS_ON.
+ENDIF.
+
+*   入力ファイルのテキスト内容を、汎用モジュールに渡す内部テーブルに格納
+PERFORM STREAM_TO_ITF.
+
+*   得意先コード&テキストID 終了ブレイク
+AT END OF FID.
+PERFORM CALL_CREATE_TEXT.
+ENDAT.
+
+ENDLOOP.
+ENDFORM.                    " CREATE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  CALL_CREATE_TEXT
+*&---------------------------------------------------------------------*
+*       汎用モジュールCREATE_TEXT実行
+*----------------------------------------------------------------------*
+FORM CALL_CREATE_TEXT.
+DATA:
+L_TDID       TYPE THEAD-TDID,
+L_TDSPRAS    TYPE THEAD-TDSPRAS,
+L_TDNAME     TYPE THEAD-TDNAME,
+L_TDOBJECT   TYPE THEAD-TDOBJECT.
+
+* エラー確認
+*-- 得意先マスタ 存在しない
+IF V_ERR_NAME_FLG = 1.
+*   得意先が存在しません
+PERFORM WRITE_ERR USING TEXT-M09.
+EXIT.
+ENDIF.
+
+*-- 得意先マスタ ロック判定
+IF V_ERR_NAME_FLG = 2.
+*   要求オブジェクトは現在ユーザ XXXXXXXX にロックされています
+PERFORM WRITE_ERR USING V_ETEXT.
+EXIT.
+ENDIF.
+
+*-- 132桁以上のテキストエラー
+IF V_ERR_ID_FLG = CNS_ON.
+*   テキストが１３２桁を越えています
+PERFORM WRITE_ERR USING TEXT-M08.
+PERFORM UNROCK_KNA1.
+EXIT.
+ENDIF.
+
+* エラーが無ければテキスト登録
+L_TDID     = WA_FILE-FID.
+L_TDSPRAS  = P_LANG.
+L_TDNAME   = WA_FILE-FNAME.
+L_TDOBJECT = P_OBJ.
+
+CALL FUNCTION 'CREATE_TEXT'
+EXPORTING
+FID         = L_TDID
+FLANGUAGE   = L_TDSPRAS
+FNAME       = L_TDNAME
+FOBJECT     = L_TDOBJECT
+SAVE_DIRECT = 'X'
+TABLES
+FLINES      = IT_TLINE
+EXCEPTIONS
+NO_INIT     = 1
+NO_SAVE     = 2
+OTHERS      = 3.
+IF SY-SUBRC = 0.
+V_M_CNT = V_M_CNT + 1.
+PERFORM UNROCK_KNA1.
+ELSE.
+CLEAR V_ETEXT.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+INTO V_ETEXT.
+PERFORM WRITE_ERR USING V_ETEXT.
+PERFORM UNROCK_KNA1.
+EXIT.
+ENDIF.
+
+ENDFORM.                    " CALL_CREATE_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNA1_CHK
+*&---------------------------------------------------------------------*
+*       入力ファイルチェック用 得意先マスタ取得
+*----------------------------------------------------------------------*
+FORM GET_KNA1_CHK.
+SELECT KUNNR INTO TABLE IT_KNA1 FROM KNA1
+FOR ALL ENTRIES IN IT_FILE
+WHERE KUNNR = IT_FILE-FNAME.
+
+ENDFORM.                    " GET_KNA1_CHK
+*&---------------------------------------------------------------------*
+*&      Form  CHK_NAME_UPLOAD
+*&---------------------------------------------------------------------*
+*      入力ファイルの得意先コードのチェック
+*----------------------------------------------------------------------*
+FORM CHK_NAME_UPLOAD.
+* 得意先マスタチェック
+CLEAR:V_ERR_NAME_FLG.
+READ TABLE IT_KNA1 INTO WA_KNA1
+WITH TABLE KEY KUNNR = WA_FILE-FNAME.
+IF SY-SUBRC <> 0.
+V_ERR_NAME_FLG = 1. "マスタ存在エラー
+EXIT.
+ENDIF.
+
+* 得意先マスタ ロックチェック
+CALL FUNCTION 'ENQUEUE_EXKNA1'
+EXPORTING
+KUNNR          = WA_FILE-FNAME
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+IF SY-SUBRC <> 0.
+CLEAR V_ETEXT.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4
+INTO V_ETEXT.
+V_ERR_NAME_FLG = 2. "ロックエラー
+ENDIF.
+
+
+ENDFORM.                    " CHK_NAME_UPLOAD
+*&---------------------------------------------------------------------*
+*&      Form  ZERO_CONV
+*&---------------------------------------------------------------------*
+*       ゼロ埋め
+*----------------------------------------------------------------------*
+FORM ZERO_CONV.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = WA_FILE-FNAME
+IMPORTING
+OUTPUT = WA_FILE-FNAME.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = WA_FILE-FID
+IMPORTING
+OUTPUT = WA_FILE-FID.
+ENDFORM.                    " ZERO_CONV
+*&---------------------------------------------------------------------*
+*&      Form  UNROCK_KNA1
+*&---------------------------------------------------------------------*
+*       得意先マスタ ロック解除
+*----------------------------------------------------------------------*
+FORM UNROCK_KNA1.
+CALL FUNCTION 'DEQUEUE_EXKNA1'
+EXPORTING
+KUNNR = WA_FILE-FNAME.
+
+ENDFORM.                    " UNROCK_KNA1
+*&---------------------------------------------------------------------*
+*&      Form  Z_AMDS_READ_SAPSCRIPT_TEXT
+*&---------------------------------------------------------------------*
+*       テキスト編集
+*----------------------------------------------------------------------*
+*      -->L_SUBRC  リターンコード
+*----------------------------------------------------------------------*
+FORM Z_AMDS_READ_SAPSCRIPT_TEXT USING L_SUBRC.
+TYPES:NLINE(80)  TYPE C.
+DATA: LT_SSTEXT  LIKE TLINE OCCURS 0,
+LT_SSTEXT2 LIKE TLINE OCCURS 0,
+LW_SSTEXT  LIKE TLINE,
+LW_SSTEXT2 LIKE TLINE.
+DATA: LT_NETEXT  TYPE NLINE OCCURS 0.
+DATA: E_HEADER   TYPE THEAD.
+
+REFRESH: IT_L_TEXT,LT_NETEXT,LT_SSTEXT,LT_SSTEXT2.
+CLEAR:   E_HEADER.
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID        = WA_THEAD-TDID
+LANGUAGE  = WA_THEAD-TDSPRAS
+NAME      = WA_THEAD-TDNAME
+OBJECT    = WA_THEAD-TDOBJECT
+IMPORTING
+HEADER    = E_HEADER
+TABLES
+LINES     = LT_SSTEXT
+EXCEPTIONS
+NOT_FOUND = 1
+OTHERS    = 8.
+IF SY-SUBRC <> 0.
+L_SUBRC = SY-SUBRC.
+EXIT.
+ENDIF.
+
+*132桁切り落としに編集
+LOOP AT LT_SSTEXT INTO LW_SSTEXT.
+IF LW_SSTEXT-TDFORMAT = CNS_ASTER.
+IF NOT LW_SSTEXT2 IS INITIAL.
+APPEND  LW_SSTEXT2 TO LT_SSTEXT2.
+ENDIF.
+CLEAR:LW_SSTEXT2.
+LW_SSTEXT2-TDFORMAT = CNS_ASTER.
+LW_SSTEXT2-TDLINE   = LW_SSTEXT-TDLINE.
+ELSE.
+CONCATENATE LW_SSTEXT2-TDLINE LW_SSTEXT-TDLINE
+INTO  LW_SSTEXT2-TDLINE.
+ENDIF.
+ENDLOOP.
+
+IF NOT LW_SSTEXT2 IS INITIAL.
+APPEND  LW_SSTEXT2 TO LT_SSTEXT2.
+ENDIF.
+
+*文字化け対策
+CALL FUNCTION 'CONVERT_ITF_TO_STREAM_TEXT'
+TABLES
+ITF_TEXT    = LT_SSTEXT2
+TEXT_STREAM = LT_NETEXT
+EXCEPTIONS
+OTHERS      = 8.
+
+IT_L_TEXT[] = LT_NETEXT[].
+ENDFORM.                    " Z_AMDS_READ_SAPSCRIPT_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  STREAM_TO_ITF
+*&---------------------------------------------------------------------*
+*       テキスト変換
+*----------------------------------------------------------------------*
+FORM STREAM_TO_ITF.
+TYPES:LT_NOTETAB_LINE(132) TYPE C.
+
+DATA:LIT_STREAM TYPE LT_NOTETAB_LINE OCCURS 0,
+LWA_STREAM TYPE LT_NOTETAB_LINE,
+LIT_ITF    TYPE STANDARD TABLE OF TLINE,
+LWA_ITF    TYPE TLINE.
+REFRESH: LIT_STREAM ,LIT_ITF .
+*    WA_TLINE-TDFORMAT = CNS_ASTER.
+*    WA_TLINE-TDLINE   = WA_FILE-TDLINE(132).
+*    APPEND WA_TLINE TO IT_TLINE.
+LWA_STREAM = WA_FILE-TDLINE(132).
+APPEND LWA_STREAM TO LIT_STREAM.
+CALL FUNCTION 'CONVERT_STREAM_TO_ITF_TEXT'
+TABLES
+TEXT_STREAM = LIT_STREAM
+ITF_TEXT    = LIT_ITF
+EXCEPTIONS
+OTHERS      = 8.
+LOOP AT LIT_ITF INTO LWA_ITF.
+APPEND LWA_ITF TO IT_TLINE.
+ENDLOOP.
+
+ENDFORM.                    " STREAM_TO_ITF

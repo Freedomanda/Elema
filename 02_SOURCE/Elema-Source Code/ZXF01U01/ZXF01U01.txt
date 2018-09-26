@@ -1,0 +1,285 @@
+************************************************************************
+* [INCLUDE名]
+*   ZXF01U01        電子銀行報告書用ユーザExit
+*
+* [処理概要]
+*   ・売掛金決済
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2001/11/20   PSD M.Arai        新規開発　
+*  2002/03/11   PSD M.Arai        支店考慮
+*  2002/03/20   PSD M.ARAI        明細考慮
+*  2005/01/27   DMC K.Abe         「仕向銀行名と支店名」の照合条件取消
+*  2012/03/07   K.Furuya          新検収照合導入に伴い電子銀行報告による
+*　　　　　　　　　　　　　　　　 消込を廃止、
+*　　　　　　　　　　　　　　　　 ダミー得意先コードに売掛金計上をして
+*　　　　　　　　　　　　　　　　 消込処理はAdd-on(ZN011500)にて行う　
+************************************************************************
+
+
+*2012/03/07 ADD START >>>
+*----------------------------------------------------------------------*
+* 振込依頼人名を明細テキストにセットする
+* 振込依頼人コード（架空口座番号）をソートキーにセットする
+*----------------------------------------------------------------------*
+CONSTANTS: CNS_DUMMY TYPE KUNNR VALUE '99999901'.  "ダミー得意先コード
+
+E_UPDATE      = 'X'.                   "データ変更_フラグON
+E_FEBKO       = I_FEBKO.
+E_FEBEP       = I_FEBEP.
+E_FEBEP-SGTXT = I_FEBEP-PARTN.         "振込依頼人名（カナ）
+E_FEBEP-ZUONR = I_FEBEP-INFO1+0(10).   "振込依頼人コード
+E_FEBEP-AVKOA = 'D'.                   "勘定タイプ
+E_FEBEP-AVKON = CNS_DUMMY.             "得意先コード
+
+*2012/03/07 ADD END <<<
+
+
+*2012/03/07 DEL START >>>
+************************************************************************
+**
+** CONSTANTS
+**
+************************************************************************
+**
+*CONSTANTS: CNS_ANWND(4)  TYPE C VALUE '0001',       "アプリケーション
+*           CNS_BANKS(2)  TYPE C VALUE 'JP',         "銀行国コード
+*           CNS_HKONT(10) TYPE C VALUE '0000113100'. "売掛金勘定コード
+*
+************************************************************************
+**
+** TYPES
+**
+************************************************************************
+**
+** 電子銀行報告書情報
+*TYPES: BEGIN OF TYP_FEB,
+*         ETIME TYPE FEBKO-ETIME,      "時間
+*         KUKEY TYPE FEBKO-KUKEY,      "ショートキー
+*         ESNUM TYPE FEBEP-ESNUM,      "メモリレコード
+*         BUKRS TYPE FEBKO-BUKRS,      "国コード
+*         PARTN TYPE FEBEP-PARTN,      "得意先/仕入先
+*         BELNR TYPE FEBEP-BELNR,      "伝票番号
+*         BUDAT TYPE FEBEP-BUDAT,      "支払基準日
+** ↓ append 2002.03.11 psd m.arai 銀行/支店考慮
+*         VWEZW TYPE FEBRE-VWEZW,      "受取人への通知
+** ↑
+*       END   OF TYP_FEB.
+*
+** 伝票番号
+*TYPES: BEGIN OF TYP_BSID,
+*         GJAHR TYPE BSID-GJAHR,       "会計年度
+*         BELNR TYPE BSID-BELNR,       "伝票番号
+*         BUZEI TYPE BSID-BUZEI,       "伝票明細
+**---APPEND START PSD T.SAITOH 2002/04/01 ---------------------------*
+*         HKONT TYPE BSID-HKONT,       "勘定コード
+**---APPEND END   PSD T.SAITOH 2002/04/01 ---------------------------*
+*       END   OF TYP_BSID.
+*
+************************************************************************
+**
+** DATA
+**
+************************************************************************
+**
+** 電子銀行報告書情報ヘッダ・内部TBL
+*DATA: GF_FEB   TYPE TYP_FEB,
+*      GT_FEB   LIKE TABLE OF GF_FEB.
+*
+** 伝票番号ヘッダ・内部TBL
+*DATA: GF_BSID  TYPE TYP_BSID,
+*      GT_BSID  LIKE TABLE OF GF_BSID.
+*
+** 電子銀行報告書明細決済データ構造
+*DATA: GF_FEBCL TYPE FEBCL.
+*
+** 得意先コード
+*DATA: G_KUNNR  TYPE KNBK-KUNNR.
+*
+** ↓ APPEND 2002.03.11 PSD M.ARAI 支店考慮
+** 銀行コード
+*DATA: G_BANKL  TYPE BNKA-BANKL.
+** ↑
+*
+** 決済伝票レコード
+*DATA: CTR_CSNUM LIKE GF_FEBCL-CSNUM.
+*
+** ループカウンタ
+*DATA: CTR_LOOP  TYPE I.
+*
+**時間
+*DATA: TMP_TIME  LIKE GF_FEB-ETIME.
+*
+**勘定コード
+*DATA: G_HKONT TYPE BSID-HKONT.
+*
+**支払基準日
+*DATA: G_LOW  TYPE DATUM,
+*      G_HIGH TYPE DATUM,
+*      G_NUM  TYPE TVARV-LOW,
+*      G_DAY  TYPE P.
+************************************************************************
+**
+** MAIN
+**
+************************************************************************
+**
+*
+** 勘定コード取得
+*SELECT SINGLE LOW FROM TVARV
+*  INTO G_HKONT
+*  WHERE NAME = 'ZXF01U01'
+*  AND   TYPE = 'P'.
+**    AND   NUMB = '0001'.
+*
+** 支払基準日前後日付の設定
+*SELECT SINGLE LOW FROM TVARV
+*  INTO G_NUM
+*  WHERE NAME = 'ZXF01U01DAY'
+*  AND   TYPE = 'P'.
+**    AND   NUMB = '0001'.
+*
+*G_DAY = G_NUM.
+*
+** 電子銀行報告書情報取得
+** ↓ MODIFY 2002.03.11 PSD M.ARAI 支店考慮
+** ↓ MODIFY 2005.01.27 DMC K.ABE  銀行名/支店名の照合条件取消
+*  SELECT A~ETIME A~KUKEY B~ESNUM
+*         A~BUKRS B~PARTN B~BELNR
+*         B~BUDAT
+*    INTO CORRESPONDING FIELDS OF TABLE GT_FEB
+*    FROM FEBKO AS A INNER JOIN FEBEP AS B
+*    ON    A~KUKEY = B~KUKEY
+*    WHERE A~EDATE = SY-DATUM
+*    AND   A~ANWND = CNS_ANWND
+*    .
+*
+**SELECT A~ETIME A~KUKEY B~ESNUM A~BUKRS
+**       B~PARTN B~BELNR B~BUDAT
+**       C~VWEZW
+**  INTO CORRESPONDING FIELDS OF TABLE GT_FEB
+**  FROM ( FEBKO AS A INNER JOIN FEBEP AS B
+**  ON    A~KUKEY = B~KUKEY ) INNER JOIN FEBRE AS C
+**  ON    B~KUKEY = C~KUKEY
+**  AND   B~ESNUM = C~ESNUM
+**  WHERE A~EDATE = SY-DATUM
+**  AND   A~ANWND = CNS_ANWND
+**  AND   C~RSNUM = '001'
+**  .
+** ↑
+** ↑
+*
+*SORT GT_FEB DESCENDING BY ETIME.
+*CTR_LOOP = 1.
+*
+** 電子銀行報告書情報ループ処理
+*LOOP AT GT_FEB INTO GF_FEB.
+*  IF CTR_LOOP    <> 1         AND
+*     GF_FEB-ETIME <> TMP_TIME.
+*    EXIT.
+*  ENDIF.
+*
+*  CLEAR:  GF_FEBCL,
+*          G_KUNNR,
+*          GF_BSID.
+*  REFRESH GT_BSID.
+*
+** 決済レコード番号初期化
+*  CTR_CSNUM = '0001'.
+*
+** 共通項目設定
+*  GF_FEBCL-KUKEY = GF_FEB-KUKEY.
+*  GF_FEBCL-ESNUM = GF_FEB-ESNUM.
+*  GF_FEBCL-KOART = ' '.
+*  GF_FEBCL-SELFD = 'BELNR'.
+*
+** 銀行仮勘定情報設定処理（仮勘定未対応のため削除）
+**    GF_FEBCL-SELVON = GF_FEB-BELNR.
+**    INSERT INTO FEBCL VALUES GF_FEBCL.
+**    CLEAR GF_FEBCL-SELVON.
+**    CTR_CSNUM = CTR_CSNUM + 1.
+*
+** ↓ APPEND 2002.03.11 PSD M.Arai 支店考慮
+** ↓ DELETE 2005.01.27 DMC K.ABE  銀行名/支店名の照合条件取消
+*** 銀行コード取得処理
+**  SELECT SINGLE BANKL FROM BNKA
+**    INTO G_BANKL
+**    WHERE BANKS = CNS_BANKS
+**    AND   BANKA = GF_FEB-VWEZW+0(15)
+**    AND   BRNCH = GF_FEB-VWEZW+15(15).
+** ↑
+** ↑
+*
+** 得意先情報取得処理
+*  SELECT SINGLE KUNNR FROM KNBK
+*    INTO G_KUNNR
+*    WHERE KOINH = GF_FEB-PARTN
+*    AND   BANKS = CNS_BANKS
+** ↓ APPEND 2002.03.11 PSD M.ARAI 支店考慮
+** ↓ DELETE 2005.01.27 DMC K.ABE  銀行名/支店名の照合条件取消
+**    AND   BANKL = G_BANKL
+** ↑
+** ↑
+*    .
+*
+** 支払基準日の設定
+*  G_LOW  = GF_FEB-BUDAT - G_DAY.
+*  G_HIGH = GF_FEB-BUDAT + G_DAY.
+*
+** 伝票番号取得処理
+**---MODIFY START PSD T.SAITOH 2002/04/01 明細番号考慮取消し---------*
+** ↓ MODIFY 2002/03/20 PSD M.ARAI 明細番号考慮
+**    SELECT BELNR FROM BSID
+**  SELECT GJAHR BELNR BUZEI FROM BSID
+*  SELECT GJAHR BELNR BUZEI HKONT FROM BSID
+** ↑
+**---MODIFY END   PSD T.SAITOH 2002/04/01 ---------------------------*
+*    INTO CORRESPONDING FIELDS OF TABLE GT_BSID
+*    WHERE KUNNR = G_KUNNR
+*    AND   ZFBDT >= G_LOW
+*    AND   ZFBDT <= G_HIGH
+**      AND   ZFBDT = '20011130'         "支払基準日の前後２～３日
+*    AND   BUKRS = GF_FEB-BUKRS
+**---DELETE START PSD T.SAITOH 2002/04/01 明細番号考慮取消し---------*
+*** ↓ APPEND 2002/03/20 PSD M.ARAI 明細番号考慮
+**      AND   BUZEI = '001'
+*** ↑
+**---DELETE END   PSD T.SAITOH 2002/04/01 ---------------------------*
+*
+*    AND   HKONT = G_HKONT
+*    .
+*
+** FEBCLレコード追加処理
+*  CLEAR GF_FEBCL-CSNUM.
+**---MODIFY START PSD T.SAITOH 2002/04/01 明細番号考慮取消し---------*
+** LOOP AT GT_BSID INTO GF_BSID.
+*  LOOP AT GT_BSID INTO GF_BSID WHERE HKONT = G_HKONT.
+**---MODIFY END   PSD T.SAITOH 2002/04/01 ---------------------------*
+** 伝票番号設定
+** ↓ APPEND 2002/03/20 PSD M.ARAI 明細番号考慮
+**      GF_FEBCL-SELVON = GF_BSID-BELNR.
+*    CONCATENATE GF_BSID-BELNR
+*                GF_BSID-GJAHR
+*                GF_BSID-BUZEI
+*    INTO        GF_FEBCL-SELVON.
+** ↑
+*    GF_FEBCL-CSNUM  = CTR_CSNUM.
+** 売掛金情報設定処理
+*    INSERT INTO FEBCL VALUES GF_FEBCL.
+*
+** エラー処理（未設定）
+*    CASE SY-SUBRC.
+*      WHEN 0.
+*      WHEN 4.
+*      WHEN OTHERS.
+*    ENDCASE.
+*
+** 決済レコード番号インクリメント
+*    CTR_CSNUM = CTR_CSNUM + 1.
+*  ENDLOOP.
+*
+*  TMP_TIME = GF_FEB-ETIME.
+*  CTR_LOOP = CTR_LOOP + 1.
+*ENDLOOP.
+*2012/03/07 DEL END >>>

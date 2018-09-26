@@ -1,0 +1,4012 @@
+************************************************************************
+* [プログラム名]
+*   ZE011400        納品書データ出力（○オ）
+*
+* [処理概要]
+*   納品書の印刷
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/04/15   PSD K.Arai      新規開発
+*  2002/05/14   PSD T.SAITOH    出荷先情報を受注先情報に変更
+*  2002/05/17   PSD K.ARAI      出荷先住所１の取得方法を変更
+*  2002/06/03   PSD T.SAITOH    パフォーマンス対応
+*  2002/06/07   PSD T.SAITOH    セット品親の単価設定処理を追加
+*  2002/06/20   PSD T.SAITOH    再移送
+*  2002/08/06   PSD T.SAITOH    ロックユーザーＩＤ取得
+*  2002/08/19   PSD T.SAITOH    金額変更
+*  2002/08/30   PSD T.SAITOH    納品書の単価を修正
+*                               再出力時のパフォーマンス対応
+*  2002/09/04   PSD T.SAITOH    基本数量単位から販売単位へ変更
+*  2002/09/19   PSD T.SAITOH    発注部門コード Z020 → Z001へ変更
+*  2002/11/29   ndsc r.tomoeda  納品キーがない伝票は印刷しない
+*  2002/12/09   NDSC R.Hata     パフォーマンス改善
+*  2003/05/29   NDSC K.kajisa   パフォーマンス改善ver2
+*  2005/06/16   NDSC R.Hata     出庫日がブランクの時にシステム日付
+*  2009/12/14   SOLFIS T.HAYASHI  受注金額・税額の型を小数点2桁に変更
+*  2012/08/21   ISID            ES-UP
+*  2012/10/30   ISID            ES-UP
+*  2013/02/22   GSL S.TOHTAKE     入り数の桁変更・通常出力でも設定可能に
+*  2013/04/17   GSL S.TOHTAKE   入り数入力時複数伝票番号設定時
+*                               メッセージ表示
+*  2014/02/25   GSL             消費税改正対応：税率取得ロジック追加
+*  変更前）税率固定値(0.05)
+*  変更後）条件マスタ（消費税）より税率を取得
+*          条件マスタ抽出時の日付は、下記優先順位とする。
+*          ①出荷伝票ヘッダの出庫転記日　※伝票登録後、設定
+*          ②受注伝票ヘッダの出荷先発注日付　※末日、未納時に設定
+*          ③受注伝票ヘッダの指定納期　※顧客納期通りの日付
+*  2014/09/01   ISID11          コードページUTF-8の改修
+*  2015/01/23   ISID11            コードページの再修正
+************************************************************************
+REPORT  ZE011400.
+
+
+*---------------------------------------------------------------------
+* TYPES
+*---------------------------------------------------------------------
+TYPE-POOLS SLIS.
+*--- メッセージステータスデータ型
+TYPES: BEGIN OF TYP_NAST,
+KAPPL      TYPE NAST-KAPPL,        " アプリケーション
+OBJKY      TYPE NAST-OBJKY,        " 対象キー
+KSCHL      TYPE NAST-KSCHL,        " メッセージタイプ
+LDEST      TYPE NAST-LDEST,        " 出力デバイス
+USNAM      TYPE NAST-USNAM,        " ユーザＩＤ
+DATVR      TYPE NAST-DATVR,        " 処理日
+UHRVR      TYPE NAST-UHRVR,        " 処理時間
+SPRAS      TYPE NAST-SPRAS,        " メッセージ言語
+PARNR      TYPE NAST-PARNR,        " メッセージ取引先
+PARVW      TYPE NAST-PARVW,        " パートナ機能
+ERDAT      TYPE NAST-ERDAT,        " 登録日
+ERUHR      TYPE NAST-ERUHR,        " 登録時刻
+END   OF TYP_NAST.
+
+*--- 出荷伝票データ型
+TYPES: BEGIN OF TYP_INFO,
+PSTYV      TYPE LIPS-PSTYV,        " 品目カテゴリ
+VBELN      TYPE LIKP-VBELN,        " 出荷伝票番号
+WADAT_IST  TYPE LIKP-WADAT_IST,    " 出庫転記日
+LFART      TYPE LIKP-LFART,        " 出荷伝票タイプ
+VSTEL      TYPE LIKP-VSTEL,        " 出荷ポイント
+VKORG      TYPE LIKP-VKORG,        " 販売組織
+KUNNR      TYPE LIKP-KUNNR,        " 出荷先
+POSNR      TYPE LIPS-POSNR,        " 出荷伝票明細
+VGBEL      TYPE LIPS-VGBEL,        " 参照伝票番号
+VGPOS      TYPE LIPS-VGPOS,        " 参照伝票明細
+LFIMG      TYPE LIPS-LFIMG,        " 出荷数量実績
+VRKME      TYPE LIPS-VRKME,        " 販売単位
+VTWEG      TYPE LIPS-VTWEG,        " 流通チャネル
+MATNR      TYPE LIPS-MATNR,        " 品目コード
+END   OF TYP_INFO.
+
+*--- 販売伝票データ型
+TYPES: BEGIN OF TYP_VBAP,
+VBELN      TYPE VBAK-VBELN,        " 販売伝票番号
+*         BSTNK      TYPE VBAK-BSTNK,        " 得意先発注番号
+BSTKD      TYPE VBKD-BSTKD,        " 得意先発注番号
+AUDAT      TYPE VBAK-AUDAT,        " 受注伝票日付
+AUART      TYPE VBAK-AUART,        " 販売伝票タイプ
+VKORG      TYPE VBAK-VKORG,        " 販売組織
+VTWEG      TYPE VBAK-VTWEG,        " 流通チャンネル
+KUNNR      TYPE VBAK-KUNNR,        " 受注先
+KNUMV      TYPE VBAK-KNUMV,        " 伝票条件番号
+POSNR      TYPE VBAP-POSNR,        " 販売伝票明細
+KDMAT      TYPE VBAP-KDMAT,        " 得意先発注番号
+VRKME      TYPE VBAP-VRKME,        " 基本数量単位
+NETPR      TYPE VBAP-NETPR,        " 正味価格
+KWMENG     TYPE VBAP-KWMENG,       " 受注数量
+MATNR      TYPE VBAP-MATNR,        " 品目コード
+WAERK      TYPE VBAP-WAERK,        " 通貨
+NETWR      TYPE VBAP-NETWR,        " 販売伝票正味額
+EDATU      TYPE VBEP-EDATU,        " 得意先希望納期
+BSTDK_E    TYPE VBKD-BSTDK_E,      " 変更納期
+KPEIN      TYPE VBAP-KPEIN,        " 価格数量単位
+*--- 2002/05/10 APPEND PSD K.ARAI
+VKBUR      TYPE VBAK-VKBUR,        " 営業所コード
+END   OF TYP_VBAP.
+*--- 2002/05/10 END
+
+*--- スプール：デバイス名（長）データ型
+TYPES: BEGIN OF TYP_TSP03L,
+LNAME      TYPE TSP03L-LNAME,      " デバイス名（長）
+PADEST     TYPE TSP03L-PADEST,     " デバイスの省略
+END   OF TYP_TSP03L.
+
+*--- 条件：タイプ：テキストデータ型
+TYPES: BEGIN OF TYP_T685T,
+KAPPL      TYPE T685T-KAPPL,       " アプリケーション
+KSCHL      TYPE T685T-KSCHL,       " メッセージタイプ
+VTEXT      TYPE T685T-VTEXT,       " 名称
+END   OF TYP_T685T.
+
+*--- アドレス型
+TYPES: BEGIN OF TYP_ADRC,
+NAME1      TYPE ADRC-NAME1,        " 名称１
+NAME2      TYPE ADRC-NAME2,        " 名称２
+NAME3      TYPE ADRC-NAME3,        " 名称３
+TEL_NUMBER TYPE ADRC-TEL_NUMBER,   " 電話番号
+FAX_NUMBER TYPE ADRC-FAX_NUMBER,   " ＦＡＸ番号
+POST_CODE1 TYPE ADRC-POST_CODE1,   " 郵便番号
+CITY1      TYPE ADRC-CITY1,        " 市区町村
+STR_SUPPL1 TYPE ADRC-STR_SUPPL1,   " 地名２
+STR_SUPPL2 TYPE ADRC-STR_SUPPL2,   " 地名３
+STREET     TYPE ADRC-STREET,       "都道府県名
+REGION     TYPE ADRC-REGION,       "地域
+END   OF TYP_ADRC.
+
+TYPES: TYP_WRITE TYPE ZS0115.               " 帳票出力用データ型
+TYPES: TYP_DUMMY TYPE  ZS0115_TEMP.         "明細カテゴリ対応用
+
+*--- ファイルデータ型
+* Mod ES-UP 2012/10/30 -->
+*TYPES: BEGIN OF TYP_FILE,
+*         DATA(2000)  TYPE C,
+*      END   OF TYP_FILE.
+* Mod ES-UP 2012/10/30 <--
+
+
+*--- 税額取得用
+TYPES: BEGIN OF TYP_KONV,
+KWERT       TYPE KONV-KWERT,    "条件金額
+WAERS       TYPE KONV-WAERS,    "通貨
+KBETR       TYPE KONV-KBETR,    "条件レート
+END   OF TYP_KONV.
+
+TYPES: BEGIN OF TYP_ADRC_INFO,
+VKBUR      TYPE TVBUR-VKBUR,       " 営業所
+ADRNR      TYPE TVBUR-ADRNR,       " アドレスNo
+NAME1      TYPE ADRC-NAME1,        " 名称１
+TEL_NUMBER TYPE ADRC-TEL_NUMBER,   " 電話番号
+FAX_NUMBER TYPE ADRC-FAX_NUMBER,   " ＦＡＸ番号
+POST_CODE1 TYPE ADRC-POST_CODE1,   " 郵便番号
+CITY1      TYPE ADRC-CITY1,        " 市区町村
+STR_SUPPL1 TYPE ADRC-STR_SUPPL1,   " 地名２
+STR_SUPPL2 TYPE ADRC-STR_SUPPL2,   " 地名３
+REGION     TYPE ADRC-REGION,       " 地域
+*--- APPEND PSD K.ARAI 2002/05/17
+STREET     TYPE ADRC-STREET,
+*--- APPEND END
+END   OF TYP_ADRC_INFO.
+
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+* 親カテゴリ　単価集計用
+TYPES: BEGIN OF TYP_LIPS_VBAP,
+VBELN TYPE LIPS-VBELN,"出荷伝票
+POSNR TYPE LIPS-POSNR,"出荷明細
+VGBEL TYPE LIPS-VGBEL,"販売伝票
+VGPOS TYPE LIPS-VGPOS,"販売明細
+LFIMG TYPE LIPS-LFIMG,"出荷数量
+KPEIN TYPE VBAP-KPEIN,"価格数量単位
+NETPR TYPE VBAP-NETPR,"受注単価
+PSTYV TYPE LIPS-PSTYV,"明細カテゴリ
+WAERK TYPE VBAP-WAERK,"通貨
+END OF TYP_LIPS_VBAP.
+*---Append Start NDSC R.Hata 2002/12/09 ----------------------------*
+TYPES : BEGIN OF TYP_NASTG ,
+OBJKY LIKE NAST-OBJKY ,
+END OF TYP_NASTG ,
+BEGIN OF TYP_LIPSG ,
+VBELN LIKE LIPS-VBELN ,
+POSNR LIKE LIPS-POSNR ,
+END OF TYP_LIPSG .
+*---Append End   NDSC R.Hata 2002/12/09 ----------------------------*
+
+DATA: GT_LIPS_VBAP TYPE TABLE OF TYP_LIPS_VBAP,
+GF_LIPS_VBAP TYPE TYP_LIPS_VBAP,
+GF_TMP_LIPS_VBAP TYPE TYP_LIPS_VBAP.
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+*---------------------------------------------------------------------
+* DATA
+*---------------------------------------------------------------------
+*--- メッセージステータス内部テーブル
+DATA: GF_NAST       TYPE           TYP_NAST,
+GF_NAST_READ  TYPE           TYP_NAST,
+GT_NAST       TYPE TABLE OF  TYP_NAST.
+
+*--- 出荷伝票内部テーブル
+DATA: GF_INFO       TYPE           TYP_INFO,
+GT_INFO       TYPE TABLE OF  TYP_INFO.
+
+*--- 販売伝票内部テーブル
+DATA: GF_VBAP  TYPE           TYP_VBAP,
+GT_VBAP  TYPE TABLE OF  TYP_VBAP.
+
+*--- スプール：デバイス名（長）内部テーブル
+DATA: GF_TSP03L TYPE          TYP_TSP03L,
+GT_TSP03L TYPE TABLE OF TYP_TSP03L.
+
+*--- 条件：タイプ：テキストデータ型
+DATA: GF_T685T  TYPE          TYP_T685T,
+GT_T685T  TYPE TABLE OF TYP_T685T.
+
+*--- アドレスデータ型
+DATA: GF_ADRC   TYPE          TYP_ADRC.
+
+*--- 2002/05/10 APPEND PSD K.ARAI
+*--- 営業所情報用
+DATA: GT_ADRC_INFO TYPE  HASHED TABLE OF TYP_ADRC_INFO
+WITH UNIQUE KEY VKBUR,
+GF_ADRC_INFO TYPE TYP_ADRC_INFO.
+
+*--- ファイル出力用構造
+DATA: GF_WRITE       TYPE     TYP_WRITE,
+GF_WRITE_TEMP  TYPE     TYP_WRITE,
+GT_WRITE  TYPE TABLE OF TYP_WRITE.
+
+*---  明細カテゴリ処理対応用
+DATA: GF_DUMMY  TYPE          TYP_DUMMY,
+GT_DUMMY  TYPE TABLE OF TYP_DUMMY.
+
+*--- ファイル出力用内部テーブル
+* Mod ES-UP 2012/10/30 -->
+*DATA: GF_FILE   TYPE          TYP_FILE.
+DATA: GF_FILE   TYPE STRING.
+* Mod ES-UP 2012/10/30 <--
+
+*--- 項目定義
+DATA: G_FILENAME(62)          TYPE C,     " ファイル名
+G_FILEOPENNAME(62)      TYPE C      " ファイルＯＰＥＮ名
+.
+*--- 数退避用
+* Edit 2013.02.22 GSL Tohtake.s Start
+*DATA: G_OUTNO(4) TYPE N,
+DATA: G_OUTNO(6) TYPE N,
+* Edit 2013.02.22 GSL Tohtake.s End
+G_OBJKY    LIKE NAST-OBJKY,         "ｵﾌﾞｼﾞｪｸﾄｷｰ
+G_PARNR    LIKE NAST-PARNR,
+G_PARVW    LIKE NAST-PARVW,
+G_ERDAT    LIKE NAST-ERDAT,
+G_ERUHR    LIKE NAST-ERUHR,
+G_LDEST    LIKE NAST-LDEST,         "出力デバイス
+G_KSCHL    LIKE NAST-KSCHL,         "メッセージタイプ
+G_NETWR    LIKE ZS0115-NETWR,       "売上金額
+G_NETWRT   LIKE ZS0115-NETWRT,      "売上税込金額
+G_KEBTR    LIKE ZS0115-KEBTR.       "消費税
+*--- カウンタ定義
+DATA: CUT_DATA(10)             TYPE C,    " データ件数
+CUT_ERR(10)              TYPE C.    " データ件数
+
+*--- フラグ定義
+DATA: F_ERR(1)                 TYPE C,    " エラーフラグ
+F_LIKP(1)                TYPE C,    " 出荷伝票情報フラグ
+F_VBAK(1)                TYPE C,    " 受注伝票情報フラグ
+F_NAST(1)                TYPE C,    " メッセージステータスフラグ
+F_TSP03L(1)              TYPE C.    " 条件：タイプ：テキストフラグ
+
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+DATA: GT_SEQG3 LIKE TABLE OF SEQG3 WITH HEADER LINE,
+GF_SEQG3 LIKE SEQG3.
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+* 再出力時の出荷伝票指定時のパフォーマンス対応
+TYPES: BEGIN OF TYP_LIPS,
+VBELN TYPE LIPS-VBELN,"出荷伝票
+POSNR TYPE LIPS-POSNR,"出荷明細
+VGBEL TYPE LIPS-VGBEL,"販売伝票
+VBPOS TYPE LIPS-VGPOS,"販売明細
+END OF TYP_LIPS.
+
+DATA: GT_LIPS TYPE TABLE OF TYP_LIPS.
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+*---Append Start NDSC R.Hata 2002/12/09 ----------------------------*
+DATA : T_NASTG TYPE TABLE OF TYP_NASTG ,
+W_NASTG TYPE TYP_NASTG ,
+T_LIPSG TYPE TABLE OF TYP_LIPSG .
+*---Append End   NDSC R.Hata 2002/12/09 ----------------------------*
+
+*---------------------------------------------------------------------
+* 定数宣言
+*---------------------------------------------------------------------
+CONSTANTS: CNS_NAST(4)    TYPE C VALUE 'NAST',
+CNS_LIPS(9)    TYPE C VALUE 'LIKP LIPS',
+CNS_VBAP(9)    TYPE C VALUE 'VBAK VBAP',
+CNS_VBPA(9)    TYPE C VALUE 'VBPA ADRC',
+CNS_KNMT(4)    TYPE C VALUE 'KNMT',
+CNS_MAKT(4)    TYPE C VALUE 'MAKT',
+CNS_MARD(4)    TYPE C VALUE 'MARD',
+CNS_VBKD(4)    TYPE C VALUE 'VBKD',
+CNS_VBFA(4)    TYPE C VALUE 'VBFA',
+CNS_KNA1(4)    TYPE C VALUE 'KNA1',
+CNS_T001W(5)   TYPE C VALUE 'T001W',
+CNS_LIKP(4)    TYPE C VALUE 'LIKP',
+CNS_TSP03L(6)  TYPE C VALUE 'TSP03L',
+CNS_T685T(5)   TYPE C VALUE 'T685T',
+*---APPEND START GSL 2014/02/17 ---------------------------------------*
+CNS_VBAK(4)     TYPE C VALUE 'VBAK',
+CNS_KNVI(4)     TYPE C VALUE 'KNVI',
+CNS_KONV(4)     TYPE C VALUE 'KONV',
+CNS_A002(4)     TYPE C VALUE 'A002',
+CNS_HEADER(6)   TYPE C VALUE '000000',
+CNS_KAPPL_V(1)  TYPE C VALUE 'V',
+CNS_ALAND_JP(2) TYPE C VALUE 'JP',
+*---APPEND END   GSL 2014/02/17 ---------------------------------------*
+CNS_J(1)       TYPE C VALUE 'J',
+CNS_X(1)       TYPE C VALUE 'X',
+* Mod ES-UP 2012/08/21 -->
+*           CNS_09(1)      TYPE X VALUE '09',
+**** START DEL 2014/09/01 ISID11 ****
+*           CNS_SJIS TYPE STRING VALUE `shift_jis`,
+**** END DEL 2014/09/01 ISID11 ****
+* Mod ES-UP 2012/08/21 <--
+CNS_V(1)       TYPE C VALUE 'V',  " 完納
+CNS_N(1)       TYPE C VALUE 'N' .  " 未完納
+**カウンタ
+DATA:LIN TYPE N,
+W_LIN  TYPE P .
+*---------------------------------------------------------------------
+* 選択画面定義
+*---------------------------------------------------------------------
+*--- 通常出力
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(33) TEXT-050.
+PARAMETERS: R_NMOUT RADIOBUTTON GROUP RDOG.
+SELECTION-SCREEN END   OF LINE.
+
+*--- 再出力
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(33) TEXT-001.
+PARAMETERS: R_REOUT RADIOBUTTON GROUP RDOG.
+SELECTION-SCREEN END   OF LINE.
+
+*--- 出荷ポイント
+SELECT-OPTIONS: S_VSTEL FOR GF_INFO-VSTEL .
+
+*--- 受注伝票NO.
+SELECT-OPTIONS: S_VGBEL FOR GF_INFO-VGBEL.
+
+*--- 出荷伝票NO.
+SELECT-OPTIONS: S_VBELN FOR GF_INFO-VBELN.
+
+*--- 入り数
+* Edit 2013.02.22 GSL Tohtake.s Start
+*PARAMETERS: P_OUTNO(4) TYPE N.
+PARAMETERS: P_OUTNO(6) TYPE N.
+* Edit 2013.02.22 GSL Tohtake.s End
+
+*--- プリンタ／トレイ
+PARAMETERS: P_PRNTR TYPE TYP_TSP03L-LNAME.
+
+
+PARAMETERS: P_FILE(20) TYPE C NO-DISPLAY.
+***2002.11.29 >>>
+SELECTION-SCREEN SKIP.
+*コメント１
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(66) TEXT-127.
+SELECTION-SCREEN END OF LINE.
+SELECT-OPTIONS:P_KUNNR FOR GF_VBAP-KUNNR NO INTERVALS.
+***2002.11.29 add <<<
+*---------------------------------------------------------------------
+* INITIALIZATION
+*---------------------------------------------------------------------
+INITIALIZATION .
+*--- ファイル作成先ディレクトリ取得
+GET PARAMETER ID 'ZSVF' FIELD P_FILE.
+IF SY-SUBRC = 4.
+MESSAGE E614(Z1) WITH TEXT-106.
+ENDIF.
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN.
+*--入力後処理
+PERFORM FRM_DATA_CHECK.
+
+*---------------------------------------------------------------------
+* START-OF-SELECTION
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+
+*---データ抽出
+PERFORM FRM_SELECT.
+
+*---ファイル更新
+PERFORM FRM_FILE_SET.
+
+*--- 終了メッセージ
+PERFORM FRM_END_MESSAGE.
+
+************************************************************************
+* Form
+***********************************************************************
+*&---------------------------------------------------------------------
+*&      Form  FRM_MAKE_DATA
+*&---------------------------------------------------------------------
+*       ファイル出力用内部テーブル設定処理
+*----------------------------------------------------------------------
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------
+FORM FRM_MAKE_DATA.
+CLEAR GF_WRITE-RHAKO .
+
+*--- プリンタ／トレイ設定
+PERFORM FRM_PNAME_SET.
+
+*---エラーフラグが立ったらルーチンを抜ける
+CHECK F_ERR <> CNS_X.
+
+*--- 帳票名設定
+PERFORM FRM_TNAME_SET.
+
+*--- 単価設定
+PERFORM FRM_TANKA_HENKAN USING      GF_VBAP-WAERK
+GF_VBAP-NETPR
+CHANGING GF_WRITE-NETPR.
+*--- 2002/04/30 APPEND PSD
+*--- 価格数量単位 が０の時は1をいれる
+IF GF_VBAP-KPEIN = 0.
+GF_VBAP-KPEIN = 1.
+ENDIF.
+*--- 単価設定
+GF_WRITE-NETPR = GF_WRITE-NETPR / GF_VBAP-KPEIN.
+*--- APPEND END
+
+*--- 2002/05/09 APPEMD PSD
+CONDENSE GF_WRITE-NETPR NO-GAPS.
+*--- APPEND END
+
+*--- 2003/06/09 APPEND 概算単価の項目を追加
+PERFORM FRM_KONV         USING     GF_VBAP-VBELN
+GF_VBAP-POSNR
+GF_WRITE-KONTPR.
+CONDENSE GF_WRITE-KONTPR NO-GAPS.
+*--- append end.
+
+*--- 2003/10/23 APPEND 概算金額の項目を追加
+PERFORM FRM_CALC_KONTWR  USING     GF_WRITE-KONTPR
+GF_INFO-LFIMG
+CHANGING  GF_WRITE-KONTWR.
+CONDENSE GF_WRITE-KONTWR NO-GAPS.
+*--- APPEND END
+
+*--- 2003/10/23 APPEND 概算消費税額の項目を追加
+PERFORM FRM_CALC_KONBTR  USING    GF_WRITE-KONTWR
+CHANGING GF_WRITE-KONBTR.
+CONDENSE GF_WRITE-KONBTR NO-GAPS.
+*--- APPEND END
+
+*--- 2003/10/23 APPEND 概算合計額の項目を追加
+PERFORM FRM_CALC_KONTWRT  USING    GF_WRITE-KONTWR
+GF_WRITE-KONBTR
+CHANGING GF_WRITE-KONTWRT.
+CONDENSE GF_WRITE-KONTWRT NO-GAPS.
+*--- APPEND END
+
+*--- 金額設定
+PERFORM FRM_TANKA_HENKAN USING      GF_VBAP-WAERK
+GF_VBAP-NETWR
+CHANGING GF_WRITE-NETWR.
+*--- 2002/05/09 APPEMD PSD
+CONDENSE GF_WRITE-NETWR NO-GAPS.
+*--- APPEND END
+
+*--- 消費税額設定
+PERFORM FRM_KEBTR_SET.
+*--- 2002/05/09 APPEMD PSD
+CONDENSE GF_WRITE-KEBTR NO-GAPS.
+*--- APPEND END
+
+*--- 再出力区分設定
+IF R_REOUT = CNS_X.
+GF_WRITE-RHAKO = 'R'.
+ENDIF.
+
+*--- 営業所／仕入先設定
+PERFORM FRM_EGSR_SET.
+*--- 付加数値設定
+PERFORM FRM_LIPS_FKSTI.
+*--- 2002/05/09 APPEMD PSD
+CONDENSE GF_WRITE-FKSTI NO-GAPS.
+*--- APPEND END
+
+*--- 納入完了区分設定
+PERFORM FRM_SET_ENDTYP.
+
+*--- ファイル編集処理
+PERFORM FRM_TBL_MAKE.
+*--- テキストの読み込み
+PERFORM FRM_READ_SET.
+
+ENDFORM.                    " FRM_MAKE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  DEQUEUE_EZNAST
+*&---------------------------------------------------------------------*
+*       ＮＡＳＴロック解除処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM DEQUEUE_EZNAST.
+CALL FUNCTION 'DEQUEUE_ALL'.
+IF SY-SUBRC <> 0.
+MESSAGE A502(Z1) WITH 'DEQUEUE_ALL'
+SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " DEQUEUE_EZNAST
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LIPSGET_REOUT
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑮
+*       出荷伝票情報設定処理（再入力時）
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_LIPSGET_REOUT.
+CLEAR:   GF_INFO,
+GF_WRITE,
+F_ERR.
+REFRESH: GT_INFO.
+*--- 出荷伝票情報取得
+SELECT A~VBELN A~WADAT_IST A~LFART A~VSTEL
+A~VKORG A~KUNNR
+B~POSNR B~VGBEL     B~VGPOS B~LFIMG
+B~VRKME B~VTWEG     B~MATNR B~PSTYV
+INTO CORRESPONDING FIELDS OF TABLE GT_INFO
+FROM LIKP AS A INNER JOIN LIPS AS B
+ON A~VBELN =  B~VBELN
+WHERE B~VGBEL =  GF_VBAP-VBELN
+AND B~VGPOS =  GF_VBAP-POSNR
+AND A~VBELN IN S_VBELN
+AND A~VSTEL IN S_VSTEL.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+F_LIKP = CNS_X.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_LIPS
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_LIPSGET_REOUT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_FILE
+*&---------------------------------------------------------------------*
+*       ファイル作成処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_FILE.
+*--- ファイル出力処理
+TRANSFER GF_FILE TO G_FILEOPENNAME.
+IF SY-SUBRC <> 0.
+PERFORM FRM_FILE_ERR.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+ENDFORM.                    " FRM_MAKE_FILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TBL_APPEND
+*&---------------------------------------------------------------------*
+*       内部テーブル更新処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_TBL_APPEND.
+
+*---DELETE START PSD T.SAITOH 2002/08/30 ---------------------------*
+*  2002/08/19の仕様変更で不要？
+*  PERFORM FRM_PSTYV_EDIT.
+*
+**---APPEND START PSD T.SAITOH 2002/06/07 ---------------------------*
+*  PERFORM FRM_COMPUTE_SINGLE_COST.
+**---APPEND END   PSD T.SAITOH 2002/06/07 ---------------------------*
+*---DELETE END   PSD T.SAITOH 2002/08/30 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/08/29 ---------------------------*
+* 単価集計
+PERFORM FRM_NETPR_COMPUTE.
+*---APPEND END   PSD T.SAITOH 2002/08/29 ---------------------------*
+* Add 2003.04.11 >>>
+* Edit 2013.02.22 GSL Tohtake.s Start
+*  IF R_REOUT = CNS_X .
+IF NOT P_OUTNO IS INITIAL .
+* Edit 2013.02.22 GSL Tohtake.s End
+PERFORM FRM_IRISU_SET.
+ENDIF .
+* Add 2003.04.11 <<<
+
+SORT GT_WRITE BY PNAME KUNNR VGBEL VBELN BUNSI.
+LOOP AT GT_WRITE INTO GF_WRITE WHERE NNKNM <> SPACE.
+*---APPEND START PSD T.SAITOH 2002/08/19 ---------------------------*
+*   合計金額、税額、税込合計金額の修正
+PERFORM FRM_COST_SEGMENT.
+*---APPEND END   PSD T.SAITOH 2002/08/19 ---------------------------*
+*--- ファイルタブ区切り処理
+PERFORM FRM_TBL_TAB.
+*--- ファイル作成処理
+PERFORM FRM_MAKE_FILE.
+CUT_DATA = CUT_DATA + 1.
+ENDLOOP.
+ENDFORM.                    " FRM_TBL_APPEND
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TBL_APPEND2
+*&---------------------------------------------------------------------*
+*       内部テーブル更新処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_TBL_APPEND2.
+
+*---DELETE START PSD T.SAITOH 2002/08/30 ---------------------------*
+*  2002/08/19の仕様変更で不要？
+*  PERFORM FRM_PSTYV_EDIT.
+*
+**---APPEND START PSD T.SAITOH 2002/06/07 ---------------------------*
+*  PERFORM FRM_COMPUTE_SINGLE_COST.
+**---APPEND END   PSD T.SAITOH 2002/06/07 ---------------------------*
+*---DELETE END   PSD T.SAITOH 2002/08/30 ---------------------------*
+* Add 2003.04.11 >>>
+* Edit 2013.02.22 GSL Tohtake.s Start
+*    IF R_REOUT = CNS_X .
+IF NOT P_OUTNO IS INITIAL .
+* Edit 2013.02.22 GSL Tohtake.s End
+PERFORM FRM_IRISU_SET.
+ENDIF .
+* Add 2003.04.11 <<<
+
+*---APPEND START PSD T.SAITOH 2002/08/29 ---------------------------*
+* 単価集計
+PERFORM FRM_NETPR_COMPUTE.
+*---APPEND END   PSD T.SAITOH 2002/08/29 ---------------------------*
+
+SORT GT_WRITE BY PNAME KUNNR VGBEL VBELN BUNSI.
+LOOP AT GT_WRITE INTO GF_WRITE.
+***2002.11.29 add >>>
+IF NOT GF_WRITE-KUNNR IN P_KUNNR AND
+GF_WRITE-NNKNM = SPACE.
+CONTINUE.
+ENDIF.
+***2002.11.29 add <<<
+*---APPEND START PSD T.SAITOH 2002/08/19 ---------------------------*
+*   合計金額、税額、税込合計金額の修正
+PERFORM FRM_COST_SEGMENT.
+*---APPEND END   PSD T.SAITOH 2002/08/19 ---------------------------*
+*--- ファイルタブ区切り処理
+PERFORM FRM_TBL_TAB.
+*--- ファイル作成処理
+PERFORM FRM_MAKE_FILE.
+CUT_DATA = CUT_DATA + 1.
+ENDLOOP.
+ENDFORM.                    " FRM_TBL_APPEND
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TBL_TAB
+*&---------------------------------------------------------------------*
+*       内部テーブルタブ区切り処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_TBL_TAB.
+*--- 明細行編集
+* Mod ES-UP 2012/08/21 -->
+*  CONCATENATE GF_WRITE-PNAME CNS_09      " プリンタ／トレイ
+*              GF_WRITE-TNAME CNS_09      " 帳票名
+*              SY-DATUM       CNS_09      " 出力日
+*              GF_WRITE-VGBEL CNS_09      " 受注伝票番号
+*              GF_WRITE-VBELN CNS_09      " 出荷伝票番号
+*              GF_WRITE-KUNNR CNS_09      " 得意先コード
+*              GF_WRITE-KSCHL CNS_09      " 出力タイプ
+*              GF_WRITE-BSTKD CNS_09      " 注文番号
+*              GF_WRITE-KDMAT CNS_09      " 図版
+*              GF_WRITE-POSTX CNS_09      " 商品名
+*              GF_WRITE-LFIMG CNS_09      " 数量
+*              GF_WRITE-VRKME CNS_09      " 単位
+*              GF_WRITE-NETPR CNS_09      " 単価
+*              GF_WRITE-KEBTR CNS_09      " 税額
+*              GF_WRITE-SNIBK CNS_09      " 社内用備考
+*              GF_WRITE-SZITK CNS_09      " 消費税用注記
+*              GF_WRITE-WADAT CNS_09      " 出庫日
+*              GF_WRITE-EIGNM CNS_09      " 営業所名
+*              GF_WRITE-EIGTN CNS_09      " 営業所電話番号
+*              GF_WRITE-EIGFN CNS_09      " 営業所ＦＡＸ番号
+*              GF_WRITE-EIGPC CNS_09      " 営業所郵便番号
+*              GF_WRITE-EGAD1 CNS_09      " 営業所住所１
+*              GF_WRITE-EGAD2 CNS_09      " 営業所住所２
+*              GF_WRITE-EGAD3 CNS_09      " 営業所住所３
+*              GF_WRITE-SKNM1 CNS_09      " 出荷先名
+*              GF_WRITE-SKNM2 CNS_09      " 名称２
+*              GF_WRITE-SKNM3 CNS_09      " 名称３
+*              GF_WRITE-SKSPC CNS_09      " 出荷先郵便番号
+*              GF_WRITE-SKAD1 CNS_09      " 出荷先住所１
+*              GF_WRITE-SKAD2 CNS_09      " 出荷先住所２
+*              GF_WRITE-SKAD3 CNS_09      " 出荷先住所３
+*              GF_WRITE-HBMCD CNS_09      " 発注部門コード
+*              GF_WRITE-TISCD CNS_09      " 訂正コード
+*              GF_WRITE-SKKBN CNS_09      " 支給区分
+*              GF_WRITE-KBTNT CNS_09      " 購買担当
+*              GF_WRITE-SKKSH CNS_09      " 材質・規格・寸法
+*              GF_WRITE-HINNM CNS_09      " 品名（品名仕様）
+*              GF_WRITE-KSKBN CNS_09      " 検査区分
+*              GF_WRITE-JYSRN CNS_09      " 自由使用欄
+*              GF_WRITE-BIKOU CNS_09      " 備考
+*              GF_WRITE-SZKBN CNS_09      " 消費税区分
+*              GF_WRITE-NASNM CNS_09      " 納入先宛先名
+*              GF_WRITE-NNKNM CNS_09      " 納入キー番号
+*              GF_WRITE-FKSTI CNS_09      " 付加数値
+*              GF_WRITE-UWSBS CNS_09      " 受渡場所名
+*              GF_WRITE-HTBCD CNS_09      " 発注者用バーコード情報
+*              GF_WRITE-HTBKU CNS_09      " 発注者用備考
+*              GF_WRITE-IRISU CNS_09      " 入り数
+*              GF_WRITE-KOGUT CNS_09      " 個口
+*              GF_WRITE-BUNSI CNS_09      " 分子
+*              GF_WRITE-EDATU CNS_09      " 納期
+*              GF_WRITE-BSTDK CNS_09      " 納期予定日
+*              GF_WRITE-KWMENG CNS_09     " 受注数
+*              GF_WRITE-JTBKU CNS_09      " 受注者用備考
+*              GF_WRITE-NINNO CNS_09      " 納入No
+*              GF_WRITE-AUDAT CNS_09      " 注文納期
+*              GF_WRITE-TNKBN CNS_09      " 直納区分
+*              GF_WRITE-RHAKO CNS_09      " 再出力区分
+*              GF_WRITE-ENDTYP CNS_09     " 納入完了区分
+*              GF_WRITE-UNTTYP CNS_09     " 単価区分
+*              GF_WRITE-PRDNUM CNS_09     " 製造番号
+*              GF_WRITE-UWBCD CNS_09      "受渡場所
+*              GF_WRITE-NETWR CNS_09      "受注金額
+**-- 2003/06/09 append
+**             GF_WRITE-NETWRT            "受注税込金額
+*              GF_WRITE-NETWRT CNS_09     "受注税込金額
+**-- 2003/10/23 append
+**             GF_WRITE-KONTPR            "概算単価
+*              GF_WRITE-KONTPR CNS_09     "概算単価
+*
+*              GF_WRITE-KONTWR CNS_09     "概算金額
+*              GF_WRITE-KONBTR CNS_09     "概算消費税額
+*              GF_WRITE-KONTWRT           "概算合計額
+*
+*    INTO GF_FILE.
+CONCATENATE GF_WRITE-PNAME      " プリンタ／トレイ
+GF_WRITE-TNAME      " 帳票名
+SY-DATUM            " 出力日
+GF_WRITE-VGBEL      " 受注伝票番号
+GF_WRITE-VBELN      " 出荷伝票番号
+GF_WRITE-KUNNR      " 得意先コード
+GF_WRITE-KSCHL      " 出力タイプ
+GF_WRITE-BSTKD      " 注文番号
+GF_WRITE-KDMAT      " 図版
+GF_WRITE-POSTX      " 商品名
+GF_WRITE-LFIMG      " 数量
+GF_WRITE-VRKME      " 単位
+GF_WRITE-NETPR      " 単価
+GF_WRITE-KEBTR      " 税額
+GF_WRITE-SNIBK      " 社内用備考
+GF_WRITE-SZITK      " 消費税用注記
+GF_WRITE-WADAT      " 出庫日
+GF_WRITE-EIGNM      " 営業所名
+GF_WRITE-EIGTN      " 営業所電話番号
+GF_WRITE-EIGFN      " 営業所ＦＡＸ番号
+GF_WRITE-EIGPC      " 営業所郵便番号
+GF_WRITE-EGAD1      " 営業所住所１
+GF_WRITE-EGAD2      " 営業所住所２
+GF_WRITE-EGAD3      " 営業所住所３
+GF_WRITE-SKNM1      " 出荷先名
+GF_WRITE-SKNM2      " 名称２
+GF_WRITE-SKNM3      " 名称３
+GF_WRITE-SKSPC      " 出荷先郵便番号
+GF_WRITE-SKAD1      " 出荷先住所１
+GF_WRITE-SKAD2      " 出荷先住所２
+GF_WRITE-SKAD3      " 出荷先住所３
+GF_WRITE-HBMCD      " 発注部門コード
+GF_WRITE-TISCD      " 訂正コード
+GF_WRITE-SKKBN      " 支給区分
+GF_WRITE-KBTNT      " 購買担当
+GF_WRITE-SKKSH      " 材質・規格・寸法
+GF_WRITE-HINNM      " 品名（品名仕様）
+GF_WRITE-KSKBN      " 検査区分
+GF_WRITE-JYSRN      " 自由使用欄
+GF_WRITE-BIKOU      " 備考
+GF_WRITE-SZKBN      " 消費税区分
+GF_WRITE-NASNM      " 納入先宛先名
+GF_WRITE-NNKNM      " 納入キー番号
+GF_WRITE-FKSTI      " 付加数値
+GF_WRITE-UWSBS      " 受渡場所名
+GF_WRITE-HTBCD      " 発注者用バーコード情報
+GF_WRITE-HTBKU      " 発注者用備考
+GF_WRITE-IRISU      " 入り数
+GF_WRITE-KOGUT      " 個口
+GF_WRITE-BUNSI      " 分子
+GF_WRITE-EDATU      " 納期
+GF_WRITE-BSTDK      " 納期予定日
+GF_WRITE-KWMENG     " 受注数
+GF_WRITE-JTBKU      " 受注者用備考
+GF_WRITE-NINNO      " 納入No
+GF_WRITE-AUDAT      " 注文納期
+GF_WRITE-TNKBN      " 直納区分
+GF_WRITE-RHAKO      " 再出力区分
+GF_WRITE-ENDTYP     " 納入完了区分
+GF_WRITE-UNTTYP     " 単価区分
+GF_WRITE-PRDNUM     " 製造番号
+GF_WRITE-UWBCD      "受渡場所
+GF_WRITE-NETWR      "受注金額
+GF_WRITE-NETWRT     "受注税込金額
+GF_WRITE-KONTPR     "概算単価
+GF_WRITE-KONTWR     "概算金額
+GF_WRITE-KONBTR     "概算消費税額
+GF_WRITE-KONTWRT    "概算合計額
+INTO GF_FILE
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/08/21 <--
+ENDFORM.                    " FRM_TBL_TAB
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILE_HEADER
+*&---------------------------------------------------------------------*
+*       ファイルヘッダ部更新処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_FILE_HEADER.
+**** START DEL 2014/09/01 ISID11 ****
+** Add ES-UP 2012/08/21 -->
+*  DATA L_CODEPAGE TYPE ABAP_ENCODING.
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+** Add ES-UP 2012/08/21 <--
+**** END DEL 2014/09/01 ISID11 ****
+**** START ADD 2015/01/23 ISID11 ****
+DATA:
+L_FILENAME TYPE  ZTEGZZM001-Z_OUTPUT_FN,
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_CODEPAGE TYPE ABAP_ENCODING,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8  TYPE  FLAG,
+L_SUBRC    TYPE SY-SUBRC.
+**** END ADD 2015/01/23 ISID11 ****
+
+CLEAR F_ERR.
+IF GT_WRITE IS INITIAL.
+*--- エラーメッセージ出力処理
+MESSAGE S611(Z1).
+STOP.
+ELSE.
+
+**** START ADD 2015/01/23 ISID11 ****
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = 'C001'
+IMPORTING
+EXPFILENAME = L_FILENAME
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+**** END ADD 2015/01/23 ISID11 ****
+
+*--- ファイル名更新
+CONCATENATE
+**** START UPD 2015/01/23 ISID11 ****
+*                SY-REPID
+L_FILENAME
+**** END UPD 2015/01/23 ISID11 ****
+SY-UNAME
+SY-UZEIT
+'.txt'
+INTO G_FILENAME.
+
+CONCATENATE P_FILE
+G_FILENAME
+INTO G_FILEOPENNAME.
+
+*--- ファイルＯＰＥＮ処理
+**** START ADD 2015/01/23 ISID11 ****
+IF L_FLGUTF8 IS INITIAL.
+
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+
+TRY .
+OPEN DATASET G_FILEOPENNAME FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+
+L_SUBRC = 8.
+
+ENDTRY.
+
+ELSE.
+**** END ADD 2015/01/23 ISID11 ****
+* Mod ES-UP 2012/08/21 -->
+*    OPEN DATASET G_FILEOPENNAME FOR OUTPUT IN TEXT MODE.
+OPEN DATASET G_FILEOPENNAME FOR OUTPUT
+**** START UPD 2014/09/01 ISID11 ****
+*      IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/09/01 ISID11 ****
+IGNORING CONVERSION ERRORS.
+
+**** START ADD 2015/01/23 ISID11 ****
+L_SUBRC = SY-SUBRC.
+**** END ADD 2015/01/23 ISID11 ****
+
+* Mod ES-UP 2012/08/21 <--
+
+**** START ADD 2015/01/23 ISID11 ****
+ENDIF.
+**** END ADD 2015/01/23 ISID11 ****
+
+**** START UPD 2015/01/23 ISID11 ****
+*    IF SY-SUBRC <> 0.
+IF L_SUBRC <> 0.
+**** END UPD 2015/01/23 ISID11 ****
+PERFORM FRM_FILE_ERR.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+
+*--- ヘッダ行更新
+GF_FILE = '<start>'.
+*--- ファイル作成処理
+PERFORM FRM_MAKE_FILE.
+
+CONCATENATE 'VrSetDocName2='
+TEXT-049
+SY-TITLE
+'('
+SY-UNAME
+')'
+TEXT-049
+INTO GF_FILE.
+*--- ファイル作成処理
+PERFORM FRM_MAKE_FILE.
+
+GF_FILE = '<end>'.
+*--- ファイル作成処理
+PERFORM FRM_MAKE_FILE.
+
+*--- タイトル行更新
+* Mod ES-UP 2012/08/21 -->
+*    CONCATENATE TEXT-005 CNS_09
+*                TEXT-019 CNS_09
+*                TEXT-020 CNS_09
+*                TEXT-055 CNS_09
+*                TEXT-058 CNS_09
+*                TEXT-114 CNS_09
+*                TEXT-121 CNS_09
+*                TEXT-024 CNS_09
+*                TEXT-026 CNS_09
+*                TEXT-028 CNS_09
+*                TEXT-031 CNS_09
+*                TEXT-032 CNS_09
+*                TEXT-059 CNS_09
+*                TEXT-060 CNS_09
+*                TEXT-061 CNS_09
+*                TEXT-062 CNS_09
+*                TEXT-063 CNS_09
+*                TEXT-035 CNS_09
+*                TEXT-064 CNS_09
+*                TEXT-065 CNS_09
+*                TEXT-066 CNS_09
+*                TEXT-067 CNS_09
+*                TEXT-068 CNS_09
+*                TEXT-069 CNS_09
+*                TEXT-021 CNS_09
+*                TEXT-070 CNS_09
+*                TEXT-071 CNS_09
+*                TEXT-072 CNS_09
+*                TEXT-073 CNS_09
+*                TEXT-074 CNS_09
+*                TEXT-075 CNS_09
+*                TEXT-076 CNS_09
+*                TEXT-077 CNS_09
+*                TEXT-078 CNS_09
+*                TEXT-079 CNS_09
+*                TEXT-080 CNS_09
+*                TEXT-081 CNS_09
+*                TEXT-082 CNS_09
+*                TEXT-083 CNS_09
+*                TEXT-084 CNS_09
+*                TEXT-085 CNS_09
+*                TEXT-086 CNS_09
+*                TEXT-087 CNS_09
+*                TEXT-088 CNS_09
+*                TEXT-089 CNS_09
+*                TEXT-090 CNS_09
+*                TEXT-091 CNS_09
+*                TEXT-092 CNS_09
+*                TEXT-093 CNS_09
+*                TEXT-094 CNS_09
+*                TEXT-029 CNS_09
+*                TEXT-095 CNS_09
+*                TEXT-096 CNS_09
+*                TEXT-097 CNS_09
+*                TEXT-098 CNS_09
+*                TEXT-099 CNS_09
+*                TEXT-100 CNS_09
+*                TEXT-101 CNS_09
+*                TEXT-116 CNS_09
+*                TEXT-117 CNS_09
+*                TEXT-118 CNS_09
+*                TEXT-120 CNS_09
+*                TEXT-124 CNS_09
+** 2003/06/09 append
+**                TEXT-125
+*                TEXT-125 CNS_09
+** 2003/10/23 APPEND
+**                TEXT-128
+*                TEXT-128 CNS_09      "概算単価
+*                TEXT-129 CNS_09      "概算金額
+*                TEXT-130 CNS_09      "概算消費税額
+*                TEXT-131             "概算合計額
+*      INTO GF_FILE.
+CONCATENATE TEXT-005          " プリンタ／トレイ
+TEXT-019          " 帳票名
+TEXT-020          " 出力日
+TEXT-055          " 受注伝票番号
+TEXT-058          " 出荷伝票番号
+TEXT-114          " 得意先コード
+TEXT-121          " 出力タイプ
+TEXT-024          " 注文番号
+TEXT-026          " 図版
+TEXT-028          " 商品名
+TEXT-031          " 数量
+TEXT-032          " 単位
+TEXT-059          " 単価
+TEXT-060          " 税額
+TEXT-061          " 社内用備考
+TEXT-062          " 消費税用注記
+TEXT-063          " 出庫日
+TEXT-035          " 営業所名
+TEXT-064          " 営業所電話番号
+TEXT-065          " 営業所ＦＡＸ番号
+TEXT-066          " 営業所郵便番号
+TEXT-067          " 営業所住所１
+TEXT-068          " 営業所住所２
+TEXT-069          " 営業所住所３
+TEXT-021          " 出荷先名
+TEXT-070          " 名称２
+TEXT-071          " 名称３
+TEXT-072          " 出荷先郵便番号
+TEXT-073          " 出荷先住所１
+TEXT-074          " 出荷先住所２
+TEXT-075          " 出荷先住所３
+TEXT-076          " 発注部門コード
+TEXT-077          " 訂正コード
+TEXT-078          " 支給区分
+TEXT-079          " 購買担当
+TEXT-080          " 材質・規格・寸法
+TEXT-081          " 品名（品名仕様）
+TEXT-082          " 検査区分
+TEXT-083          " 自由使用欄
+TEXT-084          " 備考
+TEXT-085          " 消費税区分
+TEXT-086          " 納入先宛先名
+TEXT-087          " 納入キー番号
+TEXT-088          " 付加数値
+TEXT-089          " 受渡場所名
+TEXT-090          " 発注者用バーコード情報
+TEXT-091          " 発注者用備考
+TEXT-092          " 入り数
+TEXT-093          " 個口
+TEXT-094          " 分子
+TEXT-029          " 納期
+TEXT-095          " 納期予定日
+TEXT-096          " 受注数
+TEXT-097          " 受注者用備考
+TEXT-098          " 納入No
+TEXT-099          " 注文納期
+TEXT-100          " 直納区分
+TEXT-101          " 再出力区分
+TEXT-116          " 納入完了区分
+TEXT-117          " 単価区分
+TEXT-118          " 製造番号
+TEXT-120          "受渡場所
+TEXT-124          "受注金額
+TEXT-125          "受注税込金額
+TEXT-128          "概算単価算単価
+TEXT-129          "概算金額算金額
+TEXT-130          "概算消費税額算消費税額
+TEXT-131          "概算合計額算合計額
+INTO GF_FILE
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/08/21 <--
+*--- ファイル作成処理
+PERFORM FRM_MAKE_FILE.
+ENDIF.
+
+ENDFORM.                    " FRM_FILE_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPDATE_DATA
+*&---------------------------------------------------------------------*
+*       テーブル更新処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_UPDATE_DATA.
+CHECK NOT ( GT_WRITE IS INITIAL ).
+*--- ＮＡＳＴテーブル更新処理
+DATA: LF_TSP03L LIKE GF_TSP03L.
+IF NOT ( P_PRNTR IS INITIAL ).
+READ TABLE GT_TSP03L INTO LF_TSP03L WITH KEY
+LNAME = P_PRNTR.
+GF_NAST-LDEST = LF_TSP03L-PADEST.
+G_LDEST = LF_TSP03L-PADEST.
+ENDIF.
+
+*-- 明細カテゴリが'ZSEK'(子)のときはNAST更新しない
+* IF GF_INFO-PSTYV <> 'ZSEK' .
+IF R_REOUT = CNS_X.
+*2003/05/26 DEL START (再出力時は更新しない)
+*   UPDATE NAST SET DATVR = SY-DATUM
+*                   UHRVR = SY-UZEIT
+*                   USNAM = SY-UNAME
+*                   LDEST = G_LDEST
+*     WHERE KAPPL         = 'V2'         "アプリケーション
+*       AND KSCHL         = G_KSCHL      "メッセージタイプ
+*       AND SPRAS         = 'J'          "メッセージ言語
+*       AND OBJKY         = G_OBJKY      "対象キー
+*       AND VSTAT         = '1'          "処理ステータス
+*       AND PARNR         = G_PARNR      "メッセージ取引先
+*       AND PARVW         = G_PARVW      "パートナ機能
+*       AND ERDAT         = G_ERDAT      "登録日
+*       AND ERUHR         = G_ERUHR.     "登録時刻
+*2003/05/26 DEL END
+ELSEIF R_NMOUT = CNS_X.
+UPDATE NAST SET VSTAT = '1'
+DATVR = SY-DATUM
+UHRVR = SY-UZEIT
+USNAM = SY-UNAME
+LDEST = G_LDEST
+WHERE KAPPL         = 'V2'
+AND KSCHL         = G_KSCHL
+AND SPRAS         = 'J'
+AND OBJKY         = G_OBJKY
+AND VSTAT         = '0'.
+ENDIF.
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.    " 対象データなし
+IF R_REOUT <> CNS_X.      "2003/05/26 ADD (IF文)
+*--- ＤＥ更新エラー処理
+PERFORM FRM_DE_ERR.
+*--- テーブルロック解除処理
+PERFORM DEQUEUE_EZNAST.
+ROLLBACK WORK.
+STOP.
+ENDIF.                    "2003/05/26 ADD (IF文)
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_NAST
+SY-SUBRC.
+ENDCASE.
+* ENDIF.
+ENDFORM.                    " FRM_UPDATE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_VSTEL_CHECK
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑩
+*       出荷ポイント存在チェック処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_VSTEL_CHECK.
+DATA L_VSTEL TYPE LIKP-VSTEL.
+*--- 出荷ポイント存在チェック
+*  SELECT SINGLE A~VSTEL
+*    INTO L_VSTEL
+*    FROM LIKP AS A INNER JOIN LIPS AS B
+*      ON A~VBELN  = B~VBELN
+*   WHERE A~VBELN IN S_VBELN            "出荷伝票No.
+*     AND A~VSTEL IN S_VSTEL            "出荷ポイント
+*     AND B~VGBEL IN S_VGBEL.           "受注伝票No.
+
+SELECT SINGLE VSTEL
+INTO L_VSTEL
+FROM TVST
+WHERE VSTEL IN S_VSTEL.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- 2002/05/30 MODIFY
+*     MESSAGE E600(Z1) WITH TEXT-002.
+MESSAGE E613(Z1) WITH TEXT-016 TEXT-002.
+*---
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_LIKP
+SY-SUBRC.
+ENDCASE.
+ENDFORM.                    " FRM_VSTEL_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TSP03L_GET
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑪
+*       スプール：デバイス名（長）情報取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_TSP03L_GET.
+*--- スプール：デバイス名（長）情報取得
+CHECK F_TSP03L <> CNS_X.
+SELECT LNAME PADEST
+FROM TSP03L INTO TABLE GT_TSP03L.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+F_TSP03L = CNS_X.
+WHEN 4.         " 対象データなし(処理続行)
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_TSP03L
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_TSP03L_GET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PNAME_SET
+*&---------------------------------------------------------------------*
+*       プリンタ／トレイ設定処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_PNAME_SET.
+*--選択画面でプリンタ設定されていない
+IF P_PRNTR IS INITIAL.
+READ TABLE GT_TSP03L INTO GF_TSP03L
+WITH KEY PADEST = G_LDEST.
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE-PRNTR = G_LDEST.
+GF_WRITE-PNAME = GF_TSP03L-LNAME.
+WHEN 4.
+*--- エラーメッセージ出力処理
+CUT_ERR = CUT_ERR + 1.
+PERFORM FRM_SELECT_MESSAGE USING TEXT-005
+GF_INFO-VBELN
+GF_INFO-POSNR.
+F_ERR = CNS_X.
+ENDCASE.
+*--選択画面でプリンタ設定されている
+ELSEIF NOT P_PRNTR IS INITIAL.
+READ TABLE GT_TSP03L INTO GF_TSP03L
+WITH KEY LNAME = P_PRNTR.
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE-PRNTR = GF_TSP03L-PADEST.
+GF_WRITE-PNAME = P_PRNTR.
+WHEN 4.
+*--- エラーメッセージ出力処理
+CUT_ERR = CUT_ERR + 1.
+PERFORM FRM_SELECT_MESSAGE USING TEXT-005
+GF_INFO-VBELN
+GF_INFO-POSNR.
+F_ERR = CNS_X.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " FRM_PNAME_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TBL_MAKE
+*&---------------------------------------------------------------------*
+*       ファイル編集処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_TBL_MAKE.
+
+CONCATENATE GF_VBAP-VBELN
+'-'
+GF_VBAP-POSNR
+INTO GF_WRITE-VGBEL.                    " 受注伝票番号
+CONCATENATE GF_INFO-VBELN
+'-'
+GF_INFO-POSNR
+INTO GF_WRITE-VBELN.                    " 出荷伝票番号
+GF_WRITE-KUNNR = GF_VBAP-KUNNR.                     " 得意先コード
+GF_WRITE-KSCHL = G_KSCHL.                           " 出力タイプ
+GF_WRITE-BSTKD = GF_VBAP-BSTKD.                     " 注文番号
+GF_WRITE-KDMAT = GF_VBAP-KDMAT.                     " 図番
+GF_WRITE-LFIMG = GF_INFO-LFIMG.                     " 数量
+IF GF_INFO-LFIMG < 0.
+SHIFT GF_WRITE-LFIMG RIGHT CIRCULAR.
+ENDIF.
+CONDENSE GF_WRITE-LFIMG NO-GAPS.
+WRITE GF_INFO-VRKME TO GF_WRITE-VRKME.              " 単位
+* Mod 2005/06/16 ---->
+IF GF_INFO-WADAT_IST IS INITIAL .
+GF_WRITE-WADAT = SY-DATUM   .                 " 出庫日
+ELSE .
+
+GF_WRITE-WADAT = GF_INFO-WADAT_IST.                 " 出庫日
+ENDIF .
+* Mod 2005/06/16 <----
+
+
+
+*通常のとき
+* Edit 2013.02.22 GSL Tohtake.s Start
+*  IF   R_NMOUT = CNS_X .
+IF   P_OUTNO IS INITIAL.
+* Edit 2013.02.22 GSL Tohtake.s End
+GF_WRITE-IRISU = GF_WRITE-LFIMG.                  " 入り数
+GF_WRITE-KOGUT = '1'.                             " 個口
+GF_WRITE-BUNSI = '1'.                             " 分子
+ENDIF.
+
+GF_WRITE-EDATU  = GF_VBAP-EDATU.                    " 納期
+GF_WRITE-BSTDK  = GF_VBAP-BSTDK_E.                  " 納期予定日
+*---MODIFY START PSD T.SAITOH 2002/09/03 ---------------------------*
+*---MODIFY START PSD T.SAITOH 2002/08/28 ---------------------------*
+**  GF_WRITE-KWMENG = GF_VBAP-KWMENG.                   " 受注数
+**  受注数という項目名であるが、出荷数量を設定する
+**  セット品を欠品で出荷した時の対応
+**  GF_WRITE-KWMENG = GF_VBAP-KWMENG.                   " 受注数
+*  GF_WRITE-KWMENG = GF_WRITE-LFIMG.
+**---MODIFY END   PSD T.SAITOH 2002/08/28 ---------------------------*
+GF_WRITE-KWMENG = GF_VBAP-KWMENG.                   " 受注数
+*---MODIFY END   PSD T.SAITOH 2002/09/03 ---------------------------*
+*--- 2002/05/09 APPEMD PSD
+CONDENSE GF_WRITE-KWMENG NO-GAPS.
+*--- APPEND END
+GF_WRITE-AUDAT  = GF_VBAP-AUDAT.                    " 注文納期
+GF_WRITE-NETWRT = GF_WRITE-NETWR + GF_WRITE-KEBTR.  " 受注税込金額
+*--- 2002/05/09 APPEMD PSD
+CONDENSE GF_WRITE-NETWRT NO-GAPS.
+*--- APPEND END
+GF_WRITE-PSTYV  = GF_INFO-PSTYV.                    " 明細カテゴリ
+ENDFORM.                    " FRM_TBL_MAKE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MESSAGE
+*&---------------------------------------------------------------------*
+*       エラーメッセージ出力処理
+*----------------------------------------------------------------------*
+*      -->P_TEXT      テキスト
+*      -->P_VBELN     出荷伝票番号
+*      -->P_VGPOS     出荷明細番号
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_MESSAGE USING  P_TEXT
+P_VBELN
+P_VGPOS.
+IF CUT_ERR = 1.
+WRITE / TEXT-054.
+ENDIF.
+WRITE: / TEXT-055,
+P_VBELN,
+TEXT-113,
+P_VGPOS,
+TEXT-041,
+P_TEXT,
+TEXT-040.
+
+ENDFORM.                    " FRM_SELECT_MESSAGE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NODATA_MESSAGE
+*&---------------------------------------------------------------------*
+*       エラーメッセージ出力処理（対象データなし）
+*----------------------------------------------------------------------*
+*      -->P_TEXT  text
+*----------------------------------------------------------------------*
+FORM FRM_NODATA_MESSAGE USING  P_TEXT.
+IF CUT_ERR = 1.
+WRITE / TEXT-054.
+ENDIF.
+WRITE: / P_TEXT,
+TEXT-042.
+*--- テーブルロック解除処理
+PERFORM DEQUEUE_EZNAST.
+STOP.
+
+ENDFORM.                    " FRM_NODATA_MESSAGE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILE_ERR
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_FILE_ERR.
+
+IF CUT_ERR = 1.
+WRITE / TEXT-053.
+ENDIF.
+WRITE: / TEXT-111,
+TEXT-043,
+TEXT-044.
+
+ENDFORM.                    " FRM_FILE_ERR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DE_ERR
+*&---------------------------------------------------------------------*
+*       ＤＥ更新エラー処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_DE_ERR.
+
+WRITE: / TEXT-051.
+WRITE: / TEXT-045,
+GF_WRITE-TNAME,
+TEXT-048,
+TEXT-044.
+
+ENDFORM.                    " FRM_DE_ERR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_END_MESSAGE
+*&---------------------------------------------------------------------*
+*       終了メッセージ処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_END_MESSAGE.
+
+CHECK F_ERR <> CNS_X.
+IF GT_WRITE IS INITIAL.
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+MESSAGE S616(Z1).
+STOP.
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+ELSE.
+*--- テーブルロック解除処理
+COMMIT WORK.
+PERFORM DEQUEUE_EZNAST.
+SKIP.
+WRITE: / TEXT-052,
+/ TEXT-111,
+TEXT-046,
+CUT_DATA,
+TEXT-047.
+ENDIF.
+
+ENDFORM.                    " FRM_END_MESSAGE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TNAME_SET
+*&---------------------------------------------------------------------*
+*       帳票名設定処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_TNAME_SET.
+*--- 帳票情報取得
+IF GF_INFO-LFART <> 'LR'.
+GF_WRITE-TNAME = TEXT-119.
+ELSE.
+GF_WRITE-TNAME = TEXT-105.
+ENDIF.
+
+ENDFORM.                    " FRM_TNAME_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NAST_KEYGET
+*&---------------------------------------------------------------------*
+*       ＮＡＳＴテーブルＫＥＹ取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_NAST_KEYGET.
+READ TABLE GT_NAST INTO GF_NAST_READ
+WITH KEY OBJKY+0(10) = GF_INFO-VBELN.
+ENDFORM.                    " FRM_NAST_KEYGET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_REOUT_DATA
+*&---------------------------------------------------------------------*
+*       再出力用ファイル出力用情報取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_REOUT_DATA.
+
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+* 再出力：出荷伝票番号指定時
+IF NOT S_VBELN IS INITIAL.
+PERFORM FRM_SELECT_VGBEL_FROM_LIPS.
+ENDIF.
+* 出荷伝票からの紐付く受注伝票を検索した場合（選択画面で出荷伝票番号）
+IF GT_LIPS IS INITIAL.
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+*--- 販売伝票情報取得処理
+PERFORM FRM_REOUT_VBAP.
+*---APPEND START PSD T.SAITOH 2002/08/30 ---------------------------*
+ELSE.
+PERFORM FRM_REOUT_VBAP_FROM_LIPS.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/08/30 ---------------------------*
+
+
+*--- GT_VBAP ループ処理
+LOOP AT GT_VBAP INTO GF_VBAP.
+PERFORM FRM_LOOP_GT_VBAP.
+ENDLOOP.
+
+*--- エラーメッセージ出力処理
+IF F_LIKP <> CNS_X.
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1).
+*   MESSAGE S616(Z1) WITH TEXT-008.
+*---
+STOP.
+ELSEIF F_NAST <> CNS_X.
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1).
+*   MESSAGE S611(Z1).
+*---
+STOP.
+ENDIF.
+
+ENDFORM.                    " FRM_REOUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_T685T_GET
+*&---------------------------------------------------------------------*
+*       テーブル読込条件④
+*----------------------------------------------------------------------*
+FORM FRM_T685T_GET.
+
+*--- 出力タイプ情報取得
+SELECT KAPPL KSCHL VTEXT
+FROM T685T
+INTO CORRESPONDING FIELDS OF TABLE GT_T685T
+WHERE SPRAS = CNS_J    "言語キー
+AND KVEWE = 'B'      "条件テーブルの用途
+AND KAPPL = 'V2'.    "アプリケーション
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1) .
+*     MESSAGE S600(Z1) WITH TEXT-057.
+*---
+STOP.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_T685T
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_T685T_GET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NMOUT_NAST
+*&---------------------------------------------------------------------*
+*       テーブル読込条件①
+*       メッセージステータス情報取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_NMOUT_NAST.
+CLEAR:   GF_NAST,
+F_NAST,
+F_LIKP,
+F_VBAK.
+REFRESH: GT_NAST.
+
+*Loop At T_NASTG Into W_NASTG .     "2003/05/29  DEL
+*  CLEAR:GF_NAST.                   "2003/05/29  DEL
+*--- メッセージステータス情報取得
+SELECT KAPPL OBJKY KSCHL DATVR UHRVR LDEST USNAM
+SPRAS PARNR PARVW ERDAT ERUHR
+*         Into Corresponding Fields Of GF_NAST    "2003/05/29  MOD
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST "2003/05/29  MOD
+FROM   NAST
+*---Append Start NDSC R.Hata 2002/12/09 ----------------------------*
+*              For All Entries In T_NASTG
+*---Append End   NDSC R.Hata 2002/12/09 ----------------------------*
+WHERE   KAPPL =  'V2'          "アプリケーション
+AND   KSCHL =  'ZS22'        "メッセージタイプ
+AND   SPRAS =  'J'           "言語タイプ
+AND   VSTAT =  '0'           "処理ステータス
+AND   AKTIV = SPACE.
+*2003/05/29 DEL START
+*---Append Start NDSC R.Hata 2002/12/09 ----------------------------*
+*              And   OBJKY EQ W_NASTG-OBJKY
+*---Append End   NDSC R.Hata 2002/12/09 ----------------------------*
+*2003/05/29 DEL END
+APPEND GF_NAST TO GT_NAST .
+*  ENDSELECT.                               "2003/05/29  DEL
+*ENDLOOP.                                   "2003/05/29  DEL
+DESCRIBE TABLE GT_NAST LINES W_LIN .
+IF W_LIN EQ 0 .
+MESSAGE S616(Z1) .
+STOP .
+ENDIF .
+**--- エラー処理
+*  CASE SY-SUBRC.
+*    WHEN 0.
+*    WHEN 4.         " 対象データなし
+**--- 2002/05/01 MODIFY
+*      MESSAGE S616(Z1).
+**     MESSAGE S611(Z1).
+**---
+*      STOP.
+*    WHEN OTHERS.    " システムエラー
+*      MESSAGE A603(Z1) WITH SY-REPID
+*                            CNS_NAST
+*                            SY-SUBRC.
+*  ENDCASE.
+
+ENDFORM.                    " FRM_NMOUT_NAST
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NMOUT_VBAP
+*&---------------------------------------------------------------------*
+*       テーブル読込条件③
+*       販売伝票情報取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_NMOUT_VBAP.
+DATA:PR_ETENR LIKE VBEP-ETENR.
+PR_ETENR = '0001'.
+CLEAR:   GF_VBAP.
+REFRESH: GT_VBAP.
+CLEAR    F_ERR.
+
+
+*--- 販売伝票情報取得
+* SELECT SINGLE A~VBELN A~BSTNK A~AUDAT A~AUART A~VKORG
+SELECT SINGLE A~VBELN D~BSTKD A~AUDAT A~AUART A~VKORG
+A~VTWEG A~KUNNR A~WAERK A~KNUMV
+* ↓ APPEND 2002.05.10 PSD K.ARAI
+A~VKBUR
+* ↑
+B~POSNR B~KDMAT B~VRKME B~NETPR B~KWMENG
+B~MATNR B~NETWR B~KPEIN C~EDATU D~BSTDK_E
+INTO CORRESPONDING FIELDS OF GF_VBAP
+FROM ( ( VBAK AS A INNER JOIN VBAP AS B
+ON     A~VBELN  = B~VBELN ) INNER JOIN VBEP  AS C
+ON     B~VBELN  = C~VBELN
+AND     B~POSNR  = C~POSNR ) INNER JOIN VBKD AS D
+ON     B~VBELN  = D~VBELN
+WHERE B~VBELN = GF_INFO-VGBEL
+AND B~POSNR = GF_INFO-VGPOS
+AND C~ETENR = PR_ETENR
+AND D~POSNR = '000000'.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+F_VBAK = CNS_X.
+WHEN 4.         " 対象データなし
+F_ERR  = CNS_X.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBAP
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_NMOUT_VBAP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_POSTX_SET
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑨
+*       商品名設定
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_POSTX_SET.
+*--- 得意先／品目情報取得
+SELECT SINGLE POSTX
+INTO (GF_WRITE-POSTX)
+FROM KNMT
+WHERE VKORG = GF_INFO-VKORG
+AND VTWEG = GF_INFO-VTWEG
+AND KUNNR = GF_INFO-KUNNR
+AND MATNR = GF_INFO-MATNR.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_KNMT
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_POSTX_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_KEBTR_SET
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑫
+*       税額設定
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_KEBTR_SET.
+*--- MODIFY PSD 2002/05/09
+*  DATA: L_KWERT       TYPE KONV-KWERT,    "条件金額
+*        L_WAERS       TYPE KONV-WAERS,    "通貨
+*        L_KBETR       TYPE KONV-KBETR.    "条件レート
+DATA: LF_KONV  TYPE          TYP_KONV,
+LT_KONV  TYPE TABLE OF TYP_KONV.
+
+*--- 条件 (トランザクションデータ)情報取得
+SELECT KWERT WAERS KBETR
+INTO CORRESPONDING FIELDS OF TABLE LT_KONV
+FROM   KONV
+WHERE   KNUMV = GF_VBAP-KNUMV            "伝票条件番号
+AND   KPOSN = GF_VBAP-POSNR            "条件明細番号
+AND   KAPPL = 'V'                      "アプリケーション
+AND ( KSCHL = 'MWST'                   "条件タイプ
+OR   KSCHL = 'MWSU'
+OR   KSCHL = 'MWSD' ) .
+*  SELECT SINGLE KWERT WAERS KBETR
+*    INTO (L_KWERT , L_WAERS , L_KBETR)
+*    FROM KONV
+*   WHERE KNUMV = GF_VBAP-KNUMV            "伝票条件番号
+*     AND KPOSN = GF_VBAP-POSNR            "条件明細番号
+*     AND KAPPL = 'V'                      "アプリケーション
+*     AND KSCHL = 'MWST'.                  "条件タイプ
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+LOOP AT LT_KONV INTO LF_KONV.
+PERFORM FRM_KINGAKU_HENKAN USING    GF_VBAP-WAERK
+LF_KONV-KWERT
+CHANGING GF_WRITE-KEBTR.
+*      PERFORM FRM_KINGAKU_HENKAN USING    GF_VBAP-WAERK
+*                                          L_KWERT
+*                                 CHANGING GF_WRITE-KEBTR.
+EXIT.
+ENDLOOP.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_KNMT
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_KEBTR_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_READ_TEXT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_ID      text
+*      -->P_VBELN   販売伝票
+*      <--P_TDLINE  社内用備考
+*----------------------------------------------------------------------*
+FORM FRM_READ_TEXT USING    P_ID
+P_VBELN
+P_OBJECT
+CHANGING P_TDLINE.
+
+DATA: LT_TLINE    TYPE TABLE OF TLINE,
+LF_TLINE    TYPE TLINE,
+L_VBELN     LIKE THEAD-TDNAME.
+
+L_VBELN = P_VBELN.
+
+*--- 汎用モジュール『READ_TEXT』
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID        = P_ID
+LANGUAGE  = 'J'
+NAME      = L_VBELN
+OBJECT    = P_OBJECT
+TABLES
+LINES     = LT_TLINE
+EXCEPTIONS
+NOT_FOUND = 4
+OTHERS    = 8.
+CASE SY-SUBRC.
+WHEN 0.
+READ TABLE LT_TLINE INTO LF_TLINE INDEX 1.
+P_TDLINE = LF_TLINE-TDLINE.
+WHEN 8.
+*--- エラーメッセージ出力処理
+MESSAGE A502(Z1) WITH 'READ_TEXT'
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_READ_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EIGYO_SET
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑧
+*       営業所情報設定処理
+*----------------------------------------------------------------------*
+*      -->P_PARVW   取引機能
+*----------------------------------------------------------------------*
+FORM FRM_EIGYO_SET USING P_PARVW.
+CLEAR GF_ADRC.
+*--- 営業所情報設定
+SELECT SINGLE B~NAME1 B~NAME2 B~NAME3
+B~TEL_NUMBER    B~FAX_NUMBER
+B~POST_CODE1    B~CITY1
+B~STR_SUPPL1    B~STR_SUPPL2
+B~STREET        B~REGION
+INTO CORRESPONDING FIELDS OF GF_ADRC
+FROM VBPA AS A INNER JOIN ADRC AS B
+ON A~ADRNR  = B~ADDRNUMBER
+WHERE A~VBELN = GF_INFO-VBELN
+AND A~POSNR = GF_INFO-POSNR
+AND A~PARVW = P_PARVW.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- 営業所／仕入先情報再設定
+PERFORM FRM_EIGYO_RESET USING P_PARVW.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBPA
+SY-SUBRC.
+ENDCASE.
+*--- 2002/05/17 PSD K.ARAI MODIFY
+PERFORM FRM_SIIRE_ADD1.
+**---営業所住所１データ抽出
+*  PERFORM FRM_EIGYO_ADD1.
+*--- END
+
+ENDFORM.                    " FRM_EIGYO_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EGSR_SET
+*&---------------------------------------------------------------------*
+*       営業所／仕入先設定処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_EGSR_SET.
+*--- 営業所情報設定
+*--- 2002/05/10 MODIFY PSD K.ARAI
+PERFORM FRM_SET_EIGYO.
+*  PERFORM FRM_EIGYO_SET USING 'AG'.
+*--- 2002/05/10 END
+GF_WRITE-EIGNM = GF_ADRC_INFO-NAME1.
+GF_WRITE-EIGTN = GF_ADRC_INFO-TEL_NUMBER.
+GF_WRITE-EIGFN = GF_ADRC_INFO-FAX_NUMBER.
+GF_WRITE-EIGPC = GF_ADRC_INFO-POST_CODE1.
+GF_WRITE-EGAD1 = GF_ADRC_INFO-CITY1.
+GF_WRITE-EGAD2 = GF_ADRC_INFO-STR_SUPPL1.
+GF_WRITE-EGAD3 = GF_ADRC_INFO-STR_SUPPL2.
+*--- 仕入先情報設定
+*---MODIFY START PSD T.SAITOH 2002/05/14 ---------------------------*
+*  PERFORM FRM_EIGYO_SET USING 'WE'.
+* 受注先に変更
+PERFORM FRM_EIGYO_SET USING 'AG'.
+*---MODIFY END   PSD T.SAITOH 2002/05/14 ---------------------------*
+
+GF_WRITE-SKNM1 = GF_ADRC-NAME1.
+GF_WRITE-SKNM2 = GF_ADRC-NAME2.
+GF_WRITE-SKNM3 = GF_ADRC-NAME3.
+GF_WRITE-SKSPC = GF_ADRC-POST_CODE1.
+GF_WRITE-SKAD1 = GF_ADRC-CITY1.
+GF_WRITE-SKAD2 = GF_ADRC-STR_SUPPL1.
+GF_WRITE-SKAD3 = GF_ADRC-STR_SUPPL2.
+
+ENDFORM.                    " FRM_EGSR_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_READ_SET
+*&---------------------------------------------------------------------*
+*       テキストの読み込み
+*----------------------------------------------------------------------*
+*       注）納品キー番号と納入No.は仕様で入れ替えています。
+*----------------------------------------------------------------------*
+FORM FRM_READ_SET.
+DATA: L_VBELN     LIKE THEAD-TDNAME.
+
+CONCATENATE GF_INFO-VGBEL
+GF_INFO-VGPOS
+INTO L_VBELN.
+*--- 社内備考設定
+PERFORM FRM_READ_TEXT USING      '0001'
+GF_INFO-VBELN
+'VBBK'
+CHANGING   GF_WRITE-SNIBK.
+
+*--- 発注部門コード設定
+*---MODIFY START PSD T.SAITOH 2002/09/19 ---------------------------*
+*  PERFORM FRM_READ_TEXT USING      'Z020'
+PERFORM FRM_READ_TEXT USING      'Z001'
+*---MODIFY END   PSD T.SAITOH 2002/09/19 ---------------------------*
+GF_INFO-VBELN
+'VBBK'
+CHANGING   GF_WRITE-HBMCD.
+
+*--- 訂正コード設定
+PERFORM FRM_READ_TEXT USING      'Z002'
+GF_INFO-VBELN
+'VBBK'
+CHANGING   GF_WRITE-TISCD.
+
+*--- 支給区分設定
+PERFORM FRM_READ_TEXT USING      'Z004'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-SKKBN.
+
+*--- 購買担当設定
+PERFORM FRM_READ_TEXT USING      'Z005'
+GF_INFO-VBELN
+'VBBK'
+CHANGING   GF_WRITE-KBTNT.
+
+*--- 材質／企画／寸法設定
+PERFORM FRM_READ_TEXT USING      'Z006'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-SKKSH.
+
+*--- 検査区分設定
+PERFORM FRM_READ_TEXT USING      'Z008'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-KSKBN.
+
+*--- 自由使用欄設定
+PERFORM FRM_READ_TEXT USING      'Z009'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-JYSRN.
+
+*--- 備考設定
+PERFORM FRM_READ_TEXT USING      'Z010'
+GF_INFO-VBELN
+'VBBK'
+CHANGING   GF_WRITE-BIKOU.
+
+*--- 消費税区分設定
+PERFORM FRM_READ_TEXT USING      'Z011'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-SZKBN.
+
+*--- 納入先宛先名設定
+PERFORM FRM_READ_TEXT USING      'Z012'
+GF_INFO-VBELN
+'VBBK'
+CHANGING   GF_WRITE-NASNM.
+
+*--- 納品キー番号設定
+*--- 2002/05/10 MODIFY PSD K.ARAI
+*--- 本番機(700)に合わせる
+PERFORM FRM_READ_TEXT USING      'Z902'
+L_VBELN
+'VBBP'
+CHANGING   GF_WRITE-NNKNM.
+*  PERFORM FRM_READ_TEXT USING      'Z901'
+*                                   L_VBELN
+*                                   'VBBP'
+*                        CHANGING   GF_WRITE-NNKNM.
+*--- 2002/05/10 END
+
+*--- 受渡場所名設定
+PERFORM FRM_READ_TEXT USING      'Z013'
+GF_INFO-VBELN
+'VBBK'
+CHANGING   GF_WRITE-UWSBS.
+
+*--- 発注者用バーコード情報設定
+PERFORM FRM_READ_TEXT USING      'Z014'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-HTBCD.
+
+*--- 発注者用備考設定
+PERFORM FRM_READ_TEXT USING      'Z015'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-HTBKU.
+
+*---MODIFY START D.YI 2007/11/05 ---------------------------*
+*--- 受注者用備考設定
+*  PERFORM FRM_READ_TEXT USING      '0002'
+*                                   GF_INFO-VBELN
+*                                   'VBBK'
+*                        CHANGING   GF_WRITE-JTBKU.
+DATA:  L_VBELN1    TYPE THEAD-TDNAME,
+LT_TLINE    TYPE TABLE OF TLINE,
+LF_TLINE    TYPE TLINE.
+
+L_VBELN1 = GF_INFO-VBELN.
+
+*--- 汎用モジュール『READ_TEXT』
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID        = '0002'
+LANGUAGE  = 'J'
+NAME      = L_VBELN1
+OBJECT    = 'VBBK'
+TABLES
+LINES     = LT_TLINE
+EXCEPTIONS
+NOT_FOUND = 4
+OTHERS    = 8.
+IF SY-SUBRC = 0.
+READ TABLE LT_TLINE INTO LF_TLINE INDEX 1.
+GF_WRITE-JTBKU = LF_TLINE-TDLINE.
+ELSE.
+PERFORM FRM_READ_TEXT USING      'Z023'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-JTBKU.
+ENDIF.
+*---MODIFY END   D.YI 2007/11/05 ---------------------------*
+
+*--- 納入No設定
+*--- 2002/05/10 MODIFY PSD K.ARAI
+*--- 本番機(700)に合わせる
+PERFORM FRM_READ_TEXT USING      'Z901'
+L_VBELN
+'VBBP'
+CHANGING   GF_WRITE-NINNO.
+*  PERFORM FRM_READ_TEXT USING      'Z902'
+*                                   L_VBELN
+*                                   'VBBP'
+*                        CHANGING   GF_WRITE-NINNO.
+*--- 2002/05/10 END
+*--- 直納区分設定
+PERFORM FRM_READ_TEXT USING      'Z017'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-TNKBN.
+
+*--- 商品名設定
+PERFORM FRM_READ_TEXT USING      'Z018'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-POSTX.
+GF_WRITE-HINNM = GF_WRITE-POSTX.                    " 品名（品名仕様）
+
+
+*--- 単価区分対応
+PERFORM FRM_READ_TEXT USING      'Z003'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-UNTTYP.     " 単価区分
+
+*--- 製造番号対応
+PERFORM FRM_READ_TEXT USING      'Z021'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-PRDNUM.     " 製造番号
+
+*--- 受渡場所、出力タイプ追加対応
+PERFORM FRM_READ_TEXT USING      'Z007'
+GF_INFO-VGBEL
+'VBBK'
+CHANGING   GF_WRITE-UWBCD.      " 受渡場所
+
+ENDFORM.                    " FRM_READ_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_REOUT_VBAP
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑭
+*       販売伝票情報取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_REOUT_VBAP.
+CLEAR:   GF_VBAP,
+F_NAST,
+F_LIKP,
+F_VBAK.
+REFRESH: GT_VBAP.
+
+*--- 販売伝票情報取得
+* SELECT A~VBELN A~BSTNK A~AUDAT A~AUART
+SELECT A~VBELN D~BSTKD A~AUDAT A~AUART
+A~VKORG A~VTWEG A~KUNNR A~KNUMV
+* ↓ APPEND 2002.05.10 PSD K.ARAI
+A~VKBUR
+* ↑
+B~POSNR B~KDMAT B~VRKME B~NETPR
+B~KWMENG B~MATNR B~WAERK B~NETWR
+B~KPEIN  C~EDATU D~BSTDK_E
+INTO CORRESPONDING FIELDS OF TABLE GT_VBAP
+FROM ( ( VBAK AS A INNER JOIN VBAP AS B
+ON     A~VBELN  = B~VBELN ) INNER JOIN VBEP  AS C
+ON     B~VBELN  = C~VBELN
+AND     B~POSNR  = C~POSNR ) INNER JOIN VBKD AS D
+ON     B~VBELN  = D~VBELN
+WHERE A~VBELN IN S_VGBEL                         "販売伝票番号
+AND C~ETENR =  '0001'                          "納入日程行
+AND D~POSNR =  '000000'.                       "販売明細番号
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1).
+*     MESSAGE S611(Z1).
+*---
+STOP.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBAP
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_REOUT_VBAP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_REOUT_NAST
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑥
+*       メッセージステータス情報取得処理
+*----------------------------------------------------------------------*
+*
+*  <--  P_SUBRC 日付判定でNASTチェックのリターン値
+*----------------------------------------------------------------------*
+FORM FRM_REOUT_NAST CHANGING P_SUBRC.
+CLEAR:   GF_NAST.
+REFRESH: GT_NAST.
+*---APPEND START PSD T.SAITOH 2002/06/03 ---------------------------*
+DATA: L_VBELN_POSNR_MIN TYPE NAST-OBJKY,"オブジェクトキー最小値
+L_VBELN_POSNR_MAX TYPE NAST-OBJKY."オブジェクトキー最大値
+
+L_VBELN_POSNR_MIN+0(10) = GF_INFO-VBELN.
+L_VBELN_POSNR_MIN+10(6) = '000000'.
+L_VBELN_POSNR_MAX+0(10) = GF_INFO-VBELN.
+L_VBELN_POSNR_MAX+10(6) = '999999'.
+
+*---APPEND END   PSD T.SAITOH 2002/06/03 ---------------------------*
+
+*--- メッセージステータス情報取得
+SELECT KAPPL OBJKY KSCHL DATVR UHRVR LDEST USNAM
+SPRAS PARNR PARVW ERDAT ERUHR
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST
+FROM NAST
+WHERE   KAPPL = 'V2'
+*---APPEND START PSD T.SAITOH 2002/06/03 ---------------------------*
+AND OBJKY BETWEEN L_VBELN_POSNR_MIN AND L_VBELN_POSNR_MAX
+*---APPEND END   PSD T.SAITOH 2002/06/03 ---------------------------*
+AND   KSCHL = 'ZS22'
+AND   SPRAS = CNS_J
+AND   VSTAT = '1'.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+*--- 日付判定処理
+PERFORM FRM_DATE_SET CHANGING P_SUBRC.
+F_NAST = CNS_X.
+WHEN 4.         " 対象データなし
+F_ERR = CNS_X.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_NAST
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_REOUT_NAST
+*&---------------------------------------------------------------------*
+*&      Form  FRM_KINGAKU_HENKAN
+*&---------------------------------------------------------------------*
+*       金額変換処理
+*----------------------------------------------------------------------*
+*      -->P_TSUKACD  通貨コード
+*      -->P_KINGAKU  変換前金額
+*      <--P_HENKAN   変換後金額
+*----------------------------------------------------------------------*
+FORM FRM_KINGAKU_HENKAN USING    P_TSUKACD
+P_KINGAKU
+CHANGING P_HENKAN.
+DATA : L_AMOUNT_DIS TYPE WMTO_S-AMOUNT,
+L_AMOUNT_INT TYPE WMTO_S-AMOUNT.
+L_AMOUNT_INT = P_KINGAKU.
+*--- 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+EXPORTING
+CURRENCY        = P_TSUKACD
+AMOUNT_INTERNAL = L_AMOUNT_INT
+IMPORTING
+AMOUNT_DISPLAY  = L_AMOUNT_DIS
+EXCEPTIONS
+INTERNAL_ERROR  = 1
+OTHERS          = 2.
+IF SY-SUBRC <> 1.
+P_HENKAN = L_AMOUNT_DIS.
+ENDIF.
+
+ENDFORM.                    " FRM_KINGAKU_HENKAN
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NMOUT_DATA
+*&---------------------------------------------------------------------*
+*       通常出力用ファイル出力用情報取得処理
+*----------------------------------------------------------------------*
+FORM FRM_NMOUT_DATA.
+DATA : L_OBJKY(6) TYPE N.              "オブジェクトキー(明細)
+
+*--- メッセージステータス情報取得処理
+PERFORM FRM_NMOUT_NAST.
+SORT GT_NAST BY KSCHL OBJKY . "2003/05/26 ADD
+*---GT_NAST ループ処理
+*----ｵﾌﾞｼﾞｪｸﾄｷｰのヘッダのみ条件にループする
+LOOP AT GT_NAST INTO  GF_NAST
+WHERE OBJKY+0(10) IN S_VBELN.
+F_NAST = CNS_X.
+*--- オブジェクトキーの明細6桁がスペースのとき
+IF GF_NAST-OBJKY+11(6) = SPACE.
+CONTINUE.
+ENDIF.
+*2003/05/26 DEL START
+*--- NASTロック処理
+*      PERFORM FRM_ENQUEUE_EZNAST.
+*2003/05/26 DEL END
+G_OBJKY = GF_NAST-OBJKY.
+G_LDEST = GF_NAST-LDEST.
+G_KSCHL = GF_NAST-KSCHL.
+G_PARNR = GF_NAST-PARNR.
+G_PARVW = GF_NAST-PARVW.
+G_ERDAT = GF_NAST-ERDAT.
+G_ERUHR = GF_NAST-ERUHR.
+G_LDEST = GF_NAST-LDEST.         "出力デバイス
+*---出荷伝票情報設定処理(同一ヘッダ情報のみ)
+*      AT NEW OBJKY+0(10).              "2003/05/26 DEL
+PERFORM FRM_LOOP_GT_NAST.
+*      ENDAT.                           "2003/05/26 DEL
+ENDLOOP.
+
+*--- エラーメッセージ出力処理
+IF F_NAST = CNS_X.
+IF F_LIKP <> CNS_X.
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1).
+*     MESSAGE S600(Z1) WITH TEXT-008.
+*---
+STOP.
+ELSEIF F_VBAK <> CNS_X.
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1).
+*     MESSAGE S600(Z1) WITH TEXT-115.
+*---
+STOP.
+ENDIF.
+ELSE.
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1).
+*    MESSAGE S611(Z1).
+*---
+STOP.
+ENDIF.
+ENDFORM.                    " FRM_NMOUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NMOUT_LIPS
+*&---------------------------------------------------------------------*
+*       テーブル読込条件②
+*       出荷伝票情報取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_NMOUT_LIPS.
+CLEAR:   GF_INFO,
+GF_WRITE,
+F_ERR.
+REFRESH: GT_INFO.
+
+*--- 出荷伝票情報取得
+*  SELECT                                        "2003/05/26 MOD
+SELECT SINGLE                                  "2003/05/26 MOD
+A~VBELN A~WADAT_IST A~LFART A~VSTEL A~VKORG
+A~KUNNR
+B~POSNR B~VGBEL     B~VGPOS B~LFIMG B~VRKME
+B~VTWEG B~MATNR     B~PSTYV
+*    INTO CORRESPONDING FIELDS OF TABLE GT_INFO  "2003/05/26 MOD
+INTO CORRESPONDING FIELDS OF GF_INFO         "2003/05/26 MOD
+FROM LIKP AS A INNER JOIN LIPS AS B
+ON A~VBELN = B~VBELN              "出荷伝票番号
+WHERE A~VBELN =  G_OBJKY+0(10)       "対象キー
+AND A~VSTEL IN S_VSTEL             "出荷ポイント
+AND B~POSNR = G_OBJKY+10(6)        "明細 2003/05/26
+AND B~VGBEL IN S_VGBEL.            "受注伝票No.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+F_LIKP = CNS_X.
+WHEN 4.         " 対象データなし
+F_ERR = CNS_X.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_LIPS
+SY-SUBRC.
+ENDCASE.
+ENDFORM.                    " FRM_NMOUT_LIPS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LIPS_FKSTI
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑬
+*       付加数値取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_LIPS_FKSTI.
+*2003/05/26 MOD START
+* DATA: LT_LIPS TYPE TABLE OF LIPS,
+*      LF_LIPS TYPE          LIPS.
+DATA:BEGIN OF LT_LIPS OCCURS 0,
+VBELN LIKE LIPS-VBELN,
+POSNR LIKE LIPS-POSNR,
+VGBEL LIKE LIPS-VGBEL,
+END OF LT_LIPS,
+LF_LIPS LIKE LT_LIPS.
+*2003/05/26 MOD END
+*2003/10/22 MOD START
+DATA:BEGIN OF LF_VBFA,
+VBELN LIKE VBFA-VBELN,
+POSNN LIKE VBFA-POSNN,
+END OF LF_VBFA,
+LT_VBFA LIKE TABLE OF LF_VBFA,
+L_FLG(1) TYPE C VALUE '0'.
+*2003/10/22 MOD END
+
+* IF GF_INFO-VGBEL <> LF_LIPS-VGBEL. "2003/05/26 DEL
+*   SELECT *                         "2003/05/26 MOD
+*2003/10/22 DEL START
+*    SELECT VBELN POSNR VGBEL         "2003/05/26 MOD
+*      INTO CORRESPONDING FIELDS OF TABLE LT_LIPS
+*      FROM LIPS
+*     WHERE VGBEL = GF_INFO-VGBEL
+*       AND VGPOS = GF_INFO-VGPOS.
+*2003/10/22 DEL END
+
+*2003/10/22 MOD START
+SELECT VBELN POSNN
+INTO CORRESPONDING FIELDS OF TABLE LT_VBFA
+FROM VBFA
+WHERE VBELV = GF_INFO-VGBEL
+AND POSNV = GF_INFO-VGPOS
+AND VBTYP_N = 'J'.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+L_FLG = '1'.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBFA
+SY-SUBRC.
+ENDCASE.
+
+IF ( L_FLG = '1' ).
+SELECT VBELN POSNR VGBEL
+INTO CORRESPONDING FIELDS OF TABLE LT_LIPS
+FROM LIPS
+FOR ALL ENTRIES IN LT_VBFA
+WHERE VBELN = LT_VBFA-VBELN
+AND POSNR = LT_VBFA-POSNN.
+*2003/10/22 MOD END
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+SORT LT_LIPS BY VBELN POSNR.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_LIPS
+SY-SUBRC.
+ENDCASE.
+*  ENDIF.                             "2003/05/26 DEL
+ENDIF.                             "2003/10/22 MOD
+
+READ TABLE LT_LIPS INTO LF_LIPS WITH KEY VBELN = GF_INFO-VBELN
+POSNR = GF_INFO-POSNR.
+GF_WRITE-FKSTI = SY-TABIX.
+
+ENDFORM.                    " FRM_LIPS_FKSTI
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NAST_CHECK
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑤
+*       メッセージステータス情報取得処理
+*----------------------------------------------------------------------*
+*  NASTのチェック
+*  再出力時に出力待ちレコードが混在した場合は
+*　処理対象外とする
+*----------------------------------------------------------------------*
+FORM FRM_NAST_CHECK.
+DATA: LF_NAST TYPE          TYP_NAST,
+LT_NAST TYPE TABLE OF TYP_NAST,
+L_OBJKY TYPE NAST-OBJKY.
+CONCATENATE GF_INFO-VBELN GF_INFO-POSNR INTO L_OBJKY.
+*--- メッセージステータス情報取得
+SELECT SINGLE KAPPL OBJKY KSCHL LDEST USNAM
+INTO CORRESPONDING FIELDS OF LF_NAST
+FROM NAST
+WHERE   KAPPL = 'V2'
+AND   OBJKY = L_OBJKY
+AND   KSCHL = 'ZS22'
+AND   SPRAS = CNS_J
+AND   VSTAT = '0'.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+*--- 対象データあり
+F_ERR = CNS_X.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_NAST
+SY-SUBRC.
+ENDCASE.
+ENDFORM.                    " FRM_NAST_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_IRISU_SET
+*&---------------------------------------------------------------------*
+*       入り数設定処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_IRISU_SET.
+DATA: L_KOGUT           TYPE I,     "個口
+L_AMARI           TYPE I,     "余り
+L_BUNSI           TYPE I,     "分子
+L_OUTNO           TYPE I.     "入り数
+*--- 明細カテゴリが通常
+IF GF_DUMMY-PSTYV <> 'ZSEK'.
+*--- 入り数入力値が0
+IF G_OUTNO = 0.
+L_OUTNO = GF_WRITE-LFIMG.
+ELSE.
+L_OUTNO = P_OUTNO.
+ENDIF.
+*    COMPUTE L_KOGUT = ABS( GF_WRITE_TEMP-LFIMG ) DIV L_OUTNO.
+*    COMPUTE L_AMARI = ABS( GF_WRITE_TEMP-LFIMG ) MOD L_OUTNO.
+*2003/05/30 ゼロ割防止 START
+IF L_OUTNO = 0.
+L_KOGUT = 0.
+L_AMARI = 0.
+ELSE.
+COMPUTE L_KOGUT = ABS( GF_WRITE-LFIMG ) DIV L_OUTNO.
+COMPUTE L_AMARI = ABS( GF_WRITE-LFIMG ) MOD L_OUTNO.
+ENDIF.
+*2003/05/30 ゼロ割防止 END
+IF L_AMARI <> 0.
+L_KOGUT = L_KOGUT + 1.
+ENDIF.
+*    MOVE-CORRESPONDING GF_WRITE_TEMP TO GF_WRITE.
+CLEAR GF_WRITE_TEMP.
+
+*--- 明細カテゴリが子
+ELSE.
+IF G_OUTNO = 0.
+L_OUTNO = GF_WRITE-LFIMG.
+ELSE.
+L_OUTNO = P_OUTNO.
+ENDIF.
+*    COMPUTE L_KOGUT = ABS( GF_WRITE-LFIMG ) DIV L_OUTNO.
+*    COMPUTE L_AMARI = ABS( GF_WRITE-LFIMG ) MOD L_OUTNO.
+*2003/05/30 ゼロ割防止 START
+IF L_OUTNO = 0.
+L_KOGUT = 0.
+L_AMARI = 0.
+ELSE.
+COMPUTE L_KOGUT = ABS( GF_WRITE-LFIMG ) DIV L_OUTNO.
+COMPUTE L_AMARI = ABS( GF_WRITE-LFIMG ) MOD L_OUTNO.
+ENDIF.
+*2003/05/30 ゼロ割防止 END
+IF L_AMARI <> 0.
+L_KOGUT = L_KOGUT + 1.
+ENDIF.
+ENDIF.
+
+*--- 個口数行レコードを作成する
+*  L_OUTNO = P_OUTNO.
+DO L_KOGUT TIMES.
+GF_WRITE-KOGUT = L_KOGUT.
+L_BUNSI = L_BUNSI + 1.
+GF_WRITE-BUNSI = L_BUNSI.
+*---　入り数の設定処理
+IF L_AMARI <> 0 AND L_BUNSI = L_KOGUT.
+GF_WRITE-IRISU = L_AMARI.
+ELSE.
+GF_WRITE-IRISU = L_OUTNO.
+ENDIF.
+GF_WRITE-IRISUF = CNS_X.
+*--- 出力用内部テーブル更新処理
+IF GF_DUMMY-PSTYV = 'ZSEK'.
+GF_WRITE-NETWR = G_NETWR.
+GF_WRITE-NETWRT = G_NETWRT.
+GF_WRITE-KEBTR = G_KEBTR .
+
+ENDIF.
+*--- 2002/05/09 APPEND PSD
+CONDENSE GF_WRITE-NETWR  NO-GAPS.
+CONDENSE GF_WRITE-NETWRT NO-GAPS.
+CONDENSE GF_WRITE-KEBTR  NO-GAPS.
+CONDENSE GF_WRITE-IRISU  NO-GAPS.
+CONDENSE GF_WRITE-BUNSI  NO-GAPS.
+CONDENSE GF_WRITE-KOGUT  NO-GAPS.
+*--- APPEND END
+* Add 2006.07.05 >>>
+IF P_OUTNO NE 0 AND L_BUNSI NE 1 .
+* Add 2006.07.05 <<<
+APPEND GF_WRITE TO GT_WRITE.
+* Add 2006.07.05 >>>
+ELSE .
+MODIFY GT_WRITE FROM GF_WRITE
+TRANSPORTING IRISU KOGUT BUNSI
+WHERE VGBEL EQ GF_WRITE-VGBEL
+AND  VBELN EQ GF_WRITE-VBELN .
+ENDIF .
+* Add 2006.07.05 <<<
+
+ENDDO.
+CLEAR :GF_WRITE,
+G_NETWR,
+G_NETWRT,
+G_KEBTR.
+ENDFORM.                    " FRM_IRISU_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PRINTER_CHECK
+*&---------------------------------------------------------------------*
+*       プリンタ／トレイチェック処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_PRINTER_CHECK.
+*--プリンタ画面入力されている
+IF NOT P_PRNTR IS INITIAL.
+READ TABLE GT_TSP03L INTO GF_TSP03L
+WITH KEY LNAME = P_PRNTR.
+CASE SY-SUBRC.
+*プリンタが存在する
+WHEN 0.
+GF_WRITE-PRNTR = GF_TSP03L-PADEST.
+GF_WRITE-PNAME = P_PRNTR.
+*プリンタが存在しない
+WHEN 4.
+MESSAGE E614(Z1) WITH TEXT-126."画面入力されたプリンタ/トレイ
+*        MESSAGE E614(Z1) WITH P_PRNTR.
+ENDCASE.
+ENDIF.
+ENDFORM.                    " FRM_PRINTER_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATE_SET
+*&---------------------------------------------------------------------*
+*       日付判定処理
+*----------------------------------------------------------------------*
+*  　　 GT_NASTのデータで処理時間の最新のものをGF_INFOにいれる
+*      <--- P_SUBRC SY-SUBRCのリターン値(NASTがないときは0ではない)
+*----------------------------------------------------------------------*
+FORM FRM_DATE_SET CHANGING P_SUBRC.
+DATA L_NAST TYPE TYP_NAST.
+DATA LT_NAST TYPE TABLE OF TYP_NAST.
+
+*--- 日付判定処理
+SORT GT_NAST DESCENDING BY OBJKY+0(10) DATVR UHRVR.
+LOOP AT GT_NAST INTO GF_NAST
+WHERE OBJKY+0(10) = GF_INFO-VBELN.
+EXIT.
+ENDLOOP.
+
+P_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " FRM_DATE_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EIGYO_RESET
+*&---------------------------------------------------------------------*
+*       テーブル読込条件⑧
+*       営業所情報再設定処理
+*----------------------------------------------------------------------*
+*      -->P_PARVW   取引機能
+*----------------------------------------------------------------------*
+FORM FRM_EIGYO_RESET USING P_PARVW.
+CLEAR GF_ADRC.
+*--- 営業所情報設定
+SELECT SINGLE B~NAME1 B~NAME2 B~NAME3
+B~TEL_NUMBER    B~FAX_NUMBER
+B~POST_CODE1    B~CITY1
+B~STR_SUPPL1    B~STR_SUPPL2
+B~STREET        B~REGION
+INTO CORRESPONDING FIELDS OF GF_ADRC
+FROM VBPA AS A INNER JOIN ADRC AS B
+ON A~ADRNR  = B~ADDRNUMBER
+WHERE A~VBELN = GF_INFO-VBELN
+AND A~POSNR = '000000'
+AND A~PARVW = P_PARVW.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBPA
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_EIGYO_RESET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_ENDTYP
+*&---------------------------------------------------------------------*
+*       納入完了区分設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_ENDTYP.
+DATA: LF_INFO LIKE GF_INFO,
+LT_INFO LIKE TABLE OF LF_INFO.
+DATA: L_LINE TYPE P.
+
+CLEAR GF_WRITE-ENDTYP.
+
+* 同一受注番号の出荷伝票情報取得
+SELECT VBELN POSNR VGBEL VGPOS
+INTO CORRESPONDING FIELDS OF TABLE LT_INFO
+FROM LIPS
+WHERE VBELN IN S_VBELN
+AND VGBEL =  GF_VBAP-VBELN
+AND VGPOS =  GF_VBAP-POSNR
+.
+
+* 受注伝票1:1出荷伝票の場合→完了区分非設定
+DESCRIBE TABLE LT_INFO LINES L_LINE.
+IF L_LINE <= 1.
+EXIT.
+ENDIF.
+
+* ソート(出荷伝票番号/明細)
+SORT LT_INFO DESCENDING BY VBELN
+POSNR.
+
+* 納入完了区分設定
+LOOP AT LT_INFO INTO LF_INFO.
+*--第一レコードをチェック
+IF SY-TABIX = 1.
+IF LF_INFO-VBELN = GF_INFO-VBELN AND
+LF_INFO-POSNR = GF_INFO-POSNR.
+GF_WRITE-ENDTYP = CNS_V.
+ELSE.
+GF_WRITE-ENDTYP = CNS_N.
+ENDIF.
+ELSE.
+GF_WRITE-ENDTYP = CNS_N.
+ENDIF.
+EXIT.
+ENDLOOP.
+
+ENDFORM.                    " FRM_SET_ENDTYP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_COMMENT_ZS20
+*&---------------------------------------------------------------------*
+*       ○タ納品書(税:設定/コメント:設定)
+*----------------------------------------------------------------------*
+FORM FRM_SET_COMMENT_ZS20.
+DATA: L_KEBTR(16) TYPE P DECIMALS 2.
+
+L_KEBTR = GF_WRITE-KEBTR.
+IF L_KEBTR = 0.    " 消費税0円の場合
+GF_WRITE-SZITK = TEXT-122.
+
+ELSE.              " 消費税が0円以外の場合
+CLEAR: GF_WRITE-SZITK.
+
+ENDIF.
+
+ENDFORM.                    " FRM_SET_COMMENT_ZS20
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_COMMENT_ZS21
+*&---------------------------------------------------------------------*
+*       ○タ納品書(税:非設定/コメント:設定)
+*----------------------------------------------------------------------*
+FORM FRM_SET_COMMENT_ZS21.
+DATA: L_KEBTR(16) TYPE P DECIMALS 2.
+
+L_KEBTR = GF_WRITE-KEBTR.
+IF L_KEBTR = 0.    " 消費税0円の場合
+GF_WRITE-SZITK = TEXT-122.
+
+ELSE.              " 消費税が0円以外の場合
+GF_WRITE-SZITK = TEXT-123.
+
+ENDIF.
+
+* 税額クリア
+CLEAR GF_WRITE-KEBTR.
+
+ENDFORM.                    " FRM_SET_COMMENT_ZS21
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_CHECK
+*&---------------------------------------------------------------------*
+*       画面入力後処理
+*----------------------------------------------------------------------*
+FORM FRM_DATA_CHECK.
+
+*---入力パラメータチェック
+IF SY-UCOMM+0(1) <> '%' .
+
+*--- 出荷ポイント存在チェック処理
+PERFORM FRM_VSTEL.
+*--- プリンタ／トレイチェック
+PERFORM FRM_PRINTER.
+*--ラジオボタン
+PERFORM FRM_R_BUTTON.
+
+ENDIF.
+
+ENDFORM.                    " FRM_DATA_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FRM_VSTEL
+*&---------------------------------------------------------------------*
+*       出荷ポイント存在チェック処理
+*----------------------------------------------------------------------*
+FORM FRM_VSTEL.
+* Edit 2013.04.17 GSL Tohtake.s Start
+DATA: L_DOC_CNT TYPE I.
+* Edit 2013.04.17 GSL Tohtake.s End
+
+*-出荷ポイントがブランク
+IF S_VSTEL IS INITIAL.
+MESSAGE E006(Z1) WITH TEXT-016.
+*-受注・出荷伝票No.両方が入力されている
+ELSE.
+IF NOT ( S_VGBEL IS INITIAL ) AND
+NOT ( S_VBELN IS INITIAL ).
+CLEAR: S_VGBEL, S_VBELN.
+REFRESH : S_VGBEL, S_VBELN.
+MESSAGE E605(Z1) WITH TEXT-055 TEXT-058.
+* Edit 2013.04.17 GSL Tohtake.s Start
+ELSEIF NOT ( S_VBELN IS INITIAL ) AND
+NOT ( P_OUTNO IS INITIAL ).
+DESCRIBE TABLE S_VBELN LINES L_DOC_CNT.
+IF L_DOC_CNT = 1.
+IF S_VBELN-OPTION <> 'EQ' OR S_VBELN-SIGN <> 'I'.
+MESSAGE W917(Z1).
+ENDIF.
+ELSE.
+MESSAGE W917(Z1).
+ENDIF.
+ELSEIF NOT ( S_VGBEL IS INITIAL ) AND
+NOT ( P_OUTNO IS INITIAL ).
+DESCRIBE TABLE S_VGBEL LINES L_DOC_CNT.
+IF L_DOC_CNT = 1.
+IF S_VGBEL-OPTION <> 'EQ' OR S_VGBEL-SIGN <> 'I'.
+MESSAGE W917(Z1).
+ENDIF.
+ELSE.
+MESSAGE W917(Z1).
+ENDIF.
+* Edit 2013.04.17 GSL Tohtake.s End
+
+ENDIF.
+*出荷ポイント存在チェック
+PERFORM FRM_VSTEL_CHECK.
+ENDIF.
+
+ENDFORM.                    " FRM_VSTEL
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PRINTER
+*&---------------------------------------------------------------------*
+*       プリンタ／トレイ設定
+*----------------------------------------------------------------------*
+FORM FRM_PRINTER.
+
+*--- スプール：デバイス名（長）情報取得処理
+PERFORM FRM_TSP03L_GET.
+*--- 画面入力データチェック
+PERFORM FRM_PRINTER_CHECK.
+
+ENDFORM.                    " FRM_PRINTER
+*&---------------------------------------------------------------------*
+*&      Form  FRM_R_BUTTON
+*&---------------------------------------------------------------------*
+*       ラジオボタン設定
+*----------------------------------------------------------------------*
+FORM FRM_R_BUTTON.
+*--再出力にチェックがある
+IF R_REOUT = CNS_X.
+*受注・出荷伝票No.両方ブランク
+IF S_VGBEL IS INITIAL AND
+S_VBELN IS INITIAL.
+MESSAGE E605(Z1) WITH TEXT-055 TEXT-058.
+ENDIF.
+*--通常出力にチェックがある
+ELSEIF R_NMOUT = CNS_X.
+*入り数が設定されていない
+IF P_OUTNO IS INITIAL.
+*入り数が設定されている
+ELSE.
+* Edit 2013.02.22 GSL Tohtake.s Start
+*      CLEAR P_OUTNO.
+*      MESSAGE E615(Z1) WITH TEXT-092.
+IF S_VGBEL IS INITIAL AND
+S_VBELN IS INITIAL.
+MESSAGE E805(Z1) WITH TEXT-055.
+ENDIF.
+* Edit 2013.02.22 GSL Tohtake.s End
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " FRM_R_BUTTON
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ENQUEUE_EZNAST
+*&---------------------------------------------------------------------*
+*       NASTロック
+*----------------------------------------------------------------------*
+FORM FRM_ENQUEUE_EZNAST.
+
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+DATA:L_UNAME LIKE SY-UNAME."ユーザーＩＤ
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+
+CALL FUNCTION 'ENQUEUE_EZNAST'
+EXPORTING
+MODE_NAST    = 'E'  " 排他制御
+MANDT        = SY-MANDT  " クライアント番号
+KAPPL        = 'V2'  " アプリケーション
+*2003/05/26 MOD START
+*            OBJKY        = GF_NAST-OBJKY  " オブジェクトキー
+*            KSCHL        = GF_NAST-KSCHL  " メッセージタイプ
+OBJKY        = G_OBJKY  " オブジェクトキー
+KSCHL        = G_KSCHL  " メッセージタイプ
+*2003/05/26 MOD END
+SPRAS        = 'J'  " メッセージ言語
+EXCEPTIONS
+FOREIGN_LOCK = 1
+OTHERS       = 2.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 1.
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+*     ユーザーＩＤを取得
+PERFORM FRM_ENQ_CHECK USING L_UNAME.
+*     エラーメッセージ：XXXX が処理中です
+MESSAGE S023(Z1) WITH L_UNAME. "
+ROLLBACK WORK. " ロールバック
+**--- 2002/05/10 MODIFY PSD K.ARAI
+*      MESSAGE S023(Z1).
+**      MESSAGE S004(Z1) WITH CNS_NAST.
+**--- 2002/05/10 END
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+STOP.
+WHEN OTHERS.
+MESSAGE A502(Z1) WITH 'ENQUEUE_EZNAST'
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_ENQUEUE_EZNAST
+
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ENQ_CHECK
+*&---------------------------------------------------------------------*
+*       ロックユーザーＩＤ取得
+*----------------------------------------------------------------------*
+FORM FRM_ENQ_CHECK USING P_UNAME.
+
+DATA:L_GARG TYPE SEQG3-GARG."キー
+
+* ロックキーの設定
+
+CONCATENATE SY-MANDT
+'V2'
+*              GF_NAST-OBJKY
+G_OBJKY         "2003/05/26 MOD
+'*'
+*              GF_NAST-KSCHL
+G_KSCHL         "2003/05/26 MOD
+'J'
+INTO L_GARG.
+
+* ロック情報を取得する
+
+CALL FUNCTION 'ENQUEUE_READ'
+EXPORTING
+GCLIENT       = SY-MANDT
+GNAME         = 'NAST'
+GARG          = L_GARG
+GUNAME        = SPACE
+*  IMPORTING
+*   NUMBER        =
+*   SUBRC         =
+TABLES
+ENQ           = GT_SEQG3
+.
+LOOP AT GT_SEQG3 INTO GF_SEQG3.
+P_UNAME = GF_SEQG3-GUNAME. " ユーザＩＤを設定
+IF GF_SEQG3-GUNAME <> SPACE.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    "FRM_ENQ_CHECK
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EIGYO_ADD1
+*&---------------------------------------------------------------------*
+*       営業所住所１データ抽出
+*----------------------------------------------------------------------*
+FORM FRM_EIGYO_ADD1.
+DATA : L_BEZEI LIKE T005U-BEZEI.                     "都道府県名
+SELECT SINGLE BEZEI INTO L_BEZEI
+FROM  T005U
+WHERE  SPRAS = 'J'                  "言語キー
+AND  LAND1 = 'JP'                 "国コード
+AND  BLAND = GF_ADRC_INFO-REGION. "都道府県
+
+CONCATENATE L_BEZEI
+GF_ADRC_INFO-STREET
+GF_ADRC_INFO-CITY1     INTO   GF_ADRC_INFO-CITY1.
+
+ENDFORM.                    " FRM_EIGYO_ADD1
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT
+*&---------------------------------------------------------------------*
+*　　　データ抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT.
+*--- 出力タイプ取得処理(通常・再出力共通)
+*  PERFORM FRM_T685T_GET.
+*---Append Start NDSC R.Hata 2002/12/09 ----------------------------*
+*  Perform Taishou_Get .
+*---Append End   NDSC R.Hata 2002/12/09 ----------------------------*
+
+*--- 画面入力入り数退避
+G_OUTNO = P_OUTNO.
+
+*--- ファイル出力用情報取得処理(通常出力用)
+IF R_NMOUT = CNS_X.
+PERFORM FRM_NMOUT_DATA.
+*--- ファイル出力用情報取得処理(再出力用)
+ELSEIF R_REOUT = CNS_X.
+PERFORM FRM_REOUT_DATA.
+ENDIF.
+
+ENDFORM.                    " FRM_SELECT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILE_SET
+*&---------------------------------------------------------------------*
+*       ファイル更新
+*----------------------------------------------------------------------*
+FORM FRM_FILE_SET.
+*2003/05/26 ADD START 使用済み内部テーブル開放
+FREE:GT_NAST,GT_INFO,GT_VBAP,GT_ADRC_INFO.
+*2003/05/26 ADD END
+***2002.11.29 add >>>
+CLEAR:LIN.
+DESCRIBE TABLE P_KUNNR LINES LIN.
+***2002.11.29 add <<<
+*--- ファイルヘッダ部更新処理
+PERFORM FRM_FILE_HEADER.
+*--- ファイル更新処理
+IF LIN < 1.
+PERFORM FRM_TBL_APPEND.
+ELSE.
+PERFORM FRM_TBL_APPEND2.
+ENDIF.
+*--- ファイルＣＬＯＳＥ処理
+CLOSE DATASET G_FILEOPENNAME.
+IF SY-SUBRC <> 0.
+PERFORM FRM_FILE_ERR.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+
+ENDFORM.                    " FRM_FILE_SET
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LOOP_GT_NAST
+*&---------------------------------------------------------------------*
+*       GT_NAST ループ処理
+*----------------------------------------------------------------------*
+FORM FRM_LOOP_GT_NAST.
+
+*---出荷伝票情報設定処理
+PERFORM FRM_NMOUT_LIPS.
+
+*--対象データあり
+CHECK F_ERR <> CNS_X.
+*2003/05/26 ADD START
+PERFORM FRM_ENQUEUE_EZNAST.
+*2003/05/26 ADD END
+
+*---GT_INFO　ループ処理
+*  LOOP AT GT_INFO INTO GF_INFO. "2003/05/26 DEL
+PERFORM FRM_LOOP_GT_INFO.
+*  ENDLOOP.                      "2003/05/26 DEL
+
+ENDFORM.                    " FRM_LOOP_GT_NAST
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LOOP_GT_INFO
+*&---------------------------------------------------------------------*
+*       GR_INFOループ処理
+*----------------------------------------------------------------------*
+FORM FRM_LOOP_GT_INFO.
+*---販売伝票情報取得処理
+PERFORM FRM_NMOUT_VBAP.
+CHECK F_ERR <> CNS_X.
+
+*---ファイル出力用内部テーブル設定処理
+PERFORM FRM_MAKE_DATA.
+
+CHECK F_ERR <> CNS_X.
+*  IF GF_INFO-PSTYV <> 'ZSEK'.
+PERFORM FRM_NAST_READ.
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+*  ENDIF.
+*---出力用内部テーブル更新処理
+APPEND GF_WRITE TO GT_WRITE.
+
+*---NASTテーブル更新処理
+PERFORM FRM_UPDATE_DATA.
+ENDFORM.                    " FRM_LOOP_GT_INFO
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LOOP_GT_VBAP
+*&---------------------------------------------------------------------*
+*       GT_VBAP  ループ処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_LOOP_GT_VBAP.
+*--- 出荷伝票情報設定処理
+PERFORM FRM_LIPSGET_REOUT.
+
+*--- GT_INFO ループ処理
+LOOP AT GT_INFO INTO GF_INFO.
+PERFORM FRM_LOOP_GT_INFO_REOUT.
+ENDLOOP.
+
+ENDFORM.                    " FRM_LOOP_GT_VBAP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LOOP_GT_INFO_REOUT
+*&---------------------------------------------------------------------*
+*       GT_INFOループ処理（再出力）
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_LOOP_GT_INFO_REOUT.
+DATA : L_SUBRC LIKE SY-SUBRC.   "NASTチェックのリターン値
+CLEAR F_ERR.
+*--- メッセージステータス情報取得処理
+PERFORM FRM_NAST_CHECK.
+CHECK F_ERR <> CNS_X.
+
+PERFORM FRM_REOUT_NAST CHANGING L_SUBRC.
+*--- NASTチェックでリターン値が0以外
+IF L_SUBRC <> 0.
+EXIT.
+ENDIF.
+CHECK F_ERR <> CNS_X.   " NASTレコードが存在しない場合ブレイク
+*--- NASTロック
+*2003/05/26 DEL START
+*  PERFORM FRM_ENQUEUE_EZNAST.
+*2003/05/26 DEL END
+*--- NAST項目退避
+G_OBJKY = GF_NAST-OBJKY.
+G_LDEST = GF_NAST-LDEST.
+G_KSCHL = GF_NAST-KSCHL.
+G_PARNR = GF_NAST-PARNR.
+G_PARVW = GF_NAST-PARVW.
+G_ERDAT = GF_NAST-ERDAT.
+G_ERUHR = GF_NAST-ERUHR.
+G_LDEST = GF_NAST-LDEST.
+*--- ファイル出力用内部テーブル設定処理
+PERFORM FRM_MAKE_DATA.
+APPEND GF_WRITE TO GT_WRITE.
+*--- NASTテーブル更新処理
+PERFORM FRM_UPDATE_DATA.
+
+ENDFORM.                    " FRM_LOOP_GT_INFO_REOUT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TANKA_HENKAN
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_GF_VBAP_WAERK  text
+*      -->P_GF_VBAP_NETPR  text
+*      <--P_GF_WRITE_NETPR  text
+*----------------------------------------------------------------------*
+FORM FRM_TANKA_HENKAN USING    P_TSUKACD
+P_KINGAKU
+CHANGING P_HENKAN.
+
+DATA L_IDOC_AMOUNT(255) TYPE C.
+*--- 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY    = P_TSUKACD
+SAP_AMOUNT  = P_KINGAKU
+IMPORTING
+IDOC_AMOUNT = L_IDOC_AMOUNT
+EXCEPTIONS
+OTHERS      = 1.
+IF SY-SUBRC <> 1.
+P_HENKAN = L_IDOC_AMOUNT.
+ENDIF.
+
+ENDFORM.                    " FRM_TANKA_HENKAN
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PSTYV_EDIT
+*&---------------------------------------------------------------------*
+*       明細カテゴリ編集
+*----------------------------------------------------------------------*
+*  明細カテゴリ'ZSEO'の時、同一伝票の明細行の税抜売上金額・税込売上金額
+*  消費税を集計した値を出力
+*  明細カテゴリ'ZSEK'は処理対象外とする
+*----------------------------------------------------------------------*
+FORM FRM_PSTYV_EDIT.
+*--- GT_WRITEのデータ をGT_DUMMY に移動
+LOOP AT GT_WRITE INTO GF_WRITE.
+MOVE-CORRESPONDING GF_WRITE TO GF_DUMMY.
+APPEND GF_DUMMY TO GT_DUMMY.
+CLEAR  GF_DUMMY.
+ENDLOOP.
+CLEAR   GF_WRITE .
+REFRESH GT_WRITE.
+*--- GT_DUMMY を明細カテゴリから編集
+LOOP AT GT_DUMMY INTO GF_DUMMY.
+MOVE-CORRESPONDING GF_DUMMY TO GF_WRITE_TEMP.
+*  -- カテゴリ親---*
+IF GF_DUMMY-PSTYV = 'ZSEO'.
+MOVE-CORRESPONDING GF_DUMMY TO GF_WRITE.
+*  -- カテゴリ子---*
+ELSEIF GF_DUMMY-PSTYV = 'ZSEK'.
+*税額、受注金額、受注税込金額を集計
+G_NETWR  = GF_DUMMY-NETWR  + G_NETWR.
+G_NETWRT = GF_DUMMY-NETWRT + G_NETWRT.
+G_KEBTR  = GF_DUMMY-KEBTR  + G_KEBTR.
+
+*  -- カテゴリ通常---*
+ELSE .
+* Edit 2013.02.22 GSL Tohtake.s Start
+*    IF R_REOUT = CNS_X .
+IF NOT P_OUTNO IS INITIAL .
+* Edit 2013.02.22 GSL Tohtake.s End
+PERFORM FRM_IRISU_SET.
+ELSE.
+*通常時
+*--- 2002/05/09 APPEND PSD
+CONDENSE GF_WRITE_TEMP-NETWR  NO-GAPS.
+CONDENSE GF_WRITE_TEMP-NETWRT NO-GAPS.
+CONDENSE GF_WRITE_TEMP-KEBTR  NO-GAPS.
+*--- APPEND END
+APPEND GF_WRITE_TEMP TO GT_WRITE.
+CLEAR  GF_WRITE_TEMP.
+ENDIF.
+ENDIF.
+AT END OF PSTYV.
+*カテゴリが子
+IF  GF_DUMMY-PSTYV = 'ZSEK'.
+* Edit 2013.02.22 GSL Tohtake.s Start
+*      IF R_REOUT = CNS_X .
+IF NOT P_OUTNO IS INITIAL .
+* Edit 2013.02.22 GSL Tohtake.s End
+PERFORM FRM_IRISU_SET.
+ELSE.
+GF_WRITE-NETWR = G_NETWR.
+GF_WRITE-NETWRT = G_NETWRT.
+GF_WRITE-KEBTR = G_KEBTR .
+*--- 2002/05/09 APPEND PSD
+CONDENSE GF_WRITE-NETWR  NO-GAPS.
+CONDENSE GF_WRITE-NETWRT NO-GAPS.
+CONDENSE GF_WRITE-KEBTR  NO-GAPS.
+*--- APPEND END
+APPEND GF_WRITE TO GT_WRITE.
+CLEAR :GF_WRITE,
+G_NETWR,
+G_NETWRT,
+G_KEBTR.
+ENDIF.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " FRM_PSTYV_EDIT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NAST_READ
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_NAST_READ.
+CONCATENATE GF_INFO-VBELN GF_INFO-POSNR INTO G_OBJKY.
+READ TABLE GT_NAST INTO GF_NAST_READ WITH KEY OBJKY = G_OBJKY.
+
+ENDFORM.                    " FRM_NAST_READ
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_EIGYO
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_SET_EIGYO.
+SELECT A~VKBUR      A~ADRNR
+B~NAME1      B~TEL_NUMBER
+B~FAX_NUMBER B~POST_CODE1
+B~CITY1      B~STR_SUPPL1
+B~STR_SUPPL2 B~REGION
+*--- APPEND PSD K.ARAI 2002/05/17
+B~STREET
+*--- APPEND END
+INTO CORRESPONDING FIELDS OF TABLE GT_ADRC_INFO
+FROM TVBUR AS A INNER JOIN ADRC AS B
+ON A~ADRNR  = B~ADDRNUMBER
+WHERE A~VKBUR  = GF_VBAP-VKBUR.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*     MESSAGE E613(Z1) WITH TEXT-115 TEXT-125.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBAP
+SY-SUBRC.
+ENDCASE.
+
+LOOP AT GT_ADRC_INFO INTO GF_ADRC_INFO.
+EXIT.
+ENDLOOP.
+*--- 2002/05/17 PSD K.ARAI APEND
+*---営業所住所１データ抽出
+PERFORM FRM_EIGYO_ADD1.
+*--- 2002/05/17 END
+ENDFORM.                    " FRM_SET_EIGYO
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SIIRE_ADD1
+*&---------------------------------------------------------------------*
+*       仕入先住所１の取得
+*----------------------------------------------------------------------*
+FORM FRM_SIIRE_ADD1.
+DATA : L_BEZEI LIKE T005U-BEZEI.                     "内容説明
+SELECT SINGLE BEZEI INTO L_BEZEI
+FROM  T005U
+WHERE  SPRAS = 'J'                  "言語キー
+AND  LAND1 = 'JP'                 "国コード
+AND  BLAND = GF_ADRC-REGION. "地域
+
+CONCATENATE L_BEZEI
+GF_ADRC-STREET
+GF_ADRC-CITY1     INTO   GF_ADRC-CITY1.
+
+ENDFORM.                    " FRM_SIIRE_ADD1
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_COMPUTE_SINGLE_COST
+*&---------------------------------------------------------------------*
+*       セット品親の単価を集計する。
+*----------------------------------------------------------------------*
+FORM FRM_COMPUTE_SINGLE_COST.
+DATA: L_NETPR(9) TYPE P DECIMALS 2,"単価
+L_NETWR(9) TYPE P           ,"受注金額
+L_LFIMG(9) TYPE P DECIMALS 2."数量
+
+
+FIELD-SYMBOLS <FS> LIKE GF_WRITE.
+
+LOOP AT GT_WRITE ASSIGNING <FS>.
+*   セット品親のみ対象
+IF <FS>-PSTYV = 'ZSEO' OR <FS>-PSTYV = 'ZREO'.
+CONDENSE <FS>-NETWR  NO-GAPS.
+CONDENSE <FS>-LFIMG  NO-GAPS.
+
+L_NETWR = <FS>-NETWR.
+L_LFIMG = <FS>-LFIMG.
+
+*     0で除算はしない
+IF L_LFIMG <> 0.
+L_NETPR = L_NETWR / L_LFIMG.
+<FS>-NETPR = L_NETPR.
+CONDENSE <FS>-NETPR NO-GAPS.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " FRM_COMPUTE_SINGLE_COST
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_COST_SEGMENT
+*&---------------------------------------------------------------------*
+*       合計金額、税額、税込合計金額
+*----------------------------------------------------------------------*
+* ①KNVVから得意先コードで価格決定区分(KALKS)を取得する
+* ②単価(WRITE-NETPR)×数量(WRITE-LFIMG)=小数点１桁の合計金額
+* ③②で求めた金額に価格決定区分を用いて変換ロジックを通す→合計金額
+* ④合計金額×税率＝小数点１桁の税額
+* ⑤④で求めた小数点１桁の税額に価格決定区分を用いて変換ロジックを通す
+* →税額
+* ⑥合計金額＋税額＝税込合計金額
+*----------------------------------------------------------------------*
+FORM FRM_COST_SEGMENT.
+
+DATA:L_NETPR     TYPE VBAP-NETPR,"単価
+L_LFIMG     TYPE LIPS-LFIMG,"数量
+*2009/12/14 T.HAYASHI modify{
+*小数点2桁の型に変更
+*       L_NETWR     TYPE ZSNETWR101,"小数点込み合計金額
+*       L_KEBTR     TYPE ZSNETWR101,"小数点込み税額
+L_NETWR     TYPE ZSNETWR106,"小数点込み合計金額
+L_KEBTR     TYPE ZSNETWR106,"小数点込み税額
+*}2009/12/14 T.HAYASHI modify
+L_TOTAL     TYPE ZSNUMGF101,"合計金額
+L_TAX       TYPE ZSNUMGF101,"税額
+L_TAX_TOTAL TYPE ZSNUMGF101."税込合計金額
+DATA:L_KALKS     TYPE KNVV-KALKS."価格決定区分
+
+* 単価および数量の設定
+L_NETPR = GF_WRITE-NETPR.
+L_LFIMG = GF_WRITE-LFIMG.
+* KNVVから得意先コードで価格決定区分を取得
+PERFORM FRM_KNVV_KALKS USING L_KALKS.
+* 小数点あり合計金額の算出
+L_NETWR = L_NETPR * L_LFIMG.
+* 合計金額【小数点変換ロジック】
+PERFORM FRM_Z_SCONVERT_DECIMAL_POINT USING L_NETWR
+L_KALKS
+'X'
+CHANGING L_TOTAL.
+* 合計金額の左詰
+GF_WRITE-NETWR = L_TOTAL.
+CONDENSE GF_WRITE-NETWR NO-GAPS.
+*---MODIFY START GSL 2014/02/25 ---------------------------------------*
+* 税額の算出(条件マスタ(消費税)より税率を取得して計算)
+** 税額の算出(現在は税率を固定)
+*  L_KEBTR = L_TOTAL * '0.05'.
+DATA:  L_VBELN_O TYPE VBAK-VBELN,     "受注伝票番号
+L_POSNR_O TYPE VBAP-POSNR,     "受注明細番号
+L_VBELN_D TYPE LIKP-VBELN,     "出荷伝票番号
+L_TAX_RATE TYPE KONP-KBETR.  "税率
+
+CLEAR: L_VBELN_O,
+L_POSNR_O,
+L_VBELN_D,
+L_TAX_RATE.
+
+L_VBELN_O = GF_WRITE-VGBEL(10).
+L_POSNR_O = GF_WRITE-VGBEL+11(6).
+L_VBELN_D = GF_WRITE-VBELN(10).
+
+PERFORM FRM_GET_TAX_RATE USING L_VBELN_O       "受注伝票番号
+L_POSNR_O       "受注明細番号
+L_VBELN_D       "出荷伝票番号
+GF_WRITE-WADAT  "出庫転記日
+CHANGING L_TAX_RATE.     "税率
+
+L_KEBTR = L_TOTAL * L_TAX_RATE.
+*---MODIFY END   GSL 2014/02/25 ---------------------------------------*
+* 税額【小数点変換ロジック】
+PERFORM FRM_Z_SCONVERT_DECIMAL_POINT USING L_KEBTR
+L_KALKS
+' '
+CHANGING L_TAX.
+* 税額の左詰
+GF_WRITE-KEBTR = L_TAX.
+CONDENSE GF_WRITE-KEBTR NO-GAPS.
+* 税込合計金額
+L_TAX_TOTAL = L_TOTAL + L_TAX.
+GF_WRITE-NETWRT = L_TAX_TOTAL.
+* 税込合計金額の左詰
+CONDENSE GF_WRITE-NETWRT NO-GAPS.
+
+
+
+ENDFORM.                    " FRM_COST_SEGMENT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_KNVV_KALKS
+*&---------------------------------------------------------------------*
+*       得意先コードから価格決定区分を取得する
+*----------------------------------------------------------------------*
+*      -->P_KALKS  価格決定区分
+*----------------------------------------------------------------------*
+FORM FRM_KNVV_KALKS USING    P_KALKS.
+
+SELECT SINGLE KALKS
+INTO (P_KALKS)
+FROM KNVV
+WHERE KUNNR = GF_WRITE-KUNNR.
+*                 AND VKORG = PR_VKORG
+*                 AND VTWEG = PR_VTWEG
+*                 AND SPART = PR_SPART.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+'KNVV'
+SY-SUBRC.
+ENDCASE.
+
+
+ENDFORM.                    " FRM_KNVV_KALKS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_Z_SCONVERT_DECIMAL_POINT
+*&---------------------------------------------------------------------*
+*       小数点変換ロジック
+*----------------------------------------------------------------------*
+*      -->P_NETWR  金額
+*----------------------------------------------------------------------*
+FORM FRM_Z_SCONVERT_DECIMAL_POINT USING    P_NETWR
+P_KALKS
+P_EXEC
+CHANGING    PO_NETWR.
+
+CALL FUNCTION 'Z_SCONVERT_DECIMAL_POINT'
+EXPORTING
+ICOST       = P_NETWR
+IKALKS      = P_KALKS
+IEXEC       = P_EXEC
+IMPORTING
+OCOST       = PO_NETWR
+EXCEPTIONS
+KALKS_ERROR = 1
+OTHERS      = 2.
+*  IF SY-SUBRC <> 0.
+** MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+**         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+*  ENDIF.
+
+ENDFORM.                    " FRM_Z_SCONVERT_DECIMAL_POINT
+*&---------------------------------------------------------------------*
+*&      Form  frm_netpr_compute
+*&---------------------------------------------------------------------*
+*       ファイル編集前に単価を算出する
+*----------------------------------------------------------------------*
+FORM FRM_NETPR_COMPUTE.
+
+DATA: L_NETWR(9) TYPE P DECIMALS 2,"金額
+L_NETPR(9) TYPE P DECIMALS 2,"単価
+L_LFIMG(9) TYPE P DECIMALS 2,"数量
+L_NETPR_CHANGE(9) TYPE P DECIMALS 2."変換後子単価
+
+
+* 子カテゴリは削除する
+DELETE GT_WRITE WHERE PSTYV = 'ZREK'
+OR PSTYV = 'ZSEK'.
+
+FIELD-SYMBOLS <FS> LIKE GF_WRITE.
+
+LOOP AT GT_WRITE ASSIGNING <FS>.
+*   セット品親のみ対象
+IF <FS>-PSTYV = 'ZSEO' OR <FS>-PSTYV = 'ZREO'.
+*     受注数量のスペースカット→出荷数量
+CONDENSE <FS>-LFIMG  NO-GAPS.
+*     受注数量のセット→出荷数量のセット
+*---MODIFY START PSD T.SAITOH 2002/09/03 ---------------------------*
+*      L_LFIMG = <FS>-KWMENG.
+L_LFIMG = <FS>-LFIMG.
+*---MODIFY END   PSD T.SAITOH 2002/09/03 ---------------------------*
+*     出荷＋受注伝票の取得
+PERFORM FRM_SELECT_LIPS_LIKP USING <FS>-VBELN+0(10).
+CLEAR:L_NETPR.
+*     親と子
+LOOP AT GT_LIPS_VBAP INTO GF_TMP_LIPS_VBAP.
+GF_LIPS_VBAP = GF_TMP_LIPS_VBAP.
+*　　   セット品親以外対象
+IF    GF_LIPS_VBAP-PSTYV <> 'ZSEO'
+AND GF_LIPS_VBAP-PSTYV <> 'ZREO'.
+IF GF_LIPS_VBAP-KPEIN = 0.
+GF_LIPS_VBAP-KPEIN = 1.
+ENDIF.
+*         価格変換
+CLEAR: L_NETPR_CHANGE.
+PERFORM FRM_TANKA_HENKAN USING      GF_LIPS_VBAP-WAERK
+GF_LIPS_VBAP-NETPR
+CHANGING L_NETPR_CHANGE.
+
+
+*         子の金額計算
+*         受注単価×価格数量単位
+L_NETPR_CHANGE = ( L_NETPR_CHANGE / GF_LIPS_VBAP-KPEIN ).
+*         ×数量
+L_NETWR = L_NETWR + ( L_NETPR_CHANGE *  GF_LIPS_VBAP-LFIMG ).
+
+AT LAST.
+*           受注単価（子集計）= 子集計金額 / 親出荷数量
+IF L_LFIMG <> 0.
+L_NETPR = L_NETWR / L_LFIMG.
+ENDIF.
+<FS>-NETPR = L_NETPR.
+CONDENSE <FS>-NETPR NO-GAPS.
+CLEAR L_NETWR.
+ENDAT.
+ENDIF.
+ENDLOOP.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " frm_netpr_compute
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_lips_likp
+*&---------------------------------------------------------------------*
+*       現在の出荷伝票に紐付く明細を全部取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_LIPS_LIKP USING P_VBELN.
+
+CLEAR:GT_LIPS_VBAP.
+SELECT LIPS~VBELN "出荷伝票
+LIPS~POSNR "出荷明細
+LIPS~VGBEL "販売伝票
+LIPS~VGPOS "販売明細
+LIPS~LFIMG "出荷数量
+VBAP~KPEIN "価格数量単位
+VBAP~NETPR "受注単価
+LIPS~PSTYV "明細カテゴリ
+VBAP~WAERK "通貨
+INTO CORRESPONDING FIELDS OF TABLE GT_LIPS_VBAP
+FROM LIPS INNER JOIN VBAP
+ON LIPS~VGBEL = VBAP~VBELN
+AND LIPS~VGPOS = VBAP~POSNR
+WHERE LIPS~VBELN = P_VBELN.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+'LIPS&VBAP'
+SY-SUBRC.
+ENDCASE.
+
+
+ENDFORM.                    " frm_select_lips_likp
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_VGBEL_FROM_LIPS
+*&---------------------------------------------------------------------*
+*       出荷伝票に紐付く受注伝票を取得する
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_VGBEL_FROM_LIPS.
+
+SELECT VBELN
+POSNR
+VGBEL
+VGPOS
+INTO CORRESPONDING FIELDS OF TABLE GT_LIPS
+FROM LIPS
+WHERE VBELN IN S_VBELN.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+'LIPS'
+SY-SUBRC.
+ENDCASE.
+
+
+ENDFORM.                    " FRM_SELECT_VGBEL_FROM_LIPS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_REOUT_VBAP_FROM_LIPS
+*&---------------------------------------------------------------------*
+*       lips経由で販売伝票を取得
+*----------------------------------------------------------------------*
+FORM FRM_REOUT_VBAP_FROM_LIPS.
+CLEAR:   GF_VBAP,
+F_NAST,
+F_LIKP,
+F_VBAK.
+REFRESH: GT_VBAP.
+
+*--- 販売伝票情報取得
+*  SELECT A~VBELN A~BSTNK A~AUDAT A~AUART
+SELECT A~VBELN D~BSTKD A~AUDAT A~AUART
+A~VKORG A~VTWEG A~KUNNR A~KNUMV
+* ↓ APPEND 2002.05.10 PSD K.ARAI
+A~VKBUR
+* ↑
+B~POSNR B~KDMAT B~VRKME B~NETPR
+B~KWMENG B~MATNR B~WAERK B~NETWR
+B~KPEIN  C~EDATU D~BSTDK_E
+INTO CORRESPONDING FIELDS OF TABLE GT_VBAP
+FROM ( ( VBAK AS A INNER JOIN VBAP AS B
+ON     A~VBELN  = B~VBELN ) INNER JOIN VBEP  AS C
+ON     B~VBELN  = C~VBELN
+AND     B~POSNR  = C~POSNR ) INNER JOIN VBKD AS D
+ON     B~VBELN  = D~VBELN
+FOR ALL ENTRIES IN GT_LIPS
+WHERE A~VBELN =  GT_LIPS-VGBEL                   "販売伝票番号
+AND C~ETENR =  '0001'                          "納入日程行
+AND D~POSNR =  '000000'.                       "販売明細番号
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- 2002/05/01 MODIFY
+MESSAGE S616(Z1).
+*     MESSAGE S611(Z1).
+*---
+STOP.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBAP
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_REOUT_VBAP_FROM_LIPS
+*2003/05/29 ADD START
+**---Append Start NDSC R.Hata 2002/12/09 ----------------------------*
+*Form Taishou_Get .
+*  Refresh : T_NASTG ,
+*            T_LIPSG .
+*
+*  Select P~VBELN P~POSNR
+*    Into Table T_LIPSG
+*    From LIPS As P
+*    Join LIKP As K
+*     On  K~VBELN EQ P~VBELN
+*   Where P~VGBEL IN S_VGBEL
+*    And  K~VBELN IN S_VBELN
+*    And  K~VSTEL IN S_VSTEL
+*  .
+*  Move : T_LIPSG[] To T_NASTG[] .
+*  If SY-SUBRC NE 0 .
+*    Message S616(Z1) .
+*    Stop .
+*  EndIf .
+*
+*EndForm .
+**---Append End   NDSC R.Hata 2002/12/09 ----------------------------*
+*2003/05/29 ADD END
+*&---------------------------------------------------------------------*
+*&      Form  FRM_KONV
+*&---------------------------------------------------------------------*
+*       2003/06/09 add
+*----------------------------------------------------------------------*
+*      -->P_VBELN  text
+*      -->P_POSNR  text
+*      -->P_KONTPR  text
+*----------------------------------------------------------------------*
+FORM FRM_KONV USING    P_VBELN
+P_POSNR
+P_KONTPR.
+DATA: W_KNUMV LIKE VBAK-KNUMV,
+W_KBETR LIKE KONV-KBETR,
+W_WAERS LIKE KONV-WAERS,
+W_KPEIN LIKE KONV-KPEIN.
+
+SELECT SINGLE KNUMV INTO W_KNUMV
+FROM VBAK
+WHERE VBELN = P_VBELN.
+
+SELECT SINGLE KBETR
+WAERS
+KPEIN
+INTO (W_KBETR,W_WAERS,W_KPEIN)
+FROM KONV
+WHERE KNUMV = W_KNUMV
+AND KPOSN = P_POSNR
+AND KSCHL = 'EDI1'.
+IF SY-SUBRC <> 0.
+CLEAR P_KONTPR.
+EXIT.
+ELSE.
+PERFORM FRM_TANKA_HENKAN  USING W_WAERS
+W_KBETR
+CHANGING P_KONTPR.
+P_KONTPR = P_KONTPR / W_KPEIN.
+ENDIF.
+
+ENDFORM.                    " FRM_KONV
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CALC_KONTWR
+*&---------------------------------------------------------------------*
+*       2003/10/23 APPEND
+*       概算金額計算
+*----------------------------------------------------------------------*
+*      -->P_KONTPR  概算単価
+*      -->P_LFIMG   概算数量
+*      <--P__KONTWR 概算金額
+*----------------------------------------------------------------------*
+FORM FRM_CALC_KONTWR USING    P_KONTPR
+P_LFIMG
+CHANGING P_KONTWR.
+
+DATA: L_KONTPR TYPE ZSNUMGF101,    "概算単価
+L_LFIMG  TYPE LIPS-LFIMG,    "数量
+L_KONTWR TYPE ZSNUMGF101.    "概算金額
+
+L_KONTPR = P_KONTPR.
+L_LFIMG  = P_LFIMG.
+L_KONTWR = P_KONTWR.
+
+IF ( L_KONTPR IS INITIAL ).
+CLEAR: P_KONTWR.
+EXIT.
+ELSE.
+L_KONTWR = L_KONTPR * L_LFIMG.
+P_KONTWR = L_KONTWR.
+ENDIF.
+ENDFORM.                    " FRM_CALC_KONTWR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CALC_KONBTR
+*&---------------------------------------------------------------------*
+*       2003/10/23 APPEND
+*       概算消費税額計算
+*----------------------------------------------------------------------*
+*      -->P_KONTWR  概算金額
+*      <--P_KONBTR  概算消費税額
+*----------------------------------------------------------------------*
+FORM FRM_CALC_KONBTR USING    P_KONTWR
+CHANGING P_KONBTR.
+
+DATA: LF_KONV  TYPE          TYP_KONV,
+LT_KONV  TYPE TABLE OF TYP_KONV,
+L_KBETR  TYPE KONV-KBETR.              "税率
+DATA: L_KONTWR TYPE ZSNUMGF101,              "概算金額
+L_KONBTR TYPE ZSNUMGF101.              "概算消費税額
+
+L_KONTWR = P_KONTWR.
+L_KONBTR = P_KONBTR.
+
+IF ( L_KONTWR IS INITIAL ).
+CLEAR: P_KONBTR.
+EXIT.
+ENDIF.
+
+*--- 条件 (トランザクションデータ)情報取得
+SELECT KWERT WAERS KBETR
+INTO CORRESPONDING FIELDS OF TABLE LT_KONV
+FROM   KONV
+WHERE   KNUMV = GF_VBAP-KNUMV            "伝票条件番号
+AND   KPOSN = GF_VBAP-POSNR            "条件明細番号
+AND   KAPPL = 'V'                      "アプリケーション
+AND ( KSCHL = 'MWST'                   "条件タイプ
+OR   KSCHL = 'MWSU'
+OR   KSCHL = 'MWSD' ) .
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+LOOP AT LT_KONV INTO LF_KONV.
+L_KBETR = LF_KONV-KBETR / 1000.
+L_KONBTR = L_KONTWR * L_KBETR.
+P_KONBTR = L_KONBTR.
+EXIT.
+ENDLOOP.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_KNMT
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CALC_KONBTR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CALC_KONTWRT
+*&---------------------------------------------------------------------*
+*       2003/10/23 APPEND
+*       概算合計額計算
+*----------------------------------------------------------------------*
+*      -->P_KONTWR  概算金額
+*      -->P_KONBTR  概算消費税額
+*      <--P_KONTWRT 概算合計額
+*----------------------------------------------------------------------*
+FORM FRM_CALC_KONTWRT USING    P_KONTWR
+P_KONBTR
+CHANGING P_KONTWRT.
+
+DATA:L_KONTWR  TYPE ZSNUMGF101,               "概算金額
+L_KONBTR  TYPE ZSNUMGF101,               "概算消費税額
+L_KONTWRT TYPE ZSNUMGF101.               "概算合計額
+
+L_KONTWR  = P_KONTWR.
+L_KONBTR  = P_KONBTR.
+L_KONTWRT = P_KONTWRT.
+
+IF ( L_KONTWR IS INITIAL ).
+CLEAR P_KONTWRT.
+EXIT.
+ELSE.
+L_KONTWRT = L_KONTWR + L_KONBTR.
+P_KONTWRT = L_KONTWRT.
+ENDIF.
+ENDFORM.                    " FRM_CALC_KONTWRT
+*---APPEND START GSL 2014/02/25 ---------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_TAX_RATE
+*&---------------------------------------------------------------------*
+*       条件マスタ(消費税)税率取得
+*----------------------------------------------------------------------*
+*      -->P_VBELN_O   受注伝票番号
+*      -->P_POSNR_O   受注明細番号
+*      -->P_VBELN_D   出荷伝票番号
+*      -->P_WADAT_IST 出庫転記日
+*      <--P_TAX_RATE  受注伝票明細条件(税率)
+*----------------------------------------------------------------------*
+FORM FRM_GET_TAX_RATE USING P_VBELN_O   TYPE VBAK-VBELN
+P_POSNR_O   TYPE VBAP-POSNR
+P_VBELN_D   TYPE LIKP-VBELN
+VALUE(P_WADAT_IST) TYPE LIKP-WADAT_IST
+CHANGING P_TAX_RATE  TYPE KONV-KBETR.
+
+*--- ローカル構造・変数の定義
+DATA:  L_KUNNR     TYPE VBAK-KUNNR,         "受注先
+L_KNUMV     TYPE VBAK-KNUMV,         "伝票条件番号
+L_TAXK1     TYPE VBAK-TAXK1,         "代替税分類
+L_VDATU     TYPE VBAK-VDATU,         "指定納入期日
+L_TAXM1     TYPE VBAP-TAXM1,         "品目税分類
+L_WADAT_IST TYPE LIKP-WADAT_IST,     "出庫転記日
+L_BSTDK_E   TYPE VBKD-BSTDK_E,       "出荷先発注日付
+L_KSCHL     TYPE KONV-KSCHL,         "条件タイプ
+L_SDATE     TYPE A002-DATBI,         "マスタ抽出用日付
+L_KBETR     TYPE KONV-KBETR.         "税率
+
+*--- ローカル構造・変数の初期化
+CLEAR: L_KUNNR,
+L_KNUMV,
+L_TAXK1,
+L_VDATU,
+L_TAXM1,
+L_WADAT_IST,
+L_BSTDK_E,
+L_KSCHL,
+L_SDATE,
+L_KBETR.
+
+*(1) 条件マスタ(消費税)抽出条件値の取得
+
+*--- 受注伝票(ヘッダ・明細)の抽出
+SELECT SINGLE A~KUNNR     "受注先
+A~KNUMV     "伝票条件番号
+A~TAXK1     "代替税分類
+A~VDATU     "指定納入期日
+B~TAXM1     "品目税分類
+INTO (L_KUNNR,
+L_KNUMV,
+L_TAXK1,
+L_VDATU,
+L_TAXM1)
+FROM VBAK AS A
+INNER JOIN VBAP AS B
+ON A~VBELN = B~VBELN
+WHERE A~VBELN = P_VBELN_O  "受注伝票番号
+AND B~POSNR = P_POSNR_O  "受注明細番号
+.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.         " 正常
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBAK
+SY-SUBRC.
+ENDCASE.
+
+*--- 受注伝票(ビジネスデータ)の抽出
+* 出荷伝票で出庫転記日が設定されているか確認
+* 未入力の場合、先行処理でシステム日付を入力しているため
+SELECT SINGLE WADAT_IST     "出庫転記日
+INTO L_WADAT_IST
+FROM LIKP
+WHERE VBELN = P_VBELN_D    "出荷伝票番号
+.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.         " 正常
+IF L_WADAT_IST IS INITIAL.
+CLEAR P_WADAT_IST.
+ENDIF.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_LIKP
+SY-SUBRC.
+ENDCASE.
+
+* 出荷伝票で出庫転記日が未入力場合のみ
+IF P_WADAT_IST IS INITIAL.
+SELECT SINGLE BSTDK_E     "出荷先発注日付(ヘッダ)
+INTO L_BSTDK_E
+FROM VBKD
+WHERE VBELN = P_VBELN_O  "受注伝票番号
+AND POSNR = CNS_HEADER "ヘッダ(000000)
+.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.         " 正常
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_VBKD
+SY-SUBRC.
+ENDCASE.
+ENDIF.
+
+*--- 得意先マスタ(税設定)の抽出
+* 受注伝票で代替税分類未入力の場合のみ
+IF L_TAXK1 IS INITIAL.
+SELECT SINGLE TAXKD       "得意先税分類
+INTO L_TAXK1
+FROM KNVI
+WHERE KUNNR = L_KUNNR    "得意先コード
+.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.         " 正常
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_KNVI
+SY-SUBRC.
+ENDCASE.
+ENDIF.
+
+*--- 条件(トランザクションデータ)の抽出
+SELECT SINGLE KSCHL          "条件タイプ
+INTO L_KSCHL
+FROM KONV
+WHERE KNUMV = L_KNUMV       "伝票条件番号
+AND KPOSN = P_POSNR_O     "条件明細番号
+AND KAPPL = 'V'           "アプリケーション
+AND ( KSCHL = 'MWST'      "条件タイプ(税:四捨五入)
+OR   KSCHL = 'MWSU'      "条件タイプ(税:切上げ)
+OR   KSCHL = 'MWSD' ) .  "条件タイプ(税:切捨て)
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.         " 正常
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_KONV
+SY-SUBRC.
+ENDCASE.
+
+*(2) 条件マスタ(消費税)税率の取得
+
+*--- 抽出日付の決定
+IF NOT P_WADAT_IST IS INITIAL.
+L_SDATE = P_WADAT_IST.         "出庫転記日
+ELSEIF NOT L_BSTDK_E IS INITIAL.
+L_SDATE = L_BSTDK_E.           "出荷先発注日付
+ELSE.
+L_SDATE = L_VDATU.             "指定納入期日
+ENDIF.
+
+*--- 条件(マスタ)の抽出
+SELECT SINGLE B~KBETR
+INTO L_KBETR
+FROM A002 AS A
+INNER JOIN KONP AS B
+ON A~KNUMH = B~KNUMH
+WHERE A~KAPPL =  CNS_KAPPL_V   "アプリケーション
+AND A~KSCHL =  L_KSCHL       "条件タイプ
+AND A~ALAND =  CNS_ALAND_JP  "出荷国
+AND A~TAXK1 =  L_TAXK1       "得意先税分類
+AND A~TAXM1 =  L_TAXM1       "品目税分類
+AND A~DATAB <= L_SDATE       "有効開始日
+AND A~DATBI >= L_SDATE       "有効終了日
+.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.         " 正常
+P_TAX_RATE = L_KBETR / 1000.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_KONV
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_GET_TAX_RATE
+*---APPEND END   GSL 2014/02/25 ---------------------------------------*

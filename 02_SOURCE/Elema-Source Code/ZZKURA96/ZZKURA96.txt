@@ -1,0 +1,163 @@
+REPORT zzkura96 .
+
+* 使用テーブル
+TABLES yk210. "請求データ
+TABLES mbew.  "品目評価
+TABLES ekpo.  "購買伝票明細
+TABLES lfm1.  "仕入先マスタ購買組織データ
+
+* グローバル変数
+DATA i_yk210 LIKE STANDARD TABLE OF yk210 WITH HEADER LINE.
+DATA w_knitxamt LIKE yk210-knitxamt.
+DATA w_kntaxamt LIKE yk210-kntaxamt.
+DATA w_errflg(1) TYPE c.
+DATA w_errcnt LIKE sy-dbcnt.
+DATA w_updcnt LIKE sy-dbcnt.
+DATA w_dec LIKE tcurx-currdec.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk210-bukrs DEFAULT 'C001'.
+PARAMETERS p_ekorg LIKE yk210-ekorg DEFAULT '1000'.
+PARAMETERS p_delflg LIKE yk210-delflg.
+SELECT-OPTIONS s_kekkbn FOR yk210-kekkbn.
+PARAMETERS p_lifnr LIKE yk210-lifnr DEFAULT '7023700'.
+SELECT-OPTIONS s_werks FOR yk210-werks DEFAULT 'P040'.
+PARAMETERS p_zfbdt LIKE yk210-zfbdt DEFAULT '20020831'.
+PARAMETERS p_update AS CHECKBOX.
+
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 仕入先の通貨の取得
+SELECT SINGLE * FROM  lfm1
+WHERE  lifnr  = p_lifnr
+AND    ekorg  = p_ekorg.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+i_currency         = lfm1-waers
+IMPORTING
+e_decimals         = w_dec
+EXCEPTIONS
+i_currency_initial = 1
+OTHERS             = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+
+* 請求データ検索
+SELECT        *
+FROM   yk210
+INTO   TABLE  i_yk210
+WHERE  bukrs   = p_bukrs
+AND    delflg  = p_delflg
+AND    kekkbn IN s_kekkbn
+AND    lifnr   = p_lifnr
+AND    werks  IN s_werks
+AND    zfbdt   = p_zfbdt.
+WRITE: / '検索件数', sy-dbcnt.
+
+* チェック
+LOOP AT i_yk210.
+CLEAR w_errflg.
+*   税抜金額チェック
+w_knitxamt = i_yk210-knquan * i_yk210-knuntprc
+/ 10 ** ( 2 - w_dec ).
+IF w_knitxamt <> i_yk210-knitxamt.
+WRITE: / i_yk210-bildoc,
+'税抜金額が数量×単価に一致しません',
+i_yk210-knitxamt CURRENCY i_yk210-waers,
+'≠',
+i_yk210-knquan, '×', i_yk210-knuntprc.
+*     単価修正の試み
+i_yk210-knuntprc = i_yk210-knuntprc / 100. "単価を100分の1
+w_knitxamt = i_yk210-knquan * i_yk210-knuntprc "税抜の試算
+/ 10 ** ( 2 - w_dec ).
+IF w_knitxamt = i_yk210-knitxamt. "一致した場合
+CALL FUNCTION 'ENQUEUE_EY_YK210'
+EXPORTING
+bukrs          = i_yk210-bukrs
+ykyear         = i_yk210-ykyear
+bildoc         = i_yk210-bildoc
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+UPDATE yk210 FROM i_yk210.
+IF sy-subrc = 0.
+WRITE '更新済'.
+ADD 1 TO w_updcnt.
+ENDIF.
+CALL FUNCTION 'DEQUEUE_EY_YK210'
+EXPORTING
+bukrs  = i_yk210-bukrs
+ykyear = i_yk210-ykyear
+bildoc = i_yk210-bildoc.
+
+ENDIF.
+*     w_knitxamt = i_yk210-knquan * i_yk210-knuntprc / 100.
+*     IF w_knitxamt <> i_yk210-knitxamt.
+*       w_knitxamt = abs( w_knitxamt - i_yk210-knitxamt ).
+*       WRITE: w_knitxamt CURRENCY i_yk210-waers.
+*     ENDIF.
+w_errflg = 'X'.
+ENDIF.
+*   税額チェック
+*   w_kntaxamt = i_yk210-knitxamt * 5 / 100.
+*   IF w_kntaxamt <> i_yk210-kntaxamt.
+*     WRITE: / i_yk210-bildoc,
+*              '消費税額が税抜金額×0.05に一致しません'.
+*     w_errflg = 'X'.
+*   ENDIF.
+*   発注明細チェック
+CLEAR ekpo.
+SELECT SINGLE * FROM  ekpo
+WHERE  ebeln  = i_yk210-ebeln
+AND    ebelp  = i_yk210-ebelp.
+IF sy-subrc <> 0.
+SELECT SINGLE * FROM  ekpo
+WHERE  ebeln  = i_yk210-ebeln.
+IF sy-subrc = 0.
+IF ekpo-bpumz = 1 AND ekpo-bpumn = 1.
+ELSE.
+WRITE: / i_yk210-bildoc,
+'価格単位に注意してください'.
+w_errflg = 'X'.
+ENDIF.
+ENDIF.
+ELSE.
+IF ekpo-bpumz = 1 AND ekpo-bpumn = 1.
+ELSE.
+WRITE: / i_yk210-bildoc,
+'価格単位に注意してください'.
+w_errflg = 'X'.
+ENDIF.
+ENDIF.
+*   品目価格単位チェック
+CLEAR mbew.
+SELECT SINGLE * FROM  mbew
+WHERE  matnr  = i_yk210-matnr
+AND    bwkey  = i_yk210-werks.
+IF sy-subrc = 0.
+IF mbew-peinh <> 1.
+WRITE: / i_yk210-bildoc,
+'価格単位に注意してください'.
+w_errflg = 'X'.
+ENDIF.
+ENDIF.
+*
+IF w_errflg = 'X'.
+ADD 1 TO w_errcnt.
+ENDIF.
+ENDLOOP.
+WRITE: / 'エラー件数', w_errcnt.
+WRITE: / '更新件数', w_updcnt.
+
+* テスト実行
+IF p_update IS INITIAL.
+ROLLBACK WORK.
+ENDIF.

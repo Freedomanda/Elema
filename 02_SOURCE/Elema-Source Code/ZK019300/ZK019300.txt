@@ -1,0 +1,429 @@
+*---------------------------------------------------------------------*
+*  仕入データ移行                                                     *
+*    機能：YK230と同じフォーマットのデータを入力し、YK230とYK240に    *
+*          データを登録する                                           *
+*          入力ファイルはローカルからアップロードするか、サーバから   *
+*          読み込むか選択できる                                       *
+*          登録せずに、チェックのみ行うことも可能                     *
+*    作成：2002/07/01 KURANO                                          *
+*    修正：2002/09/06 KURANO                                          *
+*                                                                     *
+*---------------------------------------------------------------------*
+REPORT zk019300 .
+
+* 使用テーブル
+TABLES t001.  "会社コード
+TABLES t001w. "プラント/支店
+TABLES t024e. "購買組織
+TABLES t024.  "購買グループ
+TABLES tgsb.  "事業領域
+TABLES lfa1.  "仕入先マスタ (一般セクション)
+TABLES lfm1.  "仕入先マスタ購買組織データ
+TABLES mara.  "一般品目データ
+TABLES eina.  "購買情報: 一般データ
+TABLES yk230. "仕入データ
+TABLES yk240. "仕入合計データ
+
+* グローバル変数
+DATA i_yk230 LIKE STANDARD TABLE OF yk230 WITH HEADER LINE.
+DATA i_yk240 LIKE STANDARD TABLE OF yk240 WITH HEADER LINE.
+DATA w_err TYPE xfeld. "エラーフラグ
+TYPES: BEGIN OF st_in1,
+mandt LIKE yk230-mandt,
+belnr LIKE yk230-belnr,
+buzei LIKE yk230-buzei,
+fixflg LIKE yk230-fixflg,
+kekkbn LIKE yk230-kekkbn,
+lifnr LIKE yk230-lifnr,
+lifn2 LIKE yk230-lifn2,
+werks LIKE yk230-werks,
+ekorg LIKE yk230-ekorg,
+ekgrp LIKE yk230-ekgrp,
+bukrs LIKE yk230-bukrs,
+gsber LIKE yk230-gsber,
+ebeln LIKE yk230-ebeln,
+ebelp LIKE yk230-ebelp,
+maktx LIKE yk230-maktx,
+matnr LIKE yk230-matnr,
+idnlf LIKE yk230-idnlf,
+ykyear LIKE yk230-ykyear,
+zfbdt LIKE yk230-zfbdt,
+budat LIKE yk230-budat,
+knquan(15) TYPE c,
+knunit LIKE yk230-knunit,
+knuntprc(22) TYPE c,
+knitxamt(21) TYPE c,
+kntaxamt(21) TYPE c,
+knetxamt(21) TYPE c,
+upyamt(21) TYPE c,
+pidamt(21) TYPE c,
+pidtax(21) TYPE c,
+beyamt(21) TYPE c,
+waers LIKE yk230-waers,
+sgtxt LIKE yk230-sgtxt,
+zfbdt2 LIKE yk230-zfbdt2,
+prcdat LIKE yk230-prcdat,
+prcno LIKE yk230-prcno,
+insdat LIKE yk230-insdat,
+instim LIKE yk230-instim,
+insusr LIKE yk230-insusr,
+upddat LIKE yk230-upddat,
+updtim LIKE yk230-updtim,
+updusr LIKE yk230-updusr,
+fiflg LIKE yk230-fiflg,
+belnr2 LIKE yk230-belnr2,
+gjahr LIKE yk230-gjahr,
+werkst LIKE yk230-werkst,
+rrflg LIKE yk230-rrflg,
+END OF st_in1.
+DATA i_in1 TYPE STANDARD TABLE OF st_in1 WITH HEADER LINE.
+
+* 選択画面
+PARAMETERS p_file LIKE rlgrap-filename. "入力ファイル名
+PARAMETERS p_local RADIOBUTTON GROUP radi. "端末よりアップロード
+PARAMETERS p_server RADIOBUTTON GROUP radi. "サーバのファイルを使用
+PARAMETERS p_check AS CHECKBOX. "チェックのみ
+PARAMETERS p_fil1 AS CHECKBOX. "購買グループエラーを無視
+PARAMETERS p_fil2 AS CHECKBOX. "品目エラーを無視
+PARAMETERS p_fil3 AS CHECKBOX. "エラーがあっても登録
+
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+PERFORM f_file_read. "ファイルの読み込み
+PERFORM f_file_check. "ファイルのチェック
+PERFORM f_make_yk240. "仕入合計データの作成
+IF p_fil3 = 'X'.
+CLEAR w_err.
+ENDIF.
+IF p_check = space AND w_err = space.
+PERFORM f_insert_yk230. "仕入データ登録
+PERFORM f_insert_yk240. "仕入合計データ登録
+ENDIF.
+
+*---------------------------------------------------------------------*
+*       FORM f_file_read                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_file_read.
+* ローカル変数
+DATA w_dec LIKE tcurx-currdec.
+*
+IF p_local = 'X'.
+*** 端末よりアップロード
+CALL FUNCTION 'UPLOAD'
+EXPORTING
+filename                = p_file
+TABLES
+data_tab                = i_in1
+EXCEPTIONS
+conversion_error        = 1
+invalid_table_width     = 2
+invalid_type            = 3
+no_batch                = 4
+unknown_error           = 5
+gui_refuse_filetransfer = 6
+OTHERS                  = 7.
+IF sy-subrc <> 0.
+WRITE: / '汎用モジュール：UPLOAD  SY-SUBRC=', sy-subrc.
+STOP.
+ENDIF.
+ELSEIF p_server = 'X'.
+*** ファイルを開く
+OPEN DATASET p_file FOR INPUT IN TEXT MODE.
+IF sy-subrc <> 0.
+WRITE: / 'ファイルOPEN：', p_file, 'SY-SUBRC=', sy-subrc.
+STOP.
+ENDIF.
+*** レコード読込
+DO.
+READ DATASET p_file INTO i_in1.
+IF sy-subrc <> 0.
+EXIT.
+ELSE.
+APPEND i_in1.
+ENDIF.
+ENDDO.
+*** ファイルを閉じる
+CLOSE DATASET p_file.
+ENDIF.
+
+** 入力ファイルの調整
+SORT i_in1 BY waers. "通貨コードで整列
+LOOP AT i_in1.
+AT NEW waers.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+i_currency         = i_in1-waers
+IMPORTING
+e_decimals         = w_dec
+EXCEPTIONS
+i_currency_initial = 1
+OTHERS             = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+ENDAT.
+MOVE-CORRESPONDING i_in1 TO i_yk230.
+i_yk230-knitxamt = i_in1-knitxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk230-kntaxamt = i_in1-kntaxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk230-knetxamt = i_in1-knetxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk230-upyamt = i_in1-upyamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk230-pidamt = i_in1-pidamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk230-pidtax = i_in1-pidtax * ( 10 ** ( w_dec - 2 ) ).
+i_yk230-beyamt = i_in1-beyamt * ( 10 ** ( w_dec - 2 ) ).
+APPEND i_yk230.
+ENDLOOP.
+SORT i_yk230 BY belnr buzei. "伝票番号で整列
+
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_file_check                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_file_check.
+* ローカル変数
+DATA w_belnr LIKE yk230-belnr.
+DATA w_buzei LIKE yk230-buzei.
+DATA w_dbcnt LIKE sy-dbcnt.
+DATA w_waers LIKE knvv-waers.
+*
+SORT i_yk230 BY belnr buzei.
+LOOP AT i_yk230.
+*** キー重複チェック
+IF i_yk230-belnr = w_belnr AND
+i_yk230-buzei = w_buzei.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'キー重複'.
+ELSE.
+SELECT SINGLE *
+FROM   yk230
+WHERE  belnr = i_yk230-belnr
+AND    buzei = i_yk230-buzei.
+IF sy-dbcnt > 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'キー重複'.
+ENDIF.
+ENDIF.
+*** 仕入先マスタ
+SELECT SINGLE *
+FROM   lfa1
+WHERE  lifnr  = i_yk230-lifnr.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'仕入先コード', i_yk230-lifnr, 'は未登録です'.
+ENDIF.
+SELECT SINGLE *
+FROM   lfa1
+WHERE  lifnr  = i_yk230-lifn2.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'請求先コード', i_yk230-lifn2, 'は未登録です'.
+ENDIF.
+*** 購買組織
+SELECT SINGLE *
+FROM   t024e
+WHERE  ekorg  = i_yk230-ekorg.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'購買組織', i_yk230-ekorg, 'は未登録です'.
+ENDIF.
+*** プラント
+SELECT SINGLE *
+FROM   t001w
+WHERE  werks  = i_yk230-werks.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'プラント', i_yk230-werks, 'は未登録です'.
+ENDIF.
+*** 購買グループ
+IF p_fil1 <> 'X'.
+SELECT SINGLE *
+FROM   t024
+WHERE  ekgrp  = i_yk230-ekgrp.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'購買グループ', i_yk230-ekgrp, 'は未登録です'.
+ENDIF.
+ENDIF.
+*** 会社コード
+SELECT SINGLE *
+FROM   t001
+WHERE  bukrs  = i_yk230-bukrs.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'会社コード', i_yk230-bukrs, 'は未登録です'.
+ENDIF.
+*** 事業領域
+SELECT SINGLE *
+FROM   tgsb
+WHERE  gsber  = i_yk230-gsber.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'事業領域', i_yk230-gsber, 'は未登録です'.
+ENDIF.
+*** 品目コード
+SELECT SINGLE *
+FROM   mara
+WHERE  matnr  = i_yk230-matnr.
+IF sy-subrc <> 0.
+IF p_fil2 <> 'X'.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'品目コード', i_yk230-matnr, 'は未登録です'.
+ENDIF.
+ENDIF.
+*** 仕入先品目コード
+SELECT SINGLE *
+FROM   eina
+WHERE  matnr  = i_yk230-matnr
+AND    lifnr  = i_yk230-lifnr
+AND    idnlf  = i_yk230-idnlf.
+IF sy-subrc <> 0.
+IF p_fil2 <> 'X'.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'仕入先品目コード', i_yk230-idnlf, 'は未登録です'.
+ENDIF.
+ENDIF.
+*** 暦年/締日
+IF i_yk230-zfbdt = space OR i_yk230-zfbdt = 0.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+i_cord         = i_yk230-lifnr
+i_ekorg        = i_yk230-ekorg
+i_day          = i_yk230-budat
+IMPORTING
+e_zfbdt        = i_yk230-zfbdt
+EXCEPTIONS
+no_get_t052    = 1
+no_good_getday = 2
+no_get_zterm   = 3
+OTHERS         = 4.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+i_yk230-ykyear = i_yk230-zfbdt+0(4).
+ENDIF.
+IF i_yk230-ykyear <> i_yk230-zfbdt+0(4).
+i_yk230-ykyear = i_yk230-zfbdt+0(4).
+ENDIF.
+*** 税抜金額
+IF i_yk230-knitxamt IS INITIAL.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'税抜金額が未入力です'.
+ENDIF.
+*** 通貨コード
+SELECT SINGLE waers FROM  lfm1
+INTO   w_waers
+WHERE  lifnr  = i_yk230-lifnr
+AND    ekorg  = i_yk230-ekorg.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'仕入先コード', i_yk230-lifnr, i_yk230-ekorg,
+'は未登録です'.
+ELSEIF w_waers <> i_yk230-waers.
+w_err = 'X'.
+WRITE: / i_yk230-belnr, i_yk230-buzei,
+'通貨コード', i_yk230-waers,
+'は仕入先の通貨と異なります'.
+ENDIF.
+*** キー情報を保存
+w_belnr = i_yk230-belnr.
+w_buzei = i_yk230-buzei.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_make_yk240                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_make_yk240.
+* ローカル変数
+DATA w_dbcnt LIKE sy-dbcnt.
+DATA w_knitxamt LIKE yk240-knitxamt.
+DATA w_kntaxamt LIKE yk240-kntaxamt.
+DATA w_knetxamt LIKE yk240-knetxamt.
+DATA w_yk240 LIKE STANDARD TABLE OF yk240 WITH HEADER LINE.
+* データ作成
+LOOP AT i_yk230.
+MOVE-CORRESPONDING i_yk230 TO w_yk240.
+APPEND w_yk240.
+ENDLOOP.
+SORT w_yk240 BY bukrs ykyear lifnr lifn2 werks ekorg ekgrp
+gsber zfbdt.
+LOOP AT w_yk240.
+MOVE-CORRESPONDING w_yk240 TO i_yk240.
+ADD w_yk240-knitxamt TO w_knitxamt.
+ADD w_yk240-kntaxamt TO w_kntaxamt.
+ADD w_yk240-knetxamt TO w_knetxamt.
+AT END OF zfbdt.
+i_yk240-knitxamt = w_knitxamt.
+i_yk240-kntaxamt = w_kntaxamt.
+i_yk240-knetxamt = w_knetxamt.
+APPEND i_yk240.
+CLEAR: w_knitxamt, w_kntaxamt, w_knetxamt.
+ENDAT.
+ENDLOOP.
+* 重複チェック
+LOOP AT i_yk240.
+SELECT SINGLE *
+FROM   yk240
+WHERE  bukrs   = i_yk240-bukrs
+AND    ykyear  = i_yk240-ykyear
+AND    lifnr   = i_yk240-lifnr
+AND    lifn2   = i_yk240-lifn2
+AND    werks   = i_yk240-werks
+AND    ekorg   = i_yk240-ekorg
+AND    ekgrp   = i_yk240-ekgrp
+AND    gsber   = i_yk240-gsber
+AND    zfbdt   = i_yk240-zfbdt.
+IF sy-dbcnt > 0.
+w_err = 'X'.
+WRITE: / '仕入合計重複',
+i_yk240-bukrs,
+i_yk240-ykyear,
+i_yk240-lifnr,
+i_yk240-lifn2,
+i_yk240-werks,
+i_yk240-ekorg,
+i_yk240-ekgrp,
+i_yk240-gsber,
+i_yk240-zfbdt.
+ENDIF.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_insert_yk230                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_insert_yk230.
+INSERT yk230 FROM TABLE i_yk230.
+WRITE: / '仕入データ　　：', sy-dbcnt.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_insert_yk240                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_insert_yk240.
+INSERT yk240 FROM TABLE i_yk240.
+WRITE: / '仕入合計データ：', sy-dbcnt.
+ENDFORM.

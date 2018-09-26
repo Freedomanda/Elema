@@ -1,0 +1,1467 @@
+**********************************************************************
+* [プログラム名]
+*   ZE011100      得意先品目別単価ダウンロード
+*
+* [処理概要]
+*   変更履歴テーブルより、価格条件マスタへ登録・変更されたデータを取得す
+*   る。
+*   得意先品目に新規登録されたデータに関しては、該当する価格条件データを
+*   取得する。
+*   取得したデータをＥＤＩサーバへダウンロードする。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/02/07   PSD K.igarashi    新規開発　
+*  2002/04/25   PSD T.SAITOH      価格条件数量単位が使われていない
+*                                 不具合を対応
+*                                 単価の不具合を修正
+*  2002/05/20   PSD T.SAITOH      複数条件単位対応
+*  2002/06/14   PSD T.SAITOH      単価をKPEINで割る
+*  2002/06/20   PSD T.SAITOH      再移送
+*  2002/06/26   PSD T.SAITOH      小数点が四捨五入されるバグ対応
+*  2002/08/03   NDSC K.KAJISA     パフォーマンス改善
+*  2002/08/05   PSD T.SAITOH      販売組織対応
+*  2002/08/08   カットオーバー ---------------------------------------*
+*  2002/08/08   PSD T.SAITOH    対象データなしの場合作り掛けファイル削除
+*  2002.09.04   Ndsc            自動時間指定 = システム日付を用いる
+*  2003/07/24   NDSC            スケール対応
+*  2005/06/22   DMC H.NOMOTO    小数第5位まで表示させる（以前は2位）
+*& 2012/08/21   ISID            ES-UP
+*  2013/11/07   GSL             DMW5878:販売価格一括更新対応
+*  2014/01/28   GSL             DMW6058:価格更新データの抽出期間変更
+*                               変更前）システム時刻－1時間前
+*                               変更後）システム時刻－25分前
+**********************************************************************
+
+REPORT  ZE011100
+MESSAGE-ID Z1
+LINE-SIZE 155
+NO STANDARD PAGE HEADING.
+
+**********************************************************************
+* ＴＹＰＥＳ
+**********************************************************************
+* 変更・更新レコード編集用内部ＴＢＬ型
+TYPES: BEGIN OF TYP_RECORD1,
+KUNNR    TYPE KNMT-KUNNR,                "得意先コード
+KDMAT    TYPE KNMT-KDMAT,            "得意先品目コード
+DATBI    TYPE A901-DATBI,        "有効期限(有効終了日)
+* Add 2003.07.24 >>>>>
+KSTBM    Type KONM-KSTBM,        "スケール数量
+* Add 2003.07.24 <<<<<
+MATNR    TYPE KNMT-MATNR,                  "品目コード
+KBETR    TYPE KONP-KBETR,                        "単価
+LOEVM_KO TYPE KONP-LOEVM_KO,               "削除フラグ
+DATUM    TYPE SYST-DATUM,                      "送信日
+UZEIT    TYPE SYST-UZEIT,                    "送信時間
+KONWA    TYPE KONP-KONWA,                    "価格単位
+UDATE    TYPE CDHDR-UDATE,                   "更新日
+UTIME    TYPE CDHDR-UTIME,                   "更新時間
+*---APPEND START PSD T.SAITOH 2002/04/24 ---------------------------*
+KPEIN    TYPE KONP-KPEIN,        "価格条件数量単位
+*---APPEND END   PSD T.SAITOH 2002/04/24 ---------------------------*
+END OF TYP_RECORD1.
+
+* 得意先品目レコード編集用内部ＴＢＬ型
+TYPES: BEGIN OF TYP_RECORD2,
+KUNNR    TYPE KNMT-KUNNR,                "得意先コード
+KDMAT    TYPE KNMT-KDMAT,            "得意先品目コード
+DATBI    TYPE A901-DATBI,        "有効期限(有効終了日)
+* Add 2003.07.24 >>>>>
+KSTBM    Type KONM-KSTBM,        "スケール数量
+* Add 2003.07.24 <<<<<
+MATNR    TYPE KNMT-MATNR,                  "品目コード
+KBETR    TYPE KONP-KBETR,                        "単価
+LOEVM_KO TYPE KONP-LOEVM_KO,               "削除フラグ
+DATUM    TYPE SYST-DATUM,                      "送信日
+UZEIT    TYPE SYST-UZEIT,                    "送信時間
+KONWA    TYPE KONP-KONWA,                    "価格単位
+DATAB    TYPE A901-DATAB,        "有効期限(有効開始日)
+*---APPEND START PSD T.SAITOH 2002/04/24 ---------------------------*
+KPEIN    TYPE KONP-KPEIN,        "価格条件数量単位
+*---APPEND END   PSD T.SAITOH 2002/04/24 ---------------------------*
+END OF TYP_RECORD2.
+
+* 出力ファイル内部ＴＢＬ型
+TYPES: BEGIN OF TYP_EDIT_OFILE,
+KUNNR    TYPE KNMT-KUNNR,                "得意先コード
+KDMAT    TYPE KNMT-KDMAT,            "得意先品目コード
+DATBI    TYPE A901-DATBI,        "有効期限(有効終了日)
+* Add 2003.07.24 >>>>>
+KSTBM(12) Type C ,                "スケール数量
+* Add 2003.07.24 <<<<<
+MATNR    TYPE KNMT-MATNR,                  "品目コード
+* MODIFY START DMC H.NOMOTO ********************************************
+*        KBETR(12)    TYPE C,                        "単価
+KBETR(16)    TYPE C,         "少数の桁が増えたため調節
+* MODIFY END DMC H.NOMOTO***********************************************
+LOEVM_KO TYPE KONP-LOEVM_KO,               "削除フラグ
+DATUM    TYPE SYST-DATUM,                      "送信日
+UZEIT    TYPE SYST-UZEIT,                    "送信時間
+END OF TYP_EDIT_OFILE.
+
+* ＣＤＨＤＲ内部テーブル型
+TYPES: BEGIN OF TYP_CDHDR,
+OBJECTID TYPE CDHDR-OBJECTID,
+UDATE    TYPE CDHDR-UDATE,
+UTIME    TYPE CDHDR-UTIME,
+END OF TYP_CDHDR.
+
+* ＫＯＮＰ内部テーブル型
+TYPES: BEGIN OF TYP_KONP,
+KAPPL TYPE KONP-KAPPL,
+KNUMH TYPE KONP-KNUMH,
+* Add 2003.07.24 >>>>>
+KSTBM Type KONM-KSTBM ,            "スケール数量
+* Add 2003.07.24 <<<<<
+KBETR TYPE KONP-KBETR,
+LOEVM_KO TYPE KONP-LOEVM_KO,
+KONWA TYPE KONP-KONWA,
+*---APPEND START PSD T.SAITOH 2002/04/25 ---------------------------*
+KPEIN    TYPE KONP-KPEIN,        "価格条件数量単位
+*---APPEND END   PSD T.SAITOH 2002/04/25 ---------------------------*
+END OF TYP_KONP.
+
+* Ａ９０１内部テーブル型
+TYPES: BEGIN OF TYP_A901,
+KUNNR TYPE A901-KUNNR,
+ZZZKDMAT TYPE A901-ZZZKDMAT,
+DATBI TYPE A901-DATBI,
+DATAB TYPE A901-DATAB,
+KNUMH TYPE A901-KNUMH,
+END OF TYP_A901.
+
+* ＫＮＭＴ内部テーブル型
+TYPES: BEGIN OF TYP_KNMT,
+KUNNR TYPE KNMT-KUNNR,
+KDMAT TYPE KNMT-KDMAT,
+MATNR TYPE KNMT-MATNR,
+END OF TYP_KNMT.
+**2002.08.03 ADD >>
+Ranges : R_KU For KNMT-KUNNR .
+**2002.08.03 ADD <<
+**********************************************************************
+* ＤＡＴＡ
+**********************************************************************
+* 変更履歴ＴＢＬ
+DATA: GF_CDHDR TYPE TYP_CDHDR,
+GT_CDHDR LIKE TABLE OF GF_CDHDR.
+
+* 条件明細ＴＢＬ
+DATA: GF_KONP TYPE TYP_KONP,
+GT_KONP LIKE TABLE OF GF_KONP.
+
+* Ａ９０１内部ＴＢＬ
+*2002/08/03 MOD START
+*DATA: GF_A901 type typ_A901,
+*      GT_A901 LIKE TABLE OF GF_A901.
+DATA:GF_A901   type typ_A901  OCCURS 0 WITH HEADER LINE.
+DATA:GT_A901   LIKE TABLE OF GF_A901.
+*2002/08/03 MOD END
+* ＫＮＭＴ内部ＴＢＬ
+DATA: GF_KNMT TYPE TYP_KNMT,
+GT_KNMT LIKE TABLE OF GF_KNMT.
+
+* 価格条件マスタ更新・変更レコード格納用内部ＴＢＬ
+DATA: GF_RECORD1 TYPE TYP_RECORD1,
+GT_RECORD1 LIKE TABLE OF GF_RECORD1.
+
+* 得意先品目情報新規登録レコード格納用内部ＴＢＬ
+DATA: GF_RECORD2 TYPE TYP_RECORD2,
+GT_RECORD2 LIKE TABLE OF GF_RECORD2.
+
+* 出力ファイル編集用項目
+DATA: GF_EDIT_OFILE TYPE TYP_EDIT_OFILE.
+
+* 出力ファイル編集用内部ＴＢＬ
+* Mod ES-UP 2012/10/24 -->
+*DATA: GF_OFILE(200) TYPE C,
+DATA: GF_OFILE TYPE string,
+* Mod ES-UP 2012/10/24 <--
+GT_OFILE LIKE TABLE OF GF_OFILE.
+
+DATA: G_CNT_RECORD1 TYPE P,   "内部TBL GT_RECORD1レコード数カウンタ
+G_CNT_KNMT    TYPE P.   "内部TBL GT_KNMT   レコード数カウンタ
+DATA: G_KONWA TYPE KONP-KONWA,                            "価格単位
+G_KBETR TYPE KONP-KBETR,                     "金額/率(変換前)
+*MODIFY START DMC H.NOMOTO*********************************************
+*     G_KINGAKU(12) TYPE C.                      "金額/率(変換済み)
+G_KINGAKU(16) TYPE C.               "少数の桁が増えたため調節
+*MODIFY END DMC H.NOMOTO***********************************************
+DATA: G_COUNT TYPE P VALUE 0.                     "更新件数カウンタ
+
+DATA: G_LDATE TYPE P,      "前レコードの有効開始日
+G_GDATE TYPE P,      "現行レコードの有効開始日
+G_ABS_LDATE TYPE P,  "前レコードとシステム日付の日数差(絶対値)
+G_ABS_GDATE TYPE P.  "現行レコードとシステム日付の日数差(絶対値)
+
+*** 汎用モジュール SXPG_CALL_SYSTEM ***
+DATA: BEGIN OF EXEC_PROTOCOL.
+INCLUDE STRUCTURE BTCXPM.
+DATA: END OF EXEC_PROTOCOL.
+
+DATA: GT_PROTOCOL   LIKE TABLE OF EXEC_PROTOCOL,
+G_COMMANDNAME LIKE SXPGCOLIST-NAME,
+G_STATUS      LIKE EXTCMDEXEX-STATUS.
+
+*---APPEND START PSD T.SAITOH 2002/05/20 ---------------------------*
+* ONE RECORD SELECT用
+DATA :GTW_KONP TYPE TABLE OF TYP_KONP.
+*---APPEND END   PSD T.SAITOH 2002/05/20 ---------------------------*
+
+**********************************************************************
+* ＣＯＮＳＴＡＮＴＳ
+**********************************************************************
+CONSTANTS: CNS_TBL_001(5) TYPE C VALUE 'CDHDR',
+CNS_TBL_002(4) TYPE C VALUE 'KONP',
+CNS_TBL_003(4) TYPE C VALUE 'A901',
+CNS_TBL_004(4) TYPE C VALUE 'KNMT'.
+* Add ES-UP 2012/08/21 -->
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/08/21 <--
+**********************************************************************
+* 選択画面
+**********************************************************************
+TABLES:KNA1.
+
+*---APPEND START PSD T.SAITOH 2002/08/05 ---------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK UNION
+WITH FRAME TITLE TEXT-100.
+PARAMETERS:PR_VKORG TYPE VBAK-VKORG MEMORY ID VKO,"販売組織
+PR_VTWEG TYPE VBAK-VTWEG MEMORY ID VTW,"流通CH
+PR_SPART TYPE VBAK-SPART MEMORY ID SPA."製品部門
+SELECTION-SCREEN END   OF BLOCK UNION.
+*---APPEND END   PSD T.SAITOH 2002/08/05 ---------------------------*
+PARAMETERS: P_UDATE LIKE CDHDR-UDATE DEFAULT SY-DATUM.      "更新日
+***2002.08.16 >>>
+select-options:S_ETIME for SY-UZEIT.
+***2002.07.04 >>>
+select-options:p_kunnr for KNA1-kunnr.
+***2002.0704 <<<
+PARAMETERS: P_OFILE TYPE RLGRAP-FILENAME.           "出力ファイル名
+***2002.08.16 ADD >>>
+PARAMETERS:P_CHK AS CHECKBOX .
+**********************************************************************
+* ＡＴ　ＳＥＬＥＣＴＩＯＮ－ＳＣＲＥＥＮ
+**********************************************************************
+AT SELECTION-SCREEN.
+
+* 更新日の入力チェック
+IF P_UDATE = '00000000'.
+MESSAGE S006 WITH '更新日'.
+STOP.
+ENDIF.
+
+* 出力ファイルの入力チェック
+IF P_OFILE = ' '.
+MESSAGE S006 WITH '出力ファイル'.
+STOP.
+ENDIF.
+
+**********************************************************************
+* ＳＴＡＲＴ-ＯＦ-ＳＥＬＥＣＴＩＯＮ
+**********************************************************************
+START-OF-SELECTION.
+* Mod ES-UP 2012/08/21 -->
+* ファイルオープン
+*  OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE.
+*      IF SY-SUBRC = 8.         "ファイルオープンエラー
+*        MESSAGE I209.
+*        CLOSE DATASET P_OFILE.      " ファイルクローズ
+*        STOP.
+*      ENDIF.
+* Mod ES-UP 2012/08/21 <--
+*自動時間セット
+PERFORM TIME_SET. "2002.09.04 edit
+*EDI得意先取得
+PERFORM EDPP1.
+* ファイルの作成
+PERFORM frm_make_file.
+
+* ファイルダウンロード
+PERFORM frm_file_download.
+
+* ファイルクローズ
+* CLOSE DATASET P_OFILE.          " ファイルクローズ
+**********************************************************************
+* 自動時間指定
+**********************************************************************
+FORM TIME_SET.
+IF P_CHK = 'X'.
+REFRESH:S_ETIME.
+* Mod DMW6058 2014/01/28 -->
+***LOWに1時間前をセット
+*    S_ETIME-LOW  = SY-UZEIT - 3600.
+**LOWに25分前をセット
+S_ETIME-LOW  = SY-UZEIT - 1500.
+* Mod DMW6058 2013/01/28 <--
+**
+S_ETIME-HIGH = SY-UZEIT.
+S_ETIME-OPTION = 'BT'.
+S_ETIME-SIGN = 'I' .
+**
+Append : S_ETIME .
+***2002.09.04 add >>>
+Clear:P_Udate.
+P_Udate = Sy-Datum.
+***2002.09.04 add <<<
+Clear :  S_ETIME .
+ENDIF.
+ENDFORM.
+**********************************************************************
+* EDPP1
+**********************************************************************
+FORM EDPP1.
+REFRESH:R_KU.
+Select PARNUM From EDPP1 Into R_KU-LOW
+Where PARNUM IN P_KUNNR
+AND   PARTYP EQ 'KU'.
+
+Move : 'EQ' To R_KU-OPTION ,
+'I'  To R_KU-SIGN   .
+Append : R_KU .
+Clear :  R_KU .
+EndSelect .
+
+ENDFORM.
+**********************************************************************
+* ＦＯＲＭ
+**********************************************************************
+*&-------------------------------------------------------------------*
+*&      Form  frm_make_file
+*&-------------------------------------------------------------------*
+*       ファイルの作成
+*--------------------------------------------------------------------*
+FORM frm_make_file.
+
+* 価格条件マスタ更新・変更
+PERFORM frm_make_record1.
+
+* 得意先品目情報新規登録
+PERFORM frm_make_record2.
+
+* ダウンロードファイルの作成
+IF ( G_CNT_RECORD1 = 0 AND G_CNT_KNMT = 0 )."対象ﾃﾞｰﾀ無し
+*---APPEND START PSD T.SAITOH 2002/08/08 ---------------------------*
+*    対象データなしの場合作りかけのファイルを削除
+DELETE DATASET P_OFILE.
+*---APPEND END   PSD T.SAITOH 2002/08/08 ---------------------------*
+MESSAGE I204.
+STOP.
+ELSEIF ( G_CNT_RECORD1 <> 0 AND G_CNT_KNMT = 0 )."更新･変更データ
+PERFORM frm_makefile_cdhdr.
+ELSEIF ( G_CNT_RECORD1 = 0 AND G_CNT_KNMT <> 0 )."新規登録データ
+PERFORM frm_makefile_knmt.
+ELSEIF ( G_CNT_RECORD1 <> 0 AND G_CNT_KNMT <> 0 )."両方のデータ
+PERFORM frm_make_downloadfile.
+ENDIF.
+
+ENDFORM.                    " frm_make_file
+*&-------------------------------------------------------------------*
+*&      Form  frm_make_record1
+*&-------------------------------------------------------------------*
+*       出力データ取得(価格条件マスタ更新・変更)
+*--------------------------------------------------------------------*
+FORM frm_make_record1.
+
+* ＣＤＨＤＲ情報の取得
+PERFORM frm_get_cdhdr_info.
+
+LOOP AT GT_CDHDR INTO GF_CDHDR.
+
+CLEAR   GF_KONP.      "初期化処理
+REFRESH GT_A901.
+
+PERFORM frm_get_record1_konp.      "ＫＯＮＰ情報の取得
+*---APPEND START PSD T.SAITOH 2002/05/20 ---------------------------*
+PERFORM FRM_1RECORD_FROM_KONP.
+*---APPEND END   PSD T.SAITOH 2002/05/20 ---------------------------*
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+CONTINUE.
+ELSEIF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_002 SY-SUBRC.
+ENDIF.
+
+PERFORM frm_get_record1_a901.      "Ａ９０１情報の取得
+
+IF SY-SUBRC = 4.
+CONTINUE.
+ELSEIF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_003 SY-SUBRC.
+ENDIF.
+
+LOOP AT GT_A901 INTO GF_A901.
+
+PERFORM frm_get_record1_knmt.      "ＫＮＭＴ情報の取得
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+CONTINUE.
+ELSEIF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_004 SY-SUBRC.
+ENDIF.
+
+* 価格条件マスタ更新・変更レコード設定
+PERFORM frm_set_record1.
+PERFORM frm_set_record1S.
+
+ENDLOOP.
+
+ENDLOOP.
+
+* 登録レコード件数チェック
+DESCRIBE TABLE GT_RECORD1 LINES G_CNT_RECORD1.
+
+ENDFORM.                    " frm_make_record1
+*&-------------------------------------------------------------------*
+*&      Form  frm_get_cdhdr_info
+*&-------------------------------------------------------------------*
+*       ＣＤＨＤＲ情報の取得(複数あり)
+*--------------------------------------------------------------------*
+FORM frm_get_cdhdr_info.
+
+SELECT * FROM CDHDR
+INTO CORRESPONDING FIELDS OF TABLE GT_CDHDR
+WHERE OBJECTCLAS = 'COND_A'
+AND   UDATE      >= P_UDATE
+AND   UTIME      IN S_ETIME
+AND   OBJECTID   BETWEEN '0000000000' AND '9999999999'
+AND   ( TCODE    = 'VK11' OR
+TCODE    = 'VK12' OR
+TCODE    = 'VK13' OR
+* Mod DMW5878 2013/11/07 -->
+*            TCODE    = 'VK14' ).
+**            TCODE    = 'XK15' ).
+TCODE    = 'VK14' OR
+TCODE    = 'XK15' ).
+* Mod DMW5878 2013/11/07 <--
+IF SY-SUBRC = 0.
+PERFORM frm_check_objectid.
+ELSEIF SY-SUBRC = 4.
+ELSEIF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_001 SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " frm_get_cdhdr_info
+*&-------------------------------------------------------------------*
+*&      Form  frm_check_objectid
+*&-------------------------------------------------------------------*
+*       条件マスタ番号(対象値)のチェック
+*--------------------------------------------------------------------*
+FORM frm_check_objectid.
+
+DATA: LF_CDHDR_HIKAKU LIKE GF_CDHDR.             "比較用構造
+
+
+SORT GT_CDHDR ASCENDING BY OBJECTID.
+
+LOOP AT GT_CDHDR INTO GF_CDHDR.
+
+IF LF_CDHDR_HIKAKU-OBJECTID = GF_CDHDR-OBJECTID.
+
+*--- 更新日時による使用レコードの選別
+* 前レコード更新日が新しい場合
+IF LF_CDHDR_HIKAKU-UDATE > GF_CDHDR-UDATE.
+DELETE GT_CDHDR WHERE OBJECTID = GF_CDHDR-OBJECTID
+AND UDATE    = GF_CDHDR-UDATE
+AND UTIME    = GF_CDHDR-UTIME.
+CONTINUE.
+* 現行レコードが新しい場合
+ELSEIF LF_CDHDR_HIKAKU-UDATE > GF_CDHDR-UDATE.
+DELETE GT_CDHDR WHERE OBJECTID = LF_CDHDR_HIKAKU-OBJECTID
+AND UDATE    = LF_CDHDR_HIKAKU-UDATE
+AND UTIME    = LF_CDHDR_HIKAKU-UTIME.
+
+LF_CDHDR_HIKAKU-OBJECTID   = GF_CDHDR-OBJECTID.
+LF_CDHDR_HIKAKU-UDATE      = GF_CDHDR-UDATE.
+LF_CDHDR_HIKAKU-UTIME      = GF_CDHDR-UTIME.
+
+CONTINUE.
+* 更新日が同じで前レコードの更新時間が新しい場合
+ELSEIF LF_CDHDR_HIKAKU-UDATE = GF_CDHDR-UDATE.
+IF LF_CDHDR_HIKAKU-UTIME > GF_CDHDR-UTIME.
+DELETE GT_CDHDR WHERE OBJECTID = GF_CDHDR-OBJECTID
+AND UDATE    = GF_CDHDR-UDATE
+AND UTIME    = GF_CDHDR-UTIME.
+CONTINUE.
+* 更新日が同じで現行レコードの更新時間が新しい場合
+ELSEIF LF_CDHDR_HIKAKU-UTIME < GF_CDHDR-UTIME.
+DELETE GT_CDHDR WHERE OBJECTID = LF_CDHDR_HIKAKU-OBJECTID
+AND UDATE    = LF_CDHDR_HIKAKU-UDATE
+AND UTIME    = LF_CDHDR_HIKAKU-UTIME.
+
+LF_CDHDR_HIKAKU-OBJECTID   = GF_CDHDR-OBJECTID.
+LF_CDHDR_HIKAKU-UDATE      = GF_CDHDR-UDATE.
+LF_CDHDR_HIKAKU-UTIME      = GF_CDHDR-UTIME.
+
+CONTINUE.
+ENDIF.
+ENDIF.
+
+ENDIF.
+
+* 次レコード比較用項目
+LF_CDHDR_HIKAKU-OBJECTID   = GF_CDHDR-OBJECTID.
+LF_CDHDR_HIKAKU-UDATE      = GF_CDHDR-UDATE.
+LF_CDHDR_HIKAKU-UTIME      = GF_CDHDR-UTIME.
+
+ENDLOOP.
+
+ENDFORM.                    " frm_check_objectid
+*&-------------------------------------------------------------------*
+*&      Form  frm_get_record1_konp
+*&-------------------------------------------------------------------*
+*       ＫＯＮＰ情報の取得(一件のみ)
+*--------------------------------------------------------------------*
+FORM frm_get_record1_konp.
+*---APPEND START PSD T.SAITOH 2002/05/20 ---------------------------*
+CLEAR :GTW_KONP.
+*---APPEND END   PSD T.SAITOH 2002/05/20 ---------------------------*
+
+*---MODIFY START PSD T.SAITOH 2002/05/20 ---------------------------*
+*  SELECT SINGLE *  "KAPPL KBETR KONWA KPEIN LOEVM_KO
+SELECT *  "KAPPL KBETR KONWA KPEIN LOEVM_KO
+FROM KONP
+*    INTO CORRESPONDING FIELDS OF GF_KONP
+INTO CORRESPONDING FIELDS OF TABLE GTW_KONP
+WHERE KNUMH = GF_CDHDR-OBJECTID
+AND   KOPOS = '01'
+AND   KAPPL = 'V'
+*    AND   KSCHL = 'ZPR0'.
+AND   KSCHL IN ('ZPR0','ZPR1','ZPR2').
+*---MODIFY END   PSD T.SAITOH 2002/05/20 ---------------------------*
+
+ENDFORM.                    " frm_get_record1_konp
+*&-------------------------------------------------------------------*
+*&      Form  frm_get_record1_a901
+*&-------------------------------------------------------------------*
+*       Ａ９０１情報の取得(複数あり)
+*--------------------------------------------------------------------*
+FORM frm_get_record1_a901.
+
+SELECT *
+FROM A901
+INTO CORRESPONDING FIELDS OF TABLE GT_A901
+WHERE KAPPL   = GF_KONP-KAPPL
+*---MODIFY START PSD T.SAITOH 2002/05/20 ---------------------------*
+*    AND   KSCHL   = 'ZPR0'
+AND   KSCHL IN ('ZPR0','ZPR1','ZPR2')
+*---MODIFY END   PSD T.SAITOH 2002/05/20 ---------------------------*
+*---MODIFY START PSD T.SAITOH 2002/08/05 ---------------------------*
+*    AND   VKORGAU = '1000'
+*    AND   VTWEG   = '10'
+AND   VKORGAU = PR_VKORG
+AND   VTWEG   = PR_VTWEG
+AND   SPART   = PR_SPART
+*---MODIFY END   PSD T.SAITOH 2002/08/05 ---------------------------*
+**2002.07.04 >>>>
+AND   KUNNR IN R_KU
+**2002.07.04 <<<<
+AND   KNUMH   =  GF_KONP-KNUMH
+AND   DATBI   >= P_UDATE.
+
+ENDFORM.                    " frm_get_record1_a901
+*&-------------------------------------------------------------------*
+*&      Form  frm_get_record1_knmt
+*&-------------------------------------------------------------------*
+*       ＫＮＭＴ情報の取得
+*--------------------------------------------------------------------*
+FORM frm_get_record1_knmt.
+
+SELECT *  "MATNR
+FROM KNMT
+INTO CORRESPONDING FIELDS OF GF_KNMT
+*---MODIFY START PSD T.SAITOH 2002/08/05 ---------------------------*
+*    WHERE VKORG = '1000'
+*    AND   VTWEG = '10'
+WHERE VKORG = PR_VKORG
+AND   VTWEG = PR_VTWEG
+*---MODIFY END   PSD T.SAITOH 2002/08/05 ---------------------------*
+AND   KUNNR = GF_A901-KUNNR
+AND   KDMAT = GF_A901-ZZZKDMAT.
+
+EXIT.
+
+ENDSELECT.
+ENDFORM.                    " frm_get_record1_knmt
+*&-------------------------------------------------------------------*
+*&      Form  frm_set_record1
+*&-------------------------------------------------------------------*
+*       出力ファイル作成
+*--------------------------------------------------------------------*
+FORM frm_set_record1.
+
+DATA: LF_RECORD1 TYPE TYP_RECORD1.
+
+* レコード項目設定
+GF_RECORD1-KUNNR    = GF_KNMT-KUNNR.                "得意先コード
+GF_RECORD1-KDMAT    = GF_KNMT-KDMAT.            "得意先品目コード
+GF_RECORD1-DATBI    = GF_A901-DATBI.        "有効期限(有効終了日)
+GF_RECORD1-MATNR    = GF_KNMT-MATNR.                  "品目コード
+GF_RECORD1-KBETR    = GF_KONP-KBETR.                        "単価
+GF_RECORD1-LOEVM_KO = GF_KONP-LOEVM_KO.               "削除フラグ
+GF_RECORD1-KONWA    = GF_KONP-KONWA.                    "価格単位
+GF_RECORD1-UDATE    = GF_CDHDR-UDATE.                   "更新日
+GF_RECORD1-UTIME    = GF_CDHDR-UTIME.                   "更新時間
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+GF_RECORD1-KPEIN    = GF_KONP-KPEIN.            "価格条件数量単位
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+* 2002/02/26 PSD K.IGARASHI ADD ↓
+* 重複チェック
+READ TABLE GT_RECORD1 WITH KEY
+KUNNR = GF_RECORD1-KUNNR
+KDMAT = GF_RECORD1-KDMAT
+DATBI = GF_RECORD1-DATBI
+KSTBM = GF_RECORD1-KSTBM
+INTO LF_RECORD1.
+
+CASE SY-SUBRC.
+WHEN 0.
+*--- 現行の更新日が前行より新しい場合
+IF LF_RECORD1-UDATE < GF_RECORD1-UDATE.
+APPEND GF_RECORD1 TO GT_RECORD1.
+DELETE TABLE GT_RECORD1 FROM LF_RECORD1.
+*--- 前行の更新日が現行より新しい場合
+ELSEIF LF_RECORD1-UDATE > GF_RECORD1-UDATE.
+*--- 前行と現行の更新日が同じ場合→更新時間で比較
+ELSEIF LF_RECORD1-UDATE = GF_RECORD1-UDATE.
+*--- 現行が前行より新しい場合
+IF LF_RECORD1-UTIME < GF_RECORD1-UTIME.
+APPEND GF_RECORD1 TO GT_RECORD1.
+DELETE TABLE GT_RECORD1 FROM LF_RECORD1.
+*--- 前行が現行より新しい場合
+ELSEIF LF_RECORD1-UTIME > GF_RECORD1-UTIME.
+ENDIF.
+ENDIF.
+WHEN 4.
+APPEND GF_RECORD1 TO GT_RECORD1.
+ENDCASE.
+* 2002/02/26 PSD K.IGARASHI ADD ↑
+
+* 2002/02/26 PSD K.IGARASHI DEL ↓
+*  APPEND GF_RECODE1 TO GT_RECODE1.
+*  CLEAR: GF_RECODE1,
+*       : GF_A901,
+*       : GF_KNMT.
+* 2002/02/26 PSD K.IGARASHI DEL ↑
+
+ENDFORM.                    " frm_set_record1
+*&-------------------------------------------------------------------*
+*&      Form  frm_make_record2
+*&-------------------------------------------------------------------*
+*       得意先品目新規登録
+*--------------------------------------------------------------------*
+FORM frm_make_record2.
+
+* 初期化処理
+CLEAR:   GF_KONP,
+GF_A901,
+GF_KNMT.
+REFRESH: GT_KONP,
+GT_A901,
+GT_KNMT.
+
+
+* ＫＮＭＴ(得意先品目)情報を全件取得
+PERFORM frm_get_record2_knmt.
+
+DESCRIBE TABLE GT_KNMT LINES G_CNT_KNMT.
+
+LOOP AT GT_KNMT INTO GF_KNMT.
+
+CLEAR: GF_RECORD2,                       "初期化処理
+GF_A901,
+GF_KONP.
+
+* 2002/02/26 PSD K.IGARASHI MOD ↓
+*    PERFORM frm_get_recode2_a901.      "Ａ９０１情報取得
+*
+*    IF SY-SUBRC = 0.
+*    ELSEIF SY-SUBRC = 4.
+*    ELSEIF SY-SUBRC = 8.
+*      MESSAGE A603 WITH SY-REPID CNS_TBL_003 SY-SUBRC.
+*    ENDIF.
+*
+*    PERFORM frm_get_recode2_konp.      "ＫＯＮＰ情報取得
+*
+*    IF SY-SUBRC = 0.
+*    ELSEIF SY-SUBRC = 4.
+*    ELSEIF SY-SUBRC = 8.
+*      MESSAGE A603 WITH SY-REPID CNS_TBL_002 SY-SUBRC.
+*    ENDIF.
+*
+** 得意先品目新規登録レコードの設定
+*    PERFORM frm_set_recode2.
+
+*--- 得意先品目情報取得
+PERFORM frm_get_record2_info.
+* 2002/02/26 PSD K.IGARASHI MOD ↑
+
+ENDLOOP.
+
+ENDFORM.                    " frm_make_record2
+*&-------------------------------------------------------------------*
+*&      Form  frm_get_record2_knmt
+*&-------------------------------------------------------------------*
+*       得意先品目情報の取得(全件)
+*--------------------------------------------------------------------*
+FORM frm_get_record2_knmt.
+
+* ＫＮＭＴ内部テーブル作成
+SELECT * FROM KNMT
+INTO CORRESPONDING FIELDS OF TABLE GT_KNMT
+*---MODIFY START PSD T.SAITOH 2002/08/05 ---------------------------*
+*                  WHERE VKORG = '1000'
+*                  AND   VTWEG = '10'
+WHERE VKORG = PR_VKORG
+AND   VTWEG = PR_VTWEG
+*---MODIFY END   PSD T.SAITOH 2002/08/05 ---------------------------*
+***2002.07.04 >>>>
+AND   KUNNR IN R_KU
+**2002.07.04 <<<<
+AND   ERDAT >= P_UDATE.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+ELSEIF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_004 SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " frm_get_record2_knmt
+*&-------------------------------------------------------------------*
+*&      Form  frm_get_record2_info
+*&-------------------------------------------------------------------*
+*       得意先品目情報の取得
+*--------------------------------------------------------------------*
+FORM frm_get_record2_info.
+
+* Ａ９０１情報取得
+*2002/08/03 MOD START
+* SELECT * FROM A901
+*   INTO CORRESPONDING FIELDS OF GF_A901
+REFRESH  GF_A901.
+SELECT * FROM A901
+INTO CORRESPONDING FIELDS OF TABLE GF_A901
+*2002/08/03 MOD END
+WHERE KAPPL    = 'V'
+*---MODIFY START PSD T.SAITOH 2002/05/20 ---------------------------*
+*    AND   KSCHL    = 'ZPR0'
+AND   KSCHL IN ('ZPR0','ZPR1','ZPR2')
+*---MODIFY END   PSD T.SAITOH 2002/05/20 ---------------------------*
+*---MODIFY START PSD T.SAITOH 2002/08/05 ---------------------------*
+*    AND   VKORGAU  = '1000'
+*    AND   VTWEG    = '10'
+AND   VKORGAU = PR_VKORG
+AND   VTWEG   = PR_VTWEG
+AND   SPART   = PR_SPART
+*---MODIFY END   PSD T.SAITOH 2002/08/05 ---------------------------*
+AND   KUNNR    = GF_KNMT-KUNNR
+AND   ZZZKDMAT = GF_KNMT-KDMAT.
+*2002/08/03 MOD START
+LOOP AT GF_A901.
+*2002/08/03 MOD END
+* 2002/02/26 PSD K.IGARASHI ADD ↓
+*--- 条件明細情報取得(Ａ９０１に該当するデータが存在した場合)
+PERFORM frm_get_record2_konp.      "ＫＯＮＰ情報取得
+*--- 得意先品目新規登録レコードの設定
+PERFORM frm_set_record2.
+*2002/08/03 MOD START
+* ENDSELECT.
+ENDLOOP.
+*2002/08/03 MOD END
+* 2002/02/26 PSD K.IGARASHI ADD ↑
+
+* ↓ APPEND 2002.03.07 PSD M.ARAI 処理対象データ設定不具合対応
+IF SY-SUBRC <> 0.
+PERFORM frm_set_record2.
+
+ENDIF.
+* ↑
+
+ENDFORM.                    " frm_get_record2_info
+*&-------------------------------------------------------------------*
+*&      Form  frm_get_record2_konp
+*&-------------------------------------------------------------------*
+*       条件:明細情報の取得(ＫＯＮＰ)
+*--------------------------------------------------------------------*
+FORM frm_get_record2_konp.
+
+*---APPEND START PSD T.SAITOH 2002/05/20 ---------------------------*
+CLEAR:GTW_KONP,GF_KONP.
+*---APPEND END   PSD T.SAITOH 2002/05/20 ---------------------------*
+
+*---MODIFY START PSD T.SAITOH 2002/05/20 ---------------------------*
+*  SELECT SINGLE KBETR KONWA KPEIN LOEVM_KO
+SELECT        KBETR KONWA KPEIN LOEVM_KO
+*---MODIFY END   PSD T.SAITOH 2002/05/20 ---------------------------*
+FROM KONP
+*---MODIFY START PSD T.SAITOH 2002/05/20 ---------------------------*
+*    INTO CORRESPONDING FIELDS OF GF_KONP
+INTO CORRESPONDING FIELDS OF TABLE GTW_KONP
+*---MODIFY END   PSD T.SAITOH 2002/05/20 ---------------------------*
+WHERE KNUMH = GF_A901-KNUMH
+AND   KOPOS = '01'
+AND   KAPPL = 'V'
+*---MODIFY START PSD T.SAITOH 2002/05/20 ---------------------------*
+*    AND   KSCHL = 'ZPR0'.
+AND   KSCHL IN ('ZPR0','ZPR1','ZPR2').
+*---MODIFY END   PSD T.SAITOH 2002/05/20 ---------------------------*
+
+IF SY-SUBRC = 8.
+MESSAGE A603 WITH SY-REPID CNS_TBL_002 SY-SUBRC.
+ENDIF.
+
+*---APPEND START PSD T.SAITOH 2002/05/20 ---------------------------*
+LOOP AT GTW_KONP INTO GF_KONP.
+EXIT.
+ENDLOOP.
+*---APPEND END   PSD T.SAITOH 2002/05/20 ---------------------------*
+
+ENDFORM.                    " frm_get_record2_konp
+*&-------------------------------------------------------------------*
+*&      Form  frm_set_record2
+*&-------------------------------------------------------------------*
+*       得意先品目情報新規登録レコードの設定
+*--------------------------------------------------------------------*
+FORM frm_set_record2.
+
+DATA: LF_RECORD2 LIKE GF_RECORD2.
+
+* 有効期限未決定の場合
+IF GF_A901-DATBI = '99999999'.
+GF_RECORD2-KUNNR    = GF_KNMT-KUNNR.                "得意先コード
+GF_RECORD2-KDMAT    = GF_KNMT-KDMAT.            "得意先品目コード
+GF_RECORD2-DATBI    = GF_A901-DATBI.        "有効期限(有効終了日)
+GF_RECORD2-MATNR    = GF_KNMT-MATNR.                  "品目コード
+GF_RECORD2-KBETR    = GF_KONP-KBETR.                        "単価
+GF_RECORD2-LOEVM_KO = GF_KONP-LOEVM_KO.               "削除フラグ
+GF_RECORD2-KONWA    = GF_KONP-KONWA.                    "価格単位
+GF_RECORD2-DATAB    = GF_A901-DATAB.        "有効期限(有効開始日)
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+GF_RECORD2-KPEIN    = GF_KONP-KPEIN.            "価格条件数量単位
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+* 2002/02/26 PSD K.IGARASHI MOD ↓
+*    APPEND GF_RECODE2 TO GT_RECODE2.
+
+* 重複チェック→APPEND
+PERFORM frm_check_record2.
+* 2002/02/26 PSD K.IGARASHI MOD ↑
+
+* 有効期限決定済みの場合→有効期限が未来のレコードが対象
+ELSEIF GF_A901-DATBI <> '00000000'.
+IF GF_A901-DATBI > SY-DATUM.
+GF_RECORD2-KUNNR    = GF_KNMT-KUNNR.                "得意先コード
+GF_RECORD2-KDMAT    = GF_KNMT-KDMAT.            "得意先品目コード
+GF_RECORD2-DATBI    = GF_A901-DATBI.        "有効期限(有効終了日)
+GF_RECORD2-MATNR    = GF_KNMT-MATNR.                  "品目コード
+GF_RECORD2-KBETR    = GF_KONP-KBETR.
+"単価
+GF_RECORD2-LOEVM_KO = GF_KONP-LOEVM_KO.               "削除フラグ
+GF_RECORD2-KONWA    = GF_KONP-KONWA.                    "価格単位
+GF_RECORD2-DATAB    = GF_A901-DATAB.        "有効期限(有効開始日)
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+GF_RECORD2-KPEIN    = GF_KONP-KPEIN.            "価格条件数量単位
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+* 2002/02/26 PSD K.IGARASHI MOD ↓
+*    APPEND GF_RECODE2 TO GT_RECODE2.
+
+* 重複チェック→APPEND
+PERFORM frm_check_record2.
+* 2002/02/26 PSD K.IGARASHI MOD ↑
+
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " frm_set_record2
+*&-------------------------------------------------------------------*
+*&      Form  frm_makefile_cdhdr
+*&-------------------------------------------------------------------*
+*       更新・変更データファイル作成
+*--------------------------------------------------------------------*
+FORM frm_makefile_cdhdr.
+
+LOOP AT GT_RECORD1 INTO GF_RECORD1.
+
+PERFORM frm_make_ofile_data_record1.
+
+ENDLOOP.
+
+ENDFORM.                    " frm_makefile_cdhdr
+*&-------------------------------------------------------------------*
+*&      Form  frm_makefile_knmt
+*&-------------------------------------------------------------------*
+*       新規登録データファイル作成
+*--------------------------------------------------------------------*
+FORM frm_makefile_knmt.
+
+LOOP AT GT_RECORD2 INTO GF_RECORD2.
+
+PERFORM frm_make_ofile_data_RECORD2.
+
+ENDLOOP.
+
+ENDFORM.                    " frm_makefile_knmt
+*&-------------------------------------------------------------------*
+*&      Form  frm_make_downloadfile
+*&-------------------------------------------------------------------*
+*       ダウンロード用ファイルの作成
+*--------------------------------------------------------------------*
+FORM frm_make_downloadfile.
+
+SORT GT_RECORD1 ASCENDING BY KUNNR KDMAT DATBI KSTBM .
+SORT GT_RECORD2 ASCENDING BY KUNNR KDMAT DATBI KSTBM .
+
+* 変更履歴TBLと得意先品目TBLのﾃﾞｰﾀが合致する場合→得意先品目ﾃﾞｰﾀ登録
+LOOP AT GT_RECORD1 INTO GF_RECORD1.
+READ TABLE GT_RECORD2 WITH KEY KUNNR    = GF_RECORD1-KUNNR
+KDMAT    = GF_RECORD1-KDMAT
+DATBI    = GF_RECORD1-DATBI
+KSTBM    = GF_RECORD1-KSTBM
+MATNR    = GF_RECORD1-MATNR
+* 2002/02/26 PSD K.IGARASHI DEL ↓
+*                                   LOEVM_KO = GF_RECODE1-LOEVM_KO
+* 2002/02/26 PSD K.IGARASHI DEL ↑
+KBETR    = GF_RECORD1-KBETR
+INTO GF_RECORD2.
+*--- 合致するレコードがある場合
+IF SY-SUBRC = 0.
+* 2002/02/26 PSD K.IGARASHI MOD ↓
+*        PERFORM frm_make_ofile_data_RECORD2.
+PERFORM frm_make_ofile_data_record1.
+* 2002/02/26 PSD K.IGARASHI MOD ↑
+DELETE TABLE GT_RECORD2 FROM GF_RECORD2. "登録済みレコードの削除
+*--- 合致するレコードが無い場合
+ELSEIF SY-SUBRC = 4.
+PERFORM frm_make_ofile_data_record1.
+ENDIF.
+
+ENDLOOP.
+
+* 新規登録レコードに存在するデータの登録
+IF NOT GT_RECORD2 IS INITIAL.
+PERFORM frm_makefile_knmt.
+ENDIF.
+
+ENDFORM.                    " frm_make_downloadfile
+*&-------------------------------------------------------------------*
+*&      Form  frm_edit_filedata
+*&-------------------------------------------------------------------*
+*       ＣＳＶファイル形式へのデータ編集
+*--------------------------------------------------------------------*
+FORM frm_edit_filedata.
+
+
+* ＣＳＶファイル形式への編集
+CONCATENATE '"'  GF_EDIT_OFILE-KUNNR    '"'  ','
+'"'  GF_EDIT_OFILE-KDMAT    '"'  ','
+'"'  GF_EDIT_OFILE-DATBI    '"'  ','
+'"'  GF_EDIT_OFILE-KSTBM    '"'  ','
+'"'  GF_EDIT_OFILE-MATNR    '"'  ','
+'"'  GF_EDIT_OFILE-KBETR    '"'  ','
+'"'  GF_EDIT_OFILE-LOEVM_KO '"'  ','
+'"'  GF_EDIT_OFILE-DATUM    '"'  ','
+'"'  GF_EDIT_OFILE-UZEIT    '"'
+INTO GF_OFILE.
+
+ENDFORM.                          " frm_edit_filedata
+*&-------------------------------------------------------------------*
+*&      Form  frm_file_download
+*&-------------------------------------------------------------------*
+*       ＥＤＩサーバへのダウンロード処理
+*--------------------------------------------------------------------*
+FORM frm_file_download.
+
+PERFORM frm_download.                       "ファイルダウンロード
+* Del ES-UP 2012/12/03 -->
+** Add 2002.07.05 Hata >>>
+*  CLOSE DATASET P_OFILE.          " ファイルクローズ
+** Add 2002.07.05 Hata <<<
+* Del ES-UP 2012/12/03 <--
+PERFORM frm_sxpg_call_system.               "汎用モジュールの起動
+
+ENDFORM.                    " frm_file_download
+*&-------------------------------------------------------------------*
+*&      Form  frm_download
+*&-------------------------------------------------------------------*
+*       ファイルダウンロード
+*--------------------------------------------------------------------*
+FORM frm_download.
+
+* Add ES-UP 2012/10/22 -->
+data: l_conv type ref to zcl_conv_to_sjis,
+l_errfile type string,
+l_message type string,
+l_openflg type abap_bool.
+create object l_conv.
+l_errfile = l_conv->get_error_filename( filename = P_OFILE
+foldnum  = 0 ).
+if l_errfile is initial.
+message e001(z2).
+endif.
+
+OPEN DATASET P_OFILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE l_conv->codepage
+IGNORING CONVERSION ERRORS.
+IF SY-SUBRC = 8.         "ファイルオープンエラー
+MESSAGE I209.
+CLOSE DATASET P_OFILE.      " ファイルクローズ
+STOP.
+ENDIF.
+
+l_openflg = abap_false.
+* Add ES-UP 2012/10/22 <--
+
+* データ出力
+LOOP AT GT_OFILE INTO GF_OFILE.
+* Mod ES-UP 2012/10/22 -->
+if l_conv->convert_check( GF_OFILE ) = abap_true.
+* Mod ES-UP 2012/10/22 <--
+TRANSFER GF_OFILE TO P_OFILE.
+G_COUNT = G_COUNT + 1.
+* Mod ES-UP 2012/10/22 -->
+else.
+if l_openflg = abap_false.
+l_openflg = abap_true.
+open dataset l_errfile for output
+in legacy text mode code page l_conv->codepage
+message l_message
+ignoring conversion errors.
+if sy-subrc <> 0.
+message l_message type 'E'.
+endif.
+endif.
+transfer GF_OFILE to l_errfile.
+endif.
+* Mod ES-UP 2012/10/22 <--
+ENDLOOP.
+* Mod ES-UP 2012/10/22 -->
+CLOSE DATASET P_OFILE.          " ファイルクローズ
+
+if l_openflg = abap_true.
+close dataset l_errfile.
+message s002(z2).
+endif.
+* Mod ES-UP 2012/10/22 <--
+ENDFORM.                    " frm_download
+*&-------------------------------------------------------------------*
+*&      Form  frm_sxpg_call_system
+*&-------------------------------------------------------------------*
+*       汎用モジュール ＳＸＰＧ_ＣＡＬＬ_ＳＹＳＴＥＭ の起動
+*--------------------------------------------------------------------*
+FORM frm_sxpg_call_system.
+G_COMMANDNAME = 'ZEDI_OUTBOUNDM'.
+CALL FUNCTION 'SXPG_CALL_SYSTEM'
+EXPORTING
+COMMANDNAME                      = G_COMMANDNAME
+*       ADDITIONAL_PARAMETERS            = ' '
+*  IMPORTING
+*      STATUS                           = G_STATUS
+*       EXITCODE                         =
+TABLES
+EXEC_PROTOCOL                    = GT_PROTOCOL
+EXCEPTIONS
+NO_PERMISSION                    = 1
+COMMAND_NOT_FOUND                = 2
+PARAMETERS_TOO_LONG              = 3
+SECURITY_RISK                    = 4
+WRONG_CHECK_CALL_INTERFACE       = 5
+PROGRAM_START_ERROR              = 6
+PROGRAM_TERMINATION_ERROR        = 7
+X_ERROR                          = 8
+PARAMETER_EXPECTED               = 9
+TOO_MANY_PARAMETERS              = 10
+ILLEGAL_COMMAND                  = 11
+OTHERS                           = 12.
+
+IF SY-SUBRC = 0.
+MESSAGE I200 WITH G_COUNT.
+ELSEIF SY-SUBRC <> 0.
+MESSAGE I400 WITH text-001.
+STOP.
+ENDIF.
+
+ENDFORM.                    " frm_sxpg_call_system
+*&-------------------------------------------------------------------*
+*&      Form  frm_change_kbetr
+*&-------------------------------------------------------------------*
+*       スプール無し金額への変更
+*--------------------------------------------------------------------*
+*  --> P_KPEIN
+*--------------------------------------------------------------------*
+FORM frm_change_kbetr USING P_KPEIN.
+
+*---MODIFY START DMC H.NOMOTO 2005/06/22 ---------------------------*
+*---MODIFY START PSD T.SAITOH 2002/06/26 ---------------------------*
+*DATA: KBETR TYPE P,                 "変換済み金額編集用項目
+*DATA: KBETR(9) TYPE P decimals 2,    "変換済み金額編集用項目
+DATA: KBETR(9) TYPE P DECIMALS 5,    "変換済み金額編集用項目
+*---MODIFY END   PSD T.SAITOH 2002/06/26---------------------------*
+*---MODIFY END   DMC H.NOMOTO 2005/06/22 ---------------------------*
+
+L_KBETR(12) TYPE C,           "変換済み金額格納項目
+L_SEISU(9)  TYPE N,           "金額整数(CHAR型)
+L_SHOSU1    TYPE KONP-KBETR,  "金額少数
+L_SHOSU2(3) TYPE N.           "金額少数(CHAR型)
+
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY          = G_KONWA
+SAP_AMOUNT        = G_KBETR
+IMPORTING
+IDOC_AMOUNT       = L_KBETR.
+
+KBETR = L_KBETR.
+*---DELETE START PSD T.SAITOH 2002/04/24 ---------------------------*
+* 意味の無い無駄な処理のため削除
+*      L_SEISU = TRUNC( KBETR ).
+*      L_SHOSU1 = FRAC( KBETR ).
+*      L_SHOSU2 = L_SHOSU1 * 1000.
+*      CONCATENATE L_SEISU L_SHOSU2 INTO G_KINGAKU.
+*---DELETE END   PSD T.SAITOH 2002/04/24 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/04/24 ---------------------------*
+* 結局必要なくなった→06/14：やはり必要になった
+*---MODIFY START PSD T.SAITOH 2002/06/14 ---------------------------*
+*      IF P_KPEIN <> 0.
+*        KBETR = KBETR * P_KPEIN.
+*      ELSE.
+*        KBETR = KBETR * 1."つまりは何もしない
+*      ENDIF.
+IF P_KPEIN <> 0.
+KBETR = KBETR / P_KPEIN.
+ELSE.
+KBETR = KBETR / 1."つまりは何もしない
+ENDIF.
+*---MODIFY END   PSD T.SAITOH 2002/06/14 ---------------------------*
+
+G_KINGAKU = KBETR.
+*---APPEND END   PSD T.SAITOH 2002/04/24 ---------------------------*
+
+ENDFORM.                    " frm_change_kbetr
+*&-------------------------------------------------------------------*
+*&      Form  frm_make_ofile_data_record1
+*&-------------------------------------------------------------------*
+*       レコード１のデータを用いて出力ファイルを作成する
+*--------------------------------------------------------------------*
+FORM frm_make_ofile_data_record1.
+DATA : L_KSTBM TYPE P .
+*--- スケール無し金額の設定
+G_KONWA = GF_RECORD1-KONWA.
+G_KBETR = GF_RECORD1-KBETR.
+L_KSTBM = GF_RECORD1-KSTBM.
+
+
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+*      PERFORM frm_change_kbetr.
+PERFORM frm_change_kbetr USING GF_RECORD1-KPEIN.
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+*--- ファイル項目設定
+GF_EDIT_OFILE-KUNNR    = GF_RECORD1-KUNNR.          "得意先コード
+GF_EDIT_OFILE-KDMAT    = GF_RECORD1-KDMAT.      "得意先品目コード
+GF_EDIT_OFILE-DATBI    = GF_RECORD1-DATBI.  "有効期間(有効終了日)
+GF_EDIT_OFILE-MATNR    = GF_RECORD1-MATNR.            "品目コード
+GF_EDIT_OFILE-KSTBM    = L_KSTBM.            "スケール
+GF_EDIT_OFILE-KBETR    = G_KINGAKU.
+"単価
+GF_EDIT_OFILE-LOEVM_KO = GF_RECORD1-LOEVM_KO.         "削除フラグ
+GF_EDIT_OFILE-DATUM    = SY-DATUM.
+"送信日
+GF_EDIT_OFILE-UZEIT    = SY-UZEIT.                      "送信時間
+
+PERFORM frm_edit_filedata.            "ＣＳＶファイル形式への編集
+
+APPEND GF_OFILE TO GT_OFILE.                "出力ファイルへの登録
+CLEAR: GF_EDIT_OFILE,
+GF_OFILE,
+G_KINGAKU.
+
+ENDFORM.                    " frm_make_ofile_data_record1
+*&-------------------------------------------------------------------*
+*&      Form  frm_make_ofile_data_record2
+*&-------------------------------------------------------------------*
+*       レコード２のデータを用いて出力ファイルを作成する
+*--------------------------------------------------------------------*
+FORM frm_make_ofile_data_record2.
+DATA : L_KSTBM TYPE P .
+*--- スケール無し金額の設定
+G_KONWA = GF_RECORD2-KONWA.
+G_KBETR = GF_RECORD2-KBETR.
+
+L_KSTBM = GF_RECORD2-KSTBM.
+
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+*      PERFORM frm_change_kbetr.
+PERFORM frm_change_kbetr USING GF_RECORD2-KPEIN.
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+*--- ファイル項目設定
+GF_EDIT_OFILE-KUNNR    = GF_RECORD2-KUNNR.          "得意先コード
+GF_EDIT_OFILE-KDMAT    = GF_RECORD2-KDMAT.      "得意先品目コード
+GF_EDIT_OFILE-DATBI    = GF_RECORD2-DATBI.  "有効期間(有効終了日)
+GF_EDIT_OFILE-MATNR    = GF_RECORD2-MATNR.            "品目コード
+GF_EDIT_OFILE-KSTBM    = L_KSTBM.            "スケール
+GF_EDIT_OFILE-KBETR    = G_KINGAKU.
+"単価
+GF_EDIT_OFILE-LOEVM_KO = GF_RECORD2-LOEVM_KO.         "削除フラグ
+GF_EDIT_OFILE-DATUM    = SY-DATUM.
+"送信日
+GF_EDIT_OFILE-UZEIT    = SY-UZEIT.                      "送信時間
+
+PERFORM frm_edit_filedata.            "ＣＳＶファイル形式への編集
+
+APPEND GF_OFILE TO GT_OFILE.                "出力ファイルへの登録
+CLEAR: GF_EDIT_OFILE,
+GF_OFILE,
+G_KINGAKU.
+
+ENDFORM.                    " frm_make_ofile_data_record2
+
+* 2002/02/26 PSD K.IGARASHI ADD ↓
+*&-------------------------------------------------------------------*
+*&      Form  frm_check_record2
+*&-------------------------------------------------------------------*
+*       レコード２の重複チェック
+*--------------------------------------------------------------------*
+* チェック内容：得意先コード・得意先品目コード・有効期限が同じﾃﾞｰﾀが複数
+*              場合、削除フラグが立っているデータを対象とする。
+*             いずれも削除フラグが立っている場合、未来のデータは対象外・
+*              る。
+*              上記のチェックで選別できない場合は全て対象とする。
+*--------------------------------------------------------------------*
+FORM frm_check_record2.
+
+DATA: LF_RECORD2 LIKE GF_RECORD2.  "比較用構造(前行)
+
+READ TABLE GT_RECORD2 WITH KEY
+KUNNR = GF_RECORD2-KUNNR
+KDMAT = GF_RECORD2-KDMAT
+DATBI = GF_RECORD2-DATBI
+KSTBM = GF_RECORD2-KSTBM
+INTO LF_RECORD2.
+
+CASE SY-SUBRC.
+WHEN 0.
+* 前行と現行行の単価が異なる場合(削除フラグ)
+IF LF_RECORD2-KBETR <> GF_RECORD2-KBETR.
+
+*--- 現行行にのみ削除フラグが立っている場合
+IF ( LF_RECORD2-LOEVM_KO <> 'X' AND
+GF_RECORD2-LOEVM_KO = 'X' ).
+APPEND GF_RECORD2 TO GT_RECORD2.
+DELETE TABLE GT_RECORD2 FROM LF_RECORD2.
+
+*--- 前行にのみ削除フラグが立っている場合
+ELSEIF ( LF_RECORD2-LOEVM_KO = 'X' AND
+GF_RECORD2-LOEVM_KO <> 'X' ).
+
+*--- どちらにも立っている、または立っていない場合
+ELSE.
+*------ 現在のデータが対象(有効開始日がシステム日付よりも小さい)
+IF ( LF_RECORD2-DATAB =< SY-DATUM AND       "前行が対象
+GF_RECORD2-DATAB > SY-DATUM ).
+
+ELSEIF ( LF_RECORD2-DATAB > SY-DATUM AND    "現行が対象
+GF_RECORD2-DATAB =< SY-DATUM ).
+APPEND GF_RECORD2 TO GT_RECORD2.
+DELETE TABLE GT_RECORD2 FROM LF_RECORD2.
+
+ELSEIF ( LF_RECORD2-DATAB =< SY-DATUM AND   "両方対象/非対称
+GF_RECORD2-DATAB =< SY-DATUM ) OR
+( LF_RECORD2-DATAB > SY-DATUM AND
+GF_RECORD2-DATAB > SY-DATUM ).
+
+PERFORM frm_comparison_sy_datum        "システム日付との差
+using LF_RECORD2-DATAB.
+
+IF G_ABS_LDATE > G_ABS_GDATE.        "現行が近い場合
+APPEND GF_RECORD2 TO GT_RECORD2.
+DELETE TABLE GT_RECORD2 FROM LF_RECORD2.
+ELSEIF G_ABS_LDATE < G_ABS_GDATE.    "前行が近い場合
+ENDIF.
+
+ENDIF.
+ENDIF.
+
+ENDIF.
+
+WHEN 4.
+APPEND GF_RECORD2 TO GT_RECORD2.
+
+ENDCASE.
+
+ENDFORM.                    " frm_check_record2
+* 2002/02/26 PSD K.IGARASHI ADD ↑
+*&---------------------------------------------------------------------*
+*&      Form  frm_comparison_sy_datum
+*&---------------------------------------------------------------------*
+*       システム日付との差計算
+*----------------------------------------------------------------------*
+FORM frm_comparison_sy_datum USING    P_LF_RECORD2_DATAB.
+
+* 日数差計算
+G_LDATE = P_LF_RECORD2_DATAB - SY-DATUM.
+G_GDATE = GF_RECORD2-DATAB - SY-DATUM.
+
+* 絶対値処理
+G_ABS_LDATE = ABS( G_LDATE ).
+G_ABS_GDATE = ABS( G_GDATE ).
+
+ENDFORM.                    " frm_comparison_sy_datum
+*&---------------------------------------------------------------------*
+*&      Form  FRM_1RECORD_FROM_KONP
+*&---------------------------------------------------------------------*
+*       KONP内部ＴＢＬから先頭１レコード取得する
+*----------------------------------------------------------------------*
+FORM FRM_1RECORD_FROM_KONP.
+*---APPEND START PSD T.SAITOH 2002/05/20 ---------------------------*
+CLEAR: GF_KONP.
+*---APPEND END   PSD T.SAITOH 2002/05/20 ---------------------------*
+LOOP AT GTW_KONP INTO GF_KONP.
+EXIT.
+ENDLOOP.
+ENDFORM.                    " FRM_1RECORD_FROM_KONP
+
+
+*&-------------------------------------------------------------------*
+*&      Form  frm_set_record1S
+*&-------------------------------------------------------------------*
+*       出力ファイル作成
+*--------------------------------------------------------------------*
+FORM frm_set_record1s .
+
+DATA: LF_RECORD1 TYPE TYP_RECORD1.
+
+Select KSTBM KBETR
+From KONM
+into (GF_KONP-KSTBM , GF_KONP-KBETR)
+Where KNUMH EQ GF_A901-KNUMH .
+
+* レコード項目設定
+GF_RECORD1-KUNNR    = GF_KNMT-KUNNR.                "得意先コード
+GF_RECORD1-KDMAT    = GF_KNMT-KDMAT.            "得意先品目コード
+GF_RECORD1-DATBI    = GF_A901-DATBI.        "有効期限(有効終了日)
+GF_RECORD1-MATNR    = GF_KNMT-MATNR.                  "品目コード
+GF_RECORD1-KBETR    = GF_KONP-KBETR.                        "単価
+GF_RECORD1-KSTBM    = GF_KONP-KSTBM.                    "スケール
+GF_RECORD1-LOEVM_KO = GF_KONP-LOEVM_KO.               "削除フラグ
+GF_RECORD1-KONWA    = GF_KONP-KONWA.                    "価格単位
+GF_RECORD1-UDATE    = GF_CDHDR-UDATE.                   "更新日
+GF_RECORD1-UTIME    = GF_CDHDR-UTIME.                   "更新時間
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+GF_RECORD1-KPEIN    = GF_KONP-KPEIN.            "価格条件数量単位
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+* 2002/02/26 PSD K.IGARASHI ADD ↓
+* 重複チェック
+READ TABLE GT_RECORD1 WITH KEY
+KUNNR = GF_RECORD1-KUNNR
+KDMAT = GF_RECORD1-KDMAT
+DATBI = GF_RECORD1-DATBI
+KSTBM = GF_RECORD1-KSTBM
+INTO LF_RECORD1.
+
+CASE SY-SUBRC.
+WHEN 0.
+*--- 現行の更新日が前行より新しい場合
+IF LF_RECORD1-UDATE < GF_RECORD1-UDATE.
+APPEND GF_RECORD1 TO GT_RECORD1.
+DELETE TABLE GT_RECORD1 FROM LF_RECORD1.
+*--- 前行の更新日が現行より新しい場合
+ELSEIF LF_RECORD1-UDATE > GF_RECORD1-UDATE.
+*--- 前行と現行の更新日が同じ場合→更新時間で比較
+ELSEIF LF_RECORD1-UDATE = GF_RECORD1-UDATE.
+*--- 現行が前行より新しい場合
+IF LF_RECORD1-UTIME < GF_RECORD1-UTIME.
+APPEND GF_RECORD1 TO GT_RECORD1.
+DELETE TABLE GT_RECORD1 FROM LF_RECORD1.
+*--- 前行が現行より新しい場合
+ELSEIF LF_RECORD1-UTIME > GF_RECORD1-UTIME.
+ENDIF.
+ENDIF.
+WHEN 4.
+APPEND GF_RECORD1 TO GT_RECORD1.
+ENDCASE.
+EndSelect .
+* 2002/02/26 PSD K.IGARASHI ADD ↑
+
+* 2002/02/26 PSD K.IGARASHI DEL ↓
+*  APPEND GF_RECODE1 TO GT_RECODE1.
+* ReAdd 2004/12/15 --->
+CLEAR: GF_RECORD1,
+: GF_A901,
+: GF_KNMT.
+* ReAdd 2004/12/15 <---
+* 2002/02/26 PSD K.IGARASHI DEL ↑
+
+ENDFORM.                    " frm_set_record1s
+
+*&-------------------------------------------------------------------*
+*&      Form  frm_set_record2S
+*&-------------------------------------------------------------------*
+*       得意先品目情報新規登録レコードの設定
+*--------------------------------------------------------------------*
+FORM frm_set_record2s .
+
+DATA: LF_RECORD2 LIKE GF_RECORD2 .
+Select KSTBM KBETR
+From KONM
+into (GF_KONP-KSTBM , GF_KONP-KBETR)
+Where KNUMH EQ GF_A901-KNUMH .
+
+
+* 有効期限未決定の場合
+IF GF_A901-DATBI = '99999999'.
+GF_RECORD2-KUNNR    = GF_KNMT-KUNNR.                "得意先コード
+GF_RECORD2-KDMAT    = GF_KNMT-KDMAT.            "得意先品目コード
+GF_RECORD2-DATBI    = GF_A901-DATBI.        "有効期限(有効終了日)
+GF_RECORD2-MATNR    = GF_KNMT-MATNR.                  "品目コード
+GF_RECORD2-KBETR    = GF_KONP-KBETR.                        "単価
+GF_RECORD2-KSTBM    = GF_KONP-KSTBM.                    "スケール
+GF_RECORD2-LOEVM_KO = GF_KONP-LOEVM_KO.               "削除フラグ
+GF_RECORD2-KONWA    = GF_KONP-KONWA.                    "価格単位
+GF_RECORD2-DATAB    = GF_A901-DATAB.        "有効期限(有効開始日)
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+GF_RECORD2-KPEIN    = GF_KONP-KPEIN.            "価格条件数量単位
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+* 2002/02/26 PSD K.IGARASHI MOD ↓
+*    APPEND GF_RECODE2 TO GT_RECODE2.
+
+* 重複チェック→APPEND
+PERFORM frm_check_record2.
+* 2002/02/26 PSD K.IGARASHI MOD ↑
+
+* 有効期限決定済みの場合→有効期限が未来のレコードが対象
+ELSEIF GF_A901-DATBI <> '00000000'.
+IF GF_A901-DATBI > SY-DATUM.
+GF_RECORD2-KUNNR    = GF_KNMT-KUNNR.                "得意先コード
+GF_RECORD2-KDMAT    = GF_KNMT-KDMAT.            "得意先品目コード
+GF_RECORD2-DATBI    = GF_A901-DATBI.        "有効期限(有効終了日)
+GF_RECORD2-MATNR    = GF_KNMT-MATNR.                  "品目コード
+GF_RECORD2-KBETR    = GF_KONP-KBETR.
+"単価
+GF_RECORD2-KSTBM    = GF_KONP-KSTBM.                    "スケール
+GF_RECORD2-LOEVM_KO = GF_KONP-LOEVM_KO.               "削除フラグ
+GF_RECORD2-KONWA    = GF_KONP-KONWA.                    "価格単位
+GF_RECORD2-DATAB    = GF_A901-DATAB.        "有効期限(有効開始日)
+*---MODIFY START PSD T.SAITOH 2002/04/25 ---------------------------*
+GF_RECORD2-KPEIN    = GF_KONP-KPEIN.            "価格条件数量単位
+*---MODIFY END   PSD T.SAITOH 2002/04/25 ---------------------------*
+
+* 2002/02/26 PSD K.IGARASHI MOD ↓
+*    APPEND GF_RECODE2 TO GT_RECODE2.
+
+* 重複チェック→APPEND
+PERFORM frm_check_record2.
+* 2002/02/26 PSD K.IGARASHI MOD ↑
+
+ENDIF.
+ENDIF.
+ENDSELECT .
+ENDFORM.                    " frm_set_record2s

@@ -1,0 +1,3050 @@
+************************************************************************
+* [プログラム名]
+*   ZS012600        ピッキングリスト
+* [処理概要]
+*   ・未送信リスト
+*       引当済み受注/無償支給の出荷を一覧表示し、
+*       グルーピングしてIFファイルを作成する。
+*   ・送信済リスト
+*     　作成したIFファイルのログを一覧表示し、削除する。
+*   ・受信済リスト
+*       UTLから取込んだIFファイルのログを一覧表示し、削除する。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar        Description
+*  2007/06/06   DMC              新規開発　
+*  2007/08/31   DMC           　 無償支給・棚番の編集を追加
+*                                得意先・ｴﾝﾄﾞﾕｰｻﾞの前ｾﾞﾛを削除(ﾌｧｲﾙのみ)
+*  2007/10/30   DMC
+*    ・品目コード・伝票番号の前ｾﾞﾛを削除(ﾌｧｲﾙのみ)
+*    ・出力ファイル名を変更 : 氏名_NO_プラント_得意先コード_送信ID
+*  2008/01/24   DMC
+*    ・個別購買品の出荷可能数計算ロジック修正
+*  2008/03/25   DMC
+*    ・仲介単価の算出ロジック修正　伝票金額→伝票単価÷単位数量
+*  2008/03/27   DMC
+*    ・仲介単価の算出ロジック修正(仲介単価を通貨変換する)
+*  2008/04/03   DMC
+*      ・出荷可能数の算出ロジック修正
+*        出荷可能数 = 受注在庫 + 出庫済数量 - 出荷済数量
+*  2008/04/04   DMC
+*      ・ファイル編集要件に下記を追加
+*        ① 得意先品目コードに品目コードを設定
+*        ② 得意先品目テキストに品目テキストを設定
+*        ③ 数量単位に入庫時の数量単位を設定
+*  2008/04/16   DMC
+*      ・継続伝票の伝票カテゴリが'R'のロジック追加
+*  2008/07/03   DMC
+*      ・選択画面に出力ファイルのソート順序追加
+*  2008/08/28   DMC
+*      ・預託品取引(KB)時のエンドユーザ価格取得変更
+*      ・ALVの変更可能項目追加
+*  2009/04/07   NDSC(KODAMA)
+*      ・ダミーレコードを受信取消した場合は数量調整しないよう変更
+*  2009/04/23   NDSC(KURATA)
+*      ・発注数量の桁数修正(オーバーフロー対応)
+************************************************************************
+REPORT  zs012600 MESSAGE-ID z1.
+
+*---------------------------------------------------------------------
+* DD構造
+*---------------------------------------------------------------------
+TABLES: vbap,
+	  vbak,
+	  vbpa,
+mseg,
+	  tcurc.
+
+*---------------------------------------------------------------------
+* TYPES
+*---------------------------------------------------------------------
+* 通常出荷処理対象データ取得用
+TYPES: BEGIN OF typ_object_normal,
+vbeln  TYPE vbak-vbeln,    " 販売伝票
+posnr  TYPE vbap-posnr,    " 販売伝票明細
+audat  TYPE vbak-audat,    " 伝票日付
+auart  TYPE vbak-auart,    " 販売伝票タイプ
+vkgrp  TYPE vbak-vkgrp,    " 営業グループ
+vkbur  TYPE vbak-vkbur,    " 営業所
+knumv  TYPE vbak-knumv,    " 伝票条件番号
+vdatu  TYPE vbak-vdatu,    " 指定納入期日
+kunnr  TYPE vbak-kunnr,    " 得意先コード
+vbtyp  TYPE vbak-vbtyp,    " 販売管理伝票カテゴリ
+ernam  TYPE vbak-ernam,    " ユーザＩＤ
+matnr  TYPE vbap-matnr,    " 品目コード
+arktx  TYPE vbap-arktx,    " 品目名
+pstyv  TYPE vbap-pstyv,    " 明細カテゴリ
+uepos  TYPE vbap-uepos,    " 上位レベル明細
+abgru  TYPE vbap-abgru,    " 拒否理由
+zmeng  TYPE vbap-zmeng,    " 目標数量
+kdmat  TYPE vbap-kdmat,    " 得意先品目コード
+netwr  TYPE vbap-netwr,    " 正味額
+waerk  TYPE vbap-waerk,    " 伝票通貨
+kwmeng TYPE vbap-kwmeng,   " 受注数量
+kbmeng TYPE vbap-kbmeng,   " 累積確認済数量
+vrkme  TYPE vbap-vrkme,    " 販売単位
+werks  TYPE vbap-werks,    " プラント
+lgort  TYPE vbap-lgort,    " 保管場所
+vstel  TYPE vbap-vstel,    " 出荷ポイント／受領ポイント
+NETPR  TYPE VBAP-NETPR,    " 正味価格
+kpein  TYPE vbap-kpein,    " 価格条件単位
+wavwr  TYPE vbap-wavwr,    " 原価
+pernr  TYPE vbpa-pernr,    " 従業員番号
+END   OF typ_object_normal.
+* 通常出荷処理対象内部テーブル用
+TYPES: typ_t_object_normal TYPE STANDARD TABLE OF typ_object_normal
+WITH KEY vbeln posnr.
+
+* 無償支給処理対象データ取得用
+TYPES: BEGIN OF typ_object_free,
+mblnr TYPE mseg-mblnr,    " 入出庫伝票番号
+zeile TYPE mseg-zeile,    " 明細番号
+bldat TYPE mkpf-bldat,    " 伝票日付
+usnam TYPE mkpf-usnam,    " ユーザ名
+matnr TYPE mseg-matnr,    " 品目コード
+werks TYPE mseg-werks,    " プラント
+lifnr TYPE mseg-lifnr,    " 仕入先コード
+menge TYPE mseg-menge,    " 数量
+* Add 2008.04.04 --->
+meins TYPE mseg-meins,    " 基本数量単位
+* Add 2008.04.04 <---
+END   OF typ_object_free.
+* 無償支給処理対象内部テーブル用
+TYPES: typ_t_object_free TYPE STANDARD TABLE OF typ_object_free
+WITH KEY mblnr zeile.
+
+* 納入日程行情報取得用
+TYPES: BEGIN OF typ_schedule_data,
+vbeln TYPE vbep-vbeln,    " 販売伝票
+posnr TYPE vbep-posnr,    " 販売伝票明細
+edatu TYPE vbep-edatu,    " 出荷日付
+banfn TYPE vbep-banfn,    " 購買依頼
+bnfpo TYPE vbep-bnfpo,    " 購買依頼の明細
+END   OF typ_schedule_data.
+* 納入日程行情報内部テーブル用
+TYPES: typ_t_schedule_data TYPE STANDARD TABLE OF typ_schedule_data
+WITH KEY vbeln posnr.
+
+* 取引先情報取得用
+TYPES: BEGIN OF typ_partner_data,
+vbeln TYPE vbpa-vbeln,    " 販売伝票
+posnr TYPE vbpa-posnr,    " 販売伝票明細
+kunze TYPE vbpa-kunnr,    " エンドユーザ
+adrnr_ze TYPE vbpa-adrnr, " 住所
+kunag TYPE vbpa-kunnr,    " 受注先
+adrnr_ag TYPE vbpa-adrnr, " 住所
+lzone TYPE vbpa-lzone,    " 納入区域
+kunwe TYPE vbpa-kunnr,    " 出荷先
+adrnr_we TYPE vbpa-adrnr, " 住所
+END   OF typ_partner_data.
+* 取引先情報内部テーブル用
+TYPES: typ_t_partner_data TYPE STANDARD TABLE OF typ_partner_data
+WITH KEY vbeln posnr.
+
+* 購買伝票情報取得用
+TYPES: BEGIN OF typ_purchase_data,
+banfn  TYPE ekpo-banfn,   " 購買依頼
+bnfpo  TYPE ekpo-bnfpo,   " 明細
+ebeln  TYPE ekpo-ebeln,   " 購買伝票
+ebelp  TYPE ekpo-ebelp,   " 明細
+menge  TYPE ekpo-menge,   " 発注数量
+meins  TYPE ekpo-meins,   " 発注単位
+enetpr TYPE ekpo-netpr,   " 正味発注価格
+peinh  TYPE ekpo-peinh,   " 価格単位
+waers  TYPE ekko-waers,   " 通貨コード
+wkurs  TYPE ekko-wkurs,   " 換算レート
+lifnr  TYPE ekko-lifnr,   " 仕入先コード
+eindt  TYPE eket-eindt,   " 納入期日
+wemng  TYPE eket-wemng,   " 納入数量
+END   OF typ_purchase_data.
+* 購買伝票情報内部テーブル用
+TYPES: typ_t_purchase_data TYPE STANDARD TABLE OF typ_purchase_data
+WITH KEY banfn bnfpo.
+
+* 出荷伝票情報取得用
+TYPES: BEGIN OF typ_shipment_data,
+vbelv   TYPE vbfa-vbelv,   " 先行販売管理伝票
+posnv   TYPE vbfa-posnv,   " 元明細
+lfimg   TYPE lips-lfimg,   " 出荷数量
+END   OF typ_shipment_data.
+* 出荷伝票情報内部テーブル用
+TYPES: typ_t_shipment_data TYPE STANDARD TABLE OF typ_shipment_data
+WITH KEY vbelv posnv.
+
+* Add 2008.04.03 ---->
+* 出庫伝票情報取得用
+TYPES: BEGIN OF typ_ship_data,
+vbelv   TYPE vbfa-vbelv,   " 先行販売管理伝票
+posnv   TYPE vbfa-posnv,   " 元明細
+rfmng   TYPE vbfa-rfmng,   " 出庫数量
+END   OF typ_ship_data.
+* 出庫伝票情報内部テーブル用
+TYPES: typ_t_ship_data TYPE STANDARD TABLE OF typ_ship_data
+WITH KEY vbelv posnv.
+* Add 2008.04.03 <----
+
+* 出荷先情報取得用
+TYPES: BEGIN OF typ_shipment_addr,
+name2  TYPE adrc-name2,    " 名称２
+city1  TYPE adrc-city1,    " 市区町村
+street TYPE adrc-street,   " 都道府県
+bezei  TYPE t005u-bezei,   " 地域(名称)
+END   OF typ_shipment_addr.
+
+* 受注在庫情報取得用
+TYPES: BEGIN OF typ_stock_data,
+matnr  TYPE mska-matnr,    " 品目コード
+werks  TYPE mska-werks,    " プラント
+vbeln  TYPE mska-vbeln,    " 販売伝票番号
+posnr  TYPE mska-posnr,    " 明細番号
+kalab  TYPE mska-kalab,    " 利用可能評価在庫
+END   OF typ_stock_data.
+* 受注在庫情報内部テーブル用
+TYPES: typ_t_stock_data TYPE STANDARD TABLE OF typ_stock_data
+			WITH KEY matnr werks vbeln posnr.
+
+* 品目マスタ情報取得用
+TYPES: BEGIN OF typ_material_data,
+matnr  TYPE mara-matnr,    " 品目コード
+meins  TYPE mara-meins,    " 基本数量単位
+ntgew  TYPE mara-ntgew,    " 正味質量
+stoff  TYPE mara-stoff,    " 危険物コード
+vkorg  TYPE mvke-vkorg,    " 販売組織
+vtweg  TYPE mvke-vtweg,    " 流通チャネル
+vrkme  TYPE mvke-vrkme,    " 販売単位
+prat1  TYPE mvke-prat1,    " 危険品区分
+prat2  TYPE mvke-prat2,    " 該非判定
+werks  TYPE marc-werks,    " プラント
+stawn  TYPE marc-stawn,    " 統計品目ｺｰﾄﾞ/輸入ｺｰﾄﾞ
+herkl  TYPE marc-herkl,    " 品目の原産国
+END OF typ_material_data.
+
+* 仲介単位情報取得用
+TYPES: BEGIN OF typ_price_data,
+knumv  TYPE konv-knumv,    " 伝票条件番号
+kposn  TYPE konv-kposn,    " 条件明細番号
+waers  TYPE konv-waers,    " 通貨コード
+kwert  TYPE konv-kwert,    " 条件金額
+* Add 2008/03/25 --->
+kawrt  TYPE konv-kawrt,    " 条件数量
+kbetr  TYPE konv-kbetr,    " 条件単価
+kpein  TYPE konv-kpein,    " 単位数量
+* Add 2008/03/25 <---
+
+END OF typ_price_data.
+* 仲介単位情報内部テーブル用
+TYPES: typ_t_price_data TYPE STANDARD TABLE OF typ_price_data
+WITH KEY knumv kposn.
+
+* ビジネス情報取得用
+TYPES: BEGIN OF typ_business_data,
+vbeln  TYPE vbkd-vbeln,    " 販売伝票番号
+kursk  TYPE vbkd-kursk,    " 換算レート
+bstkd  TYPE vbkd-bstkd,    " 得意先発注番号
+bstdk_e TYPE vbkd-bstdk_e, " 出荷先の得意先発注日付
+END OF typ_business_data.
+* ビジネス情報内部テーブル用
+TYPES: typ_t_business_data TYPE STANDARD TABLE OF typ_business_data
+WITH KEY vbeln.
+
+* テキスト情報内部テーブル用
+TYPES: typ_t_text_data TYPE TABLE OF thead.
+
+* 受注先情報取得用
+TYPES: BEGIN OF typ_guest_data,
+vbeln  TYPE vbpa-vbeln,    " 販売管理伝票
+posnr  TYPE vbpa-posnr,    " 明細（ＳＤ）
+parvw  TYPE vbpa-parvw,    " 取引先機能
+pernr  TYPE vbpa-pernr,    " 従業員番号
+adrnr  TYPE vbpa-adrnr,    " 住所
+lzone  TYPE vbpa-lzone,    " 納入区域
+name1  TYPE kna1-name1,    " 得意先名
+END   OF typ_guest_data.
+
+* 送信数量取得用
+TYPES: BEGIN OF typ_transmit_quantity,
+vbeln TYPE zsd002-vbeln,       " 伝票番号
+posnr TYPE zsd002-posnr,       " 明細
+sdmeng TYPE zsd002-sdmeng,     " 送信数量
+lfimg TYPE zsd002-lfimg,       " 出荷数量（BDC）
+END OF typ_transmit_quantity.
+* 送信数量内部テーブル用
+TYPES: typ_t_transmit_quantity
+TYPE STANDARD TABLE OF typ_transmit_quantity
+WITH KEY vbeln posnr.
+
+* 送信ログ情報取得用
+TYPES: BEGIN OF typ_transmit_log.
+INCLUDE TYPE zsd002.
+TYPES:   lock(1) TYPE c,
+END OF typ_transmit_log.
+* 送信ログ情報内部テーブル用
+TYPES: typ_t_transmit_log TYPE STANDARD TABLE OF typ_transmit_log.
+
+* 受信ログ情報取得用
+TYPES: BEGIN OF typ_receive_log.
+INCLUDE TYPE zsd003.
+TYPES:   lock(1) TYPE c,
+END OF typ_receive_log.
+* 受信ログ情報内部テーブル用
+TYPES: typ_t_receive_log TYPE STANDARD TABLE OF typ_receive_log.
+
+* 出力結果取得用
+TYPES: BEGIN OF typ_result,
+format(2) TYPE c,
+line(120) TYPE c,
+END OF typ_result.
+* 出力結果内部テーブル用
+TYPES: typ_t_result TYPE STANDARD TABLE OF typ_result.
+
+* CACHE用
+TYPES: BEGIN OF typ_hash,
+code(40)  TYPE c,   " コード
+name(80)  TYPE c,   " 名称
+END OF typ_hash.
+* CACHE内部テーブル用
+TYPES: typ_hash_cache TYPE HASHED TABLE OF typ_hash
+WITH UNIQUE KEY code.
+
+*---------------------------------------------------------------------
+* 定数宣言
+*---------------------------------------------------------------------
+* 検索モード
+CONSTANTS: cns_list_mode_not_transmit(1)  TYPE c VALUE '1', " 未送信
+cns_list_mode_transmitted(1)   TYPE c VALUE '2', " 送信済
+cns_list_mode_received(1)      TYPE c VALUE '3'. " 受信済
+
+* 未送信リストタイプ
+CONSTANTS: cns_order_type_normal(1)   TYPE c VALUE '0',     " 通常
+cns_order_type_free(1)     TYPE c VALUE '1'.     " 無償
+
+* リターンコード
+CONSTANTS: cns_rc_code_cancel        TYPE sy-subrc VALUE 1,
+cns_rc_code_not_found     TYPE sy-subrc VALUE 4,
+cns_rc_code_no_authority  TYPE sy-subrc VALUE 5,
+cns_rc_code_db_error      TYPE sy-subrc VALUE 8,
+cns_rc_code_error         TYPE sy-subrc VALUE 9.
+
+*2008/07/03 ADD START
+* ソート順序
+CONSTANTS: cns_sort_po(1)            TYPE c VALUE '1',       " P/O
+cns_sort_hin(1)           TYPE c VALUE '2'.       " 品目
+*2008/07/03 ADD END
+*---------------------------------------------------------------------
+* 内部テーブル・作業領域
+*---------------------------------------------------------------------
+* 処理対象データ内部テーブル
+DATA: gt_object_normal TYPE typ_t_object_normal.
+DATA: gt_object_free TYPE typ_t_object_free.
+* 納入日程行情報内部テーブル
+DATA: gt_schedule_data TYPE typ_t_schedule_data.
+* ビジネス情報内部テーブル
+DATA: gt_business_data TYPE typ_t_business_data.
+* 取引先情報内部テーブル
+DATA: gt_partner_data TYPE typ_t_partner_data.
+* 出荷情報内部テーブル
+DATA: gt_shipment_data TYPE typ_t_shipment_data.
+* Add 2008.04.03 --->
+DATA: gt_ship_data TYPE typ_t_ship_data.
+* Add 2008.04.03 <---
+* 受注在庫情報内部テーブル
+DATA: gt_stock_data TYPE typ_t_stock_data.
+* 購買伝票情報内部テーブル
+DATA: gt_purchase_data TYPE typ_t_purchase_data.
+* 仲介単価情報内部テーブル
+DATA: gt_price_data TYPE typ_t_price_data.
+* テキスト情報内部テーブル
+DATA: gt_text_data_1 TYPE typ_t_text_data,
+gt_text_data_2 TYPE typ_t_text_data,
+gt_text_data_3 TYPE typ_t_text_data.
+* 送信数量内部テーブル
+DATA: gt_transmit_quantity TYPE typ_t_transmit_quantity.
+
+* 営業所情報
+DATA: gt_office_cache TYPE typ_hash_cache.
+* 営業グループ情報
+DATA: gt_group_cache TYPE typ_hash_cache.
+* 営業員情報
+DATA: gt_operator_cache TYPE typ_hash_cache.
+* 納品書種別
+DATA: gt_deliver_cache TYPE typ_hash_cache.
+* 出荷ポイント
+DATA: gt_point_cache TYPE typ_hash_cache.
+* 棚番
+DATA: gt_shelf_cache TYPE typ_hash_cache.
+* 仕入先情報
+DATA: gt_supplier_cache TYPE typ_hash_cache.
+* 得意先通貨
+DATA: gt_currency_cache TYPE typ_hash_cache.
+* 得意先品目
+DATA: gt_material_cache TYPE typ_hash_cache.
+
+* 送信情報
+DATA: gt_transmit_log TYPE typ_t_transmit_log.
+* 受信情報
+DATA: gt_receive_log TYPE typ_t_receive_log.
+
+* 処理結果
+DATA: gt_result TYPE typ_t_result.
+
+*---------------------------------------------------------------------
+* 変数宣言
+*---------------------------------------------------------------------
+* 出力ファイルパス
+DATA: g_path TYPE rlgrap-filename.
+* 仲介通貨コード範囲
+DATA: gs_waers TYPE RANGE OF tcurc-waers.
+* 営業所範囲
+DATA: gs_vkbur TYPE RANGE OF tvkbt-vkbur.
+
+* 検索モード
+DATA: g_list_mode(1) TYPE c.
+* 未送信リストタイプ
+DATA: g_order_type(1) TYPE c.
+
+* リターンコード
+DATA: g_rc TYPE sy-subrc.
+
+*2008/07/03 ADD START
+* ソート順序
+DATA: g_sort(1) TYPE c.
+*2008/07/03 ADD END
+*2008/03/27 ADD START
+DATA: lv_kbetr(16) TYPE c.
+*2008/03/27 ADD END
+* 2008/08/28 ADD START
+DATA: l_knumh TYPE a902-knumh,
+l_kbetr LIKE konp-kbetr,
+l_konwa LIKE konp-konwa,
+l_kpein LIKE konp-kpein.
+* 2008/08/28 ADD END
+
+*---------------------------------------------------------------------
+* INCLUDE
+*---------------------------------------------------------------------
+INCLUDE zs012600_0000.
+*INCLUDE zs012600_0100.
+INCLUDE ZS012600_0100_20100224.
+INCLUDE zs012600_0200.
+
+*---------------------------------------------------------------------
+* 選択画面定義
+*---------------------------------------------------------------------
+*【組織指定】
+SELECTION-SCREEN BEGIN OF BLOCK bl1 WITH FRAME TITLE text-001.
+* 会社コード
+PARAMETERS: p_bukrs TYPE t001-bukrs MEMORY ID buk.
+* 販売組織
+PARAMETERS: p_vkorg TYPE vbak-vkorg MEMORY ID vko.
+* 流通ﾁｬﾈﾙ
+PARAMETERS: p_vtweg TYPE vbak-vtweg MEMORY ID vtw.
+* 製品部門
+PARAMETERS: p_spart TYPE vbak-spart MEMORY ID spa.
+SELECTION-SCREEN END   OF BLOCK bl1.
+
+*【抽出項目】
+SELECTION-SCREEN BEGIN OF BLOCK bl2 WITH FRAME TITLE text-002.
+* 抽出年月日
+SELECT-OPTIONS: s_getdt FOR sy-datum.
+* 出荷ポイント
+SELECT-OPTIONS: s_vstel FOR vbap-vstel.
+* 営業グループ
+SELECT-OPTIONS: s_vkgrp FOR vbak-vkgrp.
+* 営業員
+SELECT-OPTIONS: s_pernr FOR vbpa-pernr.
+* 得意先コード
+SELECT-OPTIONS: s_kunnr FOR vbak-kunnr MODIF ID kun.
+* 仕入先コード
+SELECT-OPTIONS: s_lifnr FOR mseg-lifnr MODIF ID lif.
+* 通常出荷(ラジオボタン)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: p_rdo21 RADIOBUTTON GROUP rg2 DEFAULT 'X'
+USER-COMMAND chtyp.
+SELECTION-SCREEN COMMENT 3(18) text-008 FOR FIELD p_rdo21.
+SELECTION-SCREEN END   OF LINE.
+* 無償支給(ラジオボタン)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: p_rdo22 RADIOBUTTON GROUP rg2.
+SELECTION-SCREEN COMMENT 3(18) text-009 FOR FIELD p_rdo22.
+SELECTION-SCREEN END   OF LINE.
+SELECTION-SCREEN END   OF BLOCK bl2.
+
+*【システム管理項目】
+SELECTION-SCREEN BEGIN OF BLOCK bl3 WITH FRAME TITLE text-010.
+* 未送信リスト(ラジオボタン)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: p_rdo31 RADIOBUTTON GROUP rg3 DEFAULT 'X'
+USER-COMMAND chmod.
+SELECTION-SCREEN COMMENT 3(36) text-011 FOR FIELD p_rdo31.
+SELECTION-SCREEN END   OF LINE.
+* 送信済リスト(ラジオボタン)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: p_rdo32 RADIOBUTTON GROUP rg3.
+SELECTION-SCREEN COMMENT 3(36) text-012 FOR FIELD p_rdo32.
+SELECTION-SCREEN END   OF LINE.
+* 受信済リスト(ラジオボタン)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: p_rdo33 RADIOBUTTON GROUP rg3.
+SELECTION-SCREEN COMMENT 3(36) text-013 FOR FIELD p_rdo33.
+SELECTION-SCREEN END   OF LINE.
+* 出力ファイル
+PARAMETERS: p_path TYPE rlgrap-filename.
+* 仲介通貨コード
+SELECT-OPTIONS: s_waers FOR tcurc-waers NO INTERVALS.
+*2008/07/03 ADD START
+* P/Oソート(ラジオボタン)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: p_rdo41 RADIOBUTTON GROUP rg4 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 3(12) text-014 FOR FIELD p_rdo41.
+SELECTION-SCREEN END   OF LINE.
+* 品目ソート(ラジオボタン)
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: p_rdo42 RADIOBUTTON GROUP rg4.
+SELECTION-SCREEN COMMENT 3(12) text-015 FOR FIELD p_rdo42.
+SELECTION-SCREEN END   OF LINE.
+*2008/07/03 ADD END
+SELECTION-SCREEN END   OF BLOCK bl3.
+*---------------------------------------------------------------------
+* INITIALIZATION
+*---------------------------------------------------------------------
+INITIALIZATION.
+
+* 送信済リストデータロック解除
+PERFORM unlock_transmitted_data.
+* 受信済リストデータロック解除
+PERFORM unlock_received_data.
+
+CLEAR: gt_office_cache[], gt_group_cache[],
+gt_operator_cache[], gt_deliver_cache[],
+gt_point_cache[], gt_shelf_cache[],
+gt_supplier_cache[], gt_currency_cache[],
+gt_material_cache[].
+
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN OUTPUT
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN OUTPUT.
+
+* 検索モード設定
+CLEAR g_list_mode.
+IF p_rdo31 = 'X'.
+g_list_mode = cns_list_mode_not_transmit.
+ELSEIF p_rdo32 = 'X'.
+g_list_mode = cns_list_mode_transmitted.
+ELSEIF p_rdo33 = 'X'.
+g_list_mode = cns_list_mode_received.
+ENDIF.
+
+* 未送信リストタイプ設定
+CLEAR g_order_type.
+IF p_rdo21 = 'X'.
+g_order_type = cns_order_type_normal.
+ELSEIF p_rdo22 = 'X'.
+g_order_type = cns_order_type_free.
+ENDIF.
+
+*2008/07/03 ADD START
+* ソート順序設定
+CLEAR g_sort.
+IF p_rdo41 = 'X'.
+g_sort = cns_sort_po.
+ELSEIF p_rdo42 = 'X'.
+g_sort = cns_sort_hin.
+ENDIF.
+*2008/07/03 ADD END
+
+* 未送信リストタイプより得意先、仕入先の表示を切り替える
+LOOP AT SCREEN.
+IF screen-group1 = 'KUN'.
+IF g_list_mode = cns_list_mode_not_transmit.
+IF g_order_type = cns_order_type_free.
+screen-invisible = 1.
+screen-active = 0.
+MODIFY SCREEN.
+ENDIF.
+ENDIF.
+ELSEIF screen-group1 = 'LIF'.
+IF g_list_mode = cns_list_mode_not_transmit.
+IF g_order_type = cns_order_type_normal.
+screen-invisible = 1.
+screen-active = 0.
+MODIFY SCREEN.
+ENDIF.
+ELSE.
+screen-invisible = 1.
+screen-active = 0.
+MODIFY SCREEN.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN ON S_GETDT
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN ON s_getdt.
+
+CASE sy-ucomm.
+WHEN 'CHMOD' OR 'CHTYP'.
+WHEN OTHERS.
+*     未送信リストの場合
+IF g_list_mode = cns_list_mode_not_transmit.
+*       抽出年月日必須入力チェック
+PERFORM check_getdt_is_not_empty.
+ENDIF.
+ENDCASE.
+	
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN ON S_VSTEL
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN ON s_vstel.
+
+CASE sy-ucomm.
+WHEN 'CHMOD' OR 'CHTYP'.
+WHEN OTHERS.
+*     未送信リストの場合
+IF g_list_mode = cns_list_mode_not_transmit.
+*       出荷ポイント必須入力チェック
+PERFORM check_vstel_is_not_empty.
+ENDIF.
+ENDCASE.
+	
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN ON P_PATH
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN ON p_path.
+
+CASE sy-ucomm.
+WHEN 'CHMOD' OR 'CHTYP'.
+WHEN OTHERS.
+*     未送信リストの場合
+IF g_list_mode = cns_list_mode_not_transmit.
+*       出力ファイルパス必須入力チェック
+PERFORM check_path_is_not_empty.
+*       出力ファイルパス存在チェック
+PERFORM check_path_is_exist.
+ENDIF.
+ENDCASE.
+g_path = p_path.
+	
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN ON S_WAERS
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN ON s_waers.
+
+CASE sy-ucomm.
+WHEN 'CHMOD' OR 'CHTYP'.
+WHEN OTHERS.
+*     未送信リストの場合
+IF g_list_mode = cns_list_mode_not_transmit.
+*       仲介通貨コード存在チェック
+PERFORM check_waers_is_exist.
+ENDIF.
+ENDCASE.
+gs_waers[] = s_waers[].
+	
+*---------------------------------------------------------------------
+* START-OF-SELECTION
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+
+CASE g_list_mode.
+*   未送信リスト
+WHEN cns_list_mode_not_transmit.
+*     未送信リストデータ取得
+PERFORM get_not_transmit_data.
+*   送信済リスト
+WHEN cns_list_mode_transmitted.
+*     送信済リストデータ取得
+PERFORM get_transmitted_data.
+IF g_rc = 0.
+*       送信済リストデータロック
+PERFORM lock_transmitted_data.
+ENDIF.
+*   受信済リスト
+WHEN cns_list_mode_received.
+*     受信済リストデータ取得
+PERFORM get_received_data.
+IF g_rc = 0.
+*       受信済リストデータロック
+PERFORM lock_received_data.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+*---------------------------------------------------------------------
+* END-OF-SELECTION
+*---------------------------------------------------------------------
+END-OF-SELECTION.
+
+CHECK g_rc = 0.
+CASE g_list_mode.
+*   未送信リスト
+WHEN cns_list_mode_not_transmit.
+*     未送信リストを表示する
+PERFORM go_to_screen_0100.
+*   送受信済リスト
+WHEN cns_list_mode_transmitted OR cns_list_mode_received.
+*     送受信済リストを表示する
+PERFORM go_to_screen_0200.
+ENDCASE.
+* 処理結果を出力する
+PERFORM output_result.
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_GETDT_IS_NOT_EMPTY
+*&---------------------------------------------------------------------*
+*       抽出年月日入力チェック
+*----------------------------------------------------------------------*
+FORM check_getdt_is_not_empty.
+
+* 抽出年月日
+IF s_getdt[] IS INITIAL.
+*   抽出年月日 を入力してください
+MESSAGE e006 WITH text-m01.
+ENDIF.
+
+ENDFORM.                    " CHECK_GETDT_IS_NOT_EMPTY
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_VSTEL_IS_NOT_EMPTY
+*&---------------------------------------------------------------------*
+*       出荷ポイント入力チェック
+*----------------------------------------------------------------------*
+FORM check_vstel_is_not_empty.
+
+* 出荷ポイント
+IF s_vstel[] IS INITIAL.
+*   出荷ポイント を入力してください
+MESSAGE e006 WITH text-m02.
+ENDIF.
+
+FIELD-SYMBOLS: <ff_vkbur> LIKE LINE OF gs_vkbur.
+
+* 営業所設定
+gs_vkbur[] = s_vstel[].
+LOOP AT gs_vkbur ASSIGNING <ff_vkbur>.
+IF NOT <ff_vkbur>-low IS INITIAL.
+SHIFT <ff_vkbur>-low.
+<ff_vkbur>-low+3(1) = '0'.
+ENDIF.
+IF NOT <ff_vkbur>-high IS INITIAL.
+SHIFT <ff_vkbur>-high.
+<ff_vkbur>-high+3(1) = '0'.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_VSTEL_IS_NOT_EMPTY
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_FILE_IS_NOT_EMPTY
+*&---------------------------------------------------------------------*
+*       出力ファイルパス入力チェック
+*----------------------------------------------------------------------*
+FORM check_path_is_not_empty.
+
+IF p_path IS INITIAL.
+*   出力ファイルパス を入力してください
+MESSAGE e006 WITH text-m03.
+ENDIF.
+
+ENDFORM.                    " CHECK_FILE_IS_NOT_EMPTY
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PATH_IS_EXIST
+*&---------------------------------------------------------------------*
+*       出力ファイルパス存在チェック
+*----------------------------------------------------------------------*
+FORM check_path_is_exist.
+
+DATA: l_dir TYPE btch0000-text80.
+
+CLEAR g_rc.
+l_dir = p_path.
+CALL FUNCTION 'PFL_CHECK_DIRECTORY'
+EXPORTING
+directory                   = l_dir
+filname                     = ' '
+EXCEPTIONS
+pfl_dir_not_exist           = 1
+pfl_permission_denied       = 2
+pfl_cant_build_dataset_name = 3
+pfl_file_not_exist          = 4
+OTHERS                      = 5.
+IF sy-subrc <> 0.
+*   出力ファイルパスが存在しません
+MESSAGE e614 WITH text-m04.
+ENDIF.
+
+ENDFORM.                    " CHECK_PATH_IS_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_WAERS_IS_EXIST
+*&---------------------------------------------------------------------*
+*       仲介通貨コード存在チェック
+*----------------------------------------------------------------------*
+FORM check_waers_is_exist.
+
+CLEAR g_rc.
+SELECT COUNT(*) FROM tcurc
+WHERE waers IN s_waers.
+IF sy-subrc <> 0.
+*   通貨コードXXは存在しません
+MESSAGE e641 WITH s_waers-low.
+ENDIF.
+
+ENDFORM.                    " CHECK_WAERS_IS_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  GET_NOT_TRANSMIT_DATA
+*&---------------------------------------------------------------------*
+*       未送信リストデータ取得
+*----------------------------------------------------------------------*
+FORM get_not_transmit_data.
+
+CASE g_order_type.
+*   通常出荷
+WHEN cns_order_type_normal.
+*     データ抽出処理
+PERFORM get_normal_data.
+*   無償支給
+WHEN cns_order_type_free.
+*     データ抽出処理
+PERFORM get_free_data.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " GET_NOT_TRANSMIT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_TRANSMITTED_DATA
+*&---------------------------------------------------------------------*
+*       送信済リストデータ取得
+*----------------------------------------------------------------------*
+FORM get_transmitted_data.
+
+CLEAR g_rc.
+* 送信済リストデータ取得
+PERFORM get_t_transmit_log.
+IF g_rc <> 0.
+*   対象の送信済みデータがありません
+MESSAGE s625.
+ENDIF.
+	
+CHECK g_rc = 0.
+* 送信データより関連する受信データ取得
+PERFORM get_t_receive_log_with_id.
+CLEAR g_rc.
+
+ENDFORM.                    " GET_TRANSMITTED_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_RECEIVED_DATA
+*&---------------------------------------------------------------------*
+*       受信済リストデータ取得
+*----------------------------------------------------------------------*
+FORM get_received_data.
+
+CLEAR g_rc.
+IF g_order_type = cns_order_type_free.
+g_rc = cns_rc_code_not_found.
+ELSE.
+*   受信済リストデータ取得
+PERFORM get_t_receive_log.
+ENDIF.
+IF g_rc <> 0.
+*   対象の取込済みデータがありません
+MESSAGE s626.
+ENDIF.
+
+CHECK g_rc = 0.
+* 受信データより関連する送信データ取得
+PERFORM get_t_transmit_log_with_id.
+CLEAR g_rc.
+
+ENDFORM.                    " GET_RECEIVED_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_NORMAL_DATA
+*&---------------------------------------------------------------------*
+*       データ抽出処理(通常出荷)
+*----------------------------------------------------------------------*
+FORM get_normal_data.
+
+* 処理対象ヘッダ、明細データ
+DATA: lt_header TYPE typ_t_object_normal,
+lt_detail TYPE typ_t_object_normal.
+* 納入日程行情報（発注情報検索用）
+DATA: lt_request TYPE typ_t_schedule_data.
+* テキストNAMEデータ（テキスト検索用）
+DATA: ls_stx_name_1 TYPE STANDARD TABLE OF stxdrname,
+ls_stx_name_2 TYPE STANDARD TABLE OF stxdrname,
+ls_stx_name_3 TYPE STANDARD TABLE OF stxdrname.
+
+CLEAR g_rc.
+* 通常出荷処理対象データ取得
+PERFORM get_t_object_normal.
+IF g_rc <> 0.
+*   販売伝票に該当するデータがありません
+MESSAGE s600 WITH text-m07.
+ENDIF.
+
+CHECK g_rc = 0.
+
+* 受注在庫情報取得
+PERFORM get_t_stock_data USING gt_object_normal.
+* 出荷情報取得
+PERFORM get_t_shipment_data USING gt_object_normal.
+* Add 2008.04.03 ---->
+PERFORM get_t_ship_data USING gt_object_normal.
+* Add 2008.04.03 <----
+* 送信数量情報取得
+PERFORM get_t_transmit_quantity.
+* 処理対象データピックアップ
+PERFORM filter_t_object_normal TABLES   ls_stx_name_1
+ls_stx_name_2
+ls_stx_name_3
+USING    gt_object_normal
+CHANGING lt_detail.
+IF g_rc <> 0.
+*   販売伝票に該当するデータがありません
+MESSAGE s600 WITH text-m07.
+ENDIF.
+
+CHECK g_rc = 0.
+
+lt_header[] = lt_detail[].
+DELETE ADJACENT DUPLICATES FROM lt_header COMPARING vbeln.
+* ビジネス情報取得
+PERFORM get_t_business_data USING lt_header.
+* 納入日程行情報取得
+PERFORM get_t_schedule_data USING lt_detail.
+* 仲介単価情報取得
+PERFORM get_t_price_data USING lt_detail.
+* 取引先情報取得
+PERFORM get_t_partner_data USING lt_header
+lt_detail.
+
+lt_request[] = gt_schedule_data[].
+DELETE lt_request WHERE banfn IS initial.
+DELETE ADJACENT DUPLICATES FROM lt_request COMPARING banfn bnfpo.
+* 購買発注情報取得
+IF NOT lt_request[] IS INITIAL.
+PERFORM get_t_purchase_data USING lt_request.
+ENDIF.
+
+* テキスト情報取得
+PERFORM get_t_text_data_1 TABLES ls_stx_name_1.
+PERFORM get_t_text_data_2 TABLES ls_stx_name_2.
+PERFORM get_t_text_data_3 TABLES ls_stx_name_3.
+
+* リターンコードをクリアする
+CLEAR g_rc.
+gt_object_normal[] = lt_detail[].
+
+ENDFORM.                    " GET_NORMAL_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_OBJECT_NORMAL
+*&---------------------------------------------------------------------*
+*       通常出荷処理対象データ取得
+*----------------------------------------------------------------------*
+FORM get_t_object_normal.
+
+CLEAR: g_rc.
+CLEAR: gt_object_normal[].
+
+SELECT h~vbeln       " 販売伝票番号
+d~posnr       " 販売伝票明細
+	   h~audat       " 伝票日付
+	   h~auart       " 販売伝票ﾀｲﾌﾟ
+h~vkgrp       " 営業ｸﾞﾙｰﾌﾟ
+h~vkbur       " 営業所
+h~knumv       " 伝票条件番号
+h~vdatu       " 指定納入期日
+h~kunnr       " 得意先ｺｰﾄﾞ
+h~vbtyp       " 販売伝票ｶﾃｺﾞﾘ
+h~ernam       " ｵﾌﾞｼﾞｪｸﾄ登録者名
+d~matnr       " 品目コード
+d~arktx       " テキスト
+d~pstyv       " 明細カテゴリ
+d~uepos       " 上位レベル明細
+d~abgru    	  " 拒否理由
+d~zmeng    	  " 目標数量
+d~kdmat    	  " 得意先品目ｺｰﾄﾞ
+d~netwr    	  " 受注明細正味額
+d~waerk    	  " 販売伝票通貨
+d~kwmeng   	  " 累積受注数量
+d~kbmeng   	  " 累積確認数量
+d~vrkme    	  " 販売単位
+d~werks    	  " プラント
+d~lgort    	  " 保管場所
+d~vstel    	  " 出荷ポイント
+d~netpr    	  " 正味価格
+d~kpein    	  " 価格条件単位
+d~wavwr    	  " 伝票通貨での原価
+p~pernr       " 従業員番号
+INTO TABLE gt_object_normal
+FROM vbak AS h INNER JOIN vbap AS d ON h~vbeln = d~vbeln
+INNER JOIN vbpa AS p ON p~vbeln = d~vbeln AND
+p~posnr = '000000' AND
+p~parvw = 'VE'
+WHERE h~vkbur IN gs_vkbur
+AND h~vkorg =  p_vkorg
+AND h~vkgrp IN s_vkgrp
+AND h~vtweg =  p_vtweg
+AND h~spart =  p_spart
+AND h~kunnr IN s_kunnr
+AND ( ( h~vbtyp =  'I' )                      OR
+( h~vbtyp =  'C'  AND h~auart <> 'KA' ) OR
+( h~vbtyp =  'H'  AND h~auart =  'KR' ) )
+AND d~vstel IN s_vstel
+AND p~pernr IN s_pernr
+AND exists
+( SELECT etenr
+FROM vbep
+WHERE vbeln = d~vbeln
+AND posnr = d~posnr
+AND edatu IN s_getdt
+AND lifsp = ' ' )
+AND EXISTS
+( SELECT vbeln
+FROM vbuk
+WHERE vbeln = h~vbeln
+AND lfstk <> 'C'
+AND abstk <> 'C' )
+AND EXISTS
+( SELECT vbeln
+FROM vbup
+WHERE vbeln = h~vbeln
+AND posnr = d~posnr
+AND lfgsa <> 'C'
+AND absta <> 'C'
+AND gbsta <> 'C' ).
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_object_normal BY vbeln posnr.
+ENDIF.
+
+ENDFORM.                    " GET_T_OBJECT_NORMAL
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_SCHEDULE_DATA
+*&---------------------------------------------------------------------*
+*       納入日程行情報取得
+*----------------------------------------------------------------------*
+FORM get_t_schedule_data USING lt_object TYPE typ_t_object_normal.
+
+CLEAR: g_rc.
+CLEAR: gt_schedule_data[].
+
+SELECT vbeln  	  " 販売伝票
+	   posnr      " 販売伝票明細
+edatu      " 納入日程日付
+banfn      " 購買依頼番号
+bnfpo      " 購買依頼の明細番号
+INTO TABLE gt_schedule_data
+FROM vbep AS a
+FOR ALL ENTRIES IN lt_object
+WHERE vbeln =  lt_object-vbeln
+AND posnr =  lt_object-posnr
+AND etenr =
+( SELECT MIN( etenr )     " 最小の納入日程行
+FROM vbep
+WHERE vbeln = a~vbeln
+AND posnr = a~posnr
+AND edatu IN s_getdt
+AND lifsp = ' ' ).
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_schedule_data BY vbeln posnr.
+ENDIF.
+
+ENDFORM.                    " GET_T_SCHEDULE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_PURCHASE_DATA
+*&---------------------------------------------------------------------*
+*       購買伝票情報取得
+*----------------------------------------------------------------------*
+FORM get_t_purchase_data USING it_request TYPE typ_t_schedule_data.
+
+CLEAR: g_rc.
+CLEAR: gt_purchase_data.
+
+SELECT eket~banfn " 購買依頼番号
+eket~bnfpo " 購買依頼明細
+ekpo~ebeln " 購買伝票番号
+	   ekpo~ebelp " 購買伝票明細
+	   ekpo~menge " 購買発注数量
+ekpo~meins " 発注単位
+ekpo~netpr " 正味価格
+ekpo~peinh " 価格単位
+ekko~waers " 通貨コード
+ekko~wkurs " 換算レート
+ekko~lifnr " 仕入先コード
+eket~eindt " 明細納入期日
+eket~wemng " 入庫数量
+INTO TABLE gt_purchase_data
+FROM eket INNER JOIN ekpo ON eket~ebeln = ekpo~ebeln AND
+					   eket~ebelp = ekpo~ebelp
+		  INNER JOIN ekko ON ekpo~ebeln = ekko~ebeln
+FOR ALL entries IN it_request
+WHERE eket~banfn = it_request-banfn
+AND eket~bnfpo = it_request-bnfpo
+AND eket~etenr = '0001'
+AND ekpo~loekz = ' '.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_purchase_data BY banfn bnfpo.
+ENDIF.
+
+ENDFORM.                    " GET_T_PURCHASE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_SHIPMENT_DATA
+*&---------------------------------------------------------------------*
+*       出荷伝票情報取得
+*----------------------------------------------------------------------*
+FORM get_t_shipment_data USING it_object TYPE typ_t_object_normal.
+
+DATA: lf_shipment_data LIKE LINE OF gt_shipment_data.
+DATA: l_vbeln TYPE vbfa-vbeln,
+l_posnn TYPE vbfa-posnn.
+
+CLEAR: g_rc.
+CLEAR: gt_shipment_data[].
+
+SELECT f~vbelv
+f~posnv
+f~vbeln
+f~posnn
+d~lfimg          " 出荷数量実績
+INTO (lf_shipment_data-vbelv,
+lf_shipment_data-posnv,
+l_vbeln,
+l_posnn,
+lf_shipment_data-lfimg)
+FROM vbfa AS f INNER JOIN lips AS d ON f~vbeln = d~vbeln AND
+					             f~posnn = d~posnr
+FOR ALL ENTRIES IN it_object
+WHERE f~vbelv    = it_object-vbeln
+AND f~posnv    = it_object-posnr
+AND f~vbtyp_n  = 'J'
+AND exists
+( SELECT vbeln
+FROM vbuk
+WHERE vbeln = f~vbelv
+AND wbstk <> 'C' ).
+*   出荷数量実績を集計する
+COLLECT lf_shipment_data INTO gt_shipment_data.
+ENDSELECT.
+
+IF gt_shipment_data[] IS INITIAL.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_shipment_data BY vbelv posnv.
+ENDIF.
+
+ENDFORM.                    " GET_T_SHIPMENT_DATA
+* Add 2008.04.03 ---->
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_SHIP_DATA
+*&---------------------------------------------------------------------*
+*       出庫伝票情報取得
+*----------------------------------------------------------------------*
+FORM get_t_ship_data USING it_object TYPE typ_t_object_normal.
+
+DATA: lf_ship_data LIKE LINE OF gt_ship_data.
+DATA: l_vbeln TYPE vbfa-vbeln,
+l_posnn TYPE vbfa-posnn,
+l_vbtyp TYPE vbfa-vbtyp_n.
+*   ADD 2008.04.16 --->
+DATA: l_bwart TYPE vbfa-bwart.
+CLEAR:l_bwart.
+*   ADD 2008.04.16 <---
+DATA: lf_object LIKE LINE OF it_object.
+
+CLEAR: g_rc.
+CLEAR: gt_ship_data[].
+
+
+LOOP AT it_object INTO lf_object.
+
+SELECT vbelv
+posnv
+vbeln
+posnn
+vbtyp_n
+rfmng          " 出庫数量実績
+*   ADD 2008.04.16 --->
+bwart
+*   ADD 2008.04.16 <---
+INTO (lf_ship_data-vbelv,
+lf_ship_data-posnv,
+l_vbeln,
+l_posnn,
+l_vbtyp,
+lf_ship_data-rfmng,
+*   ADD 2008.04.16 --->
+l_bwart
+*   ADD 2008.04.16 <---
+)
+FROM vbfa
+WHERE vbelv    = lf_object-vbeln
+AND posnv    = lf_object-posnr.
+
+CHECK l_vbtyp = 'R' OR l_vbtyp = 'h'.
+*   ADD 2008.04.16 --->
+*   継続伝票の伝票カテゴリが'R'、
+*   移動タイプ が'963'もしくは'653'の場合は数量をマイナスにする
+IF l_vbtyp = 'R'.
+IF l_bwart = '963' OR l_bwart = '653'.
+lf_ship_data-rfmng = lf_ship_data-rfmng * -1.
+ENDIF.
+ENDIF.
+*   ADD 2008.04.16 <---
+*   出庫取消の場合は数量をマイナスにする
+IF l_vbtyp = 'h'.
+lf_ship_data-rfmng = lf_ship_data-rfmng * -1.
+ENDIF.
+
+*   出荷数量実績を集計する
+COLLECT lf_ship_data INTO gt_ship_data.
+ENDSELECT.
+
+ENDLOOP.
+
+IF gt_shipment_data[] IS INITIAL.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_ship_data BY vbelv posnv.
+ENDIF.
+
+ENDFORM.                    " GET_T_SHIP_DATA
+* Add 2008.04.03 <----
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_STOCK_DATA
+*&---------------------------------------------------------------------*
+*       受注在庫情報取得
+*----------------------------------------------------------------------*
+FORM get_t_stock_data USING it_object TYPE typ_t_object_normal.
+
+CLEAR: g_rc.
+CLEAR: gt_stock_data[].
+
+SELECT matnr 	  " 品目コード
+	   werks      " プラント
+	   vbeln      " 販売管理伝票番号
+	   posnr      " 明細番号
+	   kalab      " 利用可能評価在庫
+INTO TABLE gt_stock_data
+FROM mska
+FOR ALL ENTRIES IN it_object
+WHERE matnr = it_object-matnr
+AND werks = it_object-werks
+AND lgort = 'H000'
+AND sobkz = 'E'
+AND vbeln = it_object-vbeln
+AND posnr = it_object-posnr
+AND kalab <> 0.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_stock_data BY matnr werks vbeln posnr.
+ENDIF.
+
+ENDFORM.                    " GET_T_STOCK_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_MATERIAL_DATA
+*&---------------------------------------------------------------------*
+*       品目マスタ情報取得
+*----------------------------------------------------------------------*
+FORM get_material_data USING    i_matnr
+i_werks
+CHANGING ef_material_data.
+
+CLEAR: g_rc.
+CLEAR: ef_material_data.
+
+SELECT SINGLE
+mara~matnr     " 品目コード
+mara~meins     " 基本数量単位
+mara~ntgew     " 正味質量
+mara~stoff     " 危険物コード
+mvke~vkorg     " 販売組織
+mvke~vtweg     " 流通ﾁｬﾈﾙ
+mvke~vrkme     " 販売単位
+mvke~prat1     " 危険品区分
+mvke~prat2     " 該非判定
+marc~werks     " プラント
+marc~stawn     " 統計品目ｺｰﾄﾞ/輸入ｺｰﾄﾞ
+marc~herkl     " 品目の原産国
+INTO ef_material_data
+FROM mara INNER JOIN marc ON mara~matnr = marc~matnr
+INNER JOIN mvke ON mara~matnr = mvke~matnr
+WHERE mara~matnr = i_matnr
+AND marc~werks = i_werks
+AND mvke~vkorg = p_vkorg
+AND mvke~vtweg = p_vtweg.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " GET_MATERIAL_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_PRICE_DATA
+*&---------------------------------------------------------------------*
+*       仲介単価情報取得
+*----------------------------------------------------------------------*
+FORM get_t_price_data USING it_object TYPE typ_t_object_normal.
+
+CLEAR g_rc.
+CLEAR gt_price_data[].
+
+SELECT knumv                " 伝票条件番号
+kposn                " 条件明細番号
+waers                " 通貨コード
+kwert                " 条件金額
+* Add 2008/03/25 --->
+kawrt                " 条件数量
+kbetr                " 条件単価
+kpein                " 単位数量
+* Add 2008/03/25 <---
+INTO TABLE gt_price_data
+FROM konv
+FOR ALL ENTRIES IN it_object
+WHERE knumv = it_object-knumv
+AND kposn = it_object-posnr
+AND kschl = 'ZPZE'.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_price_data BY knumv kposn.
+ENDIF.
+
+ENDFORM.                    " GET_T_PRICE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_BUSINESS_DATA
+*&---------------------------------------------------------------------*
+*       受注伝票ビジネス情報取得
+*----------------------------------------------------------------------*
+FORM get_t_business_data USING it_header TYPE typ_t_object_normal.
+
+CLEAR: g_rc.
+CLEAR: gt_business_data[].
+
+SELECT vbeln          " 販売伝票番号
+kursk          " 換算レート
+bstkd          " 得意先発注番号
+bstdk_e        " 出荷先の得意先発注日付
+INTO TABLE gt_business_data
+FROM vbkd
+FOR ALL ENTRIES IN it_header
+WHERE vbeln = it_header-vbeln
+AND posnr = '000000'.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_business_data BY vbeln.
+ENDIF.
+
+ENDFORM.                    " GET_T_BUSINESS_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_OFFICE_NAME
+*&---------------------------------------------------------------------*
+*       営業所テキスト取得
+*----------------------------------------------------------------------*
+*      -->I_VKBUR        営業所コード
+*      <--E_OFFICE_NAME  営業所名
+*----------------------------------------------------------------------*
+FORM get_office_name USING    i_vkbur
+CHANGING e_office_name.
+
+DATA: lf_office LIKE LINE OF gt_office_cache.
+
+CLEAR g_rc.
+CLEAR e_office_name.
+
+READ TABLE gt_office_cache INTO lf_office
+WITH TABLE KEY code = i_vkbur.
+IF sy-subrc = 0.
+e_office_name = lf_office-name.
+ELSE.
+SELECT SINGLE bezei
+INTO e_office_name
+FROM tvkbt
+WHERE spras = 'J'
+AND vkbur = i_vkbur.
+CASE sy-subrc.
+WHEN 0.
+lf_office-code = i_vkbur.
+lf_office-name = e_office_name.
+INSERT lf_office INTO TABLE gt_office_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " GET_OFFICE_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_GROUP_NAME
+*&---------------------------------------------------------------------*
+*       営業グループテキスト取得
+*----------------------------------------------------------------------*
+*      -->I_VKGRP       営業グループコード
+*      <--E_GROUP_NAME  営業グループ名
+*----------------------------------------------------------------------*
+FORM get_group_name USING    i_vkgrp
+CHANGING e_group_name.
+
+DATA: lf_group LIKE LINE OF gt_group_cache.
+
+CLEAR g_rc.
+CLEAR e_group_name.
+
+READ TABLE gt_group_cache INTO lf_group
+WITH TABLE KEY code = i_vkgrp.
+IF sy-subrc = 0.
+e_group_name = lf_group-name.
+ELSE.
+SELECT SINGLE bezei
+INTO e_group_name
+FROM tvgrt
+WHERE spras = 'J'
+AND vkgrp = i_vkgrp.
+CASE sy-subrc.
+WHEN 0.
+lf_group-code = i_vkgrp.
+lf_group-name = e_group_name.
+INSERT lf_group INTO TABLE gt_group_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " GET_GROUP_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_GUEST_NAME
+*&---------------------------------------------------------------------*
+*       得意先名取得
+*----------------------------------------------------------------------*
+*      -->I_ADRNR       得意先アドレスキー
+*      <--E_GUEST_NAME  得意先名
+*----------------------------------------------------------------------*
+FORM get_guest_name USING    i_adrnr
+CHANGING e_guest_name.
+
+DATA : lf_addr1_sel TYPE addr1_sel,
+lf_sadr      TYPE sadr.
+
+CLEAR g_rc.
+CLEAR e_guest_name.
+lf_addr1_sel-addrnumber = i_adrnr.
+CALL FUNCTION 'ADDR_GET'
+EXPORTING
+address_selection = lf_addr1_sel
+IMPORTING
+sadr              = lf_sadr
+EXCEPTIONS
+parameter_error   = 1
+address_not_exist = 2
+version_not_exist = 3
+internal_error    = 4
+OTHERS            = 5.
+CASE sy-subrc.
+WHEN 0.
+e_guest_name = lf_sadr-name1.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+
+ENDFORM.                                " GET_GUEST_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_FREE_DATA
+*&---------------------------------------------------------------------*
+*       データ抽出処理(無償支給)
+*----------------------------------------------------------------------*
+FORM get_free_data.
+
+CLEAR g_rc.
+* 無償支給処理対象データ取得
+PERFORM get_t_object_free.
+IF g_rc <> 0.
+*   入出庫伝票に該当するデータがありません
+MESSAGE s600 WITH text-m08.
+ENDIF.
+
+CHECK g_rc = 0.
+* 送信数量情報取得
+PERFORM get_t_transmit_quantity.
+
+* リターンコードをクリアする
+CLEAR g_rc.
+
+ENDFORM.                    " GET_FREE_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_OBJECT
+*&---------------------------------------------------------------------*
+*       無償支給処理対象データ取得
+*----------------------------------------------------------------------*
+FORM get_t_object_free.
+
+CLEAR: g_rc.
+CLEAR: gt_object_free[].
+
+SELECT mseg~mblnr     " 入出庫伝票番号
+mseg~zeile     " 明細番号
+mkpf~bldat	" 伝票日付
+mkpf~usnam     " ユーザ名
+mseg~matnr     " 品目コード
+mseg~werks     " プラント
+mseg~lifnr     " 仕入先コード
+mseg~menge     " 数量
+* Add 2008.04.04 --->
+mseg~meins     " 基本数量単位
+* Add 2008.04.04 <---
+INTO TABLE gt_object_free
+FROM mkpf INNER JOIN mseg ON mkpf~mblnr = mseg~mblnr AND
+				   mkpf~mjahr = mseg~mjahr
+WHERE mkpf~bldat IN s_getdt
+AND mseg~bwart = '541'
+AND mseg~sobkz = 'O'
+AND mseg~lifnr IN s_lifnr
+AND mseg~shkzg = 'S'
+AND mseg~werks IN s_vstel.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_object_free BY mblnr zeile.
+ENDIF.
+
+ENDFORM.                    " GET_T_OBJECT
+*&---------------------------------------------------------------------*
+*&      Form  GO_TO_SCREEN_0100
+*&---------------------------------------------------------------------*
+*       未送信リスト画面へ遷移する
+*----------------------------------------------------------------------*
+FORM go_to_screen_0100.
+
+CALL SCREEN 0100.
+
+ENDFORM.                    " GO_TO_SCREEN_0100
+*&---------------------------------------------------------------------*
+*&      Form  GO_TO_SCREEN_0200
+*&---------------------------------------------------------------------*
+*       送受信リスト画面へ遷移する
+*----------------------------------------------------------------------*
+FORM go_to_screen_0200.
+
+CALL SCREEN 0200.
+
+ENDFORM.                    " GO_TO_SCREEN_0200
+*&---------------------------------------------------------------------*
+*&      Form  GET_OPERATOR_NAME
+*&---------------------------------------------------------------------*
+*       営業員名称取得
+*----------------------------------------------------------------------*
+*      -->I_PERNR          営業員コード
+*      <--E_OPERATOR_NAME  営業員名称
+*----------------------------------------------------------------------*
+FORM get_operator_name USING    i_pernr
+CHANGING e_operator_name.
+
+DATA: lf_operator LIKE LINE OF gt_operator_cache.
+
+CLEAR: g_rc.
+CLEAR: e_operator_name.
+
+READ TABLE gt_operator_cache INTO lf_operator
+WITH TABLE KEY code = i_pernr.
+IF sy-subrc = 0.
+e_operator_name = lf_operator-name.
+ELSE.
+SELECT nachn  " 姓
+INTO e_operator_name
+FROM pa0002 UP TO 1 ROWS
+WHERE pernr = i_pernr.
+ENDSELECT.
+CASE sy-subrc.
+WHEN 0.
+lf_operator-code = i_pernr.
+lf_operator-name = e_operator_name.
+INSERT lf_operator INTO TABLE gt_operator_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " GET_OPERATOR_NAME
+*---------------------------------------------------------------------*
+*       FORM GET_SHIPMENT_POINT                                       *
+*---------------------------------------------------------------------*
+*       出荷ポイント名取得                                            *
+*---------------------------------------------------------------------*
+*       -->I_VSTEL           出荷ポイント                             *
+*       <--E_SHIPMENT_POINT  出荷ポイント名                           *
+*---------------------------------------------------------------------*
+FORM get_shipment_point USING    i_vstel
+CHANGING e_shipment_point.
+
+DATA: lf_point LIKE LINE OF gt_point_cache.
+
+CLEAR: g_rc.
+CLEAR: e_shipment_point.
+
+READ TABLE gt_point_cache INTO lf_point
+WITH TABLE KEY code = i_vstel.
+
+IF sy-subrc = 0.
+e_shipment_point = lf_point-name.
+ELSE.
+SELECT SINGLE vtext INTO e_shipment_point
+FROM tvstt
+WHERE spras = 'J'
+AND vstel = i_vstel.
+CASE sy-subrc.
+WHEN 0.
+lf_point-code = i_vstel.
+lf_point-name = e_shipment_point.
+INSERT lf_point INTO TABLE gt_point_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " GET_SHIPMENT_POINT
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHELF_NO
+*&---------------------------------------------------------------------*
+*       棚番取得
+*----------------------------------------------------------------------*
+*      -->I_MATNR     品目コード
+*      -->I_WERKS     プラント
+*      <--E_SHELF_NO  棚番
+*----------------------------------------------------------------------*
+FORM get_shelf_no USING    i_matnr
+i_werks
+CHANGING e_shelf_no.
+
+DATA: lf_shelf LIKE LINE OF gt_shelf_cache.
+DATA: l_code LIKE lf_shelf-code.
+
+CLEAR: g_rc.
+CLEAR: e_shelf_no.
+
+l_code+0(18) = i_matnr.
+l_code+18 = i_werks.
+
+READ TABLE gt_shelf_cache INTO lf_shelf
+WITH TABLE KEY code = l_code.
+IF sy-subrc = 0.
+e_shelf_no = lf_shelf-name.
+ELSE.
+SELECT SINGLE lgpbe INTO e_shelf_no
+FROM mard
+WHERE matnr = i_matnr
+AND werks = i_werks
+AND lgort = 'H000'.
+CASE sy-subrc.
+WHEN 0.
+lf_shelf-code = l_code.
+lf_shelf-name = e_shelf_no.
+INSERT lf_shelf INTO TABLE gt_shelf_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " GET_SHELF_NO
+*&---------------------------------------------------------------------*
+*&      Form  CONVERT_AMOUNT_TO_DISPLAY
+*&---------------------------------------------------------------------*
+*       通貨コードで金額変換
+*----------------------------------------------------------------------*
+*      -->I_AMOUNT  金額（変換前）
+*      -->I_WAERS   通貨コード
+*      <--E_AMOUNT  金額（変換後）
+*----------------------------------------------------------------------*
+FORM convert_amount_to_display USING    i_amount
+i_waers
+CHANGING e_amount.
+
+DATA: l_amount_internal TYPE wmto_s-amount,
+l_amount_display TYPE wmto_s-amount.
+
+CLEAR g_rc.
+CLEAR e_amount.
+l_amount_internal = i_amount.
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+EXPORTING
+currency        = i_waers
+amount_internal = l_amount_internal
+IMPORTING
+amount_display  = l_amount_display
+EXCEPTIONS
+internal_error  = 1
+OTHERS          = 2.
+CASE sy-subrc.
+WHEN 0.
+e_amount = l_amount_display.
+WHEN OTHERS.
+g_rc = cns_rc_code_error.
+ENDCASE.
+
+ENDFORM.                    " CONVERT_AMOUNT_TO_DISPLAY
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_TRANSMIT_LOG
+*&---------------------------------------------------------------------*
+*       送信済リストデータ取得
+*----------------------------------------------------------------------*
+FORM get_t_transmit_log.
+
+CLEAR g_rc.
+CLEAR gt_transmit_log[].
+
+SELECT * INTO TABLE gt_transmit_log
+FROM zsd002
+WHERE loevm = ' '
+AND nrflg = g_order_type
+AND kunnr IN s_kunnr
+AND vstel IN s_vstel
+AND sddate IN s_getdt.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " GET_T_TRANSMIT_LOG
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_TRANSMIT_LOG_WITH_ID
+*&---------------------------------------------------------------------*
+*       受信データより関連する送信データ取得
+*----------------------------------------------------------------------*
+FORM get_t_transmit_log_with_id.
+
+CLEAR g_rc.
+CLEAR gt_transmit_log[].
+
+SELECT * INTO TABLE gt_transmit_log
+FROM zsd002
+FOR ALL ENTRIES IN gt_receive_log
+WHERE sendid = gt_receive_log-sendid.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " GET_T_TRANSMIT_LOG_WITH_ID
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_RECEIVE_LOG
+*&---------------------------------------------------------------------*
+*       受信済リストデータ取得
+*----------------------------------------------------------------------*
+FORM get_t_receive_log.
+
+CLEAR g_rc.
+CLEAR gt_receive_log[].
+
+SELECT * INTO TABLE gt_receive_log
+FROM zsd003
+WHERE loevm = ' '
+AND kunnr IN s_kunnr
+AND indate IN s_getdt
+AND vstel IN s_vstel.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " GET_T_RECEIVE_LOG
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_RECEIVE_LOG_WITH_ID
+*&---------------------------------------------------------------------*
+*       送信データより関連する受信データ取得
+*----------------------------------------------------------------------*
+FORM get_t_receive_log_with_id.
+
+CLEAR: g_rc.
+CLEAR: gt_receive_log[].
+
+SELECT * INTO TABLE gt_receive_log
+FROM zsd003
+FOR ALL ENTRIES IN gt_transmit_log
+WHERE sendid = gt_transmit_log-sendid.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " GET_T_RECEIVE_LOG_WITH_ID
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_TRANSMITTED_QUANTITY
+*&---------------------------------------------------------------------*
+*       送信数量データ取得
+*----------------------------------------------------------------------*
+FORM get_t_transmit_quantity.
+
+DATA: l_object_free LIKE LINE OF gt_object_free.
+DATA: lf_transmit_quantity LIKE LINE OF gt_transmit_quantity.
+DATA: l_sendid TYPE zsd002-sendid,
+l_vbeln TYPE zsd002-vbeln,
+l_posnr TYPE zsd002-posnr.
+
+CLEAR: g_rc.
+CLEAR: gt_transmit_quantity[].
+
+CASE g_order_type.
+*   通常の場合
+WHEN cns_order_type_normal.
+SELECT sendid
+vbeln
+posnr
+sdmeng
+lfimg
+INTO (l_sendid,
+lf_transmit_quantity-vbeln,
+lf_transmit_quantity-posnr,
+lf_transmit_quantity-sdmeng,
+lf_transmit_quantity-lfimg)
+FROM zsd002
+FOR ALL ENTRIES IN gt_object_normal
+WHERE vbeln = gt_object_normal-vbeln
+AND posnr = gt_object_normal-posnr
+AND nrflg = '0'
+AND loevm = ' '.
+COLLECT lf_transmit_quantity INTO gt_transmit_quantity.
+ENDSELECT.
+*   無償の場合
+WHEN cns_order_type_free.
+LOOP AT gt_object_free INTO l_object_free.
+l_vbeln = l_object_free-mblnr.
+l_posnr = l_object_free-zeile.
+SELECT vbeln
+posnr
+SUM( sdmeng )
+SUM( lfimg )
+INTO lf_transmit_quantity
+FROM zsd002
+UP TO 1 ROWS
+WHERE vbeln = l_vbeln
+AND posnr = l_posnr
+AND nrflg = '1'
+AND loevm = ' '
+GROUP by vbeln posnr.
+ENDSELECT.
+APPEND lf_transmit_quantity TO gt_transmit_quantity.
+ENDLOOP.
+ENDCASE.
+
+IF gt_transmit_quantity[] IS INITIAL.
+g_rc = cns_rc_code_not_found.
+ELSE.
+SORT gt_transmit_quantity BY vbeln posnr.
+ENDIF.
+
+ENDFORM.                    " GET_T_TRANSMITTED_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  GET_DELIVERY_TYPE
+*&---------------------------------------------------------------------*
+*       納品書種別取得
+*----------------------------------------------------------------------*
+*      -->I_KUNNR          得意先コード
+*      <--E_DELIVERY_TYPE  納品書種別
+*----------------------------------------------------------------------*
+FORM get_delivery_type USING    i_kunnr
+CHANGING e_delivery_type.
+
+DATA: lf_deliver LIKE LINE OF gt_deliver_cache.
+DATA: l_name(20) TYPE c.
+
+CLEAR g_rc.
+CLEAR e_delivery_type.
+
+l_name+0(10) = i_kunnr.
+l_name+10(4) = p_bukrs.
+
+READ TABLE gt_text_data_1 TRANSPORTING NO FIELDS
+WITH KEY tdname = l_name BINARY SEARCH.
+IF sy-subrc = 0.
+READ TABLE gt_deliver_cache INTO lf_deliver
+WITH TABLE KEY code = l_name.
+IF sy-subrc = 0.
+e_delivery_type = lf_deliver-name.
+ELSE.
+PERFORM get_standard_text USING    'ZS01'
+l_name
+'KNB1'
+CHANGING e_delivery_type.
+lf_deliver-code = l_name.
+lf_deliver-name = e_delivery_type.
+INSERT lf_deliver INTO TABLE gt_deliver_cache.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " GET_DELIVERY_TYPE
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHIPMENT_NOTE
+*&---------------------------------------------------------------------*
+*       出荷指示備考取得
+*----------------------------------------------------------------------*
+*      -->I_VBELN          販売伝票番号
+*      -->I_POSNR          明細番号
+*      <--E_SHIPMENT_NOTE  出荷指示備考
+*----------------------------------------------------------------------*
+FORM get_shipment_note USING    i_vbeln
+i_posnr
+CHANGING e_shipment_note.
+
+DATA: l_name(20) TYPE c.
+
+CLEAR g_rc.
+CLEAR e_shipment_note.
+
+l_name+0(10) = i_vbeln.
+l_name+10(6) = i_posnr.
+
+READ TABLE gt_text_data_2 TRANSPORTING NO FIELDS
+WITH KEY tdname = l_name
+tdid = '9001' BINARY SEARCH.
+IF sy-subrc = 0.
+PERFORM get_standard_text USING    '9001'
+l_name
+'VBBP'
+CHANGING e_shipment_note.
+ENDIF.
+
+ENDFORM.                    " GET_SHIPMENT_NOTE
+*&---------------------------------------------------------------------*
+*&      Form  GET_TRANSFER_WAY
+*&---------------------------------------------------------------------*
+*       輸送手段取得
+*----------------------------------------------------------------------*
+*      -->I_VBELN         販売伝票番号
+*      -->I_POSNR         明細番号
+*      <--E_TRANSFER_WAY  輸送手段
+*----------------------------------------------------------------------*
+FORM get_transfer_way USING    i_vbeln
+i_posnr
+CHANGING e_transfer_way.
+
+DATA: l_name(20) TYPE c.
+
+CLEAR g_rc.
+CLEAR e_transfer_way.
+
+l_name+0(10) = i_vbeln.
+l_name+10(6) = i_posnr.
+
+READ TABLE gt_text_data_2 TRANSPORTING NO FIELDS
+WITH KEY tdname = l_name
+tdid = 'Z910' BINARY SEARCH.
+IF sy-subrc = 0.
+PERFORM get_standard_text USING    'Z910'
+l_name
+'VBBP'
+CHANGING e_transfer_way.
+ENDIF.
+
+ENDFORM.                    " GET_TRANSFER_WAY
+*&---------------------------------------------------------------------*
+*&      Form  GET_GOODS_NAME
+*&---------------------------------------------------------------------*
+*       商品名取得
+*----------------------------------------------------------------------*
+*      -->I_KUNNR       得意先コード
+*      -->I_MATNR       品目コード
+*      <--E_GOODS_NAME  商品名
+*----------------------------------------------------------------------*
+FORM get_goods_name USING    i_kunnr
+i_matnr
+CHANGING e_goods_name.
+
+DATA: l_name(40) TYPE c.
+
+CLEAR g_rc.
+CLEAR e_goods_name.
+
+l_name+0(4) = p_vkorg.
+l_name+4(2) = p_vtweg.
+l_name+6(10) = i_kunnr.
+l_name+16 = i_matnr.
+
+READ TABLE gt_text_data_3 TRANSPORTING NO FIELDS
+WITH KEY tdname = l_name
+tdid = '0003' BINARY SEARCH.
+IF sy-subrc = 0.
+PERFORM get_standard_text USING    '0003'
+l_name
+'KNMT'
+CHANGING e_goods_name.
+ENDIF.
+
+ENDFORM.                    " GET_GOODS_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_PRODUCT_NAME
+*&---------------------------------------------------------------------*
+*       製品取得
+*----------------------------------------------------------------------*
+*      -->I_KUNNR         得意先コード
+*      -->I_MATNR         品目コード
+*      <--E_PRODUCT_NAME  製品
+*----------------------------------------------------------------------*
+FORM get_product_name USING    i_kunnr
+i_matnr
+CHANGING e_product_name.
+
+DATA: l_name(40) TYPE c.
+
+CLEAR g_rc.
+CLEAR e_product_name.
+
+l_name+0(4) = p_vkorg.
+l_name+4(2) = p_vtweg.
+l_name+6(10) = i_kunnr.
+l_name+16 = i_matnr.
+
+READ TABLE gt_text_data_3 TRANSPORTING NO FIELDS
+WITH KEY tdname = l_name
+tdid = '0004' BINARY SEARCH.
+IF sy-subrc = 0.
+PERFORM get_standard_text USING    '0004'
+l_name
+'KNMT'
+CHANGING e_product_name.
+ENDIF.
+
+ENDFORM.                    " GET_PRODUCT_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_STANDARD_TEXT
+*&---------------------------------------------------------------------*
+*       READ_TEXT
+*----------------------------------------------------------------------*
+*      -->I_ID       ID
+*      -->I_NAME     NAME
+*      -->I_OBJECT   OBJECT
+*      <--E_TEXT     TEXT
+*----------------------------------------------------------------------*
+FORM get_standard_text USING    i_id
+i_name
+i_object
+CHANGING e_text.
+
+DATA: l_id TYPE thead-tdid,
+l_name TYPE thead-tdname,
+l_object TYPE thead-tdobject.
+DATA: lt_line TYPE STANDARD TABLE OF tline,
+lf_line LIKE LINE OF lt_line.
+
+CLEAR g_rc.
+CLEAR e_text.
+
+l_id = i_id.
+l_name = i_name.
+l_object = i_object.
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+id                      = l_id
+language                = sy-langu
+name                    = l_name
+object                  = l_object
+TABLES
+lines                   = lt_line
+EXCEPTIONS
+id                      = 1
+language                = 2
+name                    = 3
+not_found               = 4
+object                  = 5
+reference_check         = 6
+wrong_access_to_archive = 7
+OTHERS                  = 8.
+
+CASE sy-subrc.
+WHEN 0.
+READ TABLE lt_line INTO lf_line INDEX 1.
+IF sy-subrc = 0.
+e_text = lf_line-tdline.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " GET_STANDARD_TEXT
+*&---------------------------------------------------------------------*
+*&      Form  GET_SUPPLIER_NAME
+*&---------------------------------------------------------------------*
+*       仕入先名取得
+*----------------------------------------------------------------------*
+*      -->I_LIFNR          仕入先コード
+*      <--E_SUPPLIER_NAME  仕入先名
+*----------------------------------------------------------------------*
+FORM get_supplier_name USING    i_lifnr
+CHANGING e_supplier_name.
+
+DATA: lf_supplier LIKE LINE OF gt_supplier_cache.
+
+CLEAR: g_rc.
+CLEAR: e_supplier_name.
+
+READ TABLE gt_supplier_cache INTO lf_supplier
+WITH TABLE KEY code = i_lifnr.
+IF sy-subrc = 0.
+e_supplier_name = lf_supplier-name.
+ELSE.
+SELECT SINGLE name1 INTO e_supplier_name
+FROM lfa1
+WHERE lifnr = i_lifnr.
+CASE sy-subrc.
+WHEN 0.
+lf_supplier-code = i_lifnr.
+lf_supplier-name = e_supplier_name.
+INSERT lf_supplier INTO TABLE gt_supplier_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " GET_SUPPLIER_NAME
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_RESULT
+*&---------------------------------------------------------------------*
+*       処理結果出力
+*----------------------------------------------------------------------*
+FORM output_result.
+
+DATA: lf_result LIKE LINE OF gt_result.
+
+LOOP AT gt_result INTO lf_result.
+CASE lf_result-format.
+*     SKIP
+WHEN 'S'.
+SKIP.
+*     通常出力
+WHEN OTHERS.
+WRITE lf_result-line.
+ENDCASE.
+ENDLOOP.
+
+ENDFORM.                    " OUTPUT_RESULT
+*&---------------------------------------------------------------------*
+*&      Form  GET_GUEST_MATERIAL
+*&---------------------------------------------------------------------*
+*       得意先品目名称取得
+*----------------------------------------------------------------------*
+*      -->I_KUNNR           得意先コード
+*      -->I_MATNR           品目コード
+*      <--E_GUEST_MATERIAL  得意先品目名称
+*----------------------------------------------------------------------*
+FORM get_guest_material USING    i_kunnr
+i_matnr
+CHANGING e_guest_material.
+
+DATA: lf_material LIKE LINE OF gt_material_cache.
+DATA: l_code LIKE lf_material-code.
+
+CLEAR: g_rc.
+CLEAR: e_guest_material.
+
+l_code+0(10) = i_kunnr.
+l_code+10 = i_matnr.
+
+READ TABLE gt_material_cache INTO lf_material
+WITH TABLE KEY code = l_code.
+IF sy-subrc = 0.
+e_guest_material = lf_material-name.
+ELSE.
+*   KNMTから取得
+SELECT SINGLE postx INTO e_guest_material
+FROM knmt
+WHERE vkorg = p_vkorg
+AND vtweg = p_vtweg
+AND kunnr = i_kunnr
+AND matnr = i_matnr.
+IF NOT e_guest_material IS INITIAL.
+lf_material-code = l_code.
+lf_material-name = e_guest_material.
+INSERT lf_material INTO TABLE gt_material_cache.
+*   KNMTから取得できない場合、MAKTから取得
+ELSE.
+SELECT SINGLE maktx INTO e_guest_material
+FROM makt
+WHERE matnr = i_matnr
+AND spras = sy-langu.
+CASE sy-subrc.
+WHEN 0.
+lf_material-code = l_code.
+lf_material-name = e_guest_material.
+INSERT lf_material INTO TABLE gt_material_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " GET_GUEST_MATERIAL
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHIPMENT_ADDRESS
+*&---------------------------------------------------------------------*
+*       出荷先住所取得
+*----------------------------------------------------------------------*
+*      -->I_ADRNR           アドレスキー
+*      <--EF_SHIPMENT_ADDR  出荷先住所
+*----------------------------------------------------------------------*
+FORM get_shipment_address
+USING    i_adrnr
+CHANGING ef_shipment_addr TYPE typ_shipment_addr.
+
+CLEAR: g_rc.
+CLEAR: ef_shipment_addr.
+
+SELECT b~name2
+b~city1
+b~street
+c~bezei
+INTO ef_shipment_addr
+FROM adrc AS b INNER JOIN t005u AS c ON c~bland = b~region
+UP TO 1 ROWS
+WHERE addrnumber = i_adrnr
+AND c~spras = 'J'
+AND c~land1 = 'JP'.
+ENDSELECT.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " GET_SHIPMENT_ADDRESS
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_PARTNER_DATA
+*&---------------------------------------------------------------------*
+*       取引先情報取得
+*----------------------------------------------------------------------*
+*      -->IT_HEADER  処理対象ヘッダデータ
+*      <--IT_DETAIL  処理対象明細データ
+*----------------------------------------------------------------------*
+FORM get_t_partner_data USING it_header TYPE typ_t_object_normal
+it_detail TYPE typ_t_object_normal.
+
+CLEAR: g_rc.
+CLEAR: gt_partner_data[].
+
+* 取引先情報ヘッダデータ取得
+SELECT h~vbeln       " 販売管理伝票
+ag~posnr      " 明細
+ze~kunnr      " エンドユーザ
+ze~adrnr      " 住所
+ag~kunnr      " 受注先
+ag~adrnr      " 住所
+ag~lzone      " 納入区域
+we~kunnr      " 出荷先
+we~adrnr      " 住所
+INTO TABLE gt_partner_data
+FROM vbak AS h INNER JOIN vbpa AS ag ON h~vbeln = ag~vbeln AND
+ag~posnr = '000000' AND
+ag~parvw = 'AG'
+INNER JOIN vbpa AS we ON h~vbeln = we~vbeln AND
+we~posnr = '000000' AND
+we~parvw = 'WE'
+LEFT JOIN vbpa AS ze ON h~vbeln = ze~vbeln AND
+ze~posnr = '000000' AND
+ze~parvw = 'ZE'
+FOR ALL ENTRIES IN it_header
+WHERE h~vbeln = it_header-vbeln.
+
+* 取引先情報明細データ取得
+SELECT vbeln      " 販売管理伝票
+posnr      " 明細
+kunnr      " エンドユーザ
+adrnr      " 住所
+APPENDING TABLE gt_partner_data
+FROM vbpa
+FOR ALL ENTRIES IN it_detail
+WHERE vbeln = it_detail-vbeln
+AND posnr = it_detail-posnr
+AND parvw = 'ZE'.
+
+SORT gt_partner_data BY vbeln posnr.
+
+ENDFORM.                    " GET_T_PARTNER_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_TEXT_DATA_1
+*&---------------------------------------------------------------------*
+*       納品書種別テキストデータ取得
+*----------------------------------------------------------------------*
+*      -->IS_STX_NAME  テキストNAME範囲
+*----------------------------------------------------------------------*
+FORM get_t_text_data_1 TABLES   is_stx_name STRUCTURE stxdrname.
+
+DATA: l_count TYPE  sy-tfill.
+
+CLEAR gt_text_data_1[].
+
+CALL FUNCTION 'SELECT_TEXT'
+EXPORTING
+object     = 'KNB1'
+id         = 'ZS01'
+language   = 'J'
+IMPORTING
+entries    = l_count
+TABLES
+selections = gt_text_data_1
+t_name     = is_stx_name
+EXCEPTIONS
+OTHERS     = 0.
+
+IF l_count > 0.
+SORT gt_text_data_1 BY tdname tdid.
+ENDIF.
+
+ENDFORM.                    " GET_T_TEXT_DATA_1
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_TEXT_DATA_2
+*&---------------------------------------------------------------------*
+*       出荷指示備考、輸送手段テキストデータ取得
+*----------------------------------------------------------------------*
+*      -->IS_STX_NAME  テキストNAME範囲
+*----------------------------------------------------------------------*
+FORM get_t_text_data_2 TABLES   is_stx_name STRUCTURE stxdrname.
+
+DATA: ls_stx_id TYPE STANDARD TABLE OF stxdrid,
+lf_stx_id LIKE LINE OF  ls_stx_id.
+DATA: l_count TYPE  sy-tfill.
+
+CLEAR gt_text_data_2[].
+
+lf_stx_id-sign = 'I'.
+lf_stx_id-option = 'EQ'.
+lf_stx_id-low = '9001'.   " 出荷指示備考
+APPEND lf_stx_id TO ls_stx_id.
+lf_stx_id-low = 'Z910'.   " 輸送手段
+APPEND lf_stx_id TO ls_stx_id.
+
+CALL FUNCTION 'SELECT_TEXT'
+EXPORTING
+object     = 'VBBP'
+language   = 'J'
+IMPORTING
+entries    = l_count
+TABLES
+selections = gt_text_data_2
+t_name     = is_stx_name
+t_id       = ls_stx_id
+EXCEPTIONS
+OTHERS     = 0.
+
+IF l_count > 0.
+SORT gt_text_data_2 BY tdname tdid.
+ENDIF.
+
+ENDFORM.                    " GET_T_TEXT_DATA_2
+*&---------------------------------------------------------------------*
+*&      Form  GET_T_TEXT_DATA_3
+*&---------------------------------------------------------------------*
+*       商品名、製品テキストデータ取得
+*----------------------------------------------------------------------*
+*      -->IS_STX_NAME  テキストNAME範囲
+*----------------------------------------------------------------------*
+FORM get_t_text_data_3 TABLES   is_stx_name STRUCTURE stxdrname.
+
+DATA: ls_stx_id TYPE STANDARD TABLE OF stxdrid,
+lf_stx_id LIKE LINE OF  ls_stx_id.
+DATA: l_count TYPE  sy-tfill.
+
+CLEAR gt_text_data_3[].
+
+lf_stx_id-sign = 'I'.
+lf_stx_id-option = 'EQ'.
+lf_stx_id-low = '0003'.   " 商品名
+APPEND lf_stx_id TO ls_stx_id.
+lf_stx_id-low = '0004'.   " 製品
+APPEND lf_stx_id TO ls_stx_id.
+
+CALL FUNCTION 'SELECT_TEXT'
+EXPORTING
+object     = 'KNMT'
+language   = 'J'
+IMPORTING
+entries    = l_count
+TABLES
+selections = gt_text_data_3
+t_name     = is_stx_name
+t_id       = ls_stx_id
+EXCEPTIONS
+OTHERS     = 0.
+
+IF l_count > 0.
+SORT gt_text_data_3 BY tdname tdid.
+ENDIF.
+
+ENDFORM.                    " GET_T_TEXT_DATA_3
+*&---------------------------------------------------------------------*
+*&      Form  GET_VALID_QUANTITY
+*&---------------------------------------------------------------------*
+*       出荷可能受注単位数量取得
+*----------------------------------------------------------------------*
+*      -->I_MATNR         品目コード
+*      -->I_MEINS         品目の販売単位或いは基本単位
+*      -->I_VRKME         伝票の販売単位
+*      -->I_QUANTITY_IN   出荷可能数量
+*      <--E_QUANTITY_OUT  出荷可能受注単位数量
+*----------------------------------------------------------------------*
+FORM get_valid_quantity USING    i_matnr
+i_meins
+i_vrkme
+i_quantity_in
+CHANGING e_quantity_out.
+
+DATA: l_in_me TYPE mara-meins,
+l_out_me TYPE mara-meins,
+l_in_menge TYPE ekpo-menge,
+l_out_menge TYPE ekpo-menge.
+
+CLEAR g_rc.
+
+l_in_me = i_vrkme.
+l_out_me = i_meins.
+l_in_menge = i_quantity_in.
+
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+i_matnr              = i_matnr
+i_in_me              = l_in_me
+i_out_me             = l_out_me
+i_menge              = l_in_menge
+IMPORTING
+e_menge              = l_out_menge
+EXCEPTIONS
+error_in_application = 1
+error                = 2
+OTHERS               = 3.
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_error.
+ELSE.
+e_quantity_out = l_out_menge.
+ENDIF.
+
+ENDFORM.                    " GET_VALID_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  GET_ENDUSER_NAME
+*&---------------------------------------------------------------------*
+*       エンドユーザ名取得
+*----------------------------------------------------------------------*
+*      -->I_ADRNR         アドレスキー
+*      <--E_ENDUSER_NAME  エンドユーザ名
+*----------------------------------------------------------------------*
+FORM get_enduser_name USING    i_adrnr
+CHANGING e_enduser_name.
+
+CLEAR: g_rc.
+CLEAR: e_enduser_name.
+
+SELECT name2
+INTO e_enduser_name
+FROM adrc
+UP TO 1 ROWS
+WHERE addrnumber = i_adrnr.
+ENDSELECT.
+
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " GET_ENDUSER_NAME
+*&---------------------------------------------------------------------*
+*&      Form  FILTER_T_OBJECT_NORMAL
+*&---------------------------------------------------------------------*
+*       処理対象データピックアップ
+*----------------------------------------------------------------------*
+*      <--ES_STX_NAME_1  テキストNAME範囲
+*      <--ES_STX_NAME_2  テキストNAME範囲
+*      <--ES_STX_NAME_3  テキストNAME範囲
+*      -->IT_OBJECT_IN   元処理対象データ
+*      <--ET_OBJECT_OUT  処理対象データ
+*----------------------------------------------------------------------*
+FORM filter_t_object_normal
+TABLES   es_stx_name_1 STRUCTURE stxdrname
+es_stx_name_2 STRUCTURE stxdrname
+es_stx_name_3 STRUCTURE stxdrname
+USING    it_object_in TYPE typ_t_object_normal
+CHANGING et_object_out TYPE typ_t_object_normal.
+
+DATA: lf_object TYPE typ_object_normal.
+DATA: lf_shipment_data LIKE LINE OF gt_shipment_data,
+lf_stock_data LIKE LINE OF gt_stock_data,
+lf_transmit_quantity LIKE LINE OF gt_transmit_quantity.
+DATA: l_quantity(13) TYPE p DECIMALS 2.
+DATA: lf_stx_name TYPE stxdrname.
+* Add 2008/04/10 ---->
+DATA: lf_material_data TYPE typ_material_data.
+* Add 2008/04/10 <----
+* Add 2008.04.03 ---->
+DATA: lf_ship_data LIKE LINE OF gt_ship_data.
+* Add 2008.04.03 <----
+CLEAR g_rc.
+CLEAR et_object_out[].
+
+lf_stx_name-sign = 'I'.
+lf_stx_name-option = 'EQ'.
+
+LOOP AT it_object_in INTO lf_object.
+
+CLEAR: lf_shipment_data,
+lf_stock_data,
+lf_transmit_quantity.
+* Add 2008.04.03 ---->
+CLEAR: lf_ship_data.
+* Add 2008.04.03 <----
+* Add 2008/04/10 ---->
+*   品目マスタ情報取得
+PERFORM get_material_data USING    lf_object-matnr
+lf_object-werks
+CHANGING lf_material_data.
+* Add 2008/04/10 <----
+* Add 2008/09/01 --->
+IF lf_object-auart = 'KB'.
+CLEAR: l_knumh.
+*       条件レコード番号の取得
+SELECT SINGLE knumh                       " 条件レコード番号
+INTO l_knumh
+FROM a901
+WHERE kappl = 'V'                        " アプリケーション
+AND kschl = 'ZPR0'                     " 条件タイプ
+AND kunnr = lf_object-kunnr         " エンドユーザ
+AND zzzkdmat = lf_object-kdmat       " 得意先品目
+AND datbi >= sy-datum                  " 有効終了日
+AND datab <= sy-datum.                 " 有効開始日
+
+IF sy-subrc = 0.
+CLEAR: l_kbetr,
+l_konwa,
+l_kpein.
+*         金額・通貨の取得
+SELECT SINGLE kbetr                     " 条件金額
+konwa                     " 通貨
+kpein                     " 条件単位
+FROM konp
+INTO (l_kbetr,l_konwa,l_kpein)
+WHERE knumh = l_knumh.                 "条件レコード番号
+
+IF sy-subrc = 0.
+*           通貨コード
+lf_object-waerk  = l_konwa.
+*           単価
+*            CLEAR LV_KBETR.
+*            WRITE L_KBETR TO LV_KBETR
+*                             CURRENCY L_KONWA
+*                             NO-GROUPING.
+*            CLEAR L_KBETR.
+*            L_KBETR = LV_KBETR.
+lf_object-netpr = l_kbetr /
+l_kpein.
+ENDIF.
+ENDIF.
+ENDIF.
+* Add 2008/09/01 <---
+
+*   出荷数量実績取得
+READ TABLE gt_shipment_data INTO lf_shipment_data
+WITH KEY vbelv = lf_object-vbeln
+posnv = lf_object-posnr BINARY SEARCH.
+*   出荷可能数量算出
+CASE lf_object-pstyv.
+* Mod 2008.01.24 --->
+*     在庫品の場合　　　←×
+*     個別購買品の場合　←○
+* Mod 2008.01.24 <---
+WHEN 'TAB' OR 'ZTAB' OR 'ZTMB'.
+*       在庫数量取得
+READ TABLE gt_stock_data INTO lf_stock_data
+WITH KEY matnr = lf_object-matnr
+werks = lf_object-werks
+vbeln = lf_object-vbeln
+posnr = lf_object-posnr BINARY SEARCH.
+* Add 2008.04.03 ---->
+*       出庫数量取得
+READ TABLE gt_ship_data INTO lf_ship_data
+WITH KEY vbelv = lf_object-vbeln
+posnv = lf_object-posnr BINARY SEARCH.
+* Add 2008.04.03 <----
+* Add 2008/04/10 ---->
+*       在庫数量
+PERFORM get_valid_quantity USING    lf_object-matnr
+lf_object-vrkme
+lf_material_data-meins
+lf_stock_data-kalab
+CHANGING lf_stock_data-kalab.
+*       出庫数量
+PERFORM get_valid_quantity USING    lf_object-matnr
+lf_object-vrkme
+lf_material_data-meins
+lf_ship_data-rfmng
+CHANGING lf_ship_data-rfmng.
+* Add 2008/04/10 <----
+* Mod 2008.04.03 ---->
+*       出荷可能数量 = 在庫数量 + 出庫数量- 出荷数量実績
+l_quantity = lf_stock_data-kalab + lf_ship_data-rfmng
+- lf_shipment_data-lfimg.
+** Mod 2008.01.24 --->
+***       出荷可能数量 = 在庫数量 - 出荷数量実績
+**        L_QUANTITY = LF_STOCK_DATA-KALAB - LF_SHIPMENT_DATA-LFIMG.
+**       出荷可能数量 = 受注在庫数量
+*        L_QUANTITY = LF_STOCK_DATA-KALAB .
+** Mod 2008.01.24 <---
+* Mod 2008.04.03 <----
+
+*       在庫数量0、または出荷可能数量0の場合、対象外
+IF lf_stock_data-kalab = 0 OR l_quantity = 0.
+CONTINUE.
+ENDIF.
+*     在庫品じゃない場合
+WHEN OTHERS.
+*       出荷可能数量 = 引当済数量 - 出荷数量実績
+l_quantity = lf_object-kbmeng - lf_shipment_data-lfimg.
+*       出荷可能数量0の場合、対象外
+IF l_quantity = 0.
+CONTINUE.
+ENDIF.
+ENDCASE.
+
+*   送信数量取得
+READ TABLE gt_transmit_quantity INTO lf_transmit_quantity
+WITH KEY vbeln = lf_object-vbeln
+posnr = lf_object-posnr BINARY SEARCH.
+*   送信可能数量 = 送信数量 - 出荷数量(BDC)
+l_quantity = l_quantity -
+( lf_transmit_quantity-sdmeng - lf_transmit_quantity-lfimg ).
+
+*   送信可能数量0の場合、対象外
+IF l_quantity <= 0.
+CONTINUE.
+ENDIF.
+
+*   納品書種別テキストNAME範囲設定
+CLEAR  lf_stx_name-low.
+lf_stx_name-low+0(10) = lf_object-kunnr.
+lf_stx_name-low+10 = p_bukrs.
+COLLECT lf_stx_name INTO es_stx_name_1.
+
+*   出荷指示備考、輸送手段テキストNAME範囲設定
+CLEAR  lf_stx_name-low.
+lf_stx_name-low+0(10) = lf_object-vbeln.
+lf_stx_name-low+10 = lf_object-posnr.
+COLLECT lf_stx_name INTO es_stx_name_2.
+
+*   商品名、製品NAME範囲設定
+CLEAR  lf_stx_name-low.
+lf_stx_name-low+0(4) = p_vkorg.
+lf_stx_name-low+4(2) = p_vtweg.
+lf_stx_name-low+6(10) = lf_object-kunnr.
+lf_stx_name-low+16 = lf_object-matnr.
+COLLECT lf_stx_name INTO es_stx_name_3.
+
+APPEND lf_object TO et_object_out.
+
+ENDLOOP.
+
+IF et_object_out[] IS INITIAL.
+g_rc = cns_rc_code_not_found.
+ENDIF.
+
+ENDFORM.                    " FILTER_T_OBJECT_NORMAL
+*&---------------------------------------------------------------------*
+*&      Form  GET_GUEST_CURRENCY
+*&---------------------------------------------------------------------*
+*       得意先通貨コード取得
+*----------------------------------------------------------------------*
+*      -->I_KUUNR           得意先コード
+*      <--E_GUEST_CURRENCY  得意先通貨コード
+*----------------------------------------------------------------------*
+FORM get_guest_currency USING    i_kuunr
+CHANGING e_guest_currency.
+
+DATA: lf_currency LIKE LINE OF gt_currency_cache.
+
+CLEAR: g_rc.
+CLEAR: e_guest_currency.
+
+READ TABLE gt_currency_cache INTO lf_currency
+WITH TABLE KEY code = i_kuunr.
+IF sy-subrc = 0.
+e_guest_currency = lf_currency-name.
+ELSE.
+SELECT SINGLE waers
+INTO e_guest_currency
+FROM knvv
+WHERE kunnr = i_kuunr
+AND vkorg = p_vkorg
+AND vtweg = p_vtweg
+AND spart = p_spart.
+CASE sy-subrc.
+WHEN 0.
+lf_currency-code = i_kuunr.
+lf_currency-name = e_guest_currency.
+INSERT lf_currency INTO TABLE gt_currency_cache.
+WHEN OTHERS.
+g_rc = cns_rc_code_not_found.
+ENDCASE.
+ENDIF.
+
+ENDFORM.                    " GET_GUEST_CURRENCY
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_TRANSMITTED_DATA
+*&---------------------------------------------------------------------*
+*       送信済リストデータロック
+*----------------------------------------------------------------------*
+FORM lock_transmitted_data.
+
+FIELD-SYMBOLS: <ff_transmit_log> LIKE LINE OF gt_transmit_log.
+
+LOOP AT gt_transmit_log ASSIGNING <ff_transmit_log>.
+PERFORM lock_zsd002 USING <ff_transmit_log>-sendid
+<ff_transmit_log>-vbeln
+<ff_transmit_log>-posnr.
+IF g_rc <> 0.
+<ff_transmit_log>-lock = 'X'.
+ENDIF.
+ENDLOOP.
+
+CLEAR g_rc.
+
+ENDFORM.                    " LOCK_TRANSMITTED_DATA
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_RECEIVED_DATA
+*&---------------------------------------------------------------------*
+*       受信済リストデータロック
+*----------------------------------------------------------------------*
+FORM lock_received_data.
+
+FIELD-SYMBOLS: <ff_receive_log> LIKE LINE OF gt_receive_log.
+
+LOOP AT gt_receive_log ASSIGNING <ff_receive_log>.
+PERFORM lock_zsd003 USING <ff_receive_log>-sendid
+<ff_receive_log>-vbeln
+<ff_receive_log>-posnr
+<ff_receive_log>-invoice
+<ff_receive_log>-torikomi.
+IF g_rc <> 0.
+<ff_receive_log>-lock = 'X'.
+ENDIF.
+ENDLOOP.
+
+CLEAR g_rc.
+
+ENDFORM.                    " LOCK_RECEIVED_DATA
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_ZSD002
+*&---------------------------------------------------------------------*
+*       ENQUEUE_EZ_ZSD002
+*----------------------------------------------------------------------*
+*      -->I_SENDID  送信ID
+*      -->I_VBELN   販売伝票
+*      -->I_POSNR   明細
+*----------------------------------------------------------------------*
+FORM lock_zsd002 USING    i_sendid
+i_vbeln
+i_posnr.
+
+CLEAR g_rc.
+CALL FUNCTION 'ENQUEUE_EZ_ZSD002'
+EXPORTING
+sendid         = i_sendid
+vbeln          = i_vbeln
+posnr          = i_posnr
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_error.
+ENDIF.
+
+ENDFORM.                    " LOCK_ZSD002
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_ZSD003
+*&---------------------------------------------------------------------*
+*       ENQUEUE_EZ_ZSD003
+*----------------------------------------------------------------------*
+*      -->I_SENDID     送信ID
+*      -->I_VBELN      販売伝票
+*      -->I_POSNR      明細
+*      -->I_INVOICE    インボイス№
+*      -->I_TORIKOMI   取込回数
+*----------------------------------------------------------------------*
+FORM lock_zsd003 USING    i_sendid
+i_vbeln
+i_posnr
+i_invoice
+i_torikomi.
+
+CLEAR g_rc.
+CALL FUNCTION 'ENQUEUE_EZ_ZSD003'
+EXPORTING
+sendid         = i_sendid
+vbeln          = i_vbeln
+posnr          = i_posnr
+invoice        = i_invoice
+torikomi       = i_torikomi
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+g_rc = cns_rc_code_error.
+ENDIF.
+
+ENDFORM.                    " LOCK_ZSD003
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK_TRANSMITTED_DATA
+*&---------------------------------------------------------------------*
+*       送信済リストデータロック解除
+*----------------------------------------------------------------------*
+FORM unlock_transmitted_data.
+
+DATA: lf_transmit_log LIKE LINE OF gt_transmit_log.
+
+LOOP AT gt_transmit_log INTO lf_transmit_log.
+PERFORM unlock_zsd002 USING lf_transmit_log-sendid
+lf_transmit_log-vbeln
+lf_transmit_log-posnr.
+ENDLOOP.
+
+ENDFORM.                    " UNLOCK_TRANSMITTED_DATA
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK_RECEIVED_DATA
+*&---------------------------------------------------------------------*
+*       受信済リストデータロック解除
+*----------------------------------------------------------------------*
+FORM unlock_received_data.
+
+DATA: lf_receive_log LIKE LINE OF gt_receive_log.
+
+LOOP AT gt_receive_log INTO lf_receive_log.
+PERFORM unlock_zsd003 USING lf_receive_log-sendid
+lf_receive_log-vbeln
+lf_receive_log-posnr
+lf_receive_log-invoice
+lf_receive_log-torikomi.
+ENDLOOP.
+
+ENDFORM.                    " UNLOCK_RECEIVED_DATA
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK_ZSD002
+*&---------------------------------------------------------------------*
+*       DEQUEUE_EZ_ZSD002
+*----------------------------------------------------------------------*
+*      -->I_SENDID  送信ID
+*      -->I_VBELN   販売伝票
+*      -->I_POSNR   明細
+*----------------------------------------------------------------------*
+FORM unlock_zsd002 USING    i_sendid
+i_vbeln
+i_posnr.
+
+CALL FUNCTION 'DEQUEUE_EZ_ZSD002'
+EXPORTING
+sendid = i_sendid
+vbeln  = i_vbeln
+posnr  = i_posnr.
+
+ENDFORM.                    " UNLOCK_ZSD002
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK_ZSD003
+*&---------------------------------------------------------------------*
+*       DEQUEUE_EZ_ZSD003
+*----------------------------------------------------------------------*
+*      -->I_SENDID     送信ID
+*      -->I_VBELN      販売伝票
+*      -->I_POSNR      明細
+*      -->I_INVOICE    インボイス№
+*      -->I_TORIKOMI   取込回数
+*----------------------------------------------------------------------*
+FORM unlock_zsd003 USING    i_sendid
+i_vbeln
+i_posnr
+i_invoice
+i_torikomi.
+
+CALL FUNCTION 'DEQUEUE_EZ_ZSD003'
+EXPORTING
+sendid   = i_sendid
+vbeln    = i_vbeln
+posnr    = i_posnr
+invoice  = i_invoice
+torikomi = i_torikomi.
+
+ENDFORM.                    " UNLOCK_ZSD003
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_ZSEK
+*&---------------------------------------------------------------------*
+*       子品目明細が全て送信対象かチェック
+*----------------------------------------------------------------------*
+*      -->P_VBELN     親品目の受注伝票番号
+*      -->P_POSNR     親品目の受注伝票明細
+*      -->P_NO        親品目の№
+*      <--P_FLG_ERR1  エラーフラグ(送信対象チェック,エラー：'X')
+*      <--P_FLG_ERR2  エラーフラグ(№同一チェック,エラー：'X')
+*----------------------------------------------------------------------*
+FORM check_zsek USING    p_vbeln
+p_posnr
+p_no
+CHANGING p_flg_err1
+p_flg_err2.
+
+TYPES: BEGIN OF typ_zsek,
+vbeln TYPE vbap-vbeln,  " 受注伝票番号
+posnr TYPE vbap-posnr,  " 受注伝票明細
+END OF typ_zsek.
+DATA : lt_zsek        TYPE TABLE OF typ_zsek,
+lf_zsek        TYPE typ_zsek,
+l_tabix        TYPE sy-tabix,
+lf_alv_0100      LIKE LINE OF gt_alv_0100,
+lf_alv_roid      LIKE LINE OF gt_alv_roid,
+lf_alv_good_cell LIKE LINE OF gt_alv_good_cell.
+
+* 受注伝票中の紐付く子品目明細を全て取得する
+SELECT vbeln posnr
+INTO TABLE lt_zsek
+FROM vbap
+WHERE vbeln = p_vbeln
+AND pstyv = 'ZSEK'
+AND uepos = p_posnr.
+
+LOOP AT lt_zsek INTO lf_zsek.
+*   子品目データを取得する
+READ TABLE gt_alv_0100 INTO lf_alv_0100
+WITH KEY vbeln = lf_zsek-vbeln
+posnr = lf_zsek-posnr.
+l_tabix = sy-tabix.
+*   子品目がALV出力対象でない場合
+IF sy-subrc <> 0.
+p_flg_err1 = 'X'.
+CONTINUE.
+ENDIF.
+
+*   変更前の値取得
+CLEAR lf_alv_roid.
+READ TABLE gt_alv_roid INTO lf_alv_roid INDEX l_tabix.
+
+*   №に変更があったか検索
+CLEAR lf_alv_good_cell.
+READ TABLE gt_alv_good_cell INTO lf_alv_good_cell
+WITH KEY row_id    = lf_alv_roid-row_id
+fieldname = 'ZNO'.
+*   №が初期値の場合
+IF lf_alv_good_cell-value IS INITIAL OR
+lf_alv_good_cell-value =  '00'.
+p_flg_err1 = 'X'.
+*   №には入力があるが、親とは異なるグルーピングの場合
+ELSE.
+IF lf_alv_good_cell-value <> p_no.
+p_flg_err2 = 'X'.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_ZSEK
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_ZSEO
+*&---------------------------------------------------------------------*
+*       親品目が送信対象かチェック
+*----------------------------------------------------------------------*
+*      -->P_VBELN     子品目の受注伝票番号
+*      -->P_UEPOS     子品目の上位明細
+*      -->P_NO        子品目の№
+*      <--P_FLG_ERR1  エラーフラグ(送信対象チェック,エラー：'X')
+*      <--P_FLG_ERR2  エラーフラグ(№同一チェック,エラー：'X')
+*----------------------------------------------------------------------*
+FORM check_zseo USING    p_vbeln
+p_uepos
+p_no
+CHANGING p_flg_err1
+p_flg_err2.
+
+DATA : l_tabix        TYPE sy-tabix,
+lf_alv_0100      LIKE LINE OF gt_alv_0100,
+lf_alv_roid      LIKE LINE OF gt_alv_roid,
+lf_alv_good_cell LIKE LINE OF gt_alv_good_cell.
+
+* 親品目データを取得する
+READ TABLE gt_alv_0100 INTO lf_alv_0100
+WITH KEY vbeln = p_vbeln
+posnr = p_uepos.
+l_tabix = sy-tabix.
+* 親品目がALV出力対象でない場合
+IF sy-subrc <> 0.
+p_flg_err1 = 'X'.
+EXIT.
+ENDIF.
+
+* 変更前の値取得
+CLEAR lf_alv_roid.
+READ TABLE gt_alv_roid INTO lf_alv_roid INDEX l_tabix.
+
+* №に変更があったか検索
+CLEAR lf_alv_good_cell.
+READ TABLE gt_alv_good_cell INTO lf_alv_good_cell
+WITH KEY row_id    = lf_alv_roid-row_id
+fieldname = 'ZNO'.
+* №が初期値の場合
+IF lf_alv_good_cell-value IS INITIAL.
+p_flg_err1 = 'X'.
+* №には入力があるが、親とは異なるグルーピングの場合
+ELSE.
+IF lf_alv_good_cell-value <> p_no.
+p_flg_err2 = 'X'.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_ZSEO
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNAME
+*&---------------------------------------------------------------------*
+*       得意先名取得(無償支給の場合)
+*----------------------------------------------------------------------*
+*      -->I_LIFNR  得意先(＝仕入先)
+*      <--O_KNAME  得意先名(＝仕入先名)
+*----------------------------------------------------------------------*
+FORM get_kname USING    i_lifnr
+CHANGING o_kname.
+
+SELECT SINGLE name1
+INTO o_kname
+FROM lfa1
+WHERE lifnr = i_lifnr.
+
+ENDFORM.                    " GET_KNAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_ARKTX
+*&---------------------------------------------------------------------*
+*       品名取得(無償支給の場合)
+*----------------------------------------------------------------------*
+*      -->I_MATNR  品目コード
+*      <--O_ARKTX  品名
+*----------------------------------------------------------------------*
+FORM get_arktx USING    i_matnr
+CHANGING o_arktx.
+
+SELECT SINGLE maktx
+INTO o_arktx
+FROM makt
+WHERE matnr = i_matnr
+AND spras = sy-langu.
+
+ENDFORM.                    " GET_ARKTX
+*&---------------------------------------------------------------------*
+*&      Form  CONV_ALPHA_OUTPUT
+*&---------------------------------------------------------------------*
+*       前ゼロ除去
+*----------------------------------------------------------------------*
+*      -->I_VALUE  変換前コード
+*      <--O_VALUE  変換後コード
+*----------------------------------------------------------------------*
+FORM conv_alpha_output USING    i_value
+CHANGING o_value.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+EXPORTING
+input  = i_value
+IMPORTING
+output = o_value.
+
+ENDFORM.                    " CONV_ALPHA_OUTPUT

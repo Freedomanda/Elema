@@ -1,0 +1,628 @@
+************************************************************************
+* Report ZF022100
+************************************************************************
+* [プログラム名]
+*   ZF022100     入金管理一覧
+* [処理概要]
+*   入金実績（FBデータ）と入金予定（売掛金）を突合し、一覧出力する
+* [改定履歴]
+*   YYYY/MM/DD   Programar         Description
+*   2010/03/15   Solfis K.MIYAMOTO 新規開発開始
+*   2010/03/19   Solfis K.MIYAMOTO 新規開発完成
+*   2010/03/26   Solfis K.MIYAMOTO ユーザ要望対応
+************************************************************************
+
+REPORT ZF022100 MESSAGE-ID  Z1
+LINE-SIZE   170
+LINE-COUNT  58
+NO STANDARD PAGE HEADING.
+
+TABLES: FEBEP.
+
+*----------------------------------------------------------------------*
+*       構造定義          　　　　                                     *
+*----------------------------------------------------------------------*
+
+* ALV一覧：入金管理票の出力構造定義
+TYPE-POOLS SLIS.
+TYPES:
+BEGIN OF TYP_ALV,
+BUDAT TYPE FEBEP-BUDAT, " 入金日
+KOINH TYPE KNBK-KOINH,  " 口座名義人
+RCKBN TYPE CHAR2,       " 区分
+KBNTX TYPE CHAR4,       " 区分コード
+KWBTR TYPE FEBEP-KWBTR, " 金額
+KWAER TYPE FEBEP-KWAER, " 通貨コード
+GJAHR TYPE FEBEP-GJAHR, " 年度
+BELNR TYPE FEBEP-BELNR, " 伝票番号
+KUNNR TYPE BSID-KUNNR,  " 得意先コード
+NAME1 TYPE KNA1-NAME1,  " 得意先名称
+ZUONR TYPE FEBEP-ZUONR, " ソートキー
+KUKEY TYPE FEBEP-KUKEY, " ID
+ESNUM TYPE FEBEP-ESNUM, " 行No.
+MCFLG TYPE CHAR1,       " フラグ
+END   OF TYP_ALV.
+
+* 入金実績（FBデータ）の取得用構造
+TYPES:
+BEGIN OF TYP_FEBEP,
+BUDAT TYPE FEBEP-BUDAT, " 転記日付
+PARTN TYPE KNBK-KOINH,  " 取引先（＝口座名義人）
+KWBTR TYPE FEBEP-KWBTR, " 金額
+GJAHR TYPE FEBEP-GJAHR, " 会計年度
+BELNR TYPE FEBEP-BELNR, " 伝票番号
+ZUONR TYPE FEBEP-ZUONR, " ソートキー
+KUKEY TYPE FEBEP-KUKEY, " ショートキー (代理)
+ESNUM TYPE FEBEP-ESNUM, " メモレコード番号
+END   OF TYP_FEBEP.
+
+* 入金予定（売掛金）の取得用構造
+TYPES:
+BEGIN OF TYP_BSID,
+ZFBDT TYPE BSID-ZFBDT, " 支払基準日
+DMBTR TYPE BSID-DMBTR, " 国内通貨額
+GJAHR TYPE BSID-GJAHR, " 年度
+BELNR TYPE BSID-BELNR, " 伝票番号
+BUZEI TYPE BSID-BUZEI, " 明細番号
+KUNNR TYPE BSID-KUNNR, " 得意先コード
+ZUONR TYPE BSID-ZUONR, " ソートキー
+MCFLG TYPE CHAR1,      " フラグ
+END   OF TYP_BSID.
+
+* 得意先別銀行口座名義人データの取得用構造
+TYPES:
+BEGIN OF TYP_KNBK,
+KOINH TYPE KNBK-KOINH, " 口座名義人
+KUNNR TYPE KNBK-KUNNR, " 得意先コード
+END   OF TYP_KNBK.
+
+* 得意先名称データの取得用構造
+TYPES:
+BEGIN OF TYP_KNA1,
+KUNNR TYPE KNA1-KUNNR, " 得意先コード
+NAME1 TYPE KNA1-NAME1, " 得意先名称
+END   OF TYP_KNA1.
+
+*----------------------------------------------------------------------*
+*       定数定義                                                       *
+*----------------------------------------------------------------------*
+
+* 区分コード
+CONSTANTS: CNS_KBN_RC    TYPE CHAR2 VALUE '01'. "入金予定
+CONSTANTS: CNS_KBN_FB    TYPE CHAR2 VALUE '02'. "入金実績
+
+* 区分コードのテキスト
+CONSTANTS: CNS_KBN_RC_TX TYPE CHAR4 VALUE '予定'. "入金予定
+CONSTANTS: CNS_KBN_FB_TX TYPE CHAR4 VALUE '実績'. "入金実績
+
+* 出力用のマッチングフラグ
+CONSTANTS: CNS_FLG_MC    TYPE CHAR1 VALUE 'A'. "マッチ
+CONSTANTS: CNS_FLG_FB    TYPE CHAR1 VALUE 'E'. "アンマッチ（FBデータ）
+CONSTANTS: CNS_FLG_RC    TYPE CHAR1 VALUE 'Y'. "アンマッチ（入金予定）
+
+* アンマッチ入金予定の、ダミー口座名義人コード
+CONSTANTS: CNS_KOINH     TYPE KOINH_FI VALUE 'XXXXX'.
+
+*----------------------------------------------------------------------*
+*       テーブル定義                                                   *
+*----------------------------------------------------------------------*
+DATA: GT_ALV      TYPE TABLE OF TYP_ALV.             " ALV出力用
+DATA: GT_FEBEP    TYPE TABLE OF TYP_FEBEP.           " FBデータ取得用
+DATA: GT_BSID     TYPE TABLE OF TYP_BSID.            " 入金予定取得用
+DATA: GT_KNBK     TYPE TABLE OF TYP_KNBK.            " 口座名義人取得
+DATA: GT_KNA1     TYPE TABLE OF TYP_KNA1.            " 得意先名称取得
+DATA: GT_FIELDCAT TYPE          SLIS_T_FIELDCAT_ALV. " ALV出力項目設定
+
+*----------------------------------------------------------------------*
+*       作業領域定義                                                   *
+*----------------------------------------------------------------------*
+DATA: GW_ALV         TYPE TYP_ALV.           " ALV出力用
+DATA: GW_FEBEP       TYPE TYP_FEBEP.         " FBデータ取得用
+DATA: GW_BSID        TYPE TYP_BSID.          " 入金予定データ取得用
+DATA: GW_KNBK        TYPE TYP_KNBK.          " 口座名義人取得用
+DATA: GW_KNA1        TYPE TYP_KNA1.          " 得意先名称取得用
+DATA: GW_LAYOUT      TYPE SLIS_LAYOUT_ALV.   " ALV出力レイアウト
+DATA: GW_FIELDCAT    TYPE SLIS_FIELDCAT_ALV. " ALV出力項目設定
+DATA: GW_EDISVARIANT TYPE DISVARIANT.        " ALV出力バリアント
+
+*----------------------------------------------------------------------*
+*       変数定義                                                       *
+*----------------------------------------------------------------------*
+DATA: GV_WAERS    TYPE WAERS.      " 会社コード通貨保持
+DATA: GV_MINDT_FB TYPE DATS.       " FBデータ内の最古入金日付
+DATA: GV_MINDT    TYPE DATS.       " 入金予定の最古取得日付
+DATA: GV_MAXDT_FB TYPE DATS.       " FBデータ内の最新入金日付
+DATA: GV_MAXDT    TYPE DATS.       " 入金予定の最新取得日付
+DATA: GV_SAKNR    TYPE TVARV-LOW.  " 入金予定の勘定コード
+DATA: GV_RNGDT    TYPE TVARV-LOW.  " 入金予定の取得日付範囲日数
+DATA: GV_MCFLG    TYPE CHAR1.      " 入金実績のマッチングフラグ編集
+DATA: GV_REPID    TYPE SY-REPID.   " ALV出力用：プログラムID
+
+*----------------------------------------------------------------------*
+*     入力画面定義
+*----------------------------------------------------------------------*
+
+* 会計年度
+PARAMETERS    : P_BUKRS TYPE BUKRS DEFAULT 'C001' OBLIGATORY.
+
+* ID
+SELECT-OPTIONS: S_KUKEY FOR  FEBEP-KUKEY.
+
+* 入金日付
+SELECT-OPTIONS: S_BUDAT FOR  FEBEP-BUDAT.
+
+* 口座名義人
+SELECT-OPTIONS: S_PARTN FOR  FEBEP-PARTN.
+
+* ALVレイアウト
+PARAMETERS    : P_VARI  TYPE DISVARIANT-VARIANT.
+
+************************************************************************
+INITIALIZATION.
+************************************************************************
+
+
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VARI.
+************************************************************************
+
+* バリアントヘルプ
+PERFORM HELP_VARIANT CHANGING P_VARI.
+
+
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+
+* 未入金の入金実績レコードの処理
+PERFORM GET_FEBEP.
+
+* 売掛金（入金予定）レコードの処理
+PERFORM GET_BSID.
+
+* ALV出力データの編集
+PERFORM EDIT_ALV.
+
+* ALV一覧の出力
+PERFORM OUTPUT_ALV.
+
+
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+
+
+************************************************************************
+TOP-OF-PAGE.
+************************************************************************
+
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_FEBEP
+*&---------------------------------------------------------------------*
+*       未入金の入金実績レコードの処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM GET_FEBEP.
+
+* 未消込の入金実績レコードの取得
+SELECT B~BUDAT B~PARTN B~KWBTR
+B~GJAHR B~BELNR B~KUKEY B~ESNUM
+INTO CORRESPONDING FIELDS OF TABLE GT_FEBEP
+FROM FEBKO AS A INNER JOIN FEBEP AS B ON A~KUKEY = B~KUKEY
+WHERE A~BUKRS = P_BUKRS
+AND B~BELNR <> SPACE
+*     AND B~NBBLN = SPACE
+AND B~KUKEY IN S_KUKEY
+AND B~BUDAT IN S_BUDAT
+AND B~PARTN IN S_PARTN.
+
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH '出力対象の入金実績が存在しません'.
+STOP.
+ENDIF.
+
+* 入金実績レコード内の最古入金日付を取得
+SORT GT_FEBEP BY BUDAT ASCENDING.
+READ TABLE GT_FEBEP INDEX 1
+INTO GW_FEBEP.
+GV_MINDT_FB = GW_FEBEP-BUDAT.
+CLEAR: GW_FEBEP.
+
+* 入金実績レコード内の最新入金日付を取得
+SORT GT_FEBEP BY BUDAT DESCENDING.
+READ TABLE GT_FEBEP INDEX 1
+INTO GW_FEBEP.
+GV_MAXDT_FB = GW_FEBEP-BUDAT.
+CLEAR: GW_FEBEP.
+
+* 口座名義人に紐付く得意先リストの取得
+SELECT KOINH KUNNR
+INTO CORRESPONDING FIELDS OF TABLE GT_KNBK
+FROM KNBK
+FOR ALL ENTRIES IN GT_FEBEP
+WHERE KOINH = GT_FEBEP-PARTN.
+
+* 得意先名称データ取得
+SELECT KUNNR NAME1
+INTO CORRESPONDING FIELDS OF TABLE GT_KNA1
+FROM KNA1.
+
+*会社コード通貨取得
+SELECT SINGLE WAERS
+INTO GV_WAERS
+FROM T001
+WHERE BUKRS = P_BUKRS.
+
+ENDFORM.                    " GET_FEBEP
+*
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSID
+*&---------------------------------------------------------------------*
+*       売掛金（入金予定）レコードの処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM GET_BSID.
+
+* 売掛金（入金予定）取得用のパラメータを取得する
+
+* ・売掛金（入金予定）の勘定コード
+SELECT SINGLE LOW
+INTO GV_SAKNR
+FROM TVARV
+WHERE NAME = 'ZXF01U01'
+AND TYPE = 'P'.
+
+* ・売掛金（入金予定）の取得日付範囲
+SELECT SINGLE LOW
+INTO GV_RNGDT
+FROM TVARV
+WHERE NAME = 'ZXF01U01DAY'
+AND TYPE = 'P'.
+
+* 売掛金（入金予定）の取得日付範囲の算出
+GV_MINDT = GV_MINDT_FB - GV_RNGDT.
+GV_MAXDT = GV_MAXDT_FB + GV_RNGDT.
+
+* 売掛金（入金予定）のレコード取得
+SELECT ZFBDT DMBTR GJAHR BELNR BUZEI KUNNR ZUONR
+INTO CORRESPONDING FIELDS OF TABLE GT_BSID
+FROM BSID
+WHERE BUKRS = P_BUKRS
+AND HKONT = GV_SAKNR
+AND ZFBDT >= GV_MINDT
+AND ZFBDT <= GV_MAXDT.
+
+ENDFORM.                    " GET_BSID
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ALV
+*&---------------------------------------------------------------------*
+*       ALV出力データの編集
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM EDIT_ALV.
+
+DATA: LV_MINDT TYPE DATS.
+DATA: LV_MAXDT TYPE DATS.
+DATA: LV_KUKEY TYPE KUKEY_EB.
+DATA: LV_ESNUM TYPE ESNUM_EB.
+
+* 入金実績データのソート
+SORT GT_FEBEP BY BUDAT PARTN KUKEY ESNUM.
+
+* ALV出力テーブルの編集
+LOOP AT GT_FEBEP INTO GW_FEBEP.
+
+*  出力フラグ（入金実績）の初期設定
+AT NEW PARTN.
+GV_MCFLG = CNS_FLG_FB.
+ENDAT.
+
+* ID、行No.の保持
+CLEAR: LV_KUKEY.
+CLEAR: LV_ESNUM.
+LV_KUKEY = GW_FEBEP-KUKEY.
+LV_ESNUM = GW_FEBEP-ESNUM.
+
+*  入金実績と売掛金の突合
+AT NEW PARTN.
+LOOP AT GT_KNBK
+INTO GW_KNBK
+WHERE KOINH = GW_FEBEP-PARTN.
+
+*    得意先名称の取得
+READ TABLE GT_KNA1 INTO GW_KNA1
+WITH KEY KUNNR = GW_KNBK-KUNNR.
+
+*    マッチング日付範囲を算出
+LV_MINDT = GW_FEBEP-BUDAT - GV_RNGDT.
+LV_MAXDT = GW_FEBEP-BUDAT + GV_RNGDT.
+
+*    マッチングの実行（ループ条件）
+LOOP AT GT_BSID INTO GW_BSID
+WHERE KUNNR = GW_KNBK-KUNNR
+AND ZFBDT >= LV_MINDT
+AND ZFBDT <= LV_MAXDT.
+
+*    出力フラグ（入金予定）を設定する（マッチ）
+GW_BSID-MCFLG = CNS_FLG_MC.
+MODIFY GT_BSID FROM GW_BSID.
+
+*    売掛金（入金予定）レコード（マッチ）を、ALV出力テーブルに追加する
+
+GW_ALV-BUDAT = GW_BSID-ZFBDT.
+GW_ALV-KOINH = GW_KNBK-KOINH.
+GW_ALV-RCKBN = CNS_KBN_RC.
+GW_ALV-KBNTX = CNS_KBN_RC_TX.
+GW_ALV-KWBTR = -1 * GW_BSID-DMBTR.
+GW_ALV-KWAER = GV_WAERS.
+GW_ALV-GJAHR = GW_BSID-GJAHR.
+GW_ALV-BELNR = GW_BSID-BELNR.
+GW_ALV-KUNNR = GW_BSID-KUNNR.
+GW_ALV-NAME1 = GW_KNA1-NAME1.
+GW_ALV-ZUONR = GW_BSID-ZUONR.
+GW_ALV-KUKEY = LV_KUKEY.
+GW_ALV-ESNUM = LV_ESNUM.
+GW_ALV-MCFLG = GW_BSID-MCFLG.
+
+INSERT GW_ALV INTO TABLE GT_ALV.
+CLEAR: GW_ALV.
+
+*    出力フラグ（入金実績）の更新（マッチ）
+GV_MCFLG = CNS_FLG_MC.
+
+ENDLOOP.
+
+CLEAR: GW_ALV.
+
+ENDLOOP.
+ENDAT.
+
+*  入金実績（FBデータ）レコードを、ALV出力テーブルに追加する
+
+GW_ALV-BUDAT = GW_FEBEP-BUDAT.
+GW_ALV-KOINH = GW_FEBEP-PARTN.
+GW_ALV-RCKBN = CNS_KBN_FB.
+GW_ALV-KBNTX = CNS_KBN_FB_TX.
+GW_ALV-KWBTR = GW_FEBEP-KWBTR.
+GW_ALV-KWAER = GV_WAERS.
+GW_ALV-GJAHR = GW_FEBEP-GJAHR.
+GW_ALV-BELNR = GW_FEBEP-BELNR.
+GW_ALV-KUKEY = GW_FEBEP-KUKEY.
+GW_ALV-ESNUM = GW_FEBEP-ESNUM.
+GW_ALV-MCFLG = GV_MCFLG.
+
+INSERT GW_ALV INTO TABLE GT_ALV.
+CLEAR: GW_ALV.
+
+ENDLOOP.
+
+* アンマッチの入金予定レコードをループする
+LOOP AT GT_BSID INTO GW_BSID
+WHERE MCFLG IS INITIAL.
+
+*  得意先名称の取得
+READ TABLE GT_KNA1 INTO GW_KNA1
+WITH KEY KUNNR = GW_BSID-KUNNR.
+
+*  売掛金（入金予定）レコード（アンマッチ）を、ALV出力テーブルに追加する
+
+GW_ALV-BUDAT = GW_BSID-ZFBDT.
+GW_ALV-KOINH = CNS_KOINH.
+GW_ALV-RCKBN = CNS_KBN_RC.
+GW_ALV-KBNTX = CNS_KBN_RC_TX.
+GW_ALV-KWBTR = -1 * GW_BSID-DMBTR.
+GW_ALV-KWAER = GV_WAERS.
+GW_ALV-GJAHR = GW_BSID-GJAHR.
+GW_ALV-BELNR = GW_BSID-BELNR.
+GW_ALV-KUNNR = GW_BSID-KUNNR.
+GW_ALV-NAME1 = GW_KNA1-NAME1.
+GW_ALV-ZUONR = GW_BSID-ZUONR.
+GW_ALV-MCFLG = CNS_FLG_RC.
+
+INSERT GW_ALV INTO TABLE GT_ALV.
+CLEAR: GW_KNA1,GW_ALV.
+
+ENDLOOP.
+
+ENDFORM.                    " EDIT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       ALV一覧の出力
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM OUTPUT_ALV.
+
+* ALV出力用テーブルのソート
+SORT GT_ALV BY BUDAT MCFLG KOINH RCKBN KUNNR.
+
+* 項目カタログ設定処理
+PERFORM SET_FIELDCAT.
+
+* プログラムID取得
+GV_REPID = SY-REPID.
+
+*レイアウト設定
+GW_LAYOUT-COLWIDTH_OPTIMIZE = 'X'. "ALV コントロール: 列幅の最適化
+GW_LAYOUT-DETAIL_INITIAL_LINES = 'X'.
+"ALV コントロール: 詳細画面の初期値照会
+
+* 出力
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM      = GV_REPID     "プログラム名
+IS_LAYOUT               = GW_LAYOUT   "レイアウト定義
+IT_FIELDCAT             = GT_FIELDCAT  "構造定義
+I_DEFAULT               = 'X'
+I_SAVE                  = 'A'
+IS_VARIANT              = GW_EDISVARIANT
+TABLES
+T_OUTTAB                = GT_ALV       "出力データ
+EXCEPTIONS
+PROGRAM_ERROR           = 1
+OTHERS                  = 2.
+
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH 'システムエラーが発生しました'.
+STOP.
+ENDIF.
+
+ENDFORM.                    " OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM SET_FIELDCAT.
+
+* ＡＬＶ出力時のフィールド設定
+GW_FIELDCAT-FIELDNAME = 'BUDAT'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '入金日'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = 'X'.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'KOINH'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '口座名義人'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = 'X'.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'RCKBN'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '区分'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'KBNTX'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '区分テキスト'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME  = 'KWBTR'.     "項目名
+GW_FIELDCAT-SELTEXT_L  = '金額'.     "項目名称
+GW_FIELDCAT-DATATYPE   = 'CURR'.      "データ型
+GW_FIELDCAT-INTTYPE    = 'P'.         "数値のデータ型
+GW_FIELDCAT-INTLEN     = '15'.        "データ長
+GW_FIELDCAT-OUTPUTLEN  = '21'.        "出力データ長
+GW_FIELDCAT-CFIELDNAME = 'KWAER'.     "通貨参照項目
+GW_FIELDCAT-DDICTXT    = 'L'.         "
+GW_FIELDCAT-KEY        = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'GJAHR'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '年度'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'BELNR'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '伝票番号'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'KUNNR'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '得意先コード'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'NAME1'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '得意先名称'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'ZUONR'.    "項目名
+GW_FIELDCAT-SELTEXT_L = 'ソートキー'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'KUKEY'.    "項目名
+GW_FIELDCAT-SELTEXT_L = 'ID'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'ESNUM'.    "項目名
+GW_FIELDCAT-SELTEXT_L = '行No.'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME = 'MCFLG'.    "項目名
+GW_FIELDCAT-SELTEXT_L = 'ﾌﾗｸﾞ'.      "項目名称
+GW_FIELDCAT-DDICTXT   = 'L'.         "
+GW_FIELDCAT-KEY       = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+GW_FIELDCAT-FIELDNAME  = 'KWAER'.     "項目名
+GW_FIELDCAT-SELTEXT_L  = '通貨'.  "項目名称
+GW_FIELDCAT-DDICTXT    = 'L'.         "
+GW_FIELDCAT-KEY        = ' '.         "キー項目有無
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+CLEAR GW_FIELDCAT.
+
+ENDFORM.                    " SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  HELP_VARIANT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_P_VARI  text
+*----------------------------------------------------------------------*
+FORM HELP_VARIANT CHANGING C_VARI TYPE DISVARIANT-VARIANT.
+
+DATA:LW_IDISVARIANT TYPE DISVARIANT,
+LV_EXIT TYPE C.
+
+LW_IDISVARIANT-REPORT = SY-REPID.
+
+CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+EXPORTING
+IS_VARIANT         = LW_IDISVARIANT
+I_SAVE             = 'U'
+I_DISPLAY_VIA_GRID = 'X'
+IMPORTING
+E_EXIT             = LV_EXIT
+ES_VARIANT         = GW_EDISVARIANT
+EXCEPTIONS
+NOT_FOUND          = 2.
+IF SY-SUBRC = 2.
+MESSAGE ID SY-MSGID TYPE 'S' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ELSE.
+IF LV_EXIT = SPACE.
+C_VARI = GW_EDISVARIANT-VARIANT.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " HELP_VARIANT

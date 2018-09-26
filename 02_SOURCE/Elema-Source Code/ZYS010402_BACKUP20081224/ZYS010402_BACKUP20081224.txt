@@ -1,0 +1,1002 @@
+REPORT YS010402     MESSAGE-ID  Y1
+LINE-SIZE  170
+LINE-COUNT  58
+NO STANDARD PAGE HEADING.
+************************************************************************
+* REPORT        YS010402
+* PROGRAM       受注残データ更新
+* MAKE DATE     2000.002.15
+* CODING BY     R.TOMOEDA(NDSC)
+* 変更履歴      テスト用ﾊﾟﾗﾒｰﾀをコメントアウト
+*               2000.07.14  受注残区分の変更 R.TOMOEDA(NDSC)
+*               2001.04.24  出力項目大幅追加 K.kajisa(NDSC)
+*               2001.04.25  ALV化
+*               2001.05.04  拒否理由空白以外対象外
+*               2001.05.16  出荷ブロック追加
+*               2001.05.31  住所の取得先をT005Uに変更
+*               2001.11.27  未請求に対応
+*               2002.02.04　未請求数量・金額の項目を追加
+*               2002.07.17  得意先発注番号の取得先をVBKDに変更
+*               2002.07.18  テンプレートの修正分との同期
+*               2004.07.02  品目名称を伝票から取得するように変更
+*               2005.02.15  YS0011項目追加対応
+************************************************************************
+TABLES:VBUK,         "販売伝票: ヘッダ状況および管理データ
+VBUP,         "販売伝票: 明細ステータス
+VBAK,         "Sales Document: Header Data
+VBAP,         "販売伝票: 明細データ
+VBFA,         "Sales Document Flow
+VBPA,         "販売伝票: 取引先
+VBBE,         "販売条件: 個別レコード
+VBEP,         "販売伝票: 納入日程行データ
+LIKP,         "販売管理伝票: 出荷ヘッダデータ
+LIPS,         "販売伝票: 出荷伝票: 明細データ
+MAKT,         "品目テキスト
+KNA1,         "得意先マスタ: 一般
+TVKO,         "組織単位: 販売組織
+T001,         " 会社コード
+TCURX,        "通貨の小数点以下桁数
+KNVH,         "得意先階層タイプ
+YS0011,
+T023T,        "品目グループテキスト
+T179T.        "品目: 製品階層: テキスト
+TABLES VBKD.         "ADD 2002/07/17
+TABLES:T005U.        "税: 地域コード: テキスト
+************************************************************************
+*** 選択画面
+PARAMETERS:P_FLG AS CHECKBOX.
+SELECTION-SCREEN SKIP.
+PARAMETERS:P_R1 RADIOBUTTON GROUP RADI DEFAULT 'X',
+P_R2 RADIOBUTTON GROUP RADI.
+SELECTION-SCREEN SKIP.
+SELECT-OPTIONS:P_AUART FOR VBAK-AUART.
+SELECTION-SCREEN SKIP.
+SELECT-OPTIONS:P_VKBUR FOR VBAK-VKBUR.
+************************************************************************
+*** 内部ＴＢＬ定義
+DATA:BEGIN OF HTAB OCCURS 1,   "ヘッダＴＢＬ
+VBELN LIKE VBUK-VBELN,
+VBTYP LIKE VBUK-VBTYP,
+END OF HTAB.
+
+DATA:BEGIN OF JUCHU OCCURS 0,   "受注伝票ヘッダＴＢＬ
+VBELN LIKE VBAK-VBELN,   "受注伝票No
+VBTYP LIKE VBUK-VBTYP,   "販売伝票ｶﾃｺﾞﾘ
+VKBUR LIKE VBAK-VKBUR,   "営業所
+VKGRP LIKE VBAK-VKGRP,   "営業Ｇ
+KUNNR LIKE VBAK-KUNNR,   "受注先
+AUART LIKE VBAK-AUART,   "受注伝票タイプ
+BSTNK LIKE VBAK-BSTNK,   "得意先発注No
+AUDAT LIKE VBAK-ERDAT,   "登録日
+*2005/02/15 ADD START--->
+ERDAT LIKE VBAK-ERDAT,   "登録日　　
+ERZET LIKE VBAK-ERZET,   "登録時間 　
+ERNAM LIKE VBAK-ERNAM,   "登録者　　
+*2005/02/15 ADD END  <---
+
+END OF JUCHU.
+
+DATA:BEGIN OF ITAB OCCURS 0.   "メインＴＢＬ
+INCLUDE STRUCTURE YS0011.
+DATA:   NETPR LIKE VBAP-NETPR.
+DATA:   KPEIN LIKE VBAP-KPEIN.
+DATA:   FLAG.
+DATA:END OF ITAB.
+
+DATA:BEGIN OF TAB OCCURS 1.
+INCLUDE STRUCTURE YS0011.
+DATA:END OF TAB.
+DATA:BEGIN OF SHUKKM OCCURS 0,
+VBELN LIKE VBUK-VBELN,
+POSNR LIKE VBUP-POSNR,
+VGBEL LIKE LIPS-VGBEL,
+VGPOS LIKE LIPS-VGPOS,
+SURYO LIKE LIPS-LFIMG,
+VRKME LIKE LIPS-VRKME,
+VBTYP LIKE VBUK-VBTYP,
+ZFLAG(4),
+END OF   SHUKKM.
+
+DATA : BEGIN OF READ_THEAD OCCURS 10.             " CALL FUNC用
+INCLUDE STRUCTURE THEAD.                  " CALL FUNC用
+DATA : END OF READ_THEAD.                         " CALL FUNC用
+
+DATA : BEGIN OF READ_TLINE OCCURS 10.
+INCLUDE STRUCTURE TLINE.
+DATA : END OF READ_TLINE.
+
+***ワーク
+DATA: CNS_E           LIKE SY-LANGU       VALUE 'E',
+CNS_JP(2)       TYPE C              VALUE 'JP'.
+
+DATA:CNT TYPE P.  "出力件数カウント
+DATA:W_VBTYP,
+TANKA TYPE P DECIMALS 4.  "単価
+DATA: W_KUNNR     LIKE KNA1-KUNNR.
+***
+DATA:FLAG.
+DATA:CHK_NOUKI,   "パラメータチェック
+CHK_AUART,   "パラメータチェック
+W_SPRAS LIKE T001-SPRAS.
+****READ_TEXT取得用ワーク
+DATA:W_OBJECT LIKE THEAD-TDOBJECT,
+W_NAME LIKE THEAD-TDNAME,
+W_ID LIKE THEAD-TDID.
+*2001/04/25 ADD START(ALV)
+TYPE-POOLS: SLIS.
+INCLUDE <ICON>.
+INCLUDE <SYMBOL>.
+
+* REUSE_ALV_EVENTS_GET 用
+DATA: W_EVENT TYPE SLIS_T_EVENT.
+
+* 表示データ
+DATA: TB_REC LIKE STANDARD TABLE OF YS0011 WITH HEADER LINE.
+
+* REUSE_ALV_GRID_DISPLAY 用
+DATA: W_LAYOUT TYPE SLIS_LAYOUT_ALV,
+W_VARIANT LIKE DISVARIANT,
+W_EXIT1,
+W_EXIT2 TYPE SLIS_EXIT_BY_USER,
+W_REPID LIKE SY-REPID,
+W_HEADER_FORM TYPE SLIS_FORMNAME VALUE 'TOP_OF_PAGE',
+W_UCOMM_FORM TYPE SLIS_FORMNAME VALUE 'USER_COMMAND'.
+
+* REUSE_ALV_COMMENTARY_WRITE 用
+DATA: W_HEADER TYPE SLIS_LISTHEADER,
+I_HEADER TYPE SLIS_T_LISTHEADER.
+
+* REUSE_ALV_FIELDCATALOG_MERGE 用
+DATA: W_FIELDCAT TYPE SLIS_T_FIELDCAT_ALV,
+W_ITAB TYPE SLIS_TABNAME VALUE 'TB_REC',
+W_ITAB2 LIKE DD02L-TABNAME VALUE 'TB_REC'.
+***2002.02.04 ADD>>>
+DATA:W_GBSTA LIKE VBUP-GBSTA,
+W_WBSTA LIKE VBUP-WBSTA.
+************************************************************************
+START-OF-SELECTION.
+IF P_FLG <> 'X'.
+PERFORM INIT.
+PERFORM GET_JMEISAI.  "受注明細データ取得/振り分け
+PERFORM GET_SHUKKA.   "未出庫データの取得
+PERFORM INSERT.       "YS0011登録
+ELSE.
+PERFORM WRITE_OUT.    "帳票出力
+ENDIF.
+
+END-OF-SELECTION.
+************************************************************************
+AT SELECTION-SCREEN.
+CLEAR:CHK_AUART.
+IF P_AUART <> SPACE.
+CHK_AUART = 'X'.
+ENDIF.
+************************************************************************
+*** 販売伝票絞り込み
+************************************************************************
+FORM INIT.
+REFRESH:HTAB,JUCHU.
+CLEAR:HTAB,JUCHU.
+IF P_FLG = 'X'.
+* 可能イベントの取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE     = 0
+IMPORTING
+ET_EVENTS       = W_EVENT
+EXCEPTIONS
+LIST_TYPE_WRONG = 1
+OTHERS          = 2.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+ENDIF.
+*ステータスＴＢＬで対象伝票を絞りこむ
+SELECT VBELN VBTYP
+INTO TABLE HTAB
+FROM VBUK WHERE GBSTK <> 'C'
+AND   LFGSK <> 'C'
+AND ( VBTYP = 'C' OR VBTYP = 'H' OR
+VBTYP = 'K' OR VBTYP = 'L' OR
+VBTYP = 'I'   ).
+LOOP AT HTAB.
+CLEAR VBAK.
+IF CHK_AUART = SPACE.
+SELECT SINGLE VBELN VKBUR VKGRP KUNNR AUART BSTNK AUDAT VKORG
+*2005/02/15 ADD START--->
+ERDAT ERZET ERNAM
+*2005/02/15 ADD END--->
+INTO (JUCHU-VBELN,JUCHU-VKBUR,JUCHU-VKGRP,JUCHU-KUNNR,
+JUCHU-AUART,JUCHU-BSTNK,JUCHU-AUDAT,VBAK-VKORG,
+*2005/02/15 ADD START--->
+JUCHU-ERDAT,JUCHU-ERZET,JUCHU-ERNAM)
+*2005/02/15 ADD END--->
+
+FROM VBAK WHERE VBELN = HTAB-VBELN
+AND   VKBUR IN P_VKBUR.
+ELSE.
+SELECT SINGLE VBELN VKBUR VKGRP KUNNR AUART BSTNK AUDAT VKORG
+*2005/02/15 ADD START--->
+ERDAT ERZET ERNAM
+*2005/02/15 ADD END--->
+INTO (JUCHU-VBELN,JUCHU-VKBUR,JUCHU-VKGRP,JUCHU-KUNNR,
+JUCHU-AUART,JUCHU-BSTNK,JUCHU-AUDAT,VBAK-VKORG,
+*2005/02/15 ADD START--->
+JUCHU-ERDAT,JUCHU-ERZET,JUCHU-ERNAM)
+*2005/02/15 ADD END--->
+FROM VBAK WHERE VBELN = HTAB-VBELN
+AND   VKBUR IN P_VKBUR
+AND   AUART IN P_AUART.
+ENDIF.
+IF SY-SUBRC = 0.
+JUCHU-VBTYP = HTAB-VBTYP.
+APPEND JUCHU.
+CLEAR JUCHU.
+ENDIF.
+ENDLOOP.
+PERFORM GET_SPRAS.
+ENDFORM.
+************************************************************************
+*** 受注明細データ取得/振り分け
+************************************************************************
+FORM GET_JMEISAI.
+REFRESH:ITAB.
+CLEAR:JUCHU,ITAB,W_VBTYP.
+LOOP AT JUCHU.
+CLEAR:VBUP,VBEP.
+*明細ステータスの取得
+SELECT VBELN POSNR BESTA LFSTA
+INTO (VBUP-VBELN,VBUP-POSNR,VBUP-BESTA,VBUP-LFSTA)
+FROM VBUP WHERE VBELN = JUCHU-VBELN
+AND   LFSTA <> 'C'
+AND   GBSTA <> 'C'.
+CLEAR:VBEP.
+SELECT SINGLE EDATU LIFSP INTO (VBEP-EDATU,VBEP-LIFSP) FROM VBEP
+WHERE VBELN = VBUP-VBELN
+AND   POSNR = VBUP-POSNR
+AND   ETENR = '0001'.
+IF SY-SUBRC <> 0.
+CLEAR VBEP.
+ENDIF.
+*受注明細データの取得
+CLEAR:VBAP.
+CLEAR:  ITAB-CHARG,ITAB-PRODH,ITAB-PSTYV.
+SELECT SINGLE MATNR KWMENG KBMENG VRKME
+MATKL MVGR1 SPART NETPR KPEIN WAERK
+CHARG PRODH PSTYV
+* Add 2004/07/02 --->
+ARKTX
+* Add 2004/07/02 <---
+INTO (VBAP-MATNR,VBAP-KWMENG,VBAP-KBMENG,VBAP-VRKME,VBAP-MATKL,
+VBAP-MVGR1,VBAP-SPART,VBAP-NETPR,VBAP-KPEIN,VBAP-WAERK,
+ITAB-CHARG,ITAB-PRODH,ITAB-PSTYV,
+* Add 2004/07/02 --->
+ITAB-MAKTX)
+* Add 2004/07/02 <---
+FROM VBAP WHERE VBELN = VBUP-VBELN
+AND   POSNR = VBUP-POSNR
+AND   ABGRU = SPACE.
+IF SY-SUBRC = 0.
+MOVE-CORRESPONDING JUCHU TO ITAB.
+ITAB-POSNR = VBUP-POSNR.
+PERFORM GET_MEISHO.
+ITAB-MATNR = VBAP-MATNR.
+*       ITAB-MAKTX = MAKT-MAKTX.
+ITAB-JNAME = KNA1-NAME1.
+ITAB-JUCHU = VBAP-KWMENG.
+ITAB-PICKUP = VBAP-KBMENG.
+ITAB-BACKODR = VBAP-KWMENG - VBAP-KBMENG.
+ITAB-MSHUKKO = 0.
+ITAB-VRKME = VBAP-VRKME.
+ITAB-MATKL = VBAP-MATKL.
+ITAB-SPART = VBAP-SPART.
+ITAB-NOUKI = VBEP-EDATU.
+ITAB-WAERK = VBAP-WAERK.
+ITAB-NETPR = VBAP-NETPR.
+ITAB-KPEIN = VBAP-KPEIN.
+*2005/02/15 ADD START---->
+ITAB-JTANKA    = VBAP-NETPR."受注単価
+ITAB-TANITANKA = VBAP-KPEIN."単価単位
+*2005/02/15 ADD START---->
+*2002/07/18 ADD END
+ELSE.
+CLEAR ITAB.
+CONTINUE.
+*2002/07/18 ADD END
+ENDIF.
+*区分判断
+IF VBUP-LFSTA = 'A'.
+IF VBUP-BESTA = 'C'.
+ITAB-KUBUN = 'B'.   "元 A 2000.07.14 EDIT
+ELSEIF VBUP-BESTA = SPACE.
+ITAB-KUBUN = SPACE.
+ELSE.
+ITAB-KUBUN = 'A'.   "元 B 2000.07.14 EDIT
+ENDIF.
+ELSEIF VBUP-LFSTA = SPACE AND ITAB-PICKUP = 0.
+ITAB-KUBUN = 'A'.   "元 B 2000.07.14 EDIT
+ELSE.                   "分納分
+*実出荷数量(分納分)
+CLEAR:LIPS,VBFA,W_VBTYP.
+IF JUCHU-AUART = 'KA'.
+W_VBTYP = 'T'.
+ELSEIF JUCHU-VBTYP = 'C' OR
+JUCHU-VBTYP = 'I'.
+W_VBTYP = 'J'.
+ELSEIF JUCHU-VBTYP = 'H'.
+W_VBTYP = 'T'.
+ELSE.
+W_VBTYP = JUCHU-VBTYP.
+ENDIF.
+SELECT VBELN POSNN INTO (VBFA-VBELN,VBFA-POSNN)
+FROM VBFA WHERE VBELV = ITAB-VBELN
+AND   POSNV = ITAB-POSNR
+AND   VBTYP_N = W_VBTYP.
+
+SELECT SINGLE VBELN INTO VBUP-VBELN
+FROM VBUP WHERE VBELN = VBFA-VBELN
+AND   POSNR = VBFA-POSNN
+AND   WBSTA = 'C'
+AND   GBSTA <> 'A'.
+IF SY-SUBRC = 0.
+SELECT SINGLE LFIMG INTO (LIPS-LFIMG) FROM LIPS
+WHERE VBELN = VBFA-VBELN
+AND   POSNR = VBFA-POSNN.
+ITAB-SEIKYU = ITAB-SEIKYU + LIPS-LFIMG.
+ENDIF.
+ENDSELECT.
+*受注残数量
+ITAB-PICKUP = ITAB-PICKUP - ITAB-SEIKYU.
+IF VBUP-BESTA = 'A'.    "B/O有り
+ITAB-KUBUN = 'A'.   "元 C 2000.07.14 EDIT
+ELSE.                   "B/O無し
+ITAB-KUBUN = 'B'.   "元 C 2000.07.14 EDIT
+ENDIF.
+ENDIF.
+PERFORM KINGAKU.
+*2002/07/17 ADD START
+PERFORM GET_BSTNK.
+*2002/07/17 ADD END
+*2006/06/16 Add --->
+Perform Get_Text Using ITAB-YUSOUTOU 'Z910' .
+*2006/06/16 Add <---
+APPEND ITAB.
+CLEAR  ITAB.
+ENDSELECT.
+ENDLOOP.
+ENDFORM.
+************************************************************************
+*** 品目名称＆営業員ｺｰﾄﾞ取得
+************************************************************************
+FORM GET_MEISHO.
+CLEAR:MAKT,VBPA,KNA1.
+CLEAR: ITAB-WGBEZ,ITAB-VTEXT,ITAB-NAME1,ITAB-KUNNR1D,
+ITAB-PERNR.
+SELECT SINGLE WGBEZ INTO ITAB-WGBEZ FROM T023T
+WHERE MATKL = VBAP-MATKL.   "品目グループ名
+SELECT SINGLE VTEXT INTO ITAB-VTEXT FROM T179T
+WHERE PRODH = ITAB-PRODH.   "品目階層名
+ITAB-LIFSP = VBEP-LIFSP.
+CLEAR ITAB-VTEXT2.
+SELECT  SINGLE VTEXT INTO ITAB-VTEXT2 FROM TVLST
+WHERE LIFSP = ITAB-LIFSP
+AND SPRAS = 'JA'.
+SELECT SINGLE MAKTX INTO MAKT-MAKTX FROM MAKT
+WHERE MATNR = VBAP-MATNR
+AND   SPRAS = W_SPRAS.
+IF SY-SUBRC <> 0.
+CLEAR MAKT.
+ENDIF.
+CLEAR W_KUNNR.
+PERFORM GET_KNVH USING ITAB-KUNNR.  "得意先階層4.コードテキスト
+IF NOT KNVH-HKUNNR IS INITIAL.      "上位得意先がある
+W_KUNNR = KNVH-HKUNNR.
+DO 4 TIMES.                                             "最大5階層
+PERFORM GET_KNVH USING W_KUNNR.
+IF KNVH-HKUNNR IS INITIAL.      "最上位の場合
+ITAB-KUNNR1D = KNVH-KUNNR.
+EXIT.
+ELSE.
+W_KUNNR = KNVH-HKUNNR.
+ENDIF.
+ENDDO.
+*   最上位得意先名称の取得
+PERFORM DATA_GET_KNA1 USING ITAB-KUNNR1D ITAB-NAME1.
+ENDIF.
+PERFORM GET_VBPA USING 'VE'.           "PE
+ITAB-PERNR = VBPA-PERNR.
+CLEAR:ITAB-KUNRE,ITAB-NAME1_S.
+PERFORM GET_VBPA USING 'RE'.           "請求先 (BP)
+ITAB-KUNRE = VBPA-KUNNR.
+
+SELECT:SINGLE NAME1 INTO ITAB-NAME1_S  "請求名称
+FROM KNA1 WHERE KUNNR = ITAB-KUNRE.
+
+* Add 2004/07/02 --->
+PERFORM GET_VBPA USING 'WE'.           "出荷先 (SH)
+ITAB-KUNWE = VBPA-KUNNR .
+SELECT:SINGLE NAME1 INTO ITAB-NAME1_W  "出荷名称
+FROM KNA1 WHERE KUNNR = ITAB-KUNWE.
+* Add 2004/07/02 <---
+
+IF FLAG <> 'X'.
+SELECT SINGLE NAME1 REGIO INTO (KNA1-NAME1,KNA1-REGIO)
+FROM KNA1 WHERE KUNNR = JUCHU-KUNNR.
+IF SY-SUBRC <> 0.
+CLEAR KNA1.
+ELSE.
+*      PERFORM GET_LOCAT.          "住所取得
+ENDIF.
+ELSE.
+SELECT SINGLE NAME1 REGIO INTO (KNA1-NAME1,KNA1-REGIO)
+FROM KNA1 WHERE KUNNR = VBAK-KUNNR.
+IF SY-SUBRC <> 0.
+CLEAR KNA1.
+ELSE.
+*      PERFORM GET_LOCAT.          "住所取得
+ENDIF.
+ENDIF.
+ENDFORM.
+************************************************************************
+*** 未出庫データの取得
+************************************************************************
+FORM GET_SHUKKA.
+DATA:S_CNT TYPE P,
+S_VBELN LIKE VBAK-VBELN,
+S_POSNR LIKE VBAP-POSNR.
+REFRESH:HTAB.
+CLEAR: HTAB.
+FLAG = 'X'.
+*未出庫の出荷伝票を取得
+SELECT VBELN VBTYP
+INTO TABLE HTAB
+FROM VBUK WHERE GBSTK <> 'C'
+**2002.06.27 add >>>
+*                AND   WBSTK <> 'C'
+**2002.06.27 add <<<
+AND ( VBTYP = 'J' OR VBTYP = 'T' ).
+
+LOOP AT HTAB.
+SHUKKM-VBTYP = HTAB-VBTYP.
+***2001.11.27 ADD 未請求の判断を追加>>>
+IF P_R1 = 'X'.
+SELECT VBELN POSNR INTO (SHUKKM-VBELN,SHUKKM-POSNR)
+FROM VBUP WHERE VBELN = HTAB-VBELN
+AND   WBSTA <> 'C'
+AND   GBSTA <> 'C'.
+CLEAR LIPS.
+SELECT SINGLE LFIMG VRKME VGBEL VGPOS
+INTO (SHUKKM-SURYO,SHUKKM-VRKME,SHUKKM-VGBEL,SHUKKM-VGPOS)
+FROM LIPS WHERE VBELN = SHUKKM-VBELN
+AND   POSNR = SHUKKM-POSNR.
+APPEND SHUKKM.
+CLEAR SHUKKM.
+ENDSELECT.
+***2002.02.04 edit >>>
+ELSE.
+CLEAR:W_GBSTA,W_WBSTA.
+SELECT VBELN POSNR GBSTA WBSTA INTO
+(SHUKKM-VBELN,SHUKKM-POSNR,W_GBSTA,W_WBSTA)
+FROM VBUP WHERE VBELN = HTAB-VBELN
+AND   GBSTA <> 'C'.
+*                                       AND   WBSTA <> 'A'
+*                                      AND   GBSTA = 'B'.
+IF W_WBSTA = 'A' AND W_GBSTA <> 'C'.
+SHUKKM-ZFLAG = '未出'.
+*{   REPLACE        TEDK903973                                        1
+*\        ELSEIF W_WBSTA <> 'A' AND W_GBSTA = 'B'.
+ELSEIF ( W_WBSTA <> 'A' ) AND ( ( W_GBSTA = 'B' )
+OR ( W_GBSTA = 'A' ) ).
+
+*}   REPLACE
+SHUKKM-ZFLAG = '未請'.
+ENDIF.
+***2002.02.04 EDIT <<<
+CLEAR LIPS.
+SELECT SINGLE LFIMG VRKME VGBEL VGPOS
+INTO (SHUKKM-SURYO,SHUKKM-VRKME,SHUKKM-VGBEL,SHUKKM-VGPOS)
+FROM LIPS WHERE VBELN = SHUKKM-VBELN
+AND   POSNR = SHUKKM-POSNR.
+APPEND SHUKKM.
+CLEAR:SHUKKM,W_GBSTA,W_WBSTA.
+ENDSELECT.
+ENDIF.
+***2001.11.27 ADD <<<
+ENDLOOP.
+*出荷→受注
+SORT SHUKKM BY VBELN POSNR.
+SORT ITAB BY VBELN POSNR.
+LOOP AT SHUKKM.
+CLEAR ITAB.
+LOOP AT ITAB WHERE VBELN = SHUKKM-VGBEL
+AND   POSNR = SHUKKM-VGPOS.
+*** 受注伝票による受注残(受注未引当、引当有り分納)がある場合
+****2002.02.04 ADD >>>
+IF ITAB-FLAG = 'X'.  "分納(1受注伝票に対し複数出荷伝票)
+IF P_R1 = 'X'.  "未出庫までを受注残
+ITAB-MSHUKKO = ITAB-MSHUKKO + SHUKKM-SURYO.
+ITAB-SEIKYU  = ITAB-SEIKYU - SHUKKM-SURYO.
+ELSE.  "未請求までを受注残
+IF SHUKKM-ZFLAG = '未出'.  "未出庫
+ITAB-MSHUKKO = ITAB-MSHUKKO + SHUKKM-SURYO.
+ELSE.  "未請求
+ITAB-MSEIKYU = ITAB-MSEIKYU + SHUKKM-SURYO.
+ENDIF.
+ITAB-SEIKYU  = ITAB-SEIKYU - SHUKKM-SURYO.
+ENDIF.
+ELSE.
+IF P_R1 = 'X'.  "未出庫までを受注残
+ITAB-MSHUKKO = ITAB-MSHUKKO + SHUKKM-SURYO.
+ITAB-PICKUP = ITAB-PICKUP - SHUKKM-SURYO.
+ELSE.    "未請求までを受注残
+IF SHUKKM-ZFLAG = '未出'.  "未出庫
+ITAB-MSHUKKO = ITAB-MSHUKKO + SHUKKM-SURYO.
+ELSE.  "未請求
+ITAB-MSEIKYU = ITAB-MSEIKYU + SHUKKM-SURYO.
+ENDIF.
+ITAB-PICKUP = ITAB-PICKUP - SHUKKM-SURYO.
+ENDIF.
+ENDIF.
+PERFORM KINGAKU2.   "2002.02.04 EDIT.
+***2002.02.04  ADD <<<<
+MODIFY ITAB.
+CLEAR ITAB.
+ENDLOOP.
+IF SY-SUBRC <> 0.
+***受注伝票による受注残(受注未引当、引当有り分納)がない場合
+CLEAR:VBAK.
+IF CHK_AUART = SPACE.
+SELECT SINGLE VBELN VKBUR VKGRP KUNNR AUART BSTNK AUDAT
+*2005/02/15 ADD START---->
+ERDAT ERZET ERNAM
+*2005/02/15 ADD END----<
+
+INTO (VBAK-VBELN,VBAK-VKBUR,VBAK-VKGRP,VBAK-KUNNR,
+VBAK-AUART,VBAK-BSTNK,VBAK-AUDAT,
+*2005/02/15 ADD START---->
+VBAK-ERDAT, VBAK-ERZET, VBAK-ERNAM)
+*2005/02/15 ADD END----<
+FROM VBAK WHERE VBELN = SHUKKM-VGBEL
+AND   VKBUR IN P_VKBUR
+AND ( AUART = 'TA'
+OR    AUART = 'RE'
+OR    AUART = 'KL'
+OR    AUART = 'KB'
+OR    AUART = 'KE'
+OR    AUART = 'KR'
+OR    AUART = 'KA'
+OR    AUART = 'G2'
+OR    AUART = 'L2' ).
+ELSE.
+SELECT SINGLE VBELN VKBUR VKGRP KUNNR AUART BSTNK AUDAT
+*2005/02/15 ADD START---->
+ERDAT ERZET ERNAM
+*2005/02/15 ADD END----<
+INTO (VBAK-VBELN,VBAK-VKBUR,VBAK-VKGRP,VBAK-KUNNR,
+VBAK-AUART,VBAK-BSTNK,VBAK-AUDAT,
+*2005/02/15 ADD START---->
+VBAK-ERDAT, VBAK-ERZET, VBAK-ERNAM)
+*2005/02/15 ADD END----<
+FROM VBAK WHERE VBELN = SHUKKM-VGBEL
+AND   VKBUR IN P_VKBUR
+AND   AUART IN P_AUART.
+ENDIF.
+IF SY-SUBRC = 0.
+CLEAR:VBEP.
+SELECT SINGLE EDATU LIFSP INTO (VBEP-EDATU,VBEP-LIFSP)
+FROM VBEP
+WHERE VBELN = SHUKKM-VGBEL
+AND   POSNR = SHUKKM-VGPOS
+AND   ETENR = '0001'.
+IF SY-SUBRC <> '0'.  "
+CLEAR:VBEP.
+ENDIF.
+*受注明細データの取得 「参照伝票番号」を用いて受注伝票に溯る
+CLEAR:VBAP.
+CLEAR:
+ITAB-CHARG,ITAB-PRODH,ITAB-PSTYV.
+SELECT SINGLE MATNR KWMENG VRKME
+MATKL MVGR1 SPART NETPR KPEIN WAERK
+CHARG PRODH  PSTYV
+* Add 2004/07/02 --->
+ARKTX
+* Add 2004/07/02 <---
+INTO (VBAP-MATNR,VBAP-KWMENG,VBAP-VRKME,VBAP-MATKL,
+VBAP-MVGR1,VBAP-SPART,VBAP-NETPR,VBAP-KPEIN,VBAP-WAERK,
+ITAB-CHARG,ITAB-PRODH,ITAB-PSTYV,
+* Add 2004/07/02 --->
+ITAB-MAKTX)
+* Add 2004/07/02 <---
+FROM VBAP WHERE VBELN = SHUKKM-VGBEL
+AND   POSNR = SHUKKM-VGPOS
+AND   ABGRU = SPACE.
+IF SY-SUBRC <> 0.
+CLEAR VBAP.
+ELSE.
+ITAB-VBELN = SHUKKM-VGBEL.
+ITAB-POSNR = SHUKKM-VGPOS.
+ITAB-KUNNR = VBAK-KUNNR.
+PERFORM GET_MEISHO.
+***2001.11.27 ADD >>>
+IF P_R1 = 'X'.
+ITAB-KUBUN = 'C'.   "2000.07.14 ADD
+ELSE.
+IF SHUKKM-ZFLAG = '未出'.
+ITAB-KUBUN = 'C'.  "未出庫による受注残
+ELSEIF SHUKKM-ZFLAG = '未請'.
+ITAB-KUBUN = 'D'.  "未請求による受注残
+ENDIF.
+ENDIF.
+***2001.11.27 ADD <<<
+ENDIF.
+ITAB-VBELN = SHUKKM-VGBEL.
+ITAB-POSNR = SHUKKM-VGPOS.
+ITAB-MATNR = VBAP-MATNR.
+*         ITAB-MAKTX = MAKT-MAKTX.
+ITAB-JUCHU = VBAP-KWMENG.
+ITAB-PICKUP = 0.
+ITAB-BACKODR = 0.
+IF SHUKKM-ZFLAG = '未出'.
+ITAB-MSHUKKO = SHUKKM-SURYO.
+ELSEIF SHUKKM-ZFLAG = '未請'.
+ITAB-MSEIKYU = SHUKKM-SURYO.
+ENDIF.
+ITAB-VRKME = SHUKKM-VRKME.
+ITAB-SEIKYU = VBAP-KWMENG - SHUKKM-SURYO.
+ITAB-VKBUR = VBAK-VKBUR.
+ITAB-VKGRP = VBAK-VKGRP.
+ITAB-KUNNR = VBAK-KUNNR.
+ITAB-JNAME = KNA1-NAME1.
+ITAB-AUART = VBAK-AUART.
+ITAB-BSTNK = VBAK-BSTNK.
+ITAB-AUDAT = VBAK-AUDAT.
+ITAB-NOUKI = VBEP-EDATU.
+ITAB-MATKL = VBAP-MATKL.
+ITAB-SPART = VBAP-SPART.
+ITAB-KPEIN = VBAP-KPEIN.
+ITAB-WAERK = VBAP-WAERK.
+ITAB-NETPR = VBAP-NETPR.
+*2005/02/15 ADD START---->
+ITAB-JTANKA    = VBAP-NETPR."受注単価
+ITAB-TANITANKA = VBAP-KPEIN."単価単位
+*2005/02/15 ADD END----<
+
+
+
+
+
+PERFORM KINGAKU.
+ITAB-FLAG = 'X'.
+*2002/07/17 ADD START
+PERFORM GET_BSTNK.
+*2002/07/17 ADD END
+APPEND ITAB.
+CLEAR ITAB.
+ENDIF.
+ENDIF.
+ENDLOOP.
+ENDFORM.
+************************************************************************
+*** TBL登録
+************************************************************************
+FORM INSERT.
+REFRESH TAB.
+CLEAR CNT.
+DESCRIBE TABLE ITAB LINES CNT.
+IF CNT < 1.
+MESSAGE I400 WITH '対象データは存在しません'.STOP.
+ENDIF.
+CLEAR:TAB,ITAB,CNT.
+PERFORM YS0011_ROCK.
+***YS0011 全件削除
+*{   REPLACE        TEDK903973                                        1
+*\  SELECT * INTO TABLE TAB FROM YS0011.
+SELECT * INTO TABLE TAB FROM YS0011 WHERE AUART IN P_AUART
+AND   VKBUR IN P_VKBUR.
+*}   REPLACE
+DELETE YS0011 FROM TABLE TAB.
+CLEAR:YS0011.
+LOOP AT ITAB.
+IF ITAB-JUCHU = 0 AND ITAB-PICKUP = 0 AND
+ITAB-BACKODR = 0 AND ITAB-MSHUKKO = 0 AND
+ITAB-MSEIKYU = 0 AND ITAB-SEIKYU = 0.
+CONTINUE.
+ENDIF.
+MOVE-CORRESPONDING ITAB TO YS0011.
+YS0011-MANDT = SY-MANDT.
+INSERT YS0011.
+CNT = CNT + 1.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.    "ｴﾗｰ発生時は一部だけを登録せずTABLEを元に戻す
+MESSAGE I400 WITH 'E:登録時にエラーが発生しました'.STOP.
+ENDIF.
+CLEAR:ITAB,YS0011.
+ENDLOOP.
+COMMIT WORK.
+***
+PERFORM YS0011_UNROCK.
+MESSAGE I403 WITH 'YS0011:登録件数 =' CNT '件'.
+ENDFORM.
+************************************************************************
+*** 金額計算1
+************************************************************************
+FORM KINGAKU.
+DATA:BAIRITU(13) TYPE P.
+CLEAR:TCURX,CNT,TANKA,BAIRITU.
+IF VBAP-NETPR = 0 OR VBAP-KWMENG = 0.
+ITAB-KINGAKU1 = 0.
+ITAB-KINGAKU2 = 0.
+ITAB-KINGAKU3 = 0.
+ITAB-KINGAKU5 = 0.
+ITAB-KINGAKU6 = 0.
+ELSE.
+TANKA = VBAP-NETPR.
+ITAB-KINGAKU1 = ( TANKA * VBAP-KWMENG ) / VBAP-KPEIN.
+ITAB-KINGAKU2 = ( TANKA * ITAB-PICKUP ) / VBAP-KPEIN.
+ITAB-KINGAKU3 = ( TANKA * ITAB-BACKODR ) / VBAP-KPEIN.
+*** 2002.02.05 ADD >>>
+IF P_R1 = 'X'.
+ITAB-KINGAKU4 = ( TANKA * ITAB-MSHUKKO ) / VBAP-KPEIN.
+ELSE.
+IF SHUKKM-ZFLAG = '未出'.
+ITAB-KINGAKU4 = ( TANKA * ITAB-MSHUKKO ) / VBAP-KPEIN.
+ELSEIF SHUKKM-ZFLAG = '未請'.
+ITAB-KINGAKU6 = ( TANKA * ITAB-MSEIKYU ) / VBAP-KPEIN.
+ENDIF.
+ENDIF.
+*** 2002.02.05 ADD <<<
+ITAB-KINGAKU5 = ( TANKA * ITAB-SEIKYU ) / VBAP-KPEIN.
+ENDIF.
+ENDFORM.
+************************************************************************
+*** 金額計算2
+************************************************************************
+FORM KINGAKU2.
+CLEAR:TCURX,CNT,TANKA.
+TANKA = ITAB-NETPR .
+ITAB-KINGAKU2 = ( TANKA * ITAB-PICKUP ) / ITAB-KPEIN.
+IF P_R1 = 'X' OR SHUKKM-ZFLAG = '未出'.
+ITAB-KINGAKU4 = ( TANKA * ITAB-MSHUKKO ) / ITAB-KPEIN.
+ENDIF.
+IF P_R2 = 'X' AND SHUKKM-ZFLAG = '未請'.
+ITAB-KINGAKU6 = ( TANKA * ITAB-MSEIKYU ) / ITAB-KPEIN.
+ENDIF.
+IF ITAB-FLAG = 'X'.
+ITAB-KINGAKU5 = ( TANKA * ITAB-SEIKYU ) / ITAB-KPEIN.
+ENDIF.
+ENDFORM.
+************************************************************************
+***
+************************************************************************
+FORM YS0011_ROCK.
+CALL FUNCTION 'ENQUEUE_EZ_YS0011'
+EXPORTING
+MODE_YS0011    = 'E'
+MANDT          = SY-MANDT
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+
+CASE SY-SUBRC.
+WHEN 1.
+MESSAGE I400 WITH 'E:テーブルはロックされています'.STOP.
+WHEN 2.
+MESSAGE I400 WITH 'E:Z209にｼｽﾃﾑｴﾗｰが発生しました'.STOP.
+WHEN 3.
+MESSAGE I400 WITH 'E:回復不能なエラーが発生しました'.STOP.
+ENDCASE.
+ENDFORM.
+************************************************************************
+***
+************************************************************************
+FORM YS0011_UNROCK.
+CALL FUNCTION 'DEQUEUE_EZ_YS0011'
+EXCEPTIONS
+OTHERS = 1.
+IF SY-SUBRC <> 0.
+MESSAGE I400 WITH 'E:ロック解除できませんでした'.STOP.
+ENDIF.
+
+ENDFORM.
+************************************************************************
+***  固定値の取得
+************************************************************************
+FORM GET_SPRAS.
+W_SPRAS = SY-LANGU.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_OUT
+*&---------------------------------------------------------------------*
+*       帳票出力
+*----------------------------------------------------------------------*
+FORM WRITE_OUT.
+
+* ページヘッダの作成
+W_HEADER-TYP = 'H'.
+W_HEADER-INFO = '受注残分析データ一覧'.
+APPEND W_HEADER TO I_HEADER.
+*
+W_LAYOUT-DETAIL_POPUP = 'X'.
+W_VARIANT-REPORT = SY-REPID.
+W_REPID = SY-REPID.
+SELECT * INTO TABLE TB_REC FROM YS0011.   "全件抽出
+* 表示
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_BUFFER_ACTIVE         = 'X'
+I_CALLBACK_PROGRAM      = W_REPID
+I_CALLBACK_TOP_OF_PAGE  = W_HEADER_FORM
+I_CALLBACK_USER_COMMAND = W_UCOMM_FORM
+I_STRUCTURE_NAME        = 'YS0011'
+IS_LAYOUT               = W_LAYOUT
+I_SAVE                  = 'A'
+IS_VARIANT              = W_VARIANT
+IT_EVENTS               = W_EVENT[]
+IMPORTING
+E_EXIT_CAUSED_BY_CALLER = W_EXIT1
+ES_EXIT_CAUSED_BY_USER  = W_EXIT2
+TABLES
+T_OUTTAB                = TB_REC
+EXCEPTIONS
+PROGRAM_ERROR           = 1
+OTHERS                  = 2.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+ENDFORM.                    " WRITE_OUT
+*---------------------------------------------------------------------*
+*       FORM top_of_page                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM TOP_OF_PAGE.
+WRITE: / 'Page:', SY-PAGNO.
+CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+EXPORTING
+IT_LIST_COMMENTARY = I_HEADER
+I_LOGO             = 'ENJOYSAP_LOGO'.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM user_command                                             *
+*---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+*  -->  UCOMM                                                         *
+*  -->  SELFIELD                                                      *
+*---------------------------------------------------------------------*
+FORM USER_COMMAND USING UCOMM LIKE SY-UCOMM
+SELFIELD TYPE SLIS_SELFIELD.
+CASE UCOMM.
+WHEN OTHERS.
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+TITLEBAR      = 'UCOMM'
+TEXT_QUESTION = UCOMM.
+ENDCASE.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  GET_VBPA
+*&---------------------------------------------------------------------*
+*       VBPA検索 2001/04/25 ADD
+*----------------------------------------------------------------------*
+*      -->P_FLG  PARVW
+*----------------------------------------------------------------------*
+FORM GET_VBPA USING P_FLG.
+CLEAR VBPA.
+SELECT SINGLE PERNR KUNNR INTO (VBPA-PERNR,VBPA-KUNNR) FROM VBPA
+WHERE VBELN = ITAB-VBELN
+AND POSNR = VBUP-POSNR
+AND PARVW = P_FLG.
+IF SY-SUBRC <> 0.
+SELECT SINGLE PERNR KUNNR INTO (VBPA-PERNR,VBPA-KUNNR) FROM VBPA
+WHERE VBELN = ITAB-VBELN
+AND POSNR = '000000'
+AND PARVW = P_FLG.
+ENDIF.
+
+ENDFORM.                    " GET_VBPA
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNVH
+*&---------------------------------------------------------------------*
+*       得意先階層テーブル検索
+*----------------------------------------------------------------------*
+FORM GET_KNVH USING I_KUNNR.
+SELECT KUNNR DATAB HKUNNR FROM KNVH
+INTO (KNVH-KUNNR, KNVH-DATAB, KNVH-HKUNNR)
+UP TO 1 ROWS
+WHERE HITYP =  'A'        "得意先階層タイプ
+AND   KUNNR =  I_KUNNR    "得意先コード
+AND   DATAB =< SY-DATUM   "有効開始日
+AND   DATBI => SY-DATUM   "有効終了日
+ORDER BY DATAB DESCENDING.
+ENDSELECT.
+ENDFORM.                    " GET_KNVH
+*&---------------------------------------------------------------------*
+*&      Form  DATA_GET_KNA1
+*&---------------------------------------------------------------------*
+*----- 受注先名称取得
+*----------------------------------------------------------------------*
+FORM DATA_GET_KNA1 USING I_KUNAG O_NAME.
+CLEAR O_NAME.
+*----- 受注先名称取得
+SELECT SINGLE NAME1
+FROM   KNA1
+INTO   (O_NAME)
+WHERE  KUNNR = I_KUNAG.
+
+ENDFORM.                    " DATA_GET_KNA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_LOCAT
+*&---------------------------------------------------------------------*
+*       住所取得   2001/05/31 ADD
+*----------------------------------------------------------------------*
+*FORM GET_LOCAT.
+*
+*  SELECT SINGLE BEZEI
+*    FROM   T005U
+*    INTO   ITAB-LOCAT
+*    WHERE  SPRAS = CNS_E    AND
+*           LAND1 = CNS_JP   AND
+*           BLAND = KNA1-REGIO.
+*
+*ENDFORM.                    " GET_LOCAT
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSTNK
+*&---------------------------------------------------------------------*
+*       得意先発注番号の取得方法変更対応 2002/07/17
+*----------------------------------------------------------------------*
+FORM GET_BSTNK.
+CLEAR ITAB-BSTNK.
+SELECT SINGLE BSTKD INTO ITAB-BSTNK FROM VBKD
+WHERE VBELN = ITAB-VBELN
+AND POSNR = '000000'.
+ENDFORM.                    " GET_BSTNK
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_TEXT
+*&---------------------------------------------------------------------*
+*       明細テキスト取得
+*----------------------------------------------------------------------*
+
+Form Get_Text Using F_TEXT F_ID .
+DATA L_NAME LIKE THEAD-TDNAME .
+
+refresh read_tline .
+
+clear : l_name .
+move itab-vbeln to L_name+0(10) .
+move itab-posnr to L_name+10(6) .
+
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+CLIENT                        = SY-MANDT
+ID                            = F_ID
+LANGUAGE                      = 'J'
+NAME                          = L_NAME
+OBJECT                        = 'VBBP'
+*   ARCHIVE_HANDLE                = 0
+*   LOCAL_CAT                     = ' '
+* IMPORTING
+*   HEADER                        =
+TABLES
+LINES                         = READ_TLINE
+EXCEPTIONS
+ID                            = 1
+LANGUAGE                      = 2
+NAME                          = 3
+NOT_FOUND                     = 4
+OBJECT                        = 5
+REFERENCE_CHECK               = 6
+WRONG_ACCESS_TO_ARCHIVE       = 7
+OTHERS                        = 8
+.
+IF SY-SUBRC eq 0.
+read table read_tline index 1 .
+move read_tline-tdline to f_text .
+ENDIF.
+
+
+EndForm .

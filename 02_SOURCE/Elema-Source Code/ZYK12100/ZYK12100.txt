@@ -1,0 +1,1065 @@
+REPORT ZYK012100 LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID Y1
+NO STANDARD PAGE HEADING .
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID： ZYK012100                                             *
+*    ﾌﾟﾛｸﾞﾗﾑ名： 仕入データ入力                                        *
+*    処理種別 ： UL/更新(ABAP/4)                                       *
+*    処理概要 ： 取込対象の伝票は｢NAST:メッセージステータス｣より取得   *
+*                基本的な項目は｢RBKP:伝票ヘッダ: 請求書受領｣より取得   *
+*                取り込まなかった請求書伝票をエラー情報として出力      *
+*----------------------------------------------------------------------*
+*    作成日   ：2001/12/25                                             *
+*    作成者   ：舘林 裕香                                              *
+*    変更履歴 ：2002/02/14  追加貸借転記の編集追加            K.KAJISA *
+*             ：2002/03/04  選択画面調整                      K.KAJISA *
+*             ：2002/03/13  単価算出ロジックの変更            KAJISA   *
+*             ：2002/06/17a NAST無効時のPARVW='Y2'で絞り込み  INAGOSHI *
+*             ：2002/07/25  RBKPのSELECT文の修正              KURANO   *
+*             ：2002/08/22  数量マイナスロジック追加          KAJISA   *
+*             ：2002/09/05  MSG-TYPEインフォメ化              KAJISA   *
+*             ：2002/10/01  事業領域不明時は選択値を使用      KAJISA   *
+*             ：2002/10/09  MMより取り込んだ時点で未請求      KAJISA   *
+*             ：2005/10/12  仕入データ対象の抽出条件変更      KOBAYASHI*
+************************************************************************
+*// データベース定義 //*
+TABLES     : RBKP   ,            " 伝票ヘッダ: 請求書受領
+YK230  ,            " 仕入データ
+YK240  ,            " 仕入合計データ
+YK250  ,            " プラント変換テーブル
+NAST   .            " メッセージステータス
+*// 内部テーブル定義 //*
+*- ＮＡＳＴ検索用
+DATA : BEGIN OF ST_NAST ,
+OBJKY   LIKE  NAST-OBJKY  ,
+KAPPL   LIKE  NAST-KAPPL  ,
+KSCHL   LIKE  NAST-KSCHL  ,
+SPRAS   LIKE  NAST-SPRAS  ,
+PARNR   LIKE  NAST-PARNR  ,
+PARVW   LIKE  NAST-PARVW  ,
+ERDAT   LIKE  NAST-ERDAT  ,
+ERUHR   LIKE  NAST-ERUHR  ,
+OBJKY_B LIKE  RBKP-BELNR  ,
+END   OF ST_NAST .
+DATA : I_NAST LIKE TABLE OF ST_NAST WITH HEADER LINE .
+*- ＲＢＫＰデータ取得用
+DATA : BEGIN OF ST_RBKP ,
+BELNR   LIKE  RBKP-BELNR  ,       " 会計伝票番号
+LIFNR   LIKE  RBKP-LIFNR  ,       " 請求先
+BUDAT   LIKE  RBKP-BUDAT  ,       " 伝票の転記日付
+WAERS   LIKE  RBKP-WAERS  ,       " 通貨コード
+WMWST1  LIKE  RBKP-WMWST1 .       " 伝票通貨での税額
+INCLUDE STRUCTURE ST_NAST .       " nast
+DATA : END   OF ST_RBKP .
+DATA : I_RBKP  LIKE TABLE OF ST_RBKP WITH HEADER LINE .
+*-
+DATA : BEGIN OF ST_INTAB ,
+BELNR        LIKE  RSEG-BELNR  ,       " 会計伝票番号
+BUZEI        LIKE  RSEG-BUZEI  ,       " 請求書伝票内伝票番号
+BUKRS        LIKE  RSEG-BUKRS  ,       " 会社コード
+WERKS        LIKE  RSEG-WERKS  ,       " プラント
+EBELN        LIKE  RSEG-EBELN  ,       " 購買伝票番号
+EBELP        LIKE  RSEG-EBELP  ,       " 購買伝票の明細番号
+MATNR        LIKE  RSEG-MATNR  ,       " 品目コード
+MENGE        LIKE  RSEG-MENGE  ,       " 数量
+WRBTR        LIKE  RSEG-WRBTR  ,       " 伝票通貨額
+BSTME        LIKE  RSEG-BSTME  ,       " 発注単位
+SHKZG        LIKE  RSEG-SHKZG  ,       " 借方/貸方フラグ
+MWSKZ        LIKE  RSEG-MWSKZ  ,       " 税コード
+TBTKZ        LIKE  RSEG-TBTKZ  ,       "追加貸借転記 20020214 ADD
+EKORG        LIKE  EKKO-EKORG  ,       " 購買組織
+EKGRP        LIKE  EKKO-EKGRP  ,       " 購買グループ
+LIFN2        LIKE  WYT3-LIFN2  ,       " 請求先
+ZFBDT        LIKE  SY-DATUM    ,       " 締日
+SPART        LIKE  MARA-SPART  ,       " 製品部門
+GSBER        LIKE  T134G-GSBER ,       " 事業領域
+MAKTX        LIKE  MAKT-MAKTX  ,       " 品目テキスト
+WMWST        LIKE  BSET-FWSTE  ,       " 税額
+LIFNR        LIKE  RBKP-LIFNR  ,       " 請求先
+BUDAT        LIKE  RBKP-BUDAT  ,       " 伝票の転記日付
+WAERS        LIKE  RBKP-WAERS  ,       " 通貨コード
+WMWST1       LIKE  RBKP-WMWST1 ,       " 伝票通貨での税額
+WERKST       LIKE  YK250-WERKST,       " プラント
+FLG          TYPE  C           ,       " 明細フラグ
+230          TYPE  C           .       " yk230 登録確認
+INCLUDE STRUCTURE ST_NAST      .       " nast
+DATA : END   OF ST_INTAB .
+DATA : I_INTAB  LIKE TABLE OF ST_INTAB WITH HEADER LINE .
+*- エラーリスト用
+DATA : BEGIN OF ST_SRR ,
+BELNR        LIKE  RSEG-BELNR  ,       " 請求伝票番号
+BUZEI        LIKE  RSEG-BUZEI  ,       " 明細番号
+MESSAGE(60)  TYPE  C           ,       " メッセージ
+END   OF ST_SRR   .
+DATA : I_ERR    LIKE TABLE OF ST_SRR   WITH HEADER LINE .
+*- YK230 登録用内部テーブル
+DATA : I_YK230  LIKE TABLE OF YK230    WITH HEADER LINE .
+*- YK240 登録用内部テーブル
+DATA : BEGIN OF I_YK240 OCCURS 0   .
+INCLUDE STRUCTURE YK240        .       " yk240
+DATA : 230          TYPE  C           .       " yk230 登録確認
+DATA : END   OF I_YK240            .
+*- YK240 読み込み失敗用
+DATA : I_YK240E LIKE TABLE OF YK240    WITH HEADER LINE .
+*- YK240 読み込み成功用
+DATA : I_YK240S LIKE TABLE OF YK240    WITH HEADER LINE .
+************************************************************************
+*// 作業領域定義(ワーク変数、フラグ、カウンタ等) //*
+DATA      : W_FLG           TYPE C          ,  " エラーフラグ
+W_INCNT_YK230   TYPE  I         ,  " YK230 登録件数
+W_INCNT_YK240   TYPE  I         ,  " YK240 登録件数
+W_UPCNT_YK240   TYPE  I         .  " YK240 更新件数
+*
+CONSTANTS :
+C_ON(4)      TYPE C    VALUE '有効'               ,
+C_OFF(4)     TYPE C    VALUE '無効'               ,
+C_EKKO(50)   TYPE C
+VALUE '購買伝票ヘッダ(EKKO)の取得失敗'          ,
+C_WYT3(50)  TYPE C
+VALUE '取引先機能(WYT3)の取得失敗'              ,
+C_MARA(50)   TYPE C
+VALUE '一般品目データ(MARA)の取得失敗'          ,
+C_T134G(50)  TYPE C
+VALUE '組織単位・事業領域設定(T134G)の取得失敗' ,
+C_DATUM(50)  TYPE C
+VALUE '締日の取得失敗'                          ,
+C_MAKT(50)   TYPE C
+VALUE '品目テキスト(MAKT)の取得失敗'            ,
+C_YK230(60)  TYPE C
+*2005/10/12 MOD START
+*      VALUE '仕入データ(YK230)には、既に、同じ請求伝票レコードが存在' .
+VALUE '仕入データ(YK230)には、既に、同じ請求伝票レコードが存在' ,
+C_INSUSR(60)  TYPE C
+VALUE 'TEC0000'                                .
+*2005/10/12 MOD END
+************************************************************************
+*選択画面定義
+* selection-screen skip 1 .                      "2002/03/04 DEL
+*--
+* selection-screen begin of block sl1 .          "2002/03/04 DEL
+*2005/10/12 MOD START
+**-- 転記日付
+*    SELECT-OPTIONS : S_BUDAT  FOR  RBKP-BUDAT ,
+**- 仕入気コード
+*                     S_LIFNR  FOR  RBKP-LIFNR ,
+**- 請求伝票番号
+*                     S_BELNR  FOR  RBKP-BELNR .
+*-- 登録日付
+SELECT-OPTIONS : S_INSDAT  FOR  YK230-INSDAT NO-EXTENSION
+NO INTERVALS ,
+*-  登録時間
+S_INSTIM  FOR  YK230-INSTIM NO-EXTENSION
+NO INTERVALS ,
+*-  仕入気コード
+S_LIFNR   FOR  RBKP-LIFNR .
+*2005/10/12 MOD END
+* selection-screen end   of block sl1 .         "2002/03/04 DEL
+*-- ブランク行
+* selection-screen skip 1 .                     "2002/03/04 DEL
+*--
+* selection-screen begin of block sl2 .         "2002/03/04 DEL
+*-- アプリケーション
+PARAMETERS : P_KAPPL LIKE  NAST-KAPPL DEFAULT 'MR' ,
+*-- メッセージタイプ
+P_KSCHL LIKE  NAST-KSCHL DEFAULT 'YK01' .
+*2002/10/01 ADD START
+PARAMETERS   P_GSBER LIKE YK230-GSBER DEFAULT 'B000'. "応急用
+*2002/10/01 ADD END
+* selection-screen end   of block sl2 .        "2002/03/04 DEL
+*-- ブランク行
+* selection-screen skip 1 .                    "2002/03/04 DEL
+*-- ＮＡＳＴ検索
+* selection-screen begin of block sl3 with frame title text-f01 ."0304 D
+*---- サーバ
+*   selection-screen begin of line .           "2002/03/04 DEL
+PARAMETERS : B_ON  RADIOBUTTON GROUP SEL DEFAULT 'X'.
+*     selection-screen comment 08(10) text-f02 for field b_on   ."0304 D
+*   selection-screen end   of line .          "2002/03/04 DEL
+*---- ローカル
+*   selection-screen begin of line .          "2002/03/04 DEL
+PARAMETERS : B_OFF RADIOBUTTON GROUP SEL .
+*     selection-screen comment 25(10) text-f03 for field b_off  ."0304 D
+*   selection-screen end   of line .         "2002/03/04 DEL
+* selection-screen end   of block sl3 .      "2002/03/04 DEL
+
+* ADD 2002.04.09 INAGOSHI
+PARAMETERS : B2_ON  RADIOBUTTON GROUP SEL2 DEFAULT 'X'.
+PARAMETERS : B2_OFF RADIOBUTTON GROUP SEL2 .
+************************************************************************
+INITIALIZATION .
+*2005/10/12 MOD START
+* DATA  W_BELNR_LOW  TYPE RBKP-BELNR.
+* DATA  W_BELNR_HIGH TYPE RBKP-BELNR.
+**請求番号の初期値提案
+*  CLEAR S_BELNR.
+*  SELECT SINGLE MAX( BELNR ) INTO W_BELNR_LOW FROM YK230
+*         WHERE BELNR >= 0 AND BELNR < 9999999999.
+*  IF SY-SUBRC = 0.
+*    S_BELNR-SIGN   = 'I'.
+*    S_BELNR-OPTION = 'EQ'.
+*    ADD 1 TO W_BELNR_LOW.
+*  ELSE.
+*    CLEAR W_BELNR_LOW.
+*  ENDIF.
+*  S_BELNR-LOW = W_BELNR_LOW. "請求番号の初期値-LOW
+*  SELECT SINGLE MAX( BELNR ) INTO W_BELNR_HIGH FROM RBKP
+*         WHERE BELNR >= 0 AND BELNR <= 9999999999.
+*  IF SY-SUBRC = 0.
+*    ADD 0 TO W_BELNR_HIGH. "数値として比較するため
+*    IF W_BELNR_HIGH GE W_BELNR_LOW.
+*      S_BELNR-SIGN   = 'I'.
+*      S_BELNR-OPTION = 'BT'.
+*      S_BELNR-LOW    = W_BELNR_LOW.  "請求番号の初期値-LOW
+*      S_BELNR-HIGH   = W_BELNR_HIGH. "請求番号の初期値-HIGH
+*    ELSE.
+*      CLEAR S_BELNR-HIGH.
+*    ENDIF.
+*  ENDIF.
+*  APPEND S_BELNR.
+DATA:  W_INSTIM_LOW  TYPE YK230-INSTIM,
+W_INSTIM_HIGH TYPE YK230-INSTIM.
+*-初期値提案
+CLEAR: S_INSDAT,
+S_INSTIM.
+SELECT SINGLE MAX( INSDAT ) INTO S_INSDAT-LOW FROM YK230   "登録日付
+WHERE INSUSR = C_INSUSR.
+IF SY-SUBRC = 0.
+S_INSDAT-SIGN   = 'I'.
+S_INSDAT-OPTION = 'EQ'.
+APPEND S_INSDAT.
+ELSE.
+ENDIF.
+
+IF NOT S_INSDAT-LOW IS INITIAL.
+SELECT SINGLE MAX( INSTIM ) INTO S_INSTIM-LOW FROM YK230 "登録時間
+WHERE INSDAT = S_INSDAT-LOW
+AND INSUSR = C_INSUSR.
+IF SY-SUBRC = 0.
+S_INSTIM-SIGN   = 'I'.
+S_INSTIM-OPTION = 'EQ'.
+APPEND S_INSTIM.
+ELSE.
+ENDIF.
+ELSE.
+ENDIF.
+*2005/10/12 MOD END
+************************************************************************
+START-OF-SELECTION .
+
+*-- ロック[yk230/yk240]
+PERFORM FRM_LOCK_ENQUEU .
+*-- データ抽出
+PERFORM FRM_SELECT_DATA .
+*-- データ集計
+PERFORM FRM_TOTAL_DATA .
+*-- テーブル更新
+PERFORM FRM_UPDATE_TABLE .
+*-- ＮＡＳＴロック
+IF B_ON = 'X' AND B_OFF = SPACE .
+PERFORM FRM_NAST_LOCK .
+ENDIF .
+*-- 印刷処理
+PERFORM FRM_PROCESSING_PRINT .
+*-- ＮＡＳＴの更新処理
+IF B_ON = 'X' AND B_OFF = SPACE .
+PERFORM FRM_UPDATE_NAST .
+ENDIF .
+*-- commit work
+COMMIT WORK .
+*-- ロック解除[nast/yk230/yk240]
+PERFORM FRM_LOCK_DEQUEUE .
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_lock_enqueu
+*&---------------------------------------------------------------------*
+*       ロック[yk230/yk240]
+*----------------------------------------------------------------------*
+FORM FRM_LOCK_ENQUEU .
+*- YK230 のロック
+CALL FUNCTION 'ENQUEUE_EY_YK230'
+EXPORTING
+MODE_YK230           = 'E'
+MANDT                = SY-MANDT
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3 .
+IF SY-SUBRC <> 0.
+*   message s649 with 'YK230' .
+MESSAGE I649 WITH 'YK230' . "2002/09/05 MOD
+STOP .
+ENDIF.
+*- YK240 のロック
+CALL FUNCTION 'ENQUEUE_EY_YK240'
+EXPORTING
+MODE_YK240           = 'E'
+MANDT                = SY-MANDT
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3 .
+IF SY-SUBRC <> 0.
+*   message s649 with 'YK240' .
+MESSAGE I649 WITH 'YK240' . "2002/09/05 MOD
+STOP .
+ENDIF.
+ENDFORM.                    " frm_lock_enqueu
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_data
+*&---------------------------------------------------------------------*
+*       データ抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_DATA.
+IF     B_ON = 'X'   AND B_OFF = SPACE .
+*- NAST検索が有効の場合
+PERFORM FRM_NAST_ON .
+*- NAST検索が無効の場合
+ELSEIF B_ON = SPACE AND B_OFF = 'X'   .
+PERFORM FRM_NAST_OFF .
+ENDIF .
+*- データ取得
+PERFORM FRM_ACQUISITION_DATA .
+ENDFORM.                    " frm_select_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_total_data
+*&---------------------------------------------------------------------*
+*       データ集計
+*----------------------------------------------------------------------*
+FORM FRM_TOTAL_DATA .
+DATA : W_L_KNITXAMT  LIKE YK240-KNITXAMT ,    " 税抜金額
+W_L_KNTAXAMT  LIKE YK240-KNTAXAMT ,    " 消費税額
+W_L_KNETXAMT  LIKE YK240-KNETXAMT .    " 税込金額
+DATA : I_L_YK240 LIKE TABLE OF YK240 WITH HEADER LINE .
+*
+SORT I_YK240
+BY BUKRS YKYEAR LIFNR LIFN2 WERKS EKORG EKGRP GSBER ZFBDT  .
+LOOP AT I_YK240 .
+*-- 変数 clear
+AT NEW ZFBDT .
+CLEAR : W_L_KNITXAMT , W_L_KNTAXAMT , W_L_KNETXAMT  .
+ENDAT .
+*-- 計算
+W_L_KNITXAMT = I_YK240-KNITXAMT + W_L_KNITXAMT .
+W_L_KNTAXAMT = I_YK240-KNTAXAMT + W_L_KNTAXAMT .
+W_L_KNETXAMT = I_YK240-KNETXAMT + W_L_KNETXAMT .
+*-- 文字化け防止
+MOVE-CORRESPONDING I_YK240 TO I_L_YK240 .
+AT END OF ZFBDT .
+SELECT SINGLE * FROM YK240
+WHERE BUKRS  = I_YK240-BUKRS
+AND YKYEAR = I_YK240-YKYEAR
+AND LIFNR  = I_YK240-LIFNR
+AND LIFN2  = I_YK240-LIFN2
+AND WERKS  = I_YK240-WERKS
+AND EKORG  = I_YK240-EKORG
+AND EKGRP  = I_YK240-EKGRP
+AND GSBER  = I_YK240-GSBER
+AND ZFBDT  = I_YK240-ZFBDT .
+*---- YK240 更新用内部tab へ
+IF SY-SUBRC = 0 .
+MOVE-CORRESPONDING I_L_YK240 TO I_YK240S .
+I_YK240S-INSDAT   = YK240-INSDAT .                  " 登録日
+I_YK240S-INSTIM   = YK240-INSTIM .                  " 登録時刻
+I_YK240S-INSUSR   = YK240-INSUSR .                  " 登録ユーザ
+I_YK240S-KNITXAMT = W_L_KNITXAMT + YK240-KNITXAMT . " 税抜金額
+I_YK240S-KNTAXAMT = W_L_KNTAXAMT + YK240-KNTAXAMT . " 消費税額
+I_YK240S-KNETXAMT = W_L_KNETXAMT + YK240-KNETXAMT . " 税込金額
+I_YK240S-YKYEAR   = I_YK240S-ZFBDT(4) .
+I_YK240S-UPDDAT   = SY-DATUM     .
+I_YK240S-UPDTIM   = SY-UZEIT     .
+I_YK240S-UPDUSR   = SY-UNAME     .
+APPEND I_YK240S .
+CLEAR  I_YK240S .
+*---- YK240 登録用内部tab へ
+ELSE  .
+MOVE-CORRESPONDING I_L_YK240 TO I_YK240E .
+I_YK240E-KNITXAMT = W_L_KNITXAMT .
+I_YK240E-KNTAXAMT = W_L_KNTAXAMT .
+I_YK240E-KNETXAMT = W_L_KNETXAMT .
+I_YK240E-YKYEAR   = I_YK240E-ZFBDT(4) .
+I_YK240E-INSDAT   = SY-DATUM     .
+I_YK240E-INSTIM   = SY-UZEIT     .
+I_YK240E-INSUSR   = SY-UNAME     .
+APPEND I_YK240E .
+CLEAR  I_YK240E .
+ENDIF .
+ENDAT .
+ENDLOOP .
+ENDFORM.                    " frm_total_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_update_table
+*&---------------------------------------------------------------------*
+*       テーブル更新
+*----------------------------------------------------------------------*
+FORM FRM_UPDATE_TABLE.
+*- YK230 の登録
+LOOP AT I_YK230 .
+MOVE-CORRESPONDING I_YK230 TO YK230 .
+YK230-KEKKBN = '1'.                    "2002/10/09 ADD
+INSERT YK230 .
+IF SY-SUBRC = 0 .
+W_INCNT_YK230 = W_INCNT_YK230 + 1 .
+ENDIF .
+ENDLOOP .
+*- YK240 の登録
+LOOP AT I_YK240E.
+MOVE-CORRESPONDING I_YK240E TO YK240 .
+INSERT YK240 .
+IF SY-SUBRC = 0 .
+W_INCNT_YK240 = W_INCNT_YK240 + 1 .
+ENDIF .
+ENDLOOP .
+*- YK240 の更新
+LOOP AT I_YK240S .
+MOVE-CORRESPONDING I_YK240S TO YK240 .
+UPDATE YK240 .
+IF SY-SUBRC = 0 .
+W_UPCNT_YK240 = W_UPCNT_YK240 + 1 .
+ENDIF .
+ENDLOOP .
+ENDFORM.                    " frm_update_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_nast_on
+*&---------------------------------------------------------------------*
+*       NAST検索が有効の場合
+*----------------------------------------------------------------------*
+FORM FRM_NAST_ON .
+*- 未処理のＭＭ請求伝票番号の抽出
+PERFORM FRM_SELECT_NAST .
+*- 仕入先などの取得
+LOOP AT I_NAST .
+SELECT BELNR LIFNR BUDAT WAERS WMWST1
+FROM RBKP
+INTO (I_RBKP-BELNR , I_RBKP-LIFNR , I_RBKP-BUDAT ,
+I_RBKP-WAERS , I_RBKP-WMWST1)
+WHERE BELNR = I_NAST-OBJKY_B .
+ENDSELECT .
+IF SY-SUBRC = 0 .
+MOVE-CORRESPONDING I_NAST TO I_RBKP .
+APPEND : I_RBKP .
+CLEAR  : I_RBKP , I_NAST .
+ENDIF .
+ENDLOOP .
+IF I_RBKP[] IS INITIAL .
+MESSAGE S650 .
+STOP .
+ENDIF .
+ENDFORM.                    " frm_nast_on
+*&---------------------------------------------------------------------*
+*&      Form  frm_nast_off
+*&---------------------------------------------------------------------*
+*       NAST検索が無効の場合
+*----------------------------------------------------------------------*
+FORM FRM_NAST_OFF.
+***--- ADD 2002/06/17a (start)
+RANGES: R_LIFNR FOR  WYT3-LIFNR.
+DATA  : W_LIFNR LIKE WYT3-LIFNR.
+DATA    W_RBKP  LIKE RBKP. "2002/07/25 ADD
+*2005/10/12 ADD START
+DATA    W_OFF_FLG(1) TYPE C. "対象外フラグ
+*2005/10/12 ADD END
+
+REFRESH R_LIFNR.
+CLEAR   R_LIFNR.
+SELECT LIFNR INTO W_LIFNR
+FROM WYT3
+WHERE LIFNR IN S_LIFNR
+AND PARVW = 'Y2'.
+R_LIFNR-SIGN   ='I'.
+R_LIFNR-OPTION = 'EQ'.
+R_LIFNR-LOW    = W_LIFNR.
+APPEND R_LIFNR.
+CLEAR R_LIFNR.
+ENDSELECT.
+IF SY-SUBRC <> 0.
+*   message s400 with '* WYT3-PARVW=Y2 ; Not Found'.
+MESSAGE I400 WITH '* WYT3-PARVW=Y2 ; Not Found'."2002/09/05 MOD
+STOP.
+ENDIF.
+***--- ADD 2002/06/17a (end)
+*
+
+* MOD 2002/07/25 START SQLエラーの対応
+* select belnr lifnr budat waers wmwst1
+*    from rbkp
+*    into table i_rbkp
+*       where belnr in s_belnr
+*         and budat in s_budat
+*          and lifnr in s_lifnr . "MOD 2002/06/17a
+*         and lifnr in r_lifnr .
+SELECT * INTO W_RBKP FROM RBKP
+*2005/10/12 MOD START
+*       WHERE BELNR IN S_BELNR
+*         AND BUDAT IN S_BUDAT.
+WHERE CPUDT >= S_INSDAT-LOW.
+*    IF W_RBKP-LIFNR IN R_LIFNR.
+*      MOVE-CORRESPONDING W_RBKP TO I_RBKP.
+*      APPEND I_RBKP.
+*    ENDIF.
+IF NOT W_RBKP-LIFNR IN R_LIFNR.
+W_OFF_FLG = 'X'.
+ENDIF.
+
+IF W_RBKP-CPUDT = S_INSDAT-LOW AND W_RBKP-CPUTM <= S_INSTIM-LOW.
+W_OFF_FLG = 'X'.
+ENDIF.
+
+IF W_OFF_FLG IS INITIAL.
+MOVE-CORRESPONDING W_RBKP TO I_RBKP.
+APPEND I_RBKP.
+ENDIF.
+CLEAR: W_OFF_FLG.
+*2005/10/12 MOD END
+ENDSELECT.
+* MOD 2002/07/25 END
+
+IF SY-SUBRC <> 0 .
+MESSAGE S650 .
+STOP .
+ENDIF .
+ENDFORM.                    " frm_nast_off
+*&---------------------------------------------------------------------*
+*&      Form  frm_Acquisition_data
+*&---------------------------------------------------------------------*
+*       データ取得
+*----------------------------------------------------------------------*
+FORM FRM_ACQUISITION_DATA.
+LOOP AT I_RBKP .
+CLEAR  I_INTAB .
+MOVE-CORRESPONDING I_RBKP TO I_INTAB .
+*-- append < 対象キーが変わったら>
+AT NEW WAERS .
+CLEAR : W_FLG .
+*-- RSEG よりデータ取得
+SELECT BELNR BUZEI BUKRS WERKS EBELN EBELP
+MATNR MENGE WRBTR BSTME SHKZG MWSKZ
+TBTKZ                               "2002/02/14 ADD
+FROM RSEG
+INTO (I_INTAB-BELNR,I_INTAB-BUZEI,I_INTAB-BUKRS,I_INTAB-WERKS,
+I_INTAB-EBELN,I_INTAB-EBELP,I_INTAB-MATNR,I_INTAB-MENGE,
+I_INTAB-WRBTR,I_INTAB-BSTME,I_INTAB-SHKZG,I_INTAB-MWSKZ,
+I_INTAB-TBTKZ)                    "2002/02/14 ADD
+WHERE BELNR = I_RBKP-BELNR .
+*---- 明細処理
+PERFORM FRM_PROCESSING_MEISAI .
+APPEND I_INTAB .
+ENDSELECT .
+ENDAT .
+ENDLOOP .
+*- ヘッダ処理
+PERFORM FRM_PROCESSING_HEADER .
+ENDFORM.                    " frm_Acquisition_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_processing_meisai
+*&---------------------------------------------------------------------*
+*       明細処理
+*----------------------------------------------------------------------*
+FORM FRM_PROCESSING_MEISAI.
+IF I_INTAB-SHKZG = 'H' .
+I_INTAB-WRBTR = I_INTAB-WRBTR * -1 .
+I_INTAB-MENGE = I_INTAB-MENGE * -1 . "2002/08/22 ADD
+ENDIF .
+PERFORM FRM_SELECT_YK250 .             "
+PERFORM FRM_SELECT_EKKO  .             " 購買組織/購買グループの取得
+PERFORM FRM_SELECT_WYT3  .             " 請求先の取得
+PERFORM FRM_SELECT_MARA  .             " 製品部門の取得
+PERFORM FRM_SELECT_DATUM .             " 締日の取得
+PERFORM FRM_SELECT_MAKT  .             " 品目テキストの取得
+PERFORM FRM_CALCULATION_TAX .          " 税額の算出
+*- エラーフラグがOFFの場合
+IF W_FLG = SPACE .
+PERFORM FRM_SELECT_YK230  .          " YK230 の読込
+*-- エラーフラグがONの場合
+ELSE  .
+I_INTAB-FLG = 'X' .
+ENDIF .
+ENDFORM.                    " frm_processing_meisai
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_ekko
+*&---------------------------------------------------------------------*
+*       購買組織/購買グループの取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_EKKO.
+SELECT SINGLE EKORG EKGRP
+FROM EKKO
+INTO (I_INTAB-EKORG,I_INTAB-EKGRP)
+WHERE EBELN = I_INTAB-EBELN .
+IF SY-SUBRC <> 0 .
+W_FLG   = 'X' .
+I_ERR-BELNR   = I_INTAB-BELNR .         " 請求伝票番号
+I_ERR-BUZEI   = I_INTAB-BUZEI .         " 伝票番号
+I_ERR-MESSAGE = C_EKKO .
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+* ADD 2002.04.09
+IF B2_OFF = 'X' .  "購買Gr無効
+I_INTAB-EKGRP = SPACE.
+ENDIF.
+*
+ENDFORM.                    " frm_select_ekko
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_wyt3
+*&---------------------------------------------------------------------*
+*       請求先の取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_WYT3.
+SELECT SINGLE LIFN2
+FROM WYT3
+INTO I_INTAB-LIFN2
+WHERE LIFNR = I_RBKP-LIFNR
+AND EKORG = I_INTAB-EKORG
+AND PARVW = 'Y2' .
+IF SY-SUBRC <> 0 .
+W_FLG   = 'X' .
+I_ERR-BELNR   = I_INTAB-BELNR .         " 請求伝票番号
+I_ERR-BUZEI   = I_INTAB-BUZEI .         " 伝票番号
+I_ERR-MESSAGE = C_WYT3 .
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+ENDFORM.                    " frm_select_wyt3
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_mara
+*&---------------------------------------------------------------------*
+*       製品部門の取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_MARA.
+SELECT SINGLE SPART
+FROM MARA
+INTO I_INTAB-SPART
+WHERE MATNR = I_INTAB-MATNR .
+IF SY-SUBRC <> 0 .
+W_FLG   = 'X' .
+I_ERR-BELNR   = I_INTAB-BELNR .         " 請求伝票番号
+I_ERR-BUZEI   = I_INTAB-BUZEI .         " 伝票番号
+I_ERR-MESSAGE = C_MARA .
+APPEND I_ERR .
+CLEAR  I_ERR .
+ELSE .
+SELECT SINGLE GSBER
+FROM T134G
+INTO I_INTAB-GSBER
+WHERE SPART = I_INTAB-SPART
+AND WERKS = I_INTAB-WERKS .
+IF SY-SUBRC <> 0 .
+*2002/10/01 MOD START
+*     w_flg   = 'X' .
+*     i_err-belnr   = i_intab-belnr .         " 請求伝票番号
+*     i_err-buzei   = i_intab-buzei .         " 伝票番号
+*     i_err-message = c_t134g .
+*     append i_err .
+*     clear  i_err .
+I_INTAB-GSBER = P_GSBER. "デフォルトの事業領域
+*2002/10/01 MOD END
+ENDIF .
+ENDIF .
+ENDFORM.                    " frm_select_mara
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_datum
+*&---------------------------------------------------------------------*
+*       締日の取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_DATUM.
+DATA : W_DATUM  LIKE  SY-DATUM .
+*
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+I_CORD               = I_RBKP-LIFNR    " 仕入先コード
+I_EKORG              = I_INTAB-EKORG   " 購買組織
+I_DAY                = I_RBKP-BUDAT    " 請求日
+IMPORTING
+E_ZFBDT              = I_INTAB-ZFBDT   " 締日
+EXCEPTIONS
+NO_GET_T052          = 1
+NO_GOOD_GETDAY       = 2
+NO_GET_ZTERM         = 3
+OTHERS               = 4 .
+IF SY-SUBRC <> 0.
+W_FLG   = 'X' .
+I_ERR-BELNR   = I_INTAB-BELNR .         " 請求伝票番号
+I_ERR-BUZEI   = I_INTAB-BUZEI .         " 伝票番号
+I_ERR-MESSAGE = C_DATUM .
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF.
+ENDFORM.                    " frm_select_datum
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_makt
+*&---------------------------------------------------------------------*
+*       品目テキストの取得
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_MAKT.
+SELECT SINGLE MAKTX
+FROM MAKT
+INTO I_INTAB-MAKTX
+WHERE MATNR = I_INTAB-MATNR
+AND SPRAS = 'J' .
+IF SY-SUBRC <> 0 .
+W_FLG   = 'X' .
+I_ERR-BELNR   = I_INTAB-BELNR .         " 請求伝票番号
+I_ERR-BUZEI   = I_INTAB-BUZEI .         " 伝票番号
+I_ERR-MESSAGE = C_MAKT .
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+ENDFORM.                    " frm_select_makt
+*&---------------------------------------------------------------------*
+*&      Form  frm_calculation_tax
+*&---------------------------------------------------------------------*
+*       税額の算出
+*----------------------------------------------------------------------*
+FORM FRM_CALCULATION_TAX.
+DATA : W_MWDAT LIKE TABLE OF RTAX1U15 WITH HEADER LINE .
+*
+CALL FUNCTION 'CALCULATE_TAX_FROM_NET_AMOUNT'
+EXPORTING
+I_BUKRS                 = I_INTAB-BUKRS       " 会社コード
+I_MWSKZ                 = I_INTAB-MWSKZ       " 税コード
+I_WAERS                 = I_RBKP-WAERS        " 通貨コード
+I_WRBTR                 = I_INTAB-WRBTR       " 伝票通貨額
+TABLES
+T_MWDAT                 = W_MWDAT
+EXCEPTIONS
+BUKRS_NOT_FOUND         = 1
+COUNTRY_NOT_FOUND       = 2
+MWSKZ_NOT_DEFINED       = 3
+MWSKZ_NOT_VALID         = 4
+KTOSL_NOT_FOUND         = 5
+KALSM_NOT_FOUND         = 6
+PARAMETER_ERROR         = 7
+KNUMH_NOT_FOUND         = 8
+KSCHL_NOT_FOUND         = 9
+UNKNOWN_ERROR           = 10
+ACCOUNT_NOT_FOUND       = 11
+TXJCD_NOT_VALID         = 12
+OTHERS                  = 13 .
+IF SY-SUBRC <> 0.
+*    message s651 .
+MESSAGE I651 . "2002/09/05 MOD
+STOP .
+ELSE .
+I_INTAB-WMWST = W_MWDAT-WMWST .
+ENDIF.
+ENDFORM.                    " frm_calculation_tax
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_yk230
+*&---------------------------------------------------------------------*
+*       YK230 の読込
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_YK230.
+SELECT SINGLE * FROM YK230
+WHERE BELNR = I_INTAB-BELNR
+AND BUZEI = I_INTAB-BUZEI
+.
+
+IF SY-SUBRC = 0 .
+*2005/10/12 MOD START
+*   I_ERR-BELNR   = I_INTAB-BELNR .         " 請求伝票番号
+*   I_ERR-BUZEI   = I_INTAB-BUZEI .         " 伝票番号
+*   I_ERR-MESSAGE = C_YK230 .
+*   APPEND I_ERR .
+*   CLEAR  I_ERR .
+IF SY-UNAME <> C_INSUSR.
+I_ERR-BELNR   = I_INTAB-BELNR .         " 請求伝票番号
+I_ERR-BUZEI   = I_INTAB-BUZEI .         " 伝票番号
+I_ERR-MESSAGE = C_YK230 .
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF.
+*2005/10/12 MOD END
+ELSE .
+MOVE-CORRESPONDING I_INTAB TO I_YK230 .
+*--
+*    select single * from yk250
+*            where bukrs  = i_yk230-bukrs
+*              and lifnr  = i_yk230-lifnr
+*              and werkst = i_yk230-werks .
+*    if sy-subrc = 0 .
+*      i_yk230-werkst = i_yk230-werks .
+*      i_yk230-werks  = yk250-werksp  .
+*      i_intab-werkst = i_yk230-werks .
+*      i_intab-werks  = yk250-werksp  .
+*    else .
+*      i_yk230-werkst = i_yk230-werks .
+*      i_intab-werkst = i_yk230-werks .
+*    endif .
+I_YK230-YKYEAR   = I_YK230-ZFBDT(4) . " 暦年
+I_YK230-KNQUAN   = I_INTAB-MENGE    . " 数量
+I_YK230-KNUNIT   = I_INTAB-BSTME    . " 単位:発注単位
+*2002/03/13 ADD START
+DATA: W_KINGAKU  LIKE BAPICURR-BAPICURR,
+W_KINGAKU2 LIKE BAPICURR-BAPICURR.
+CLEAR W_KINGAKU.
+W_KINGAKU2 = I_INTAB-WRBTR.
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_BAPI'
+EXPORTING
+CURRENCY          = I_INTAB-WAERS
+SAP_AMOUNT        = W_KINGAKU2
+IMPORTING
+BAPI_AMOUNT       = W_KINGAKU.
+*2002/03/13 ADD END
+*2002/03/13 MOD START
+*   i_yk230-knuntprc = i_intab-wrbtr / i_intab-menge .
+*                                         " 単価:税抜/数量
+IF I_INTAB-MENGE = 0.
+I_YK230-KNUNTPRC = 0.
+ELSE.
+I_YK230-KNUNTPRC = W_KINGAKU / I_INTAB-MENGE .
+ENDIF.
+*2002/03/13 MOD END
+I_YK230-KNITXAMT = I_INTAB-WRBTR    . " 税抜金額:伝票通貨額
+I_YK230-KNTAXAMT = I_INTAB-WMWST    . " 消費税額
+I_YK230-KNETXAMT = I_YK230-KNITXAMT + I_YK230-KNTAXAMT .
+" 税込金額:税抜金額+消費税額
+I_YK230-UPYAMT   = I_YK230-KNITXAMT . " 未請求額
+I_YK230-PIDAMT   = '0'              . " 消込金額
+I_YK230-PIDTAX   = '0'              . " 消込税額
+I_YK230-INSDAT   = SY-DATUM         . " 登録日
+I_YK230-INSTIM   = SY-UZEIT         . " 登録時刻
+I_YK230-INSUSR   = SY-UNAME         . " 登録ユーザ
+I_YK230-RRFLG    = I_INTAB-TBTKZ    . " 値引き返品区分20020214 ADD
+APPEND I_YK230 .
+CLEAR  I_YK230 .
+*-- yk230 更新確認フラグ
+I_INTAB-230 = 'X' .
+ENDIF .
+ENDFORM.                    " frm_select_yk230
+*&---------------------------------------------------------------------*
+*&      Form  frm_nast_lock
+*&---------------------------------------------------------------------*
+*       ＮＡＳＴロック
+*----------------------------------------------------------------------*
+FORM FRM_NAST_LOCK.
+LOOP AT I_INTAB .
+CALL FUNCTION 'ENQUEUE_EZNAST'
+EXPORTING
+MODE_NAST            = 'E'
+MANDT                = SY-MANDT
+KAPPL                = I_INTAB-KAPPL
+OBJKY                = I_INTAB-OBJKY
+KSCHL                = I_INTAB-KSCHL
+SPRAS                = I_INTAB-SPRAS
+PARNR                = I_INTAB-PARNR
+PARVW                = I_INTAB-PARVW
+ERDAT                = I_INTAB-ERDAT
+ERUHR                = I_INTAB-ERUHR
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3 .
+IF SY-SUBRC <> 0 .
+*      message e652 .
+MESSAGE I652 . "2002/09/05 MOD
+STOP.          "2002/09/05 MOD
+ENDIF .
+ENDLOOP .
+ENDFORM.                    " frm_nast_lock
+*&---------------------------------------------------------------------*
+*&      Form  frm_Processing_print
+*&---------------------------------------------------------------------*
+*       印刷処理
+*----------------------------------------------------------------------*
+FORM FRM_PROCESSING_PRINT.
+DATA : W_NAST(4)  TYPE C ,
+W_ERR      TYPE I .
+*
+IF     B_ON = 'X'   AND B_OFF = SPACE .
+W_NAST = C_ON .
+ELSEIF B_ON = SPACE AND B_OFF = 'X'   .
+W_NAST = C_OFF .
+ENDIF .
+*-
+SKIP 1 .
+*- 入力パラメータ
+WRITE:/002 TEXT-P01 ,
+015 W_NAST   .
+*-
+SKIP 1 .
+*- エラーリスト
+DESCRIBE TABLE I_ERR LINES W_ERR  .
+IF W_ERR <> 0 .
+WRITE:/002 TEXT-P11 ,
+015 TEXT-P12 ,
+024 TEXT-P13 .
+LOOP AT I_ERR .
+WRITE:/002 I_ERR-BELNR ,
+015 I_ERR-BUZEI ,
+024 I_ERR-MESSAGE .
+ENDLOOP .
+SKIP 1 .
+ENDIF .
+*- add-on テーブルの登録/更新件数
+WRITE:/002 TEXT-P21      ,
+020 W_INCNT_YK230 ,
+/002 TEXT-P22      ,
+020 W_INCNT_YK240 ,
+/002 TEXT-P23      ,
+020 W_UPCNT_YK240 .
+ENDFORM.                    " frm_Processing_print
+*&---------------------------------------------------------------------*
+*&      Form  frm_lock_dequeue
+*&---------------------------------------------------------------------*
+*       ロック解除[nast/yk230/yk240]
+*----------------------------------------------------------------------*
+FORM FRM_LOCK_DEQUEUE.
+*- NAST のロック解除
+LOOP AT I_INTAB .
+CALL FUNCTION 'DEQUEUE_EZNAST'
+EXPORTING
+MODE_NAST       = 'E'
+MANDT           = SY-MANDT
+KAPPL           = I_INTAB-KAPPL
+OBJKY           = I_INTAB-OBJKY
+KSCHL           = I_INTAB-KSCHL
+SPRAS           = I_INTAB-SPRAS
+PARNR           = I_INTAB-PARNR
+PARVW           = I_INTAB-PARVW
+ERDAT           = I_INTAB-ERDAT
+ERUHR           = I_INTAB-ERUHR .
+ENDLOOP .
+*- YK230 のロック解除
+CALL FUNCTION 'DEQUEUE_EY_YK230'
+EXPORTING
+MODE_YK230       = 'E'
+MANDT            = SY-MANDT .
+*- YK240 のロック解除
+CALL FUNCTION 'DEQUEUE_EY_YK240'
+EXPORTING
+MODE_YK240       = 'E'
+MANDT            = SY-MANDT .
+ENDFORM.                    " frm_lock_dequeue
+*&---------------------------------------------------------------------*
+*&      Form  frm_update_nast
+*&---------------------------------------------------------------------*
+*       ＮＡＳＴの更新処理
+*----------------------------------------------------------------------*
+FORM FRM_UPDATE_NAST.
+RANGES : R_OBJKY FOR I_INTAB-OBJKY .
+R_OBJKY-SIGN   = 'I' .
+R_OBJKY-OPTION = 'CP' .
+*
+LOOP AT I_INTAB WHERE OBJKY <> SPACE .
+CONCATENATE I_INTAB-OBJKY(14) '*' INTO R_OBJKY-LOW .
+APPEND R_OBJKY .
+CLEAR  R_OBJKY-LOW .
+ENDLOOP .
+*- 更新<NAST>
+UPDATE NAST SET VSTAT = '1' WHERE OBJKY IN R_OBJKY .
+
+ENDFORM.                    " frm_update_nast
+*&---------------------------------------------------------------------*
+*&      Form  frm_processing_header
+*&---------------------------------------------------------------------*
+*       ヘッダ処理
+*----------------------------------------------------------------------*
+FORM FRM_PROCESSING_HEADER.
+DATA :
+W_WMWST       LIKE  I_INTAB-WMWST ,   " 明細の税額の合計算出用
+W_DIFFERENCE  LIKE  I_INTAB-WMWST ,   " ヘッダと明細の差額算出
+W_WMWST_F     LIKE  I_INTAB-WMWST ,   " 明細の先頭行の税額退避
+W_WMWST_H     LIKE  I_INTAB-WMWST ,   " ヘッダの税額退避
+W_TOTAL       LIKE  I_INTAB-WMWST ,   " 税額調整用
+I_INTAB_L     LIKE TABLE OF I_INTAB WITH HEADER LINE .
+*
+SORT I_INTAB BY BELNR BUZEI .
+*-
+LOOP AT I_INTAB WHERE 230 = 'X' .
+IF     I_INTAB-FLG = SPACE .
+MOVE-CORRESPONDING I_INTAB TO I_INTAB_L .
+APPEND I_INTAB_L .
+CLEAR  I_INTAB_L .
+ELSEIF I_INTAB-FLG = 'X' .
+DELETE I_INTAB WHERE BELNR = ST_INTAB-BELNR
+AND BUZEI = ST_INTAB-BUZEI .
+ENDIF .
+ENDLOOP .
+*
+LOOP AT I_INTAB_L .
+*--   文字化け防止
+MOVE-CORRESPONDING I_INTAB_L TO ST_INTAB .
+*--   明細の先頭行のsy-indexの退避
+AT NEW BELNR .
+CLEAR : W_WMWST , W_DIFFERENCE , W_WMWST_F , W_WMWST_H ,
+W_TOTAL .
+W_WMWST_F = ST_INTAB-WMWST  .              " 明細の税額
+W_WMWST_H = ST_INTAB-WMWST1 .              " RBKP-WMWST1
+ENDAT .
+*--   明細の税額の合計
+W_WMWST = I_INTAB-WMWST + W_WMWST .
+*--   金額の調整
+AT END OF BELNR .
+*------ RBKP-WMWST1 <> 明細税額の合計 の場合
+IF W_WMWST_H <> W_WMWST .
+*-------- ヘッダと明細の差額 = RBKP-WMWST1(ヘッダの税額) - 明細額
+W_DIFFERENCE  = W_WMWST_H    - W_WMWST   .
+*-------- 税額調整 = ヘッダと明細の差額 - 明細税額
+W_TOTAL       = W_DIFFERENCE + W_WMWST_F .
+ENDIF .
+ENDAT .
+MOVE-CORRESPONDING ST_INTAB TO I_YK240 .
+I_YK240-KNITXAMT = ST_INTAB-WRBTR     .   " 税抜金額
+I_YK240-KNTAXAMT = ST_INTAB-WMWST     .   " 消費税額
+I_YK240-KNETXAMT =
+ST_INTAB-WRBTR + ST_INTAB-WMWST  .   " 税込金額
+I_YK240-YKYEAR   = ST_INTAB-ZFBDT     .   " 暦年
+APPEND I_YK240 .
+CLEAR  I_YK240 .
+ENDLOOP .
+ENDFORM.                    " frm_processing_header
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_nast
+*&---------------------------------------------------------------------*
+*       未処理のＭＭ請求伝票番号の抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_NAST.
+*- ＮＡＳＴ検索用
+DATA : BEGIN OF ST_L_NAST ,
+OBJKY   LIKE  NAST-OBJKY  ,
+KAPPL   LIKE  NAST-KAPPL  ,
+KSCHL   LIKE  NAST-KSCHL  ,
+SPRAS   LIKE  NAST-SPRAS  ,
+PARNR   LIKE  NAST-PARNR  ,
+PARVW   LIKE  NAST-PARVW  ,
+ERDAT   LIKE  NAST-ERDAT  ,
+ERUHR   LIKE  NAST-ERUHR  ,
+END   OF ST_L_NAST .
+DATA : I_L_NAST LIKE TABLE OF ST_L_NAST WITH HEADER LINE .
+*
+SELECT DISTINCT
+OBJKY KAPPL KSCHL SPRAS PARNR PARVW ERDAT ERUHR
+FROM NAST
+INTO TABLE I_L_NAST
+WHERE  KAPPL =  P_KAPPL
+AND  KSCHL =  P_KSCHL
+AND  VSTAT <> '1' .
+IF SY-SUBRC <> 0 .
+MESSAGE S650 .
+STOP .
+ELSE .
+LOOP AT I_L_NAST .
+MOVE-CORRESPONDING I_L_NAST TO I_NAST .
+I_NAST-OBJKY_B = I_L_NAST-OBJKY+4(10) .
+APPEND   I_NAST .
+CLEAR  : I_NAST ,I_L_NAST .
+ENDLOOP .
+ENDIF .
+ENDFORM.                    " frm_select_nast
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_yk250
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_YK250.
+SELECT SINGLE * FROM YK250
+WHERE BUKRS  = I_INTAB-BUKRS
+AND LIFNR  = I_RBKP-LIFNR
+AND WERKST = I_INTAB-WERKS .
+IF SY-SUBRC = 0 .
+I_INTAB-WERKST = I_INTAB-WERKS .
+I_INTAB-WERKS  = YK250-WERKSP  .
+ELSE .
+I_INTAB-WERKST = I_INTAB-WERKS .
+ENDIF .
+ENDFORM.                    " frm_select_yk250

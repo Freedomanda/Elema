@@ -1,0 +1,1130 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN010800                                                    *
+*&         違算明細書                                                  *
+*&---------------------------------------------------------------------*
+*&  機能     :外部データ(仕入)[YN210]より請求書受領時と異なる支払データ*
+*&            を選択画面の条件で取得し、違算明細書として帳票出力する。 *
+*&                                                                     *
+*&  作成日   : 2012/03/12                                              *
+*&  作成者   : H.KOMIYAMA(SOLFIS)                                      *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/03/27 K.KAJISA(SOLFIS)                             *
+*&  変更内容 : インデックス対応                                        *
+*&---------------------------------------------------------------------*
+REPORT ZN010800
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT  58
+MESSAGE-ID  YN01.
+
+*----------------------------------------------------------------------*
+*   参照先
+*----------------------------------------------------------------------*
+TABLES: T001W,
+LFA1.
+
+*----------------------------------------------------------------------*
+*   型定義
+*----------------------------------------------------------------------*
+*-- 仕入先コード取得用
+TYPES: BEGIN OF T_LFM1,
+LIFNR TYPE LFM1-LIFNR,             " 仕入先コード
+ZTERM TYPE LFM1-ZTERM,             " 支払条件キー
+WAERS TYPE LFM1-WAERS,             " 通貨コード
+END   OF T_LFM1,
+*-- 支払条件取得用
+BEGIN OF T_T052,
+ZTERM TYPE T052-ZTERM,             " 支払条件キー
+ZTAGG TYPE T052-ZTAGG,             " 期限
+END   OF T_T052,
+*-- 外部データ取得用
+BEGIN OF T_YN210,
+GJAHR     TYPE YN210-GJAHR,        " 外部会計年度
+SLPDOC	   TYPE YN210-SLPDOC,       " 外部番号
+DTLDOC	   TYPE YN210-DTLDOC,       " 外部明細番号
+VRFCTON   TYPE YN210-VRFCTON,      " 仕入先コード(請求先)
+BUKRS	   TYPE YN210-BUKRS,        " 会社コード
+DVSON	   TYPE YN210-DVSON,        " プラント
+CSTS	   TYPE YN210-CSTS,         " 照合ステータス
+COMMT	   TYPE YN210-COMMT,        " コメント
+KNQUAN	   TYPE YN210-KNQUAN,       " 数量
+KNUNIT	   TYPE YN210-KNUNIT,       " 単位
+KNUNTPRC  TYPE YN210-KNUNTPRC,     " 単価
+KNETXAMT  TYPE YN210-KNETXAMT,     " 税込金額
+WAERS	   TYPE YN210-WAERS,        " 通貨コード
+CHKDOC	   TYPE YN210-CHKDOC,       " 照合番号
+DELFLG	   TYPE YN210-DELFLG,       " 削除フラグ
+OLDGJAHR  TYPE YN210-OLDGJAHR,     " 元会計年度
+OLDSLPDOC TYPE YN210-OLDSLPDOC,    " 元外部番号
+OLDDTLDOC TYPE YN210-OLDDTLDOC,    " 元外部明細番号
+LIST2	   TYPE YN210-LIST2,        " 発注番号
+LIST6     TYPE YN210-LIST6,        " 品目テキスト
+LDATE1    TYPE YN210-LDATE1,       " 請求日
+CZFBDT    TYPE YN210-CZFBDT,       " 照合締日
+END   OF T_YN210,
+*-- 仕入先名称取得用
+BEGIN OF T_LFA1,
+LIFNR     TYPE LFA1-LIFNR,         " 仕入先
+NAME1     TYPE LFA1-NAME1,         " 名称１
+END   OF T_LFA1,
+*-- プラント名称取得用
+BEGIN OF T_T001W,
+WERKS     TYPE T001W-WERKS,        " プラント
+NAME1     TYPE T001W-NAME1,        " 名称１
+END   OF T_T001W,
+*-- データ出力用
+BEGIN OF T_OUTPUT,
+VRFCTON   TYPE YN210-VRFCTON,      " 仕入先コード
+DVSON     TYPE YN210-DVSON,        " プラント
+GJAHR     TYPE YN210-GJAHR,        " 外部会計年度
+SLPDOC	   TYPE YN210-SLPDOC,       " 外部番号
+DTLDOC	   TYPE YN210-DTLDOC,       " 外部明細番号
+DTYPE     TYPE C,                  " データ種別
+LDATE1    TYPE YN210-LDATE1,       " 請求日
+CHKDOC    TYPE YN210-CHKDOC,       " 照合番号
+LIST2     TYPE YN210-LIST2,        " 発注番号
+LIST6     TYPE YN210-LIST6,        " 品目テキスト
+KNQUAN    TYPE YN210-KNQUAN,       " 数量
+KNUNIT	   TYPE YN210-KNUNIT,       " 単位
+KNUNTPRC  TYPE YN210-KNUNTPRC,     " 単価
+KNETXAMT  TYPE YN210-KNETXAMT,     " 請求金額
+WAERS     TYPE YN210-WAERS,        " 通貨
+COMMT     TYPE YN210-COMMT,        " コメント
+END   OF T_OUTPUT.
+
+*----------------------------------------------------------------------*
+*   構造定義
+*----------------------------------------------------------------------*
+DATA: W_LFM1     TYPE T_LFM1,
+W_T052     TYPE T_T052,
+W_YN210    TYPE T_YN210,
+W_LFA1     TYPE T_LFA1,
+W_T001W    TYPE T_T001W,
+W_OUTPUT   TYPE T_OUTPUT.
+
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+DATA: I_LFM1    TYPE STANDARD TABLE OF T_LFM1,
+I_T052    TYPE SORTED   TABLE OF T_T052
+WITH UNIQUE KEY ZTERM ZTAGG,
+I_YN210_A TYPE STANDARD TABLE OF T_YN210,
+I_YN210_B TYPE STANDARD TABLE OF T_YN210,
+I_LFA1    TYPE HASHED   TABLE OF T_LFA1
+WITH UNIQUE KEY LIFNR,
+I_T001W   TYPE HASHED   TABLE OF T_T001W
+WITH UNIQUE KEY WERKS,
+I_OUTPUT  TYPE STANDARD TABLE OF T_OUTPUT.
+
+*----------------------------------------------------------------------*
+*   変数定義
+*----------------------------------------------------------------------*
+DATA: G_ZFBDT     TYPE DATUM,           " 今回締日
+G_ZFBDT_OLD TYPE DATUM,           " 前回締日
+G_TTLAMT    TYPE YN210-KNETXAMT,  " 請求金額合計
+G_CHGAMT    TYPE YN210-KNETXAMT,  " 変更請求金額合計
+G_SUMAMT    TYPE YN210-KNETXAMT,  " 税込違算合計
+G_WAERS     TYPE YN210-WAERS,     " 通貨
+G_EDIT(17)  TYPE C.               " 単価/金額/数量編集用ワーク
+
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS: C_ON(1) TYPE C VALUE 'X'.    " フラグON
+
+*&---------------------------------------------------------------------*
+*&   画面項目定義
+*&---------------------------------------------------------------------*
+*-- データ選択
+SELECTION-SCREEN: BEGIN OF BLOCK BL01 WITH FRAME TITLE TEXT-S01.
+*-- 出力年月
+PARAMETERS:     P_YEARS(6) TYPE N,
+*-- 出力締日
+P_CDATE(2) TYPE N OBLIGATORY.
+*-- プラント
+SELECT-OPTIONS: S_WERKS    FOR T001W-WERKS,
+*-- 仕入先コード(請求先)
+S_LIFNR    FOR LFA1-LIFNR.
+SELECTION-SCREEN: END   OF BLOCK BL01.
+
+*-- システム項目
+SELECTION-SCREEN: BEGIN OF BLOCK BL02 WITH FRAME TITLE TEXT-S02.
+*-- 会社コード
+PARAMETERS: P_BUKRS TYPE T001-BUKRS OBLIGATORY MEMORY ID BUK,
+*-- 購買組織
+P_EKORG TYPE LFM1-EKORG OBLIGATORY MEMORY ID EKO.
+SELECTION-SCREEN: END   OF BLOCK BL02.
+
+************************************************************************
+INITIALIZATION.
+************************************************************************
+
+************************************************************************
+AT SELECTION-SCREEN.
+************************************************************************
+*-- 選択画面処理
+PERFORM F_SELECTION_SCREEN_PROC.
+
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+*-- 初期処理
+PERFORM F_INIT_SEC.
+*-- メイン処理
+PERFORM F_MAIN_SEC.
+
+************************************************************************
+TOP-OF-PAGE.
+************************************************************************
+*-- ヘッダ出力
+PERFORM F_OUTPUT_HEADER USING W_OUTPUT-VRFCTON
+W_OUTPUT-DVSON.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECTION_SCREEN_PROC
+*&---------------------------------------------------------------------*
+*       選択画面処理
+*----------------------------------------------------------------------*
+FORM F_SELECTION_SCREEN_PROC.
+
+*-- 会社コードと購買組織の存在チェック
+PERFORM F_CHECK_P_BUKRS_AND_P_EKORG.
+
+*-- 出力締日チェック
+PERFORM F_CHECK_P_CDATE.
+
+*-- 出力年月初期値設定
+IF P_YEARS IS INITIAL.
+PERFORM F_SET_P_YEARS.
+ENDIF.
+
+*-- 出力年月チェック
+PERFORM F_CHECK_P_YEARS.
+
+*-- 今回締日の取得
+PERFORM F_GET_ZFBDT.
+
+
+ENDFORM.                    " F_SELECTION_SCREEN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_P_BUKRS_AND_P_EKORG
+*&---------------------------------------------------------------------*
+*       会社コードと購買組織の存在チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_P_BUKRS_AND_P_EKORG.
+
+DATA: L_EKORG LIKE T024E-EKORG.
+
+SELECT   SINGLE EKORG             " 購買組織
+FROM T024E
+INTO L_EKORG
+WHERE EKORG = P_EKORG          " 購買組織
+AND BUKRS = P_BUKRS.         " 会社コード
+
+IF SY-SUBRC <> 0.
+*-- 対象データがありません
+MESSAGE E762.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_P_BUKRS_AND_P_EKORG
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_P_CDATE
+*&---------------------------------------------------------------------*
+*       出力締日チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_P_CDATE.
+
+IF NOT (  P_CDATE =  5
+OR P_CDATE = 10
+OR P_CDATE = 15
+OR P_CDATE = 20
+OR P_CDATE = 25
+OR P_CDATE = 31 ).
+*-- 入力された締日が適切ではありません
+MESSAGE E913.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_P_CDATE
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_P_YEARS
+*&---------------------------------------------------------------------*
+*       出力年月初期値設定
+*----------------------------------------------------------------------*
+FORM F_SET_P_YEARS.
+
+DATA: L_ENDDA LIKE PSKEY-ENDDA.
+
+IF P_CDATE =  5
+OR P_CDATE = 10
+OR P_CDATE = 15
+OR P_CDATE = 20
+OR P_CDATE = 25.
+
+*-- システム日付の先頭６桁を設定
+P_YEARS = SY-DATUM(6).
+
+ELSE.
+
+*-- システム日付の前月を取得する
+CALL FUNCTION 'HRWPC_BL_DATES_MONTH_INTERVAL'
+EXPORTING
+DATUM          = SY-DATUM
+MONTH_PST      = 1
+MONTH_FTR      = -1
+IMPORTING
+ENDDA          = L_ENDDA
+EXCEPTIONS
+OTHERS         = 0.
+
+*-- システム日付の前月の先頭６桁を設定
+P_YEARS = L_ENDDA(6).
+
+ENDIF.
+
+ENDFORM.                    " F_SET_P_YEARS
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_P_YEARS
+*&---------------------------------------------------------------------*
+*       出力年月チェック
+*----------------------------------------------------------------------*
+FORM F_CHECK_P_YEARS.
+
+IF P_YEARS+4(2) < 01
+OR P_YEARS+4(2) > 12.
+*-- 入力された出力年月が不正です。
+MESSAGE E914.
+ENDIF.
+
+ENDFORM.                    " F_CHECK_P_YEARS
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_ZFBDT
+*&---------------------------------------------------------------------*
+*       今回締日の算出
+*----------------------------------------------------------------------*
+FORM F_GET_ZFBDT.
+
+CLEAR: G_ZFBDT.
+
+IF P_CDATE =  5
+OR P_CDATE = 10
+OR P_CDATE = 15
+OR P_CDATE = 20
+OR P_CDATE = 25.
+
+*-- 出力年月(YYYYMM)＋出力締日(DD)
+CONCATENATE P_YEARS
+P_CDATE
+INTO G_ZFBDT.
+
+ELSE.
+
+*-- 出力年月(YYYYMM)＋[01]
+CONCATENATE P_YEARS
+'01'
+INTO G_ZFBDT.
+
+*-- 月末日へ変換
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN                  = G_ZFBDT
+IMPORTING
+LAST_DAY_OF_MONTH       = G_ZFBDT
+EXCEPTIONS
+OTHERS                  = 0.
+
+ENDIF.
+
+ENDFORM.                    " F_GET_ZFBDT
+*&---------------------------------------------------------------------*
+*&      Form  F_INIT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM F_INIT_SEC.
+
+*-- 変数の初期化
+
+
+ENDFORM.                    " F_INIT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_MAIN_SEC
+*&---------------------------------------------------------------------*
+*       メイン処理
+*----------------------------------------------------------------------*
+FORM F_MAIN_SEC.
+
+*-- 対象仕入先取得
+PERFORM F_GET_TARGET_SUPPLIER.
+
+*-- 前回締日の取得
+PERFORM F_CALL_YK_ZFBDT_GET_BY_LFM1.
+
+*-- 外部データ取得
+PERFORM F_GET_YN210_DATA.
+
+*-- テキスト取得
+PERFORM F_GET_LIFNR_WERKS_NAME.
+
+*-- 出力対象データ作成
+PERFORM F_MAKE_OUTPUT_DATA.
+
+*-- データ出力
+PERFORM F_OUTPUT_DATA.
+
+
+ENDFORM.                    " F_MAIN_SEC
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_TARGET_SUPPLIER
+*&---------------------------------------------------------------------*
+*       対象仕入先取得
+*----------------------------------------------------------------------*
+FORM F_GET_TARGET_SUPPLIER.
+
+*-- 対象の仕入先コード取得
+PERFORM F_SELECT_LFM1.
+
+*-- 購買データの支払条件を一括取得
+PERFORM F_SELECT_T052.
+
+*-- 仕入先データ絞込み
+PERFORM F_REFINE_LFM1.
+
+ENDFORM.                    " F_GET_TARGET_SUPPLIER
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_LFM1
+*&---------------------------------------------------------------------*
+*       対象の仕入先コード取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_LFM1.
+
+REFRESH: I_LFM1.
+*-- 仕入先コード取得
+SELECT LIFNR                         " 仕入先コード
+ZTERM                         " 支払条件キー
+WAERS                         " 通貨コード
+FROM LFM1
+INTO CORRESPONDING FIELDS OF TABLE I_LFM1
+WHERE LIFNR IN S_LIFNR              " 仕入先コード
+AND EKORG =  P_EKORG.             " 購買組織
+
+ENDFORM.                    " F_SELECT_LFM1
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_T052
+*&---------------------------------------------------------------------*
+*       購買データの支払条件を一括取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_T052.
+
+DATA: LI_LFM1 LIKE I_LFM1.
+
+*-- 支払条件キーをユニークにする
+LI_LFM1 = I_LFM1.
+SORT LI_LFM1 ASCENDING BY ZTERM.          " 仕入先コード
+DELETE ADJACENT  DUPLICATES FROM LI_LFM1
+COMPARING ZTERM.
+
+CHECK NOT LI_LFM1[] IS INITIAL.
+
+REFRESH: I_T052.
+*-- 支払条件取得
+SELECT ZTERM                              " 支払条件キー
+ZTAGG                              " 期限
+FROM T052
+INTO CORRESPONDING FIELDS OF TABLE I_T052
+FOR ALL ENTRIES IN LI_LFM1
+WHERE ZTERM = LI_LFM1-ZTERM.             " 支払条件キー
+
+*-- 期日を若番1つに絞り込む
+DELETE ADJACENT  DUPLICATES FROM I_T052
+COMPARING ZTERM.                   " 支払条件キー
+
+ENDFORM.                    " F_SELECT_T052
+*&---------------------------------------------------------------------*
+*&      Form  F_REFINE_LFM1
+*&---------------------------------------------------------------------*
+*       仕入先データ絞込み
+*----------------------------------------------------------------------*
+FORM F_REFINE_LFM1.
+
+LOOP AT I_LFM1 INTO W_LFM1.
+
+*-- 支払条件の読込み
+CLEAR: W_T052.
+READ TABLE I_T052 INTO W_T052
+WITH KEY ZTERM = W_LFM1-ZTERM   " 支払条件キー
+BINARY SEARCH.
+
+*-- 締日<>期日の場合、処理対象外とする
+IF W_T052-ZTAGG <> P_CDATE.
+DELETE I_LFM1.
+CONTINUE.
+ENDIF.
+
+ENDLOOP.
+
+IF I_LFM1[] IS INITIAL.
+*-- 対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+FREE: I_T052.
+
+ENDFORM.                    " F_REFINE_LFM1
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_YK_ZFBDT_GET_BY_LFM1
+*&---------------------------------------------------------------------*
+*       YK_ZFBDT_GET_BY_LFM1
+*----------------------------------------------------------------------*
+FORM F_CALL_YK_ZFBDT_GET_BY_LFM1.
+
+CLEAR: G_ZFBDT_OLD.
+
+LOOP AT I_LFM1 INTO W_LFM1.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+I_CORD               = W_LFM1-LIFNR
+I_EKORG              = P_EKORG
+I_DAY                = G_ZFBDT
+IMPORTING
+E_ZFBDT_OLD          = G_ZFBDT_OLD
+EXCEPTIONS
+OTHERS               = 0.
+EXIT.
+ENDLOOP.
+
+ENDFORM.                    " F_CALL_YK_ZFBDT_GET_BY_LFM1
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_YN210_DATA
+*&---------------------------------------------------------------------*
+*       外部データ取得
+*----------------------------------------------------------------------*
+FORM F_GET_YN210_DATA.
+
+CHECK NOT I_LFM1[] IS INITIAL.
+
+REFRESH: I_YN210_A,
+I_YN210_B.
+
+*-- 当月請求データ取得
+SELECT GJAHR                              " 外部会計年度
+SLPDOC                             " 外部番号
+DTLDOC                             " 外部明細番号
+VRFCTON                            " 仕入先コード(請求先)
+BUKRS                              " 会社コード
+DVSON                              " プラント
+CSTS                               " 照合ステータス
+COMMT                              " コメント
+KNQUAN                             " 数量
+KNUNIT                             " 単位
+KNUNTPRC                           " 単価
+KNETXAMT                           " 税込金額
+WAERS                              " 通貨コード
+CHKDOC                             " 照合番号
+DELFLG                             " 削除フラグ
+OLDGJAHR                           " 元会計年度
+OLDSLPDOC                          " 元外部番号
+OLDDTLDOC                          " 元外部明細番号
+LIST2                              " 発注番号
+LIST6                              " 品目テキスト
+LDATE1                             " 請求日
+CZFBDT                             " 照合締日
+FROM YN210
+INTO CORRESPONDING FIELDS OF TABLE I_YN210_A
+FOR ALL ENTRIES IN I_LFM1[]
+* 2012/03/27 MOD インデックス対応 START
+*  WHERE VRFCTON  = I_LFM1-LIFNR            " 仕入先
+*    AND BUKRS    = P_BUKRS                 " 会社コード
+WHERE BUKRS    = P_BUKRS                 " 会社コード
+AND VRFCTON  = I_LFM1-LIFNR            " 仕入先
+* 2012/03/27 MOD インデックス対応 END
+AND ZFBDT    = G_ZFBDT                 " 今回締日
+AND DVSON   IN S_WERKS.                " プラント
+
+*-- 追加支払データの取得
+SELECT GJAHR                              " 外部会計年度
+SLPDOC                             " 外部番号
+DTLDOC                             " 外部明細番号
+VRFCTON                            " 仕入先コード(請求先)
+BUKRS                              " 会社コード
+DVSON                              " プラント
+CSTS                               " 照合ステータス
+COMMT                              " コメント
+KNQUAN                             " 数量
+KNUNIT                             " 単位
+KNUNTPRC                           " 単価
+KNETXAMT                           " 税込金額
+WAERS                              " 通貨コード
+CHKDOC                             " 照合番号
+DELFLG                             " 削除フラグ
+OLDGJAHR                           " 元会計年度
+OLDSLPDOC                          " 元外部番号
+OLDDTLDOC                          " 元外部明細番号
+LIST2                              " 発注番号
+LIST6                              " 品目テキスト
+LDATE1                             " 請求日
+CZFBDT                             " 照合締日
+FROM YN210
+INTO CORRESPONDING FIELDS OF TABLE I_YN210_B
+FOR ALL ENTRIES IN I_LFM1[]
+* 2012/03/27 MOD インデックス対応 START
+*  WHERE VRFCTON  = I_LFM1-LIFNR           " 仕入先
+*    AND BUKRS    = P_BUKRS                " 会社コード
+*    AND ZFBDT   <= G_ZFBDT_OLD            " 前回締日
+*    AND DVSON   IN S_WERKS                " プラント
+*    AND CZFBDT   = G_ZFBDT.               " 今回締日
+WHERE BUKRS    = P_BUKRS                " 会社コード
+AND CZFBDT   = G_ZFBDT                " 今回締日
+AND VRFCTON  = I_LFM1-LIFNR           " 仕入先
+AND ZFBDT   <= G_ZFBDT_OLD            " 前回締日
+AND  DVSON   IN S_WERKS.              " プラント
+* 2012/03/27 MOD インデックス対応 END
+IF  I_YN210_A[] IS INITIAL
+AND I_YN210_B[] IS INITIAL.
+*-- 対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " F_GET_YN210_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_LIFNR_WERKS_NAME
+*&---------------------------------------------------------------------*
+*       テキスト取得
+*----------------------------------------------------------------------*
+FORM F_GET_LIFNR_WERKS_NAME.
+
+*-- 仕入先名称取得
+PERFORM F_SELECT_LFA1.
+
+*-- プラント名称取得
+PERFORM F_SELECT_WERKS.
+
+ENDFORM.                    " F_GET_LIFNR_WERKS_NAME
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_LFA1
+*&---------------------------------------------------------------------*
+*       仕入先名称取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_LFA1.
+
+CHECK NOT I_LFM1[] IS INITIAL.
+
+REFRESH: I_LFA1.
+
+SELECT LIFNR                              " 仕入先コード
+NAME1                              " 名称１
+FROM LFA1
+INTO TABLE I_LFA1
+FOR ALL ENTRIES IN I_LFM1
+WHERE LIFNR = I_LFM1-LIFNR.              " 仕入先コード
+
+ENDFORM.                    " F_SELECT_LFA1
+*&---------------------------------------------------------------------*
+*&      Form  F_SELECT_WERKS
+*&---------------------------------------------------------------------*
+*       プラント名称取得
+*----------------------------------------------------------------------*
+FORM F_SELECT_WERKS.
+
+REFRESH: I_T001W.
+
+SELECT WERKS                              " プラント
+NAME1                              " 名称１
+FROM T001W
+INTO TABLE I_T001W.
+
+ENDFORM.                    " F_SELECT_WERKS
+*&---------------------------------------------------------------------*
+*&      Form  F_MAKE_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       出力対象データ作成
+*----------------------------------------------------------------------*
+FORM F_MAKE_OUTPUT_DATA.
+
+DATA: L_FLG_STOP TYPE XFELD,
+LW_YN210_1 TYPE T_YN210,
+LW_YN210_2 TYPE T_YN210,
+LI_YN210   TYPE STANDARD TABLE OF T_YN210.
+
+*-- オリジナルデータ
+REFRESH: LI_YN210.
+LOOP AT I_YN210_A INTO W_YN210
+WHERE (   CZFBDT = '00000000'  " 照合締日
+OR CZFBDT > G_ZFBDT   ) " 照合締日
+AND CSTS     NA '78'        " 照合ステータス
+AND OLDGJAHR  = '0000'      " 元会計年度
+AND OLDSLPDOC = SPACE       " 元外部番号
+AND OLDDTLDOC = '000000'.   " 元外部明細番号
+APPEND W_YN210 TO LI_YN210.
+ENDLOOP.
+
+*-- 顛末データ
+LOOP AT LI_YN210 INTO LW_YN210_1.
+IF LW_YN210_1-DELFLG = C_ON.                 " 削除フラグ
+CLEAR: W_YN210.
+READ TABLE I_YN210_A INTO W_YN210
+WITH KEY VRFCTON   = LW_YN210_1-VRFCTON
+OLDGJAHR  = LW_YN210_1-GJAHR
+OLDSLPDOC = LW_YN210_1-SLPDOC
+OLDDTLDOC = LW_YN210_1-DTLDOC.
+IF SY-SUBRC = 0.
+*-- 顛末データ追跡
+CLEAR: L_FLG_STOP.
+WHILE L_FLG_STOP IS INITIAL.
+LW_YN210_2 = W_YN210.
+CLEAR: W_YN210.
+READ TABLE I_YN210_A INTO W_YN210
+WITH KEY VRFCTON   = LW_YN210_2-VRFCTON
+OLDGJAHR  = LW_YN210_2-GJAHR
+OLDSLPDOC = LW_YN210_2-SLPDOC
+OLDDTLDOC = LW_YN210_2-DTLDOC.
+IF SY-SUBRC <> 0.
+L_FLG_STOP = C_ON.
+ENDIF.
+ENDWHILE.
+IF  LW_YN210_2-DELFLG = SPACE            " 削除フラグ
+AND LW_YN210_2-CZFBDT = G_ZFBDT.         " 照合締日
+*-- オリジナル＆顛末 データ登録
+PERFORM F_ENTRY_OT_DATA USING LW_YN210_1
+LW_YN210_2.
+ELSE.
+*-- 顛末データなし
+CONTINUE.
+ENDIF.
+ELSE.
+*-- 顛末データなし
+CONTINUE.
+ENDIF.
+ELSE.
+*-- オリジナル＆顛末(初期値) データ登録
+PERFORM F_ENTRY_OI_DATA USING LW_YN210_1.
+ENDIF.
+ENDLOOP.
+
+*-- 追加支払データ
+LOOP AT I_YN210_B INTO LW_YN210_2.
+*-- オリジナル(初期値)＆顛末 データ登録
+PERFORM F_ENTRY_IT_DATA USING LW_YN210_2.
+ENDLOOP.
+
+FREE: I_YN210_A,
+I_YN210_B.
+
+
+IF I_OUTPUT[] IS INITIAL.
+*-- 対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*-- ｿｰﾄ (仕入先/ﾌﾟﾗﾝﾄ/外部会計年度/外部番号/外部明細番号/ｵﾘｼﾞﾅﾙﾃﾞｰﾀ … )
+SORT I_OUTPUT ASCENDING.
+
+ENDFORM.                    " F_MAKE_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_ENTRY_OT_DATA
+*&---------------------------------------------------------------------*
+*       オリジナルデータ + 顛末データ ペア作成
+*----------------------------------------------------------------------*
+*       -->AW_YN210_1  オリジナルデータ
+*       -->AW_YN210_2  顛末データ
+*----------------------------------------------------------------------*
+FORM F_ENTRY_OT_DATA USING VALUE(AW_YN210_1) TYPE T_YN210
+VALUE(AW_YN210_2) TYPE T_YN210.
+
+*-- オリジナルデータ登録
+CLEAR: W_OUTPUT.
+MOVE-CORRESPONDING AW_YN210_1 TO W_OUTPUT.
+W_OUTPUT-DTYPE = 1.
+APPEND W_OUTPUT TO I_OUTPUT.
+
+*-- 顛末データ登録
+CLEAR: W_OUTPUT.
+MOVE-CORRESPONDING AW_YN210_2 TO W_OUTPUT.
+*-- キー項目設定
+W_OUTPUT-VRFCTON = AW_YN210_1-VRFCTON.     " 仕入先コード
+W_OUTPUT-DVSON   = AW_YN210_1-DVSON.       " プラント
+W_OUTPUT-GJAHR   = AW_YN210_1-GJAHR.       " 外部会計年度
+W_OUTPUT-SLPDOC  = AW_YN210_1-SLPDOC.      " 外部番号
+W_OUTPUT-DTLDOC  = AW_YN210_1-DTLDOC.      " 外部明細番号
+W_OUTPUT-DTYPE   = 2.                      " データ種別
+APPEND W_OUTPUT TO I_OUTPUT.
+
+ENDFORM.                    " F_ENTRY_OT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_ENTRY_OI_DATA
+*&---------------------------------------------------------------------*
+*       オリジナルデータ + 初期値データ ペア作成
+*----------------------------------------------------------------------*
+*       --> AW_YN210_1 オリジナルデータ
+*----------------------------------------------------------------------*
+FORM F_ENTRY_OI_DATA USING VALUE(AW_YN210_1) TYPE T_YN210.
+
+*-- オリジナルデータ登録
+CLEAR: W_OUTPUT.
+MOVE-CORRESPONDING AW_YN210_1 TO W_OUTPUT.
+W_OUTPUT-DTYPE = 1.
+APPEND W_OUTPUT TO I_OUTPUT.
+
+*-- 顛末データ(初期値)登録
+CLEAR: W_OUTPUT.
+*-- キー項目設定
+W_OUTPUT-VRFCTON = AW_YN210_1-VRFCTON.     " 仕入先コード
+W_OUTPUT-DVSON   = AW_YN210_1-DVSON.       " プラント
+W_OUTPUT-GJAHR   = AW_YN210_1-GJAHR.       " 外部会計年度
+W_OUTPUT-SLPDOC  = AW_YN210_1-SLPDOC.      " 外部番号
+W_OUTPUT-DTLDOC  = AW_YN210_1-DTLDOC.      " 外部明細番号
+W_OUTPUT-DTYPE   = 2.                      " データ種別
+APPEND W_OUTPUT TO I_OUTPUT.
+
+ENDFORM.                    " F_ENTRY_OI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_ENTRY_IT_DATA
+*&---------------------------------------------------------------------*
+*       初期値データ + 顛末データ ペア作成
+*----------------------------------------------------------------------*
+*       --> AW_YN210_2 顛末データ
+*----------------------------------------------------------------------*
+FORM F_ENTRY_IT_DATA USING VALUE(AW_YN210_2) TYPE T_YN210.
+
+*-- オリジナルデータ(初期値)登録
+CLEAR: W_OUTPUT.
+*-- キー項目設定
+W_OUTPUT-VRFCTON = AW_YN210_2-VRFCTON.     " 仕入先コード
+W_OUTPUT-DVSON   = AW_YN210_2-DVSON.       " プラント
+W_OUTPUT-GJAHR   = AW_YN210_2-GJAHR.       " 外部会計年度
+W_OUTPUT-SLPDOC  = AW_YN210_2-SLPDOC.      " 外部番号
+W_OUTPUT-DTLDOC  = AW_YN210_2-DTLDOC.      " 外部明細番号
+W_OUTPUT-DTYPE   = 1.                      " データ種別
+APPEND W_OUTPUT TO I_OUTPUT.
+
+*-- 顛末データ登録
+CLEAR: W_OUTPUT.
+MOVE-CORRESPONDING AW_YN210_2 TO W_OUTPUT.
+W_OUTPUT-DTYPE = 2.
+APPEND W_OUTPUT TO I_OUTPUT.
+
+ENDFORM.                    " F_ENTRY_IT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*       データ出力
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_DATA.
+
+LOOP AT I_OUTPUT INTO W_OUTPUT.
+AT NEW DVSON.                           " プラント
+NEW-PAGE.
+CLEAR: G_TTLAMT,
+G_CHGAMT,
+G_SUMAMT.
+ENDAT.
+
+IF W_OUTPUT-DTYPE = 1.
+*-- オリジナルデータ明細出力
+PERFORM F_OUTPUT_DATA_O USING W_OUTPUT.
+ELSE.                                   " 顛末データ
+*-- 顛末データ明細出力
+PERFORM F_OUTPUT_DATA_I USING W_OUTPUT.
+ENDIF.
+
+G_WAERS = W_OUTPUT-WAERS.
+
+AT END OF DVSON.                           " プラント
+*-- 各合計額表示
+ULINE.
+*-- 請求金額合計
+PERFORM F_EDIT_VALUE USING G_TTLAMT
+G_WAERS.
+WRITE: /90      TEXT-D01,
+108(14)  G_EDIT  RIGHT-JUSTIFIED,
+124      G_WAERS NO-GAP,
+TEXT-D02.
+*-- 変更請求金額合計
+PERFORM F_EDIT_VALUE USING G_CHGAMT
+G_WAERS.
+WRITE: /90      TEXT-D03,
+108(14)  G_EDIT  RIGHT-JUSTIFIED,
+124      G_WAERS NO-GAP,
+TEXT-D02.
+*-- 税込違算合計
+G_SUMAMT = G_CHGAMT - G_TTLAMT.
+PERFORM F_EDIT_VALUE USING G_SUMAMT
+G_WAERS.
+WRITE: /90      TEXT-D04,
+108(14)  G_EDIT  RIGHT-JUSTIFIED,
+124      G_WAERS NO-GAP,
+TEXT-D02.
+ENDAT.
+ENDLOOP.
+
+FREE: I_OUTPUT[],
+I_LFA1[],
+I_T001W[].
+
+ENDFORM.                    " F_OUTPUT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_HEADER
+*&---------------------------------------------------------------------*
+*       ページヘッダ出力
+*----------------------------------------------------------------------*
+*       --> AI_LIFNR 仕入先コード
+*       --> AI_WERKS プラント
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_HEADER USING VALUE(AI_LIFNR) TYPE ANY
+VALUE(AI_WERKS) TYPE ANY.
+
+DATA: L_NAME TYPE STRING.
+
+*-- 仕入先名称取得
+CLEAR: W_LFA1.
+READ TABLE I_LFA1 INTO W_LFA1
+WITH TABLE KEY LIFNR = AI_LIFNR.
+*-- プラント名称取得
+CLEAR: W_T001W.
+READ TABLE I_T001W INTO W_T001W
+WITH TABLE KEY WERKS = AI_WERKS.
+
+WRITE: /,
+/27 TEXT-H01,
+63 TEXT-H02,
+P_YEARS+0(4),
+TEXT-H03,
+P_YEARS+4(2),
+TEXT-H04,
+120 TEXT-H05,
+SY-DATUM USING EDIT MASK TEXT-H06,
+SY-UZEIT USING EDIT MASK TEXT-H07,
+150 TEXT-H08,
+SY-PAGNO.
+
+*-- 仕入先名称 + 敬称
+CLEAR: L_NAME.
+CONCATENATE W_LFA1-NAME1
+TEXT-H09
+INTO L_NAME
+SEPARATED BY SPACE.
+
+WRITE: /,
+/1  TEXT-H10,
+W_LFA1-LIFNR,
+19 L_NAME,
+/1  TEXT-H11,
+W_T001W-WERKS,
+19 W_T001W-NAME1.
+SKIP.
+WRITE: /1   TEXT-H12,
+12  TEXT-H13,
+23  TEXT-H14,
+34  TEXT-H15,
+88  TEXT-H16,
+101 TEXT-H17,
+114 TEXT-H18,
+/110 TEXT-H19,
+124 TEXT-H20,
+130 TEXT-H21.
+ULINE.
+
+ENDFORM.                    " F_OUTPUT_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_DATA_O
+*&---------------------------------------------------------------------*
+*       オリジナルデータ明細出力
+*----------------------------------------------------------------------*
+*       --> AW_OUTPUT  出力明細
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_DATA_O USING VALUE(AW_OUTPUT) TYPE T_OUTPUT.
+
+WRITE: /1  AW_OUTPUT-LDATE1,              " 請求日
+12  AW_OUTPUT-CHKDOC,              " 入力番号
+23  AW_OUTPUT-LIST2,               " 発注番号
+34  AW_OUTPUT-LIST6.               " 品目テキスト
+
+*-- 単価換算
+PERFORM F_EDIT_UNTPRC USING AW_OUTPUT-KNUNTPRC
+AW_OUTPUT-WAERS.
+WRITE:  76(17)  G_EDIT RIGHT-JUSTIFIED.   " 単価
+
+*-- 数量換算
+PERFORM F_EDIT_QUANT  USING AW_OUTPUT-KNQUAN
+AW_OUTPUT-KNUNIT.
+WRITE:  94(12)  G_EDIT RIGHT-JUSTIFIED.   " 数量
+
+*-- 請求金額換算
+PERFORM F_EDIT_VALUE  USING AW_OUTPUT-KNETXAMT
+AW_OUTPUT-WAERS.
+WRITE:  109(13) G_EDIT RIGHT-JUSTIFIED,   " 請求金額
+124     AW_OUTPUT-WAERS,          " 通貨コード
+130(40) AW_OUTPUT-COMMT.          " 摘要
+
+G_TTLAMT = G_TTLAMT + AW_OUTPUT-KNETXAMT. " 請求額計
+
+ENDFORM.                    " F_OUTPUT_DATA_O
+*&---------------------------------------------------------------------*
+*&      Form  F_OUTPUT_DATA_I
+*&---------------------------------------------------------------------*
+*       顛末データ明細出力
+*----------------------------------------------------------------------*
+*       --> AW_OUTPUT  出力明細
+*----------------------------------------------------------------------*
+FORM F_OUTPUT_DATA_I USING VALUE(AW_OUTPUT) TYPE T_OUTPUT.
+
+IF NOT AW_OUTPUT-LDATE1 IS INITIAL.
+WRITE: /1 AW_OUTPUT-LDATE1,             " 請求日
+12 AW_OUTPUT-CHKDOC.             " 入力番号
+ELSE.
+WRITE:/12 AW_OUTPUT-CHKDOC.             " 入力番号
+ENDIF.
+WRITE:23 AW_OUTPUT-LIST2,                 " 発注番号
+34 AW_OUTPUT-LIST6.                 " 品目テキスト
+
+*-- 単価換算
+PERFORM F_EDIT_UNTPRC USING AW_OUTPUT-KNUNTPRC
+AW_OUTPUT-WAERS.
+WRITE:  76(17)  G_EDIT RIGHT-JUSTIFIED.   " 単価
+
+*-- 数量換算
+PERFORM F_EDIT_QUANT  USING AW_OUTPUT-KNQUAN
+AW_OUTPUT-KNUNIT.
+WRITE:  94(12)  G_EDIT RIGHT-JUSTIFIED.   " 数量
+
+*-- 請求金額換算
+PERFORM F_EDIT_VALUE  USING AW_OUTPUT-KNETXAMT
+AW_OUTPUT-WAERS.
+WRITE:  109(13) G_EDIT RIGHT-JUSTIFIED,   " 請求金額
+124     AW_OUTPUT-WAERS,          " 通貨コード
+130(40) AW_OUTPUT-COMMT.          " 摘要
+
+G_CHGAMT = G_CHGAMT + AW_OUTPUT-KNETXAMT. " 変更請求額計
+
+ENDFORM.                    " F_OUTPUT_DATA_I
+*----------------------------------------------------------------------*
+*       Form F_EDIT_UNTPRC ( PGM:ZYK12A20 より引用 )
+*----------------------------------------------------------------------*
+*       単価編集ルーチン
+*----------------------------------------------------------------------*
+*       --> AI_UNTPRC (単価)
+*       --> AI_WAERS  (通貨コード)
+*----------------------------------------------------------------------*
+FORM F_EDIT_UNTPRC USING VALUE(AI_UNTPRC) TYPE YN210-KNUNTPRC
+VALUE(AI_WAERS)  TYPE YN210-WAERS.
+
+CLEAR: G_EDIT.
+
+IF AI_UNTPRC = 0.
+G_EDIT = 0.
+EXIT.
+ENDIF.
+
+WRITE: AI_UNTPRC DECIMALS 4 TO G_EDIT.
+
+CALL FUNCTION 'CLOI_PUT_SIGN_IN_FRONT'
+CHANGING
+value = G_EDIT.
+
+CONDENSE: G_EDIT NO-GAPS.
+
+ENDFORM.                    " F_EDIT_UNTPRC
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_QUANT ( PGM:ZYK12A20 より引用 )
+*&---------------------------------------------------------------------*
+*       数量編集ルーチン
+*----------------------------------------------------------------------*
+*       --> AI_QUAN  (数量)
+*       --> AI_WAERS (通貨コード)
+*----------------------------------------------------------------------*
+FORM F_EDIT_QUANT USING VALUE(AI_QUAN) TYPE YN210-KNQUAN
+VALUE(AI_UNIT) TYPE YN210-KNUNIT.
+
+DATA: L_AMOUNT(15) TYPE C,
+L_SIGN       TYPE C.
+
+CLEAR: G_EDIT,
+L_AMOUNT,
+L_SIGN.
+
+IF AI_QUAN = 0.
+G_EDIT = 0.
+EXIT.
+ENDIF.
+IF AI_QUAN < 0.
+L_SIGN = '-'.
+ENDIF.
+
+WRITE: AI_QUAN UNIT AI_UNIT RIGHT-JUSTIFIED TO G_EDIT.
+IF L_SIGN = '-'.
+WRITE: G_EDIT RIGHT-JUSTIFIED TO L_AMOUNT.
+CONCATENATE: L_SIGN
+L_AMOUNT(14)
+INTO G_EDIT.
+ENDIF.
+CONDENSE: G_EDIT NO-GAPS.
+
+ENDFORM.                    " F_EDIT_QUANT
+*&---------------------------------------------------------------------*
+*&      Form  F_EDIT_VALUE ( PGM:ZYK12A20 より引用 )
+*&---------------------------------------------------------------------*
+*      金額編集ルーチン
+*----------------------------------------------------------------------*
+*       --> AI_VALUE  (金額)
+*       --> AI_WAERS (通貨コード)
+*----------------------------------------------------------------------*
+FORM F_EDIT_VALUE USING VALUE(AI_VALUE) TYPE YN210-KNITXAMT
+VALUE(AI_WAERS) TYPE YN210-WAERS.
+
+DATA: L_AMOUNT(15) TYPE C,
+L_SIGN       TYPE C,
+L_DEC5(16)   TYPE P DECIMALS 5,
+L_FRACT      TYPE TCURX-CURRDEC.
+
+CLEAR: G_EDIT,
+L_AMOUNT,
+L_SIGN.
+
+IF AI_VALUE = 0.
+G_EDIT = 0.
+EXIT.
+ENDIF.
+
+IF AI_VALUE < 0.
+L_SIGN = '-'.
+ENDIF.
+
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY    = AI_WAERS
+SAP_AMOUNT  = AI_VALUE
+IMPORTING
+IDOC_AMOUNT = L_AMOUNT
+EXCEPTIONS
+OTHERS      = 1.
+
+IF SY-SUBRC >  0
+OR L_AMOUNT IS INITIAL.
+CLEAR: L_AMOUNT.
+ENDIF.
+
+L_DEC5 = L_AMOUNT.
+
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+I_CURRENCY = AI_WAERS
+IMPORTING
+E_DECIMALS = L_FRACT
+EXCEPTIONS
+OTHERS     = 1.
+
+IF SY-SUBRC > 0.
+CLEAR: L_FRACT.
+ENDIF.
+
+WRITE: L_DEC5 DECIMALS L_FRACT TO G_EDIT.
+IF L_SIGN = '-'.
+WRITE: G_EDIT RIGHT-JUSTIFIED TO L_AMOUNT.
+CONCATENATE: L_SIGN
+L_AMOUNT(14)
+INTO G_EDIT.
+ENDIF.
+CONDENSE: G_EDIT NO-GAPS.
+
+ENDFORM.                    " F_EDIT_VALUE

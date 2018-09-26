@@ -1,0 +1,402 @@
+*---------------------------------------------------------------------*
+*  入金予定データ移行                                                 *
+*    機能：YK310と同じフォーマットのデータを入力し、データを登録する  *
+*          入力ファイルはローカルからアップロードするか、サーバから   *
+*          読み込むか選択できる                                       *
+*          登録せずに、チェックのみ行うことも可能                     *
+*    作成：2002/02/06  tatebayashi<psd>                               *
+*    修正：2002/03/04  選択画面調整 K.KAJISA(NDSC)                    *
+*    修正：2002/06/27  kurano                                         *
+*    修正：2002/08/01  kurano エラーを無視して登録                    *
+* 2009/07/27  D.KODAMA  ローカルよりアップロード時にタブ区切り形式
+*　　　　　　　　　　　 ファイルを読み込むよう変更
+*                                                                     *
+*---------------------------------------------------------------------*
+REPORT zk019400 .
+
+* 使用テーブル
+TABLES yk310. "入金予定データ
+TABLES t001.  "会社コード
+TABLES kna1.  "得意先マスタ: 一般データ
+TABLES tgsb.  "事業領域
+TABLES tvko.  "組織単位: 販売組織
+TABLES tvtw.  "組織単位: 流通チャネル
+TABLES tspa.  "組織単位: 販売部門
+TABLES tvbur. "組織単位: 営業所
+TABLES tvkgr. "組織単位: 営業グループ
+
+* グローバル変数
+TYPES: BEGIN OF st_in1,            "入力ファイル形式
+bukrs LIKE yk310-bukrs,   "会社コード
+kunnr LIKE yk310-kunnr,   "得意先コード
+incdoc LIKE yk310-incdoc, "入金予定番号
+prcflg LIKE yk310-prcflg, "入力区分
+corflg LIKE yk310-corflg, "訂正区分
+delflg LIKE yk310-delflg, "削除区分
+zfbdt LIKE yk310-zfbdt,   "締日
+incdat LIKE yk310-incdat, "入金予定日
+incamt(21) TYPE c,        "入金予定額
+waers LIKE yk310-waers,   "通貨コード
+kunrg LIKE yk310-kunrg,   "支払人
+kunr1 LIKE yk310-kunr1,   "入金先
+umskz LIKE yk310-umskz,   "特殊仕訳コード
+sgtxt LIKE yk310-sgtxt,   "明細テキスト
+gsber LIKE yk310-gsber,   "事業領域
+vkorg LIKE yk310-vkorg,   "販売組織
+vtweg LIKE yk310-vtweg,   "流通チャネル
+spart LIKE yk310-spart,   "製品部門
+vkbur LIKE yk310-vkbur,   "営業所
+vkgrp LIKE yk310-vkgrp,   "営業グループ
+zterm LIKE yk310-zterm,   "支払条件
+zlsch LIKE yk310-zlsch,   "支払方法
+zlspr LIKE yk310-zlspr,   "支払保留
+zuonr LIKE yk310-zuonr,   "ソートキー
+insdat LIKE yk310-insdat, "登録日
+instim LIKE yk310-instim, "登録時刻
+insusr LIKE yk310-insusr, "登録ユーザ
+upddat LIKE yk310-upddat, "変更日
+updtim LIKE yk310-updtim, "変更時刻
+updusr LIKE yk310-updusr, "変更ユーザ
+fiflg LIKE yk310-fiflg,   "会計連絡済
+gjahr LIKE yk310-gjahr,   "会計年度
+belnr LIKE yk310-belnr,   "会計伝票番号
+avsid LIKE yk310-avsid,   "支払明細通知書番号
+prcdat LIKE yk310-prcdat, "処理日
+END OF st_in1.
+DATA i_in1 TYPE STANDARD TABLE OF st_in1 WITH HEADER LINE.
+DATA i_yk310 LIKE STANDARD TABLE OF yk310 WITH HEADER LINE.
+DATA w_err TYPE xfeld .            "エラーフラグ
+
+* 選択画面
+PARAMETERS p_file LIKE rlgrap-filename.     " 入力ファイル名
+PARAMETERS p_local RADIOBUTTON GROUP radi.  " 端末
+PARAMETERS p_server RADIOBUTTON GROUP radi. "サーバ
+PARAMETERS p_check AS CHECKBOX.             "チェックのみ
+PARAMETERS p_auto  AS CHECKBOX.             "入金予定番号自動
+PARAMETERS p_ignore AS CHECKBOX.            "エラーを無視
+
+*---------------------------------------------------------------------*
+START-OF-SELECTION .
+
+PERFORM frm_file_read.      "ファイルの読み込み
+PERFORM frm_file_check.     "ファイルのチェック
+IF p_ignore = 'X'.
+CLEAR w_err.
+ENDIF.
+IF p_check = space AND w_err = space .
+PERFORM frm_insert_yk310. "入金予定データ登録
+ENDIF.
+
+*---------------------------------------------------------------------*
+*       FORM frm_file_read                                            *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM frm_file_read .
+* ローカル変数
+DATA w_dec LIKE tcurx-currdec.
+*
+IF p_local = 'X' .
+*** 端末よりアップロード
+CALL FUNCTION 'UPLOAD'
+EXPORTING
+filename                = p_file
+* 2009/07/27 add start
+FILETYPE            = 'DAT'
+* 2009/07/27 add end
+TABLES
+data_tab                = i_in1
+EXCEPTIONS
+conversion_error        = 1
+invalid_table_width     = 2
+invalid_type            = 3
+no_batch                = 4
+unknown_error           = 5
+gui_refuse_filetransfer = 6
+OTHERS                  = 7.
+IF sy-subrc <> 0.
+WRITE: / '汎用モジュール：UPLOAD  SY-SUBRC=', sy-subrc.
+STOP.
+ENDIF.
+ELSEIF p_server = 'X'.
+*** ファイルを開く
+OPEN DATASET p_file FOR INPUT IN TEXT MODE.
+IF sy-subrc <> 0.
+WRITE: / 'ファイルOPEN：', p_file, 'SY-SUBRC=', sy-subrc.
+STOP.
+ENDIF.
+*** レコード読込
+DO.
+READ DATASET p_file INTO i_in1.
+IF sy-subrc <> 0.
+EXIT.
+ELSE.
+APPEND i_in1.
+ENDIF.
+ENDDO.
+*** ファイルを閉じる
+CLOSE DATASET p_file.
+ENDIF.
+* 入力ファイルの調整
+IF p_auto = 'X'. "自動採番の場合に行数を仮設定
+LOOP AT i_in1.
+i_in1-incdoc = sy-tabix.
+MODIFY i_in1.
+ENDLOOP.
+ENDIF.
+SORT i_in1 BY waers. "通貨コードで整列
+LOOP AT i_in1.
+AT NEW waers.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+i_currency         = i_in1-waers
+IMPORTING
+e_decimals         = w_dec
+EXCEPTIONS
+i_currency_initial = 1
+OTHERS             = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+ENDAT.
+MOVE-CORRESPONDING i_in1 TO i_yk310.
+*   i_yk310-incamt = i_in1-incamt ** ( w_dec - 2 ). 2002/08/01 MOD
+i_yk310-incamt = i_in1-incamt * ( 10 ** ( w_dec - 2 ) ).
+APPEND i_yk310.
+ENDLOOP.
+SORT i_yk310 BY zfbdt kunnr. "締日、得意先コードで整列
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM frm_file_check                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM frm_file_check .
+
+* ローカル変数
+DATA w_bukrs LIKE yk310-bukrs.   "会社コード
+DATA w_kunnr LIKE yk310-kunnr.   "得意先コード
+DATA w_incdoc LIKE yk310-incdoc. "入金予定番号
+DATA w_dbcnt LIKE sy-dbcnt.      "カウンタ
+DATA w_waers LIKE knvv-waers.    "通貨コード
+DATA w_msg(100) TYPE c.          "メッセージ
+*
+SORT i_yk310 BY bukrs kunnr incdoc .
+
+LOOP AT i_yk310 .
+*** キー重複チェック
+IF p_auto <> 'X'.
+IF i_yk310-bukrs = w_bukrs AND
+i_yk310-kunnr = w_kunnr AND i_yk310-incdoc = w_incdoc .
+w_err = 'X' .
+PERFORM frm_write_errlist USING 'キー重複' .
+ELSE .
+SELECT COUNT( * )
+FROM   yk310
+INTO   w_dbcnt
+WHERE  bukrs  = i_yk310-bukrs
+AND    kunnr  = i_yk310-kunnr
+AND    incdoc = i_yk310-incdoc .
+IF sy-dbcnt > 0 .
+w_err = 'X' .
+PERFORM frm_write_errlist USING 'キー重複' .
+ENDIF .
+ENDIF .
+ENDIF .
+*** 会社コード
+SELECT SINGLE *
+FROM   t001
+WHERE  bukrs  = i_yk310-bukrs.
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '会社コード' i_yk310-bukrs 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 得意先マスタ
+SELECT SINGLE *
+FROM   kna1
+WHERE  kunnr  = i_yk310-kunnr .
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '得意先コード' i_yk310-kunnr 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+SELECT SINGLE *
+FROM   kna1
+WHERE  kunnr  = i_yk310-kunr1 .
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '入金先' i_yk310-kunr1 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+SELECT SINGLE *
+FROM   kna1
+WHERE  kunnr  = i_yk310-kunrg .
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '支払人' i_yk310-kunrg 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 事業領域
+SELECT SINGLE *
+FROM   tgsb
+WHERE  gsber  = i_yk310-gsber.
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '事業領域' i_yk310-gsber 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 販売組織
+SELECT SINGLE *
+FROM   tvko
+WHERE  vkorg  = i_yk310-vkorg.
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '販売組織' i_yk310-vkorg 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 流通チャネル
+SELECT SINGLE *
+FROM   tvtw
+WHERE  vtweg  = i_yk310-vtweg.
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '流通チャネル' i_yk310-vtweg 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 製品部門
+SELECT SINGLE *
+FROM   tspa
+WHERE  spart  = i_yk310-spart.
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '製品部門' i_yk310-spart 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 営業所
+SELECT SINGLE *
+FROM   tvbur
+WHERE  vkbur  = i_yk310-vkbur .
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '営業所' i_yk310-vkbur 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 営業グループ
+SELECT SINGLE *
+FROM   tvkgr
+WHERE  vkgrp  = i_yk310-vkgrp.
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '営業グループ' i_yk310-vkgrp 'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 締日/入金予定日
+IF i_yk310-zfbdt IS INITIAL .
+w_err = 'X'.
+w_msg = '締日が未入力です'.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF .
+IF i_yk310-incdat IS INITIAL .
+w_err = 'X'.
+w_msg = '入金予定日が未入力です'.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF .
+*** 入金予定額
+IF i_yk310-incamt IS INITIAL.
+w_err = 'X'.
+w_msg = '入金予定額が未入力です'.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** 通貨コード
+SELECT SINGLE waers FROM  knvv
+INTO   w_waers
+WHERE  kunnr  = i_yk310-kunnr
+AND    vkorg  = i_yk310-vkorg
+AND    vtweg  = i_yk310-vtweg
+AND    spart  = i_yk310-spart.
+IF sy-subrc <> 0.
+w_err = 'X'.
+CONCATENATE '得意先コード' i_yk310-kunnr
+i_yk310-vkorg i_yk310-vtweg i_yk310-spart
+'は未登録です'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ELSEIF w_waers <> i_yk310-waers.
+w_err = 'X'.
+CONCATENATE '通貨コード' i_yk310-waers
+'は得意先の通貨と異なります'
+INTO w_msg.
+PERFORM frm_write_errlist USING w_msg.
+ENDIF.
+*** キー情報を保存
+w_bukrs  = i_yk310-bukrs  .
+w_kunnr  = i_yk310-kunnr  .
+w_incdoc = i_yk310-incdoc .
+ENDLOOP .
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM frm_insert_yk310                                         *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM frm_insert_yk310 .
+* ローカル変数
+DATA w_incdoc LIKE yk310-incdoc.
+*
+IF p_auto = 'X'. "自動採番
+SORT i_yk310 BY bukrs kunnr incdoc.
+LOOP AT i_yk310.
+CLEAR w_incdoc.
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+nr_range_nr             = '10'
+object                  = 'YKINCDOC'
+subobject               = i_yk310-bukrs
+IMPORTING
+number                  = w_incdoc
+EXCEPTIONS
+interval_not_found      = 1
+number_range_not_intern = 2
+object_not_found        = 3
+quantity_is_0           = 4
+quantity_is_not_1       = 5
+interval_overflow       = 6
+buffer_overflow         = 7
+OTHERS                  = 8.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+i_yk310-incdoc = w_incdoc.
+MODIFY i_yk310.
+ENDLOOP.
+ENDIF.
+INSERT yk310 FROM TABLE i_yk310.
+WRITE: / '入金予定データ：', sy-dbcnt.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_errlist
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM frm_write_errlist USING    p_list .
+
+WRITE: / i_yk310-bukrs  , i_yk310-kunnr ,
+i_yk310-incdoc , p_list        .
+
+ENDFORM.                    " frm_write_errlist

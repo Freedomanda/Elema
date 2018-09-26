@@ -1,0 +1,759 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN031200                                                    *
+*&         【移行】売掛金明細（差額決済）【セットアップ】              *
+*&---------------------------------------------------------------------*
+*&  機能     : 自社データに使用されていない未決済伝票を消しこむ
+*&
+*&  作成日   : 2012/04/02
+*&  作成者   : S.TAKIKAWA(SOLFIS)
+*&---------------------------------------------------------------------*
+*&  変更履歴 :
+*&  変更内容 :
+*&---------------------------------------------------------------------*
+REPORT ZN031200
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT  58
+MESSAGE-ID  YN01.
+*----------------------------------------------------------------------*
+*   テーブル
+*----------------------------------------------------------------------*
+TABLES:BSID.
+*----------------------------------------------------------------------*
+*   型定義
+*----------------------------------------------------------------------*
+TYPES:BEGIN OF TYP_BSID,
+BUKRS     TYPE BUKRS,       "会社コード
+KUNNR     TYPE KUNNR,       "得意先コード
+GJAHR     TYPE GJAHR,       "会計年度
+BELNR     TYPE BELNR_D,     "会計伝票番号
+BUZEI     TYPE BUZEI,       "会計伝票内の明細番号
+SHKZG     TYPE SHKZG,       "借方/貸方フラグ
+DMBTR     TYPE DMBTR,       "国内通貨額
+END   OF TYP_BSID,
+T_TYP_BSID TYPE STANDARD TABLE OF TYP_BSID.
+TYPES:BEGIN OF TYP_BKPF,
+BUKRS     TYPE BUKRS,        "会社コード
+BELNR     TYPE BELNR_D,      "会計伝票番号
+GJAHR     TYPE GJAHR,        "会計年度
+AWKEY     TYPE AWKEY,        "オブジェクトキー
+END   OF TYP_BKPF,
+T_TYP_BKPF TYPE STANDARD TABLE OF TYP_BKPF.
+TYPES:BEGIN OF TYP_YN120,
+GJAHR     TYPE YNDOCGJAHR,   "伝票会計年度
+SLPDOC    TYPE YNSLPDOC,     "伝票番号
+DTLDOC    TYPE YNDTLDOC,     "伝票明細番号
+YNGJAHR   TYPE YN120-YNGJAHR, "会計年度
+BELNR     TYPE YN120-BELNR,   "会計伝票
+BUZEI     TYPE YN120-BUZEI,   "会計伝票明細
+END   OF TYP_YN120,
+T_TYP_YN120 TYPE STANDARD TABLE OF TYP_YN120.
+TYPES:BEGIN OF TYP_CLEAR,
+KUNNR    TYPE KUNNR,         "得意先コード
+MESSAGE  TYPE CHAR255,       "メッセージ内容
+END   OF TYP_CLEAR,
+T_TYP_CLEAR TYPE STANDARD TABLE OF TYP_CLEAR.
+TYPES:T_TYP_BDC TYPE STANDARD TABLE OF BDCDATA.
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+DATA:T_BSID     TYPE T_TYP_BSID,
+T_BKPF     TYPE T_TYP_BKPF,
+T_YN120    TYPE T_TYP_YN120,
+T_CLEAR    TYPE T_TYP_CLEAR.
+*----------------------------------------------------------------------*
+*   変数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_ON         TYPE C     VALUE 'X',
+C_SPRAS      TYPE SPRAS VALUE 'J'.   "言語キー
+
+* 2012/03/12 ADD START
+DATA:G_ERR(1) TYPE C.
+* 2012/03/12 ADD END
+
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+DATA:G_CNT_BSID   TYPE I,
+G_CNT_BDC    TYPE I,
+G_CNT_CLEAR  TYPE I.
+
+*&---------------------------------------------------------------------*
+*&   画面項目定義
+*&---------------------------------------------------------------------*
+SELECTION-SCREEN:BEGIN OF BLOCK BL01 WITH FRAME TITLE TEXT-001.
+SELECT-OPTIONS:P_BUKRS    FOR BSID-BUKRS.
+SELECT-OPTIONS:P_KUNNR    FOR BSID-KUNNR.
+SELECT-OPTIONS:P_GJAHR    FOR BSID-GJAHR.
+SELECT-OPTIONS:P_BELNR    FOR BSID-BELNR.
+SELECT-OPTIONS:P_BUZEI    FOR BSID-BUZEI.
+SELECT-OPTIONS:P_HKONT    FOR BSID-HKONT.
+SELECTION-SCREEN:END   OF BLOCK BL01.
+* 2012/03/28 ADD START
+SELECTION-SCREEN:BEGIN OF BLOCK BL02 WITH FRAME TITLE TEXT-002.
+*  PARAMETERS:P_EKORG TYPE LFM1-EKORG OBLIGATORY.
+PARAMETERS:P_BUDAT TYPE D OBLIGATORY.
+SELECTION-SCREEN:END   OF BLOCK BL02.
+* 2012/03/28 ADD END
+PARAMETERS:P_TEST   AS CHECKBOX DEFAULT 'X'.
+*----------------------------------------------------------------------*
+*  START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+*  BSID取得
+PERFORM GET_BSID.
+CHECK NOT T_BSID[] IS INITIAL.
+*  得意先マスタでの絞込み
+PERFORM CHOICE_KUNNR.
+CHECK NOT T_BSID[] IS INITIAL.
+*  YN220存在チェック
+PERFORM CHECK_YN120.
+DESCRIBE TABLE T_BSID LINES G_CNT_BDC.
+*  テスト実行の場合
+IF P_TEST = C_ON.
+PERFORM WRITE_TEST.
+EXIT.
+ENDIF.
+IF G_CNT_BDC > 0.
+*    ＢＤＣ実行
+PERFORM CALL_BDC.
+ENDIF.
+*  処理結果出力
+PERFORM WRITE_PRC.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSID
+*&---------------------------------------------------------------------*
+*       BSID取得
+*----------------------------------------------------------------------*
+FORM GET_BSID.
+
+SELECT BUKRS         "会社コード
+KUNNR         "得意先コード
+GJAHR         "会計年度
+BELNR         "会計伝票番号
+BUZEI         "会計伝票内の明細番号
+SHKZG         "借方/貸方フラグ
+* 2011/03/28 MOD START
+*         DMBTR         "国内通貨額
+WRBTR         "伝票通貨額
+* 2011/03/28 MOD END
+INTO TABLE T_BSID
+FROM BSID
+WHERE BUKRS IN P_BUKRS
+AND KUNNR IN P_KUNNR
+AND UMSKS =  SPACE
+AND UMSKZ =  SPACE
+AND GJAHR IN P_GJAHR
+AND BELNR IN P_BELNR
+AND BUZEI IN P_BUZEI
+AND HKONT IN P_HKONT.
+
+IF SY-SUBRC = 0.
+DESCRIBE TABLE T_BSID LINES G_CNT_BSID.
+SORT T_BSID BY BUKRS KUNNR BELNR BUZEI.
+ELSE.
+MESSAGE S762(YN01).
+ENDIF.
+
+ENDFORM.                    " GET_BSID
+*&---------------------------------------------------------------------*
+*&      Form  CHOICE_KUNNR
+*&---------------------------------------------------------------------*
+*       得意先マスタでの絞込み
+*----------------------------------------------------------------------*
+FORM CHOICE_KUNNR.
+DATA:LT_BSID      TYPE T_TYP_BSID,
+LW_BSID      TYPE TYP_BSID,
+L_ID         TYPE THEAD-TDID,
+L_LANGU      TYPE THEAD-TDSPRAS,
+L_NAME       TYPE THEAD-TDNAME,
+L_OBJECT     TYPE THEAD-TDOBJECT,
+LT_LINES     TYPE STANDARD TABLE OF TLINE,
+LW_LINES     TYPE TLINE.
+
+LT_BSID[] = T_BSID[].
+DELETE ADJACENT DUPLICATES FROM LT_BSID COMPARING KUNNR.
+L_LANGU   = C_SPRAS.
+L_ID      = 'YN01'.
+L_OBJECT  = 'KNB1'.
+
+LOOP AT LT_BSID INTO LW_BSID.
+CLEAR:LT_LINES,LW_LINES.
+CONCATENATE LW_BSID-KUNNR LW_BSID-BUKRS
+INTO L_NAME.
+*   テキスト読込
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+ID                            = L_ID
+LANGUAGE                      = L_LANGU
+NAME                          = L_NAME
+OBJECT                        = L_OBJECT
+TABLES
+LINES                         = LT_LINES
+EXCEPTIONS
+ID                            = 1
+LANGUAGE                      = 2
+NAME                          = 3
+*     NOT_FOUND                     = 4
+OBJECT                        = 5
+REFERENCE_CHECK               = 6
+WRONG_ACCESS_TO_ARCHIVE       = 7
+OTHERS                        = 8.
+IF SY-SUBRC = 0.
+READ TABLE LT_LINES INTO LW_LINES INDEX 1.
+ENDIF.
+
+IF LW_LINES-TDLINE = 'X'
+OR LW_LINES-TDLINE = 'Y'
+OR LW_LINES-TDLINE = 'Z'.
+*   'X''Y''Z'以外が設定されている
+*　　得意先(または取得できていない場合)は対象外
+ELSE.
+DELETE T_BSID WHERE KUNNR = LW_BSID-KUNNR.
+ENDIF.
+
+ENDLOOP.
+
+* 削除後の件数再確認
+CLEAR G_CNT_BSID.
+DESCRIBE TABLE T_BSID LINES G_CNT_BSID.
+IF G_CNT_BSID = 0.
+MESSAGE S762(YN01).
+ENDIF.
+
+ENDFORM.                    " CHOICE_KUNNR
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_YN120
+*&---------------------------------------------------------------------*
+*       YN120存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_YN120.
+DATA:LW_BKPF     TYPE TYP_BKPF,
+LW_YN120    TYPE TYP_YN120,
+LT_YN120    TYPE T_TYP_YN120,
+LW_AWKEY    TYPE AWKEY.
+DATA:LW_BSID     TYPE TYP_BSID.
+
+CHECK NOT T_BSID[] IS INITIAL.
+** BKPFデータ取得
+*  SELECT BUKRS        "会社コード
+*         BELNR        "会計伝票番号
+*         GJAHR        "会計年度
+*         AWKEY        "オブジェクトキー
+*    INTO TABLE T_BKPF
+*    FROM BKPF
+*         FOR ALL ENTRIES IN T_BSIK
+*    WHERE BUKRS = T_BSIK-BUKRS
+*      AND BELNR = T_BSIK-BELNR
+*      AND GJAHR = T_BSIK-GJAHR.
+*  IF SY-SUBRC = 0.
+*    SORT T_BKPF BY AWKEY.
+*  ELSE.
+*    EXIT.
+*  ENDIF.
+
+* オブジェクトキーより、YN220を取得
+*  LOOP AT T_BKPF INTO LW_BKPF.
+*    LW_YN220-SLPDOC = LW_BKPF-AWKEY+0(10).
+*    LW_YN220-GJAHR  = LW_BKPF-AWKEY+10(4).
+*    APPEND LW_YN220 TO LT_YN220.
+*  ENDLOOP.
+SELECT GJAHR
+SLPDOC
+DTLDOC
+YNGJAHR
+BELNR
+BUZEI
+INTO TABLE T_YN120
+FROM YN120
+FOR ALL ENTRIES IN T_BSID
+WHERE BUKRS    = T_BSID-BUKRS
+AND YNGJAHR  = T_BSID-GJAHR
+AND BELNR    = T_BSID-BELNR
+AND BUZEI    = T_BSID-BUZEI.
+
+IF SY-SUBRC = 0.
+SORT T_YN120.
+ELSE.
+EXIT.
+ENDIF.
+
+* YN220が存在するデータは処理対象外
+*  LOOP AT T_YN220 INTO LW_YN220.
+*    CLEAR:LW_BKPF, LW_AWKEY.
+*
+**   オブジェクトキーを編集
+*    LW_AWKEY+0(10) = LW_YN220-SLPDOC.
+*    LW_AWKEY+10(4) = LW_YN220-GJAHR.
+**   オブジェクトキーより、BKPFデータを読み込む
+*    READ TABLE T_BKPF INTO LW_BKPF
+*         WITH KEY AWKEY = LW_AWKEY
+*         BINARY SEARCH.
+**   BSIKより対象外とする
+*    IF SY-SUBRC = 0.
+*      DELETE T_BSIK WHERE BUKRS = LW_BKPF-BUKRS
+*                      AND BELNR = LW_BKPF-BELNR
+*                      AND GJAHR = LW_BKPF-GJAHR.
+*    ENDIF.
+*  ENDLOOP.
+LOOP AT T_BSID INTO LW_BSID.
+READ TABLE T_YN120 INTO LW_YN120
+WITH KEY YNGJAHR = LW_BSID-GJAHR
+BELNR   = LW_BSID-BELNR
+BUZEI   = LW_BSID-BUZEI.
+
+IF SY-SUBRC = 0.
+DELETE T_BSID WHERE GJAHR = LW_BSID-GJAHR
+AND BELNR = LW_BSID-BELNR
+AND BUZEI = LW_BSID-BUZEI.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_YN120
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_TEST
+*&---------------------------------------------------------------------*
+*       テスト実行の場合の処理結果出力
+*----------------------------------------------------------------------*
+FORM WRITE_TEST.
+DATA:LW_CNT(10)  TYPE C,
+LW_BSID     TYPE TYP_BSID.
+
+WRITE G_CNT_BSID TO LW_CNT.
+WRITE: /001 '<処理対象>',
+/003 '未決済データ(BSID)抽出件数：',
+040 LW_CNT,
+050 '件'.
+WRITE G_CNT_BDC TO LW_CNT.
+WRITE: /003 '消込処理対象件数：',
+040 LW_CNT,
+050 '件'.
+
+CHECK NOT T_BSID[] IS INITIAL.
+SKIP 1.
+WRITE: /003 '会計年度',
+012 '会計伝票番号',
+025 '明細番号',
+034 '得意先コード'.
+ULINE.
+LOOP AT T_BSID INTO LW_BSID.
+WRITE: /003 LW_BSID-GJAHR,
+012 LW_BSID-BELNR,
+025 LW_BSID-BUZEI,
+034 LW_BSID-KUNNR.
+ENDLOOP.
+
+ENDFORM.                    " WRITE_TEST
+*&---------------------------------------------------------------------*
+*&      Form  CALL_BDC
+*&---------------------------------------------------------------------*
+*       ＢＤＣ実行
+*----------------------------------------------------------------------*
+FORM CALL_BDC.
+DATA:LW_BSID     TYPE TYP_BSID,
+LT_BSID_BUF TYPE T_TYP_BSID,
+LW_KUNNR    TYPE CHAR1,
+LW_NAME1    TYPE NAME1_GP,
+LW_DMBTR    TYPE DMBTR.
+
+* 2012/03/28 ADD START
+CLEAR:G_ERR.
+* 2012/03/28 ADD END.
+
+LOOP AT T_BSID INTO LW_BSID.
+CLEAR:LW_KUNNR,LW_NAME1.
+
+AT END OF KUNNR.
+LW_KUNNR = C_ON.
+ENDAT.
+
+*   金額合計
+IF LW_BSID-SHKZG = 'S'.   "貸方＋
+LW_DMBTR = LW_DMBTR + LW_BSID-DMBTR.
+ELSE.
+LW_DMBTR = LW_DMBTR - LW_BSID-DMBTR.
+ENDIF.
+*   データ退避
+APPEND LW_BSID TO LT_BSID_BUF.
+
+*   得意先が次から変わる場合
+IF LW_KUNNR = C_ON.
+*     得意先名称取得
+SELECT SINGLE NAME1
+INTO LW_NAME1
+FROM KNA1
+WHERE KUNNR = LW_BSID-KUNNR.
+
+*     BDC実行
+PERFORM EDIT_BDC USING LT_BSID_BUF
+LW_DMBTR
+LW_NAME1
+* 2012/03  ADD START
+LW_BSID-KUNNR.
+IF G_ERR = C_ON.
+*        EXIT.
+ENDIF.
+* 2012/03/28 ADD END
+*     処理後のクリア
+CLEAR:LW_DMBTR, LT_BSID_BUF.
+ENDIF.
+
+ENDLOOP.
+
+ENDFORM.                    " CALL_BDC
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_BDC
+*&---------------------------------------------------------------------*
+*       BDC実行
+*----------------------------------------------------------------------*
+*      -->P_T_BSID  BDC対象のデータ
+*----------------------------------------------------------------------*
+FORM EDIT_BDC USING    P_T_BSID   TYPE T_TYP_BSID
+P_W_DMBTR  TYPE DMBTR
+P_W_NAME1  TYPE NAME1_GP
+* 2012/03/28 ADD START
+P_KUNNR2    TYPE KUNNR.
+
+* 2012/03/28 ADD END.
+DATA:LT_BDC      TYPE T_TYP_BDC,
+LW_BSID     TYPE TYP_BSID,
+LW_FVAL     TYPE BDC_FVAL,
+LW_DMBTR    TYPE DMBTR,
+LW_OPTION   TYPE CTU_PARAMS,
+LT_RETURN   TYPE STANDARD TABLE OF BDCMSGCOLL,
+LW_RETURN   TYPE BDCMSGCOLL,
+LW_CLEAR    TYPE TYP_CLEAR.
+
+* 2012/03/28 ADD START
+DATA:L_WAERS TYPE KNVV-WAERS.
+CLEAR:L_WAERS .
+
+SELECT SINGLE WAERS INTO L_WAERS
+FROM KNVV
+WHERE KUNNR = P_KUNNR2
+AND VKORG = '1000'
+AND VTWEG = '10'
+AND SPART = '10'.
+
+*  IF P_BUDAT IS INITIAL.
+*     P_BUDAT = SY-DATUM.
+*  ENDIF.
+
+* 2012/03/28 ADD END.
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0122'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "OKCODE
+'BDC_OKCODE'
+'=SL'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "伝票日付
+'BKPF-BLDAT'
+SY-DATUM
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "転記日付
+'BKPF-BUDAT'
+* 2012/03/28 MOD START
+*                               SY-DATUM
+P_BUDAT
+* 2012/03/28 MOD END
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "伝票タイプ
+'BKPF-BLART'
+'SA'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "会社コード
+'BKPF-BUKRS'
+'C001'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "通貨コード
+'BKPF-WAERS'
+* 2012/03/28 MOD START
+*                               'JPY'
+L_WAERS
+* 2012/03/28 MOD END
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "伝票ヘッダテキスト
+'BKPF-BKTXT'
+'検収照合/売掛差額'
+CHANGING LT_BDC.
+* 第二画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0710'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "OKCODE
+'BDC_OKCODE'
+'=SLB'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "会社コード
+'RF05A-AGBUK'
+'C001'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "会社コード
+'RF05A-AGBUK'
+'C001'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "勘定タイプ
+'RF05A-AGKOA'
+'D'
+CHANGING LT_BDC.
+
+* 第三画面
+LOOP AT P_T_BSID INTO LW_BSID.
+CONCATENATE LW_BSID-BELNR
+LW_BSID-GJAHR
+LW_BSID-BUZEI
+INTO LW_FVAL.
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0733'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "OKCODE
+'BDC_OKCODE'
+'=SLB'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE
+'RF05A-FELDN(01)'
+'BELNR'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE
+'RF05A-SEL01(01)'
+LW_FVAL
+CHANGING LT_BDC.
+ENDLOOP.
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0733'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=PA'         "未決済明細処理ボタン
+CHANGING LT_BDC.
+* 指定した伝票データ一覧画面
+* 貸借が一致する場合はここで終了
+IF P_W_DMBTR = 0.
+PERFORM BDC_RECORD     USING C_ON
+'SAPDF05X'
+'3100'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=BU'         "保存
+CHANGING LT_BDC.
+* 貸借が一致しない場合は、追加仕訳を入力
+ELSE.
+PERFORM BDC_RECORD     USING C_ON
+'SAPDF05X'
+'3100'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=AB'         "概要
+CHANGING LT_BDC.
+*   追加仕訳入力
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0700'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'/00'
+CHANGING LT_BDC.
+IF P_W_DMBTR > 0.
+LW_FVAL = '07'.
+LW_DMBTR = P_W_DMBTR.
+ELSE.
+LW_FVAL = '17'.
+LW_DMBTR = P_W_DMBTR * -1.
+ENDIF.
+PERFORM BDC_RECORD     USING SPACE         "転記キー
+'RF05A-NEWBS'
+LW_FVAL
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "勘定
+'RF05A-NEWKO'
+LW_BSID-KUNNR
+CHANGING LT_BDC.
+*   金額/税入力
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0301'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=ZK'         "追加詳細
+CHANGING LT_BDC.
+* 2012/03/28 MOD START
+*    WRITE LW_DMBTR TO LW_FVAL CURRENCY 'JPY'.
+WRITE LW_DMBTR TO LW_FVAL CURRENCY L_WAERS.
+* 2012/03/28 MOD END
+CONDENSE LW_FVAL NO-GAPS.
+PERFORM BDC_RECORD     USING SPACE         "金額
+'BSEG-WRBTR'
+LW_FVAL
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "支払条件
+'BSEG-ZTERM'
+''
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "支払基準日
+'BSEG-ZFBDT'
+SY-DATUM
+CHANGING LT_BDC.
+CONCATENATE 'CLEAR' LW_BSID-KUNNR
+INTO LW_FVAL.
+PERFORM BDC_RECORD     USING SPACE         "ソートキー
+'BSEG-ZUONR'
+LW_FVAL
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "明細テキスト
+'BSEG-SGTXT'
+P_W_NAME1
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0331'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "参照キー1
+'BSEG-XREF1'
+LW_BSID-KUNNR
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=BU'         "保存
+CHANGING LT_BDC.
+ENDIF.
+
+LW_OPTION-DISMODE = 'N'.
+LW_OPTION-UPDMODE = 'S'.
+* 実行
+CALL TRANSACTION 'F-30'  USING LT_BDC
+OPTIONS FROM LW_OPTION
+MESSAGES INTO LT_RETURN.
+* 正常終了メッセージを検索
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'S'
+MSGID  = 'F5'
+MSGNR  = '312'.
+IF SY-SUBRC = 0.
+LW_CLEAR-KUNNR = LW_BSID-KUNNR.
+LW_CLEAR-MESSAGE = LW_RETURN-MSGV1.
+G_CNT_CLEAR = G_CNT_CLEAR + 1.
+APPEND LW_CLEAR TO T_CLEAR.
+* エラーの場合
+ELSE.
+*  2012/03/28 ADD START
+G_ERR = C_ON.
+*  2012/03/28 ADD END
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'A'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'E'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'S'.
+ENDIF.
+ENDIF.
+
+IF LW_RETURN-MSGID IS INITIAL.
+MESSAGE I999(YN01) WITH '消込エラーが発生しました'.
+LW_CLEAR-MESSAGE = '消込エラーが発生しました'.
+ELSE.
+MESSAGE ID     LW_RETURN-MSGID  "ログ用
+TYPE   'I'
+NUMBER LW_RETURN-MSGNR
+WITH   LW_RETURN-MSGV1
+LW_RETURN-MSGV2
+LW_RETURN-MSGV3
+LW_RETURN-MSGV4.
+
+MESSAGE ID     LW_RETURN-MSGID  "画面用
+TYPE   'I'
+NUMBER LW_RETURN-MSGNR
+WITH   LW_RETURN-MSGV1
+LW_RETURN-MSGV2
+LW_RETURN-MSGV3
+LW_RETURN-MSGV4
+INTO   LW_CLEAR-MESSAGE.
+CONCATENATE 'エラー：' LW_CLEAR-MESSAGE INTO LW_CLEAR-MESSAGE.
+
+ENDIF.
+
+LW_CLEAR-KUNNR = LW_BSID-KUNNR.
+
+APPEND LW_CLEAR TO T_CLEAR.
+ENDIF.
+
+ENDFORM.                    " EDIT_BDC
+*&---------------------------------------------------------------------*
+*&      Form  BDC_RECORD
+*&---------------------------------------------------------------------*
+*       BDCレコードの作製
+*----------------------------------------------------------------------*
+*      -->P_SCREEN      'X'=画面/SPACE=項目値
+*      -->P_VALUE1      PGID/項目名
+*      -->P_VALUE2      SCREEN番号/項目値
+*      <--P_T_BDC       BDCレコードテーブル
+*----------------------------------------------------------------------*
+FORM BDC_RECORD USING    P_SCREEN    TYPE CHAR1
+P_VALUE1    TYPE ANY
+P_VALUE2    TYPE ANY
+CHANGING P_T_BDC     TYPE T_TYP_BDC.
+DATA:LW_BDC    TYPE BDCDATA.
+
+* 画面定義の場合
+IF P_SCREEN = C_ON.
+LW_BDC-PROGRAM  = P_VALUE1.
+LW_BDC-DYNPRO   = P_VALUE2.
+LW_BDC-DYNBEGIN = C_ON.
+* 項目定義の場合
+ELSE.
+LW_BDC-FNAM = P_VALUE1.
+LW_BDC-FVAL = P_VALUE2.
+ENDIF.
+
+* 内部テーブルに格納
+APPEND LW_BDC TO P_T_BDC.
+
+ENDFORM.                    " BDC_RECORD
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_PRC
+*&---------------------------------------------------------------------*
+*       処理結果出力
+*----------------------------------------------------------------------*
+FORM WRITE_PRC.
+DATA:LW_CNT(10)  TYPE C,
+LW_CLEAR    TYPE TYP_CLEAR.
+
+WRITE G_CNT_BSID TO LW_CNT.
+WRITE: /001 '<処理対象>',
+/003 '未決済データ(BSID)抽出件数：',
+040 LW_CNT,
+050 '件'.
+WRITE G_CNT_BDC TO LW_CNT.
+WRITE: /003 '消込処理対象件数：',
+040 LW_CNT,
+050 '件'.
+SKIP 1.
+WRITE G_CNT_CLEAR TO LW_CNT.
+WRITE: /003 '消込件数：',
+040 LW_CNT,
+050 '件'.
+
+CHECK NOT T_CLEAR[] IS INITIAL.
+SKIP 1.
+WRITE: /003 '消込得意先',
+014 '消込伝票番号'.
+ULINE.
+LOOP AT T_CLEAR INTO LW_CLEAR.
+WRITE: /003 LW_CLEAR-KUNNR,
+014 LW_CLEAR-MESSAGE.
+ENDLOOP.
+
+ENDFORM.                    " WRITE_PRC

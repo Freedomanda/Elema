@@ -1,0 +1,1113 @@
+************************************************************************
+* [プログラム名]
+*   ZS011100    売上粗利予算実績予定表
+*
+* [処理概要]
+*   売上粗利の予算実績管理を行う。
+*   指定された処理年月と期初月からの累計の売上、粗利の予算、実績、予定を
+*   帳票出力する。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2001/12/18   PSD k.igarashi    新規開発　
+*  2002/01/08   PSD k.igarashi    仕様変更
+*  2002/02/06   PSD M.Arai        合計誤差修正対応
+*  2002/03/19   PSD T.SAITOH      ALVステータス印刷拒否設定
+*  2002/06/20   PSD T.SAITOH      再移送
+*  2002/08/10   PSD T.SAITOH
+*                        255を突破しているため正常に印刷できないバグ修正
+*  2002/09/14   PSD T.SAITOH      売上予算、売上予定、粗利予算、粗利予定
+*                               は次月を表示する【TD仕様変更】
+*  2004/10/13   DMC murata      ﾊﾟﾗﾒｰﾀにﾊﾞｰｼﾞｮﾝを追加
+*  2010/09/08   SOLFIS S.KURATA   部門表示順変更対応
+************************************************************************
+REPORT  ZS011100.
+
+************************************************************************
+* TYPES
+************************************************************************
+TYPE-POOLS SLIS.
+
+* ① ＬＩＳ内部ＴＢＬ型
+TYPES: BEGIN OF TYP_LIS,
+VRSIO      TYPE S901-VRSIO,                        "バージョン
+SPMON      TYPE S901-SPMON,                            "分析月
+VKBUR      TYPE S901-VKBUR,                            "営業所
+NETWR      TYPE S901-NETWR,                            "正味額
+ZZARAIGAKU TYPE S901-ZZARAIGAKU,                     "粗利金額
+END OF TYP_LIS.
+
+* ② 営業所内部ＴＢＬ型
+TYPES: BEGIN OF TYP_EIGYOUSHO,
+VKBUR TYPE TVKBT-VKBUR,                               "営業所
+BEZEI TYPE TVKBT-BEZEI,                              "テキスト
+END OF TYP_EIGYOUSHO.
+
+*2010/09/08 ADD START
+* レポートコード取得用
+TYPES: BEGIN OF T_ZS0030,
+ZKEY   TYPE ZS0030-ZKEY,                         "キー
+REPCD  TYPE ZS0030-REPCD,                        "レポートコード
+END OF T_ZS0030.
+*2010/09/08 ADD END
+************************************************************************
+* DATA
+************************************************************************
+* ① ＬＩＳ内部ＴＢＬ
+DATA: GF_LIS TYPE TYP_LIS,
+GT_LIS LIKE TABLE OF GF_LIS.
+* ② 営業所内部ＴＢＬ
+DATA: GF_EIGYOUSHO TYPE TYP_EIGYOUSHO,
+GT_EIGYOUSHO LIKE TABLE OF GF_EIGYOUSHO.
+* ③ 帳票出力用内部ＴＢＬ
+DATA: GF_WRITE LIKE ZSLIST_V12,
+GT_WRITE LIKE TABLE OF GF_WRITE.
+*2010/09/08 ADD START
+* レポートコード取得用
+DATA: GT_ZS0030    TYPE HASHED TABLE OF T_ZS0030
+WITH UNIQUE KEY ZKEY,
+GF_ZS0030    TYPE T_ZS0030.
+*2010/09/08 ADD END
+*--- DATA
+DATA: G_YOSANVER LIKE S901-VRSIO,                   "予算使用バージョン
+G_YOTEIVER LIKE S901-VRSIO,                   "予定使用バージョン
+G_KISHOGETSU(6) TYPE N,                                   "期初月
+G_VKBUR    LIKE GF_LIS-VKBUR.                             "営業所
+* 実績
+DATA: G_TURIJSK(13) TYPE P DECIMALS 2,                      "売上(当月)
+G_TARAJSK(13) TYPE P DECIMALS 2,                      "粗利(当月)
+G_RURIJSK(13) TYPE P DECIMALS 2,                      "売上(累計)
+G_RARAJSK(13) TYPE P DECIMALS 2.                      "売上(累計)
+* 予算
+DATA: G_TURIYSN(13) TYPE P DECIMALS 2,                      "売上(当月)
+G_TARAYSN(13) TYPE P DECIMALS 2,                      "粗利(当月)
+G_RURIYSN(13) TYPE P DECIMALS 2,                      "売上(累計)
+G_RARAYSN(13) TYPE P DECIMALS 2.                      "売上(累計)
+*---APPEND START PSD T.SAITOH 2002/09/17 ---------------------------*
+* 売上（次月）
+DATA: G_BUDGET_NEXT(13) TYPE P DECIMALS 2,"売上（次月）
+G_PROFIT_NEXT(13) TYPE P DECIMALS 2."粗利（次月）
+*---APPEND END   PSD T.SAITOH 2002/09/17 ---------------------------*
+* 予定
+DATA: G_URIYTI(13) TYPE P DECIMALS 2,                             "売上
+G_ARAYTI(13) TYPE P DECIMALS 2.                             "粗利
+
+*---APPEND START PSD T.SAITOH 2002/09/14 ---------------------------*
+* +1ヶ月した年月　格納用
+DATA: G_SPMON LIKE S901-SPMON.
+*---APPEND END   PSD T.SAITOH 2002/09/14 ---------------------------*
+
+************************************************************************
+* リストビューア関連
+************************************************************************
+DATA: G_REPID     LIKE SY-REPID,                            "レポートID
+GF_LAYOUT   TYPE SLIS_LAYOUT_ALV,                 "レイアウト構造
+GF_FILDCAT TYPE SLIS_FIELDCAT_ALV.        "フィールドカタログ構造
+
+* REUSE_ALV_COMMENTARY_WRITE
+DATA: GF_HEAD_ALV   TYPE SLIS_LISTHEADER,                   "ヘッダ構造
+GT_T_HEAD_ALV TYPE SLIS_T_LISTHEADER.            "ヘッダ用内部TBL
+
+* ABAPリストビューアヘッダデータ保持
+DATA: GF_HEADER_DATA LIKE GF_WRITE.                    "ヘッダ表示情報
+
+* REUSE_ALV_LIST_DISPLAY
+DATA: TOP_OF_PAGE TYPE SLIS_FORMNAME VALUE 'TOP_OF_PAGE'.
+
+* REUSE_ALV_EVENT
+DATA: GT_EVENT TYPE SLIS_T_EVENT,                  "イベント情報内部TBL
+GS_EVENT LIKE LINE OF GT_EVENT.                 "イベント情報構造
+
+* ↓APPEND 2002/02/06 PSD M.Arai 合計誤差修正対応
+************************************************************************
+* ALV 合計誤差対応関連
+************************************************************************
+DATA: WK_POS        TYPE P VALUE 1,
+CTR_TOTAL_NUM TYPE I,
+CTR_TOTAL     TYPE I,
+WK_VALUE      TYPE P,
+WK_SUM(16)    TYPE P,
+WK_AVG(16)    TYPE P,
+WK_MAX(16)    TYPE P,
+WK_MIN(16)    TYPE P,
+G_LINE        TYPE SY-LINNO,
+G_TABLINE     TYPE I.
+
+DATA: G_ZURIYSN(12)   TYPE P,  "売上予算
+G_ZURIJSK(12)   TYPE P,  "売上実績
+G_ZARAYSN(12)   TYPE P,  "粗利予算
+G_ZARAJSK(12)   TYPE P,  "粗利実績
+G_ZURIYTI(12)   TYPE P,  "売上予定
+G_ZARAYTI(12)   TYPE P,  "粗利予定
+G_ZURUIYSN(12)  TYPE P,  "売上累計予算
+G_ZURUIJSK(12)  TYPE P,  "売上累計実績
+G_ZARUIYSN(12)  TYPE P,  "粗利累計予算
+G_ZARUIJSK(12)  TYPE P.  "粗利累計実績
+
+DATA: WK_LAYOUT                    TYPE SLIS_LAYOUT_ALV,
+WK_FIELDCAT                  TYPE SLIS_T_FIELDCAT_ALV,
+H_FIELDCAT                   LIKE LINE OF WK_FIELDCAT,
+WK_SORT                      TYPE SLIS_T_SORTINFO_ALV,
+H_SORT                       LIKE LINE OF WK_SORT,
+WK_FILTER                    TYPE SLIS_T_FILTER_ALV,
+WK_LIST_SCROOLL              TYPE SLIS_LIST_SCROLL,
+WK_VARIANT                   LIKE DISVARIANT,
+WK_WIDTH                     TYPE INT4,
+WK_MARKED_COLUMNS            TYPE SLIS_T_FIELDCAT_ALV,
+WK_FILTERED_ENTRIES          TYPE SLIS_T_FILTERED_ENTRIES,
+WK_FILTERED_ENTRIES_HEADER   TYPE SLIS_T_FILTERED_ENTRIES,
+WK_FILTERED_ENTRIES_ITEM     TYPE SLIS_T_FILTERED_ENTRIES
+.
+* ↑APPEND 2002/02/06 PSD M.Arai 合計誤差修正対応
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定----*
+DATA: GF_PRINT      TYPE SLIS_PRINT_ALV.
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+************************************************************************
+* CONSTANTS
+************************************************************************
+CONSTANTS: CNS_001(3) TYPE N VALUE '001',
+CNS_002(3) TYPE N VALUE '901',
+CNS_003(1) TYPE C VALUE 'J',
+CNS_004(4) TYPE C VALUE '1000',
+CNS_005(3) TYPE C VALUE '000',
+CNS_006(5) TYPE C VALUE 'Page:'.
+CONSTANTS: CNS_TBL_001(5) TYPE C VALUE 'TVKBT',
+CNS_TBL_002(4) TYPE C VALUE 'S901',
+*2010/09/08 ADD START
+CNS_TBL_003(6) TYPE C VALUE 'ZS0030'.
+*2010/09/08 ADD END
+CONSTANTS: CNS_TOP(11) TYPE C VALUE 'TOP_OF_PAGE',
+CNS_FRM_TOP(15) TYPE C VALUE 'FRM_TOP_OF_PAGE'.
+************************************************************************
+* 選択画面
+************************************************************************
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT (10) TEXT-006.
+* ラジオボタン(年間)
+SELECTION-SCREEN POSITION 22.
+PARAMETERS R_NENKAN RADIOBUTTON GROUP RD_1.
+SELECTION-SCREEN COMMENT (4) TEXT-007.
+* ラジオボタン(期間)
+SELECTION-SCREEN POSITION 32.
+PARAMETERS R_KIKAN RADIOBUTTON GROUP RD_1.
+SELECTION-SCREEN COMMENT (4) TEXT-008.
+SELECTION-SCREEN END OF LINE.
+
+*----------------------------------------------------------------------*
+* 2002/01/08  仕様変更(処理年月参照データ型変更) k.igarashi start
+*----------------------------------------------------------------------*
+** 処理年月
+*SELECTION-SCREEN BEGIN OF LINE.
+*  SELECTION-SCREEN COMMENT (8) text-001.
+*  SELECTION-SCREEN POSITION 22.
+*  PARAMETERS P_DATUM(6) TYPE N DEFAULT SY-DATUM+0(6).
+*SELECTION-SCREEN END OF LINE.
+
+* 処理年月
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT (8) TEXT-001.
+SELECTION-SCREEN POSITION 22.
+PARAMETERS P_DATUM LIKE S901-SPMON DEFAULT SY-DATUM+0(6).
+SELECTION-SCREEN END OF LINE.
+
+* 2004/10/13 mod>>
+PARAMETERS : P_VRSIO  LIKE S901-VRSIO OBLIGATORY.    "ﾊﾞｰｼﾞｮﾝ
+* 2004/10/13 mod<<
+
+*----------------------------------------------------------------------*
+* 2002/01/08  仕様変更(処理年月参照データ型変更) k.igarashi end
+*----------------------------------------------------------------------*
+
+************************************************************************
+* AT SELECTION-SCREEN
+************************************************************************
+AT SELECTION-SCREEN.
+
+* 入力後処理
+PERFORM FRM_CHECK_DATE.
+
+************************************************************************
+* START-OF-SELECTION
+************************************************************************
+START-OF-SELECTION.
+
+* 入力後処理
+PERFORM FRM_CHECK_DATE.
+* 2-2 対象データ抽出処理
+PERFORM FRM_SEL_DATA.
+* 2-3 帳票出力用内部ＴＢＬ作成処理
+PERFORM FRM_MAKE_TABLE.
+* 2-4 帳票出力処理
+PERFORM FRM_WRITE_TABLE.
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_date
+*&---------------------------------------------------------------------*
+*       入力後処理
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_DATE.
+
+* ① 処理年月エラー処理
+IF ( P_DATUM+4(2) > 0 ) AND ( P_DATUM+4(2) < 13 ).
+ELSE.
+MESSAGE E009(Z1) WITH TEXT-001.
+ENDIF.
+
+* ② 期初月の設定
+G_KISHOGETSU = P_DATUM.
+
+CASE 'X'.
+WHEN R_NENKAN.
+IF ( 4 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 12 ).
+G_KISHOGETSU+4(2) = 4.
+ELSEIF ( 1 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 3 ).
+G_KISHOGETSU+0(4) = G_KISHOGETSU+0(4) - 1.
+G_KISHOGETSU+4(2) = 4.
+ENDIF.
+WHEN R_KIKAN.
+IF ( 4 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 9 ).
+G_KISHOGETSU+4(2) = 4.
+ELSEIF ( 10 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 12 ).
+G_KISHOGETSU+4(2) = 10.
+ELSEIF ( 1 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 3 ).
+G_KISHOGETSU+0(4) = G_KISHOGETSU+0(4) - 1.
+G_KISHOGETSU+4(2) = 10.
+ENDIF.
+ENDCASE.
+
+* ③ 予算、予定使用バージョンの設定
+G_YOSANVER = CNS_001.
+G_YOTEIVER = CNS_002.
+
+ENDFORM.                    " frm_check_date
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_data
+*&---------------------------------------------------------------------*
+*       2-2 対象データ抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_DATA.
+
+* ① 営業所抽出処理
+PERFORM FRM_SEL_EIGYOUSHO.
+
+* ② ＬＩＳ情報(予算･実績･予定)
+PERFORM FRM_SEL_LIS.
+
+*2010/09/08 ADD START
+* レポートコード抽出処理
+PERFORM FRM_SEL_ZS0030.
+*2010/09/08 ADD END
+
+* ③ ソート処理
+SORT GT_LIS ASCENDING BY VKBUR.
+
+ENDFORM.                    " frm_sel_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_table
+*&---------------------------------------------------------------------*
+*       2-3 帳票出力用内部ＴＢＬ作成処理
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_TABLE.
+
+* ＬＩＳ内部ＴＢＬループ開始
+LOOP AT GT_LIS INTO GF_LIS.
+
+* 一行目の場合
+CASE SY-TABIX.
+WHEN 1.
+G_VKBUR = GF_LIS-VKBUR.
+ENDCASE.
+
+* 前回ループ処理行と現行との比較
+*--- ① 帳票出力内部ＴＢＬレコード追加処理
+IF GF_LIS-VKBUR <> G_VKBUR.
+PERFORM FRM_SET_DATA.
+ENDIF.
+
+CASE GF_LIS-VRSIO.
+*--- ② 実績データ設定
+WHEN CNS_005.                                         " = '000'
+PERFORM FRM_SET_JISSEKI.
+*--- ③ 予算データ設定
+* 2004/10/13 mod>>
+WHEN P_VRSIO.                             "選択画面のﾊﾞｰｼﾞｮﾝを設・
+*    when cns_001." = '001'
+* 2004/10/13 mod<<
+PERFORM FRM_SET_YOSAN.
+*--- ④ 予定データ設定
+WHEN CNS_002.                                         " = '901'
+PERFORM FRM_SET_YOTEI.
+ENDCASE.
+
+* 次回ループ時比較用営業所
+G_VKBUR = GF_LIS-VKBUR.
+
+ENDLOOP.
+
+* ループ終了後の追加処理
+PERFORM FRM_SET_DATA.
+
+ENDFORM.                    " frm_make_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_table
+*&---------------------------------------------------------------------*
+*       2-4 帳票出力処理
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_TABLE.
+
+* ＡＬＶ改ページ関連処理
+PERFORM FRM_ALV_PAGE_NEXT.
+
+* 初期設定
+G_REPID = SY-REPID.
+
+* ページ切り替え設定
+GF_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+
+*----------------------------------------------------------------------*
+* 2002/01/10 修正(合計行の行名称修正)  PSD k.igarashi  start
+*----------------------------------------------------------------------*
+GF_LAYOUT-TOTALS_TEXT = '全社合計'.
+*----------------------------------------------------------------------*
+* 2002/01/10 修正(合計行の行名称修正)  PSD k.igarashi  end
+*----------------------------------------------------------------------*
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定---*
+GF_PRINT-NO_PRINT_LISTINFOS = 'X'.
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+
+* リストの出力
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM             = G_REPID               "レポートID
+I_STRUCTURE_NAME               = 'ZSLIST_V12'                "構造
+IS_LAYOUT                      = GF_LAYOUT         "レイアウト設定
+*     IT_FIELDCAT                    = GF_FILDCAT    "フィールドカタログ
+I_SAVE                         = 'A'               "レイアウト保存
+IT_EVENTS                      = GT_EVENT[]          "イベント設定
+*---APPEND START PSD T.SAITOH 2002/03/19 ALVステータス印刷拒否設定---*
+IS_PRINT                       = GF_PRINT      "印刷設定
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+TABLES
+T_OUTTAB                       = GT_WRITE.
+
+ENDFORM.                    " frm_write_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_eigyousho
+*&---------------------------------------------------------------------*
+*       2-2-① 営業所抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_EIGYOUSHO.
+
+SELECT * FROM TVKBT
+INTO CORRESPONDING FIELDS OF TABLE GT_EIGYOUSHO
+WHERE SPRAS = CNS_003.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-002.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_TBL_001 SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_eigyousho
+*&---------------------------------------------------------------------*
+*&      Form  frm_sel_lis
+*&---------------------------------------------------------------------*
+*       2-2-② ＬＩＳ情報(予算･実績･予定)
+*----------------------------------------------------------------------*
+FORM FRM_SEL_LIS.
+
+*---MODIFY START PSD T.SAITOH 2002/09/14 ---------------------------*
+* SELECT * FROM S901
+*   INTO CORRESPONDING FIELDS OF TABLE GT_LIS
+** MODIFY PSD K.ARAI 2002/05/29
+*   WHERE ( VRSIO  = CNS_005    OR
+*           VRSIO  = G_YOSANVER OR
+*           VRSIO  = G_YOTEIVER )
+*    AND  SPMON >= G_KISHOGETSU
+*    AND  SPMON <= P_DATUM
+*    AND  VKORG  = CNS_004.
+
+* ＋１ヶ月した年月を算出
+PERFORM FRM_MON_PLUS_ONE USING P_DATUM
+CHANGING G_SPMON.
+
+SELECT * FROM S901
+INTO CORRESPONDING FIELDS OF TABLE GT_LIS
+WHERE ( VRSIO  = '000'
+AND  SPMON >= G_KISHOGETSU
+AND  SPMON <= P_DATUM
+AND  VKORG  = '1000' )
+* 2004/10/13 mod>>
+OR  ( VRSIO  IN (P_VRSIO,'901') "次月の情報まで設定
+*     or  ( vrsio  in ('001','901') "次月の情報まで設定
+* 2004/10/13 mod<<
+AND  SPMON >= G_KISHOGETSU
+AND  SPMON <= G_SPMON
+AND  VKORG  = '1000' )
+.
+
+*---MODIFY END   PSD T.SAITOH 2002/09/14 ---------------------------*
+
+
+* ↑暫定条件。
+* ↓SSOUR が固定でスペースの確認がとれたらこっちに修正する
+*　最新ソース（予定）
+*   WHERE SSOUR    = SPACE
+*    AND  ( VRSIO  = CNS_005    OR
+*           VRSIO  = G_YOSANVER OR
+*           VRSIO  = G_YOTEIVER )
+*    AND  SPMON >= G_KISHOGETSU
+*    AND  SPMON <= P_DATUM
+*    AND  VKORG  = CNS_004.
+* ↓パフォーマンスを考慮して削除。条件をキー順にする
+*  元のソースです
+*   WHERE SPMON >= G_KISHOGETSU
+*    AND  SPMON <= P_DATUM
+*    AND  VKORG  = CNS_004
+*    AND  ( VRSIO  = CNS_005    OR
+*           VRSIO  = G_YOSANVER OR
+*           VRSIO  = G_YOTEIVER ).
+* MODIFY END
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH TEXT-003.
+STOP.
+WHEN 8.
+MESSAGE A603(Z1) WITH SY-REPID CNS_TBL_002 SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " frm_sel_lis
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_data
+*&---------------------------------------------------------------------*
+*       2-3-① 帳票出力内部ＴＢＬレコード追加処理
+*----------------------------------------------------------------------*
+FORM FRM_SET_DATA.
+
+* a) 営業所名設定処理
+READ TABLE GT_EIGYOUSHO WITH KEY VKBUR = G_VKBUR
+INTO GF_EIGYOUSHO.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE-VKBUR = GF_EIGYOUSHO-VKBUR.
+GF_WRITE-BEZEI = GF_EIGYOUSHO-BEZEI.
+WHEN 4.
+GF_WRITE-VKBUR = GF_EIGYOUSHO-VKBUR.
+GF_WRITE-BEZEI = ' '.
+ENDCASE.
+
+* b) 実績、予算、予定の売上額、粗利額の設定
+GF_WRITE-ZURIYSN = G_TURIYSN / 10.                         "売上予算
+GF_WRITE-ZURIJSK = G_TURIJSK / 10.                         "売上実績
+GF_WRITE-ZARAYSN = G_TARAYSN / 10.                         "粗利予算
+GF_WRITE-ZARAJSK = G_TARAJSK / 10.                         "粗利実績
+*---MODIFY START PSD T.SAITOH 2002/09/17 ---------------------------*
+* GF_WRITE-ZURIYSN2 = G_TURIYSN / 10.                       "売上予算
+GF_WRITE-ZURIYSN2 = G_BUDGET_NEXT / 10.             "売上予算（次月）
+*---MODIFY END   PSD T.SAITOH 2002/09/17 ---------------------------*
+GF_WRITE-ZURIYTI  = G_URIYTI / 10.                         "売上予定
+*---MODIFY START PSD T.SAITOH 2002/09/17 ---------------------------*
+* GF_WRITE-ZARAYSN2 = G_TARAYSN / 10.                        "粗利予算
+GF_WRITE-ZARAYSN2 = G_PROFIT_NEXT / 10.             "粗利予算（次月）
+*---MODIFY END   PSD T.SAITOH 2002/09/17 ---------------------------*
+GF_WRITE-ZARAYTI  = G_ARAYTI / 10.                         "粗利予定
+GF_WRITE-ZURUIYSN = G_RURIYSN / 10.                    "売上累計予算
+GF_WRITE-ZURUIJSK = G_RURIJSK / 10.                    "売上累計実績
+GF_WRITE-ZARUIYSN = G_RARAYSN / 10.                    "粗利累計予算
+GF_WRITE-ZARUIJSK = G_RARAJSK / 10.                    "粗利累計実績
+
+* ↓APPEND 2002/01/18 PSD M.Arai 合計行対応
+GF_WRITE-ZURIYSN_R  = G_TURIYSN * 100.         "売上予算(実データ)
+GF_WRITE-ZURIJSK_R  = G_TURIJSK * 100.         "売上予算(実データ)
+GF_WRITE-ZARAYSN_R  = G_TARAYSN * 100.         "粗利予算(実データ)
+GF_WRITE-ZARAJSK_R  = G_TARAJSK * 100.         "粗利実績(実データ)
+GF_WRITE-ZURIYTI_R  = G_URIYTI  * 100.         "売上予定(実データ)
+GF_WRITE-ZARAYTI_R  = G_ARAYTI  * 100.         "粗利予定(実データ)
+GF_WRITE-ZURUIYSN_R = G_RURIYSN * 100.         "売上累計予算(実データ)
+GF_WRITE-ZURUIJSK_R = G_RURIJSK * 100.         "売上累計実績(実データ)
+GF_WRITE-ZARUIYSN_R = G_RARAYSN * 100.         "粗利累計予算
+GF_WRITE-ZARUIJSK_R = G_RARAJSK * 100.         "粗利累計実績
+* ↑APPEND 2002/01/18 PSD M.Arai 合計行対応
+*---APPEND START PSD T.SAITOH 2002/09/17 ---------------------------*
+* 売上予算、粗利予算（次月）実データ
+GF_WRITE-BUDGET_NEXT_R = G_BUDGET_NEXT * 100.
+GF_WRITE-PROFIT_NEXT_R = G_PROFIT_NEXT * 100.
+*---APPEND END   PSD T.SAITOH 2002/09/17 ---------------------------*
+
+* c) 達成率(売上)の設定
+IF G_TURIYSN = 0.
+GF_WRITE-ZURIPER = 0.
+ELSEIF G_TURIYSN <> 0.
+GF_WRITE-ZURIPER = ( G_TURIJSK / G_TURIYSN ) * 100.
+ENDIF.
+
+* d) 粗利率(予算･粗利予算比)の設定
+IF G_TURIYSN = 0.
+GF_WRITE-ZAYSNPER = 0.
+ELSEIF G_TURIYSN <> 0.
+GF_WRITE-ZAYSNPER = ( G_TARAYSN / G_TURIYSN ) * 100.
+ENDIF.
+
+* e) 粗利率(実績)の設定
+IF G_TURIJSK = 0.
+GF_WRITE-ZAJSKPER = 0.
+ELSEIF G_TURIJSK <> 0.
+GF_WRITE-ZAJSKPER = ( G_TARAJSK / G_TURIJSK ) * 100.
+ENDIF.
+
+* f) 売上累計達成率の設定
+IF G_RURIYSN = 0.
+GF_WRITE-ZURITASSEI = 0.
+ELSEIF G_RURIYSN <> 0.
+GF_WRITE-ZURITASSEI = ( G_RURIJSK / G_RURIYSN ) * 100.
+ENDIF.
+
+* g) 粗利累計達成率の設定
+IF G_RARAYSN = 0.
+GF_WRITE-ZARATASSEI = 0.
+ELSEIF G_RARAYSN <> 0.
+GF_WRITE-ZARATASSEI = ( G_RARAJSK / G_RARAYSN ) * 100.
+ENDIF.
+
+* h) 売上予算比の設定
+IF G_TURIYSN = 0.
+GF_WRITE-ZURIYSNHI = 0.
+ELSEIF G_TURIYSN <> 0.
+GF_WRITE-ZURIYSNHI = ( G_URIYTI / G_TURIYSN ) * 100.
+ENDIF.
+
+*----------------------------------------------------------------------*
+* 2002/01/08 仕様変更(０除算チェック追加) K.Igarashi start
+*----------------------------------------------------------------------*
+** i) 予定粗利率の設定
+* GF_WRITE-ZAYTIPER = ( G_ARAYTI / G_URIYTI ) * 100.
+
+** j) 粗利予算比の設定
+* GF_WRITE-ZARAYSNHI = ( G_ARAYTI / G_TARAYSN ) * 100.
+
+* i) 予定粗利率の設定
+IF G_URIYTI = 0.
+GF_WRITE-ZAYTIPER = 0.
+ELSEIF G_URIYTI <> 0.
+GF_WRITE-ZAYTIPER = ( G_ARAYTI / G_URIYTI ) * 100.
+ENDIF.
+
+* j) 粗利予算比の設定
+IF G_TARAYSN = 0.
+GF_WRITE-ZARAYSNHI = 0.
+ELSEIF G_TARAYSN <> 0.
+GF_WRITE-ZARAYSNHI = ( G_ARAYTI / G_TARAYSN ) * 100.
+ENDIF.
+*----------------------------------------------------------------------*
+* 2002/01/08 仕様変更(０除算チェック追加) K.Igarashi end
+*----------------------------------------------------------------------*
+
+*2010/09/08 ADD START
+* レポートコードの設定
+CLEAR GF_ZS0030.
+READ TABLE GT_ZS0030 INTO GF_ZS0030
+WITH TABLE KEY ZKEY = GF_EIGYOUSHO-VKBUR.
+GF_WRITE-ZREPCD = GF_ZS0030-REPCD.
+*2010/09/08 ADD END
+
+* レコード追加処理
+APPEND GF_WRITE TO GT_WRITE.
+
+* 初期化処理
+CLEAR GF_WRITE.
+CLEAR: G_TURIJSK, G_TARAJSK, G_RURIJSK, G_RARAJSK, G_TURIYSN,
+G_TARAYSN, G_RURIYSN, G_RARAYSN, G_URIYTI, G_ARAYTI.
+*---APPEND START PSD T.SAITOH 2002/09/17 ---------------------------*
+* 追加した変数の初期化
+CLEAR: G_BUDGET_NEXT, G_PROFIT_NEXT.
+*---APPEND END   PSD T.SAITOH 2002/09/17 ---------------------------*
+
+ENDFORM.                    " frm_set_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_jisseki
+*&---------------------------------------------------------------------*
+*       2-3-② 実績データ設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_JISSEKI.
+
+* a) 当月情報の設定処理
+IF GF_LIS-SPMON = P_DATUM.
+*--- ｱ) 売上実績(当月)の設定
+G_TURIJSK = G_TURIJSK + GF_LIS-NETWR.
+*--- ｲ) 粗利実績(当月)の設定
+G_TARAJSK = G_TARAJSK + GF_LIS-ZZARAIGAKU.
+ENDIF.
+
+*---APPEND START PSD T.SAITOH 2002/09/14 ---------------------------*
+* 次月は累計しない
+IF GF_LIS-SPMON = G_SPMON.
+EXIT.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/09/14 ---------------------------*
+
+* b) 累計情報の設定処理
+*--- ｱ) 売上実績(累計)の設定
+G_RURIJSK = G_RURIJSK + GF_LIS-NETWR.
+*--- ｲ) 粗利実績(累計)の設定
+G_RARAJSK = G_RARAJSK + GF_LIS-ZZARAIGAKU.
+
+ENDFORM.                    " frm_set_jisseki
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_yosan
+*&---------------------------------------------------------------------*
+*       2-3-③ 予算データ設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_YOSAN.
+
+* a) 当月情報の設定
+IF GF_LIS-SPMON = P_DATUM.
+*--- ｱ) 売上予算(当月)の設定
+G_TURIYSN = G_TURIYSN + GF_LIS-NETWR.
+*--- ｲ) 粗利予算(当月)の設定
+G_TARAYSN = G_TARAYSN + GF_LIS-ZZARAIGAKU.
+ENDIF.
+
+*---APPEND START PSD T.SAITOH 2002/09/17 ---------------------------*
+*   次月情報の設定
+IF GF_LIS-SPMON = G_SPMON.
+G_BUDGET_NEXT = G_BUDGET_NEXT + GF_LIS-NETWR.     "売上予算（次月）
+G_PROFIT_NEXT = G_PROFIT_NEXT + GF_LIS-ZZARAIGAKU."粗利予算（次月）
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/09/17 ---------------------------*
+
+
+
+*---APPEND START PSD T.SAITOH 2002/09/14 ---------------------------*
+* 次月は累計しない
+IF GF_LIS-SPMON = G_SPMON.
+EXIT.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/09/14 ---------------------------*
+
+* b) 累計情報の設定
+*--- ｱ) 売上予算(累計)の設定
+G_RURIYSN = G_RURIYSN + GF_LIS-NETWR.
+*--- ｲ) 粗利予算(累計)の設定
+G_RARAYSN = G_RARAYSN + GF_LIS-ZZARAIGAKU.
+
+ENDFORM.                    " frm_set_yosan
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_yotei
+*&---------------------------------------------------------------------*
+*       2-3-④ 予定データ設定
+*----------------------------------------------------------------------*
+FORM FRM_SET_YOTEI.
+
+*---MODIFY START PSD T.SAITOH 2002/09/14 ---------------------------*
+* a) 当月情報の設定→仕様変更→次月情報の設定
+* IF GF_LIS-SPMON = P_DATUM.
+IF GF_LIS-SPMON = G_SPMON.
+*---MODIFY END   PSD T.SAITOH 2002/09/14 ---------------------------*
+*--- ｱ) 売上予定の設定
+G_URIYTI = G_URIYTI + GF_LIS-NETWR.
+*--- ｲ) 粗利予定の設定
+G_ARAYTI = G_ARAYTI + GF_LIS-ZZARAIGAKU.
+ENDIF.
+
+ENDFORM.                    " frm_set_yotei
+*&---------------------------------------------------------------------*
+*&      Form  frm_alv_page_next
+*&---------------------------------------------------------------------*
+*       ＡＬＶ改ページ関連処理
+*----------------------------------------------------------------------*
+FORM FRM_ALV_PAGE_NEXT.
+
+* 使用可能イベントのチェック
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE     = 0
+IMPORTING
+ET_EVENTS       = GT_EVENT  "使用可能なイベント取得
+EXCEPTIONS
+LIST_TYPE_WRONG = 1
+OTHERS          = 2.
+
+IF SY-SUBRC <> 0.
+*  MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*          WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+* 使用イベントに実行するサブルーチン名を設定
+LOOP AT GT_EVENT INTO GS_EVENT.
+CASE GS_EVENT-NAME.
+WHEN CNS_TOP.
+GS_EVENT-FORM = CNS_FRM_TOP.                     "FRM_TOP_OF_PAGE
+MODIFY GT_EVENT FROM GS_EVENT.
+* 個別GUIステータス使用時はコメントアウトすること
+*     WHEN 'PF_STATUS_SET'.
+*       GS_EVENT-FORM = 'FRM_SET_STATUS'.
+*       MODIFY GT_EVENT FROM GS_EVENT.
+WHEN 'END_OF_LIST'.
+GS_EVENT-FORM = 'FRM_END_OF_LIST'.
+MODIFY GT_EVENT FROM GS_EVENT.
+ENDCASE.
+ENDLOOP.
+
+ENDFORM.                    " frm_alv_page_next
+*&---------------------------------------------------------------------*
+*&      Form  TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+FORM FRM_TOP_OF_PAGE.
+
+DATA: L_SHORINENGETU(10) TYPE C,
+L_SY_DATUM(8) TYPE C,
+L_VERSION(4) TYPE C.
+
+* 帳票バージョンの設定
+CASE 'X'.
+WHEN R_NENKAN.
+L_VERSION = TEXT-007.
+WHEN R_KIKAN.
+IF ( 4 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 9 ).
+L_VERSION = TEXT-009.
+ELSEIF ( 1 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 3 ).
+L_VERSION = TEXT-010.
+ELSEIF ( 10 =< P_DATUM+4(2) AND P_DATUM+4(2) =< 12 ).
+L_VERSION = TEXT-010.
+ENDIF.
+ENDCASE.
+
+* 処理年月の編集
+CONCATENATE P_DATUM+2(2)
+'年'
+P_DATUM+4(2)
+'月'
+INTO L_SHORINENGETU.
+
+* システム日付の編集
+CONCATENATE SY-DATUM+2(2)
+'/'
+SY-DATUM+4(2)
+'/'
+SY-DATUM+6(2)
+INTO L_SY_DATUM.
+
+*----------------------------------------------------------------------*
+* 2002/01/08  仕様変更(ページ番号追加)  k.igarashi start
+*----------------------------------------------------------------------*
+** ヘッダ書き出し処理
+* WRITE: 70 L_VERSION,
+*        80 L_SHORINENGETU,
+*        95 text-004,
+*        240 L_SY_DATUM,
+*        /260 text-005.
+
+* ヘッダ書き出し処理
+WRITE: 70 L_VERSION,
+80 L_SHORINENGETU,
+95 TEXT-004,
+*---MODIFY START PSD T.SAITOH 2002/08/10 ---------------------------*
+* 255を突破しているため正常に印刷できないバグ修正
+*        250 L_SY_DATUM,
+*        260 CNS_006,
+*        265 SY-PAGNO,
+*        /260 text-005.
+245 L_SY_DATUM,
+/245 TEXT-005.
+*---MODIFY END   PSD T.SAITOH 2002/08/10 ---------------------------*
+*----------------------------------------------------------------------*
+* 2002/01/08  仕様変更(ページ番号追加)  k.igarashi  end
+*----------------------------------------------------------------------*
+
+ENDFORM.
+
+* ↓APPEND 2002/02/06 PSD.M.Arai 合計誤差修正対応
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_STATUS
+*&---------------------------------------------------------------------*
+*       ALV個別GUIステータス設定(未使用)
+*----------------------------------------------------------------------*
+*FORM FRM_SET_STATUS USING rt_extab TYPE slis_t_extab.
+*DATA: WK_UCOMM   TYPE SY-UCOMM,
+*      ITAB_UCOMM LIKE TABLE OF WK_UCOMM.
+*
+*  SET PF-STATUS 'ZS011100_TEST' EXCLUDING ITAB_UCOMM.
+*ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_END_OF_LIST
+*&---------------------------------------------------------------------*
+*       合計行設定処理
+*----------------------------------------------------------------------*
+FORM FRM_END_OF_LIST.
+
+* 合計行出力初期化処理
+PERFORM FRM_INIT_TOTAL.
+
+* ALV設定内容取得
+CALL FUNCTION 'REUSE_ALV_LIST_LAYOUT_INFO_GET'
+IMPORTING
+ES_LAYOUT                  = WK_LAYOUT
+ET_FIELDCAT                = WK_FIELDCAT
+ET_SORT                    = WK_SORT
+ET_FILTER                  = WK_FILTER
+ES_LIST_SCROLL             = WK_LIST_SCROOLL
+ES_VARIANT                 = WK_VARIANT
+E_WIDTH                    = WK_WIDTH
+ET_MARKED_COLUMNS          = WK_MARKED_COLUMNS
+ET_FILTERED_ENTRIES        = WK_FILTERED_ENTRIES
+ET_FILTERED_ENTRIES_HEADER = WK_FILTERED_ENTRIES_HEADER
+ET_FILTERED_ENTRIES_ITEM   = WK_FILTERED_ENTRIES_ITEM
+EXCEPTIONS
+NO_INFOS                   = 1
+PROGRAM_ERROR              = 2
+OTHERS                     = 3.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+* 合計項目の集計
+LOOP AT GT_WRITE INTO GF_WRITE.
+G_ZURIYSN  = G_ZURIYSN  + GF_WRITE-ZURIYSN_R.  "売上予算
+G_ZURIJSK  = G_ZURIJSK  + GF_WRITE-ZURIJSK_R.  "売上実績
+G_ZARAYSN  = G_ZARAYSN  + GF_WRITE-ZARAYSN_R.  "粗利予算
+G_ZARAJSK  = G_ZARAJSK  + GF_WRITE-ZARAJSK_R.  "粗利実績
+G_ZURIYTI  = G_ZURIYTI  + GF_WRITE-ZURIYTI_R.  "売上予定
+G_ZARAYTI  = G_ZARAYTI  + GF_WRITE-ZARAYTI_R.  "粗利予定
+G_ZURUIYSN = G_ZURUIYSN + GF_WRITE-ZURUIYSN_R. "売上累計予算
+G_ZURUIJSK = G_ZURUIJSK + GF_WRITE-ZURUIJSK_R. "売上累計実績
+G_ZARUIYSN = G_ZARUIYSN + GF_WRITE-ZARUIYSN_R. "粗利累計予算
+G_ZARUIJSK = G_ZARUIJSK + GF_WRITE-ZARUIJSK_R. "粗利累計実績
+*---APPEND START PSD T.SAITOH 2002/09/17 ---------------------------*
+*   売上予算、粗利予算（次月）
+G_BUDGET_NEXT = G_BUDGET_NEXT + GF_WRITE-BUDGET_NEXT_R.
+G_PROFIT_NEXT = G_PROFIT_NEXT + GF_WRITE-PROFIT_NEXT_R.
+*---APPEND END   PSD T.SAITOH 2002/09/17 ---------------------------*
+ENDLOOP .
+
+* 出力内部TBLのレコード取得
+DESCRIBE TABLE GT_WRITE LINES G_TABLINE.
+
+* 総合計行の有無チェック
+LOOP AT WK_FIELDCAT INTO H_FIELDCAT
+WHERE DO_SUM = 'X'      "合計
+OR    DO_SUM = 'C'      "平均
+OR    DO_SUM = 'A'      "最大
+OR    DO_SUM = 'B'.     "最小
+
+CTR_TOTAL     = 1.
+CTR_TOTAL_NUM = CTR_TOTAL.
+
+* 小計行数の取得
+LOOP AT WK_SORT INTO H_SORT
+WHERE SUBTOT = 'X'.
+CTR_TOTAL_NUM = CTR_TOTAL_NUM + 1.
+ENDLOOP.
+
+EXIT.
+
+ENDLOOP.
+
+FORMAT COLOR COL_TOTAL ON.
+
+* 合計表示設定時のみ表示
+IF CTR_TOTAL <= 0.
+EXIT.
+ENDIF.
+
+* 先頭列数の設定
+G_LINE = SY-LINNO - 1.
+SKIP TO LINE G_LINE.
+
+WK_POS = WK_POS + 1.
+DO CTR_TOTAL_NUM TIMES.
+WK_POS = WK_POS + 1.
+ENDDO.
+
+* 表示項目のみ処理
+LOOP AT WK_FIELDCAT INTO H_FIELDCAT
+WHERE NO_OUT <> 'X'.
+
+CLEAR WK_VALUE.
+CASE H_FIELDCAT-FIELDNAME.
+WHEN 'ZURIYSN'  OR
+'ZURIJSK'  OR
+'ZARAYSN'  OR
+'ZARAJSK'  OR
+'ZURUIJSK' OR
+'ZARUIJSK' OR
+'ZURIYTI'  OR
+'ZARAYTI'  OR
+'ZURUIYSN' OR
+'ZARUIYSN'
+**---APPEND START PSD T.SAITOH 2002/09/17 ---------------------------*
+*           OR 'ZURIYSN2'
+*           OR 'ZARAYSN2'
+**---APPEND END   PSD T.SAITOH 2002/09/17 ---------------------------*
+.
+PERFORM FRM_ALV_TOTAL USING H_FIELDCAT-FIELDNAME
+''.
+WHEN 'ZURIYSN2'.
+
+*---MODIFY START PSD T.SAITOH 2002/09/17 ---------------------------*
+*        PERFORM FRM_ALV_TOTAL USING H_FIELDCAT-FIELDNAME
+*                                    'ZURIYSN'.
+PERFORM FRM_ALV_TOTAL USING  'BUDGET_NEXT'
+''.
+*---MODIFY END   PSD T.SAITOH 2002/09/17 ---------------------------*
+WHEN 'ZARAYSN2'.
+*---MODIFY START PSD T.SAITOH 2002/09/17 ---------------------------*
+*        PERFORM FRM_ALV_TOTAL USING H_FIELDCAT-FIELDNAME
+*                                    'ZARAYSN'.
+PERFORM FRM_ALV_TOTAL USING 'PROFIT_NEXT'
+''.
+*---MODIFY END   PSD T.SAITOH 2002/09/17 ---------------------------*
+
+WHEN OTHERS.
+WK_POS = WK_POS + H_FIELDCAT-OUTPUTLEN.
+WK_POS = WK_POS + 1.
+
+ENDCASE.
+
+ENDLOOP.
+
+FORMAT COLOR OFF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ALV_TOTAL
+*&---------------------------------------------------------------------*
+*       合計出力
+*----------------------------------------------------------------------*
+FORM FRM_ALV_TOTAL USING VALUE(P_NAME)
+VALUE(P_NAME2).
+
+DATA: L_NAME(128) TYPE C.
+FIELD-SYMBOLS <FS_NAME>.
+
+* 項目名設定
+IF H_FIELDCAT-DO_SUM = 'A' OR
+H_FIELDCAT-DO_SUM = 'B'.
+CONCATENATE 'GF_WRITE-'
+P_NAME
+INTO      L_NAME.
+ELSE.
+IF P_NAME2 IS INITIAL.
+CONCATENATE 'G_'
+P_NAME
+INTO      L_NAME.
+ELSE.
+CONCATENATE 'G_'
+P_NAME2
+INTO      L_NAME.
+ENDIF.
+ENDIF.
+
+ASSIGN (L_NAME) TO <FS_NAME>.
+
+CASE H_FIELDCAT-DO_SUM.
+WHEN 'A'.    " 最大
+SORT GT_WRITE DESCENDING BY (P_NAME).
+READ TABLE GT_WRITE INTO GF_WRITE INDEX 1.
+WK_MAX = <FS_NAME>.
+WRITE AT: WK_POS(H_FIELDCAT-OUTPUTLEN) WK_MAX.
+
+WHEN 'B'.    " 最小
+SORT GT_WRITE ASCENDING BY (P_NAME).
+READ TABLE GT_WRITE INTO GF_WRITE INDEX 1.
+WK_MIN = <FS_NAME>.
+WRITE AT: WK_POS(H_FIELDCAT-OUTPUTLEN) WK_MIN.
+
+WHEN 'X'.    " 合計
+WK_SUM = <FS_NAME> / 1000.
+WRITE AT: WK_POS(H_FIELDCAT-OUTPUTLEN) WK_SUM.
+
+WHEN 'C'.    " 平均
+WK_AVG = ( <FS_NAME> / G_TABLINE ) / 1000.
+WRITE AT: WK_POS(H_FIELDCAT-OUTPUTLEN) WK_AVG.
+
+WHEN OTHERS.
+ENDCASE.
+
+WK_POS = WK_POS + H_FIELDCAT-OUTPUTLEN.
+WK_POS = WK_POS + 1.
+
+ENDFORM.                    " FRM_ALV_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  FRM_INIT_TOTAL
+*&---------------------------------------------------------------------*
+*       合計行出力初期化処理
+*----------------------------------------------------------------------*
+FORM FRM_INIT_TOTAL.
+
+* 設定列数初期化
+WK_POS = 1.
+
+* 合計項目の初期化
+CLEAR: G_ZURIYSN,
+G_ZURIJSK,
+G_ZARAYSN,
+G_ZARAJSK,
+G_ZURIYTI,
+G_ZARAYTI,
+G_ZURUIYSN,
+G_ZURUIJSK,
+G_ZARUIYSN,
+G_ZARUIJSK.
+*---APPEND START PSD T.SAITOH 2002/09/17 ---------------------------*
+CLEAR: G_BUDGET_NEXT,"売上予算（次月）
+G_PROFIT_NEXT."粗利予算（次月）
+*---APPEND END   PSD T.SAITOH 2002/09/17 ---------------------------*
+
+* フィールドカタログヘッダ初期化
+CLEAR H_FIELDCAT.
+ENDFORM.                    " FRM_INIT_TOTAL
+* ↑APPEND 2002/02/06 PSD.M.Arai 合計誤差修正対応
+
+*---APPEND START PSD T.SAITOH 2002/09/14 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  frm_mon_plus_one
+*&---------------------------------------------------------------------*
+*       年月のプラス１ヶ月
+*----------------------------------------------------------------------*
+*      -->P_PR_SPMON  text
+*      <--P_G_SPMON  text
+*----------------------------------------------------------------------*
+FORM FRM_MON_PLUS_ONE USING    P_PR_SPMON
+CHANGING P_G_SPMON.
+
+CASE P_PR_SPMON+4(2).
+WHEN 12.
+P_G_SPMON+0(4) = P_PR_SPMON+0(4) + 1.
+P_G_SPMON+4(2) = '01'.
+WHEN OTHERS.
+P_G_SPMON = P_PR_SPMON + 1.
+ENDCASE.
+
+ENDFORM.                    " frm_mon_plus_one
+*---APPEND END   PSD T.SAITOH 2002/09/14 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SEL_ZS0030
+*&---------------------------------------------------------------------*
+*       レポートコード抽出処理
+*----------------------------------------------------------------------*
+FORM FRM_SEL_ZS0030.
+
+REFRESH GT_ZS0030.
+SELECT ZKEY    "キー
+REPCD   "レポートコード
+INTO TABLE GT_ZS0030
+FROM ZS0030
+FOR ALL ENTRIES IN GT_EIGYOUSHO
+WHERE ZKEY = GT_EIGYOUSHO-VKBUR.
+
+CASE SY-SUBRC.
+WHEN 0 OR 4.
+WHEN OTHERS.
+*     システムエラー
+MESSAGE A603(Z1) WITH SY-REPID CNS_TBL_003 SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_SEL_ZS0030

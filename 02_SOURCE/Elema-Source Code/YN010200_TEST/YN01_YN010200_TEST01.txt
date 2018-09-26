@@ -1,0 +1,1607 @@
+*&---------------------------------------------------------------------*
+*&  INCLUDE           YN01_YN010200
+*&                    YN010200起動
+*&---------------------------------------------------------------------*
+
+* 内部テーブル
+DATA: BEGIN OF TBL_OBJECT OCCURS 0,    " 対象データ
+TDNAME     LIKE STXH-TDNAME,       " 名称
+OWNEXITDOC LIKE YN130-OWNEXITDOC,  " 自社データ取込EXIT番号
+END OF TBL_OBJECT.
+
+DATA: BEGIN OF TBL_ERRLOG OCCURS 0,    " エラーログ
+GJAHR(4)    TYPE C,          " 会計年度
+SLPDOC(10)  TYPE C,          " 伝票番号
+DTLDOC(6)   TYPE C,          " 伝票明細番号
+VRFCTON(10) TYPE C,          " 得意先コード
+BUKRS(4)    TYPE C,          " 会社コード
+ERR(128)    TYPE C,          " ERR
+END OF TBL_ERRLOG.
+
+DATA: BEGIN OF TBL_BUKRS OCCURS 0,    " 会社コード
+BUKRS    LIKE T001-BUKRS,         " 会社コード
+END OF TBL_BUKRS.
+
+DATA: BEGIN OF TBL_KNB1 OCCURS 0,     " 得意先
+BUKRS    LIKE KNB1-BUKRS,         " 会社コード
+KUNNR    LIKE KNB1-KUNNR,         " 得意先コード
+WAERS    LIKE KNVV-WAERS,         " 通貨コード
+END OF TBL_KNB1.
+
+DATA: BEGIN OF TBL_LFB1 OCCURS 0,     " 仕入先
+BUKRS    LIKE LFB1-BUKRS,         " 会社コード
+LIFNR    LIKE LFB1-LIFNR,         " 仕入先コード
+WAERS    LIKE LFM1-WAERS,         " 通貨コード
+END OF TBL_LFB1.
+
+DATA: BEGIN OF TBL_TDNAME OCCURS 0,    " TDNAME
+TDNAME    LIKE STXH-TDNAME,        " TDNAME
+END OF TBL_TDNAME.
+*-- 20090113 INS STA
+*-- 自社データ一括挿入用内部テーブル定義
+DATA: WA_YN120 TYPE YN120,
+TBL_YN120_INS TYPE STANDARD TABLE OF YN120,
+WA_YN220 TYPE YN220,
+TBL_YN220_INS TYPE STANDARD TABLE OF YN220.
+*-- 20090113 INS END
+* 変数定義
+DATA: G_READ_COUNT    TYPE I,           " 読込件数
+G_INSERT_COUNT  TYPE I,           " 登録件数
+G_UPDATE_COUNT  TYPE I,           " 更新件数
+G_OUT_COUNT     TYPE I,           " 対象外件数
+G_ERR_COUNT     TYPE I,           " エラー件数
+G_ERR_FLG       TYPE C VALUE 'X', " エラーフラグ
+G_TBLID(5)      TYPE C.           " 処理テーブル
+
+TYPES: TYP_T_TEXTPOOL TYPE STANDARD TABLE OF TEXTPOOL.
+DATA: T_TEXTPOOL TYPE TYP_T_TEXTPOOL.
+
+* YN010200メイン
+INCLUDE YN01_YN010200_0000_TEST.
+*elematec 対応 INSERT START 2011/12/08
+INCLUDE ZN090100.
+DATA W_LOCK    TYPE TYP_LOCK.
+DATA LW_LOCK   TYPE TYP_LOCK.
+DATA LW_USER   TYPE SY-MSGV1.
+DATA: BEGIN OF TBL_WYT3 OCCURS 0,     " 取引先機能
+LIFNR    LIKE WYT3-LIFNR,         " 仕入先コード
+LIFN2    LIKE WYT3-LIFN2,         " 他の仕入先への参照
+END OF TBL_WYT3.
+TYPES: BEGIN OF TYPE_LOCK,
+BUKRS TYPE LFB1-BUKRS,          " 会社コード
+LIFNR TYPE LFB1-LIFNR,          " 仕入先コード
+END    OF TYPE_LOCK.
+DATA : T_LOCK TYPE TABLE OF TYPE_LOCK,
+WA_LOCK TYPE TYPE_LOCK.
+*elematec 対応 INSERT END   2011/12/08
+*elematec 対応 INSERT START 2012/01/16
+DATA: BEGIN OF TBL_KNVP OCCURS 0,     " 取引先機能
+KUNNR    LIKE KNVP-KUNNR,         " 得意先コード
+KUNN2    LIKE KNVP-KUNN2,         " 取引先の得意先コード
+END OF TBL_KNVP.
+TYPES:BEGIN OF TY_LOCK,
+BUKRS    TYPE BUKRS,                  "会社コード
+LIFNR    TYPE YNLIFNR,                "仕入先コード
+END   OF TY_LOCK.
+DATA: GT_LOCK_WORK TYPE STANDARD TABLE OF TY_LOCK,
+GW_LOCK_WORK TYPE TY_LOCK.
+*elematec 対応 INSERT END   2012/01/16
+
+*&---------------------------------------------------------------------*
+*&      Form  YN010200_MAIN
+*&---------------------------------------------------------------------*
+*       MAIN
+*----------------------------------------------------------------------*
+FORM YN010200_MAIN.
+
+READ TEXTPOOL 'YN010200' INTO T_TEXTPOOL LANGUAGE SY-LANGU.
+
+* [売上照合]が選択された場合
+IF P_SALES = 'X'.
+*elematec 対応 INSERT START 2012/01/16
+*得意先発注番号、受注番号コンバート
+PERFORM F_SALES_LIST23_LIST33.
+*
+IF NOT P_VRFCT1[] IS INITIAL.
+PERFORM GET_KNVP.
+ENDIF.
+*elematec 対応 INSERT END   2012/01/16
+*elematec 対応 UPDATE START 2012/01/16
+* 得意先マスタの取得
+*     PERFORM GET_KNB1.
+PERFORM GET_KNB1_KNVV.
+*elematec 対応 UPDATE END   2012/01/16
+ENDIF.
+* [仕入照合]が選択された場合
+IF P_PRCHS = 'X'.
+* 仕入先マスタの取得
+*elematec 対応 INSERT START 2011/12/08
+*発注番号、発注明細番号コンバート
+PERFORM F_PRCHS_LIST23_LIST33.
+*
+IF NOT P_VRFCT1[] IS INITIAL.
+PERFORM GET_WYT3.
+ENDIF.
+*elematec 対応 INSERT END   2011/12/08
+*elematec 対応 UPDATE START 2011/12/08
+* 仕入先マスタの取得
+*    PERFORM GET_LFB1.
+PERFORM GET_LFB1_WYT3.
+*elematec 対応 UPDATE END 2011/12/08
+ENDIF.
+
+* EXIT番号の取得
+PERFORM GET_EXIT.
+
+* EXIT番号により処理を行う
+PERFORM EXIT_CASE.
+*-- 20090113 MOV STA INSERT処理をEXIT_CASE下から移動
+* 自社データテーブル更新を行う
+PERFORM EDIT_TABLE.
+*-- 20090113 MOV END
+* コミット
+COMMIT WORK.
+
+* テーブルのアンロック
+PERFORM UNLOCK_TABLE.
+
+* 結果出力
+PERFORM WRITE_LOG.
+CLEAR G_ERR_FLG.
+
+ENDFORM.                    "  YN010200_MAIN
+
+
+**&---------------------------------------------------------------------
+**
+**&      Form  LOCK_TABLE
+**&---------------------------------------------------------------------
+**
+**       テーブルのロック
+**----------------------------------------------------------------------
+**
+*FORM LOCK_TABLE .
+*
+*  DATA: L_USER LIKE SY-MSGV1.
+*  IF P_SALES = 'X'.
+** [売上照合]が選択された場合
+** テーブルYN120のロック
+*    LOOP AT TBL_OBJECT.
+*      CALL FUNCTION 'ENQUEUE_EY_YN120'
+*        EXPORTING
+*          VRFCTON = TBL_OBJECT-TDNAME+0(10)
+*          BUKRS   = TBL_OBJECT-TDNAME+10(4)
+*        EXCEPTIONS
+*          FOREIGN_LOCK   = 1
+*          SYSTEM_FAILURE = 2
+*          OTHERS         = 3.
+*      L_USER = SY-MSGV1.
+*      IF SY-SUBRC <> 0.
+*        MESSAGE I756 WITH TEXT-M12 L_USER.
+** 20080122 STOP命令置き換え <<<
+*        LEAVE LIST-PROCESSING.
+**        STOP.
+** 20080122 <<<
+*      ENDIF.
+**-- 20090113 INS STA
+**-- 会社コード、取引先コードのキー項目を持つ内部テーブルを作成
+*     TBL_KEY-BUKRS = TBL_OBJECT-TDNAME+10(4).
+*     TBL_KEY-KUNNR = TBL_OBJECT-TDNAME+0(10).
+*     APPEND TBL_KEY.
+**-- 20090113 INS END
+*    ENDLOOP.
+*  ENDIF.
+*  IF P_PRCHS = 'X'.
+** [仕入照合]が選択された場合
+** テーブルYN220のロック
+*    LOOP AT TBL_OBJECT.
+*      CALL FUNCTION 'ENQUEUE_EY_YN220'
+*        EXPORTING
+*          VRFCTON = TBL_OBJECT-TDNAME+0(10)
+*          BUKRS   = TBL_OBJECT-TDNAME+10(4)
+*        EXCEPTIONS
+*          FOREIGN_LOCK   = 1
+*          SYSTEM_FAILURE = 2
+*          OTHERS         = 3.
+*      L_USER = SY-MSGV1.
+*      IF SY-SUBRC <> 0.
+*        MESSAGE I756 WITH TEXT-M16 L_USER.
+** 20080122 STOP命令置き換え <<<
+*        LEAVE LIST-PROCESSING.
+**        STOP.
+** 20080122 <<<
+*      ENDIF.
+**-- 20090113 INS STA
+**-- 会社コード、取引先コードのキー項目を持つ内部テーブルを作成
+*     TBL_KEY-BUKRS = TBL_OBJECT-TDNAME+10(4).
+*     TBL_KEY-KUNNR = TBL_OBJECT-TDNAME+0(10).
+*     APPEND TBL_KEY.
+**-- 20090113 INS END
+*    ENDLOOP.
+*  ENDIF.
+*
+*ENDFORM.                    " LOCK_TABLE
+*&---------------------------------------------------------------------*
+*&      Form  GET_EXIT
+*&---------------------------------------------------------------------*
+*       EXIT番号の取得
+*----------------------------------------------------------------------*
+FORM GET_EXIT .
+DATA: L_TBLID(5)   TYPE C.
+*-- 20090113 INS STA
+*-- 照合マスタ一括取得用内部テーブル
+TYPES:BEGIN OF L_T_YNX30,
+VRFCTON    TYPE YN230-VRFCTON,     "取引先コード
+BUKRS      TYPE YN230-BUKRS,       "会社コード
+OWNEXITDOC TYPE YN230-OWNEXITDOC,  "自社データ取込EXIT番号
+END OF L_T_YNX30.
+DATA: L_WA_YNX30 TYPE L_T_YNX30,
+L_TBL_YNX30 TYPE HASHED TABLE OF L_T_YNX30
+WITH UNIQUE KEY VRFCTON BUKRS.
+*-- 20090113 INS END
+PERFORM GET_TDNAME.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+SELECT TDNAME
+INTO CORRESPONDING FIELDS OF TABLE TBL_OBJECT
+FROM STXH
+FOR ALL ENTRIES IN TBL_TDNAME
+WHERE TDOBJECT = 'KNB1'
+AND TDID = 'YN01'
+AND TDNAME = TBL_TDNAME-TDNAME.
+L_TBLID = 'YN130'.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+SELECT TDNAME
+INTO CORRESPONDING FIELDS OF TABLE TBL_OBJECT
+FROM STXH
+FOR ALL ENTRIES IN TBL_TDNAME
+WHERE TDOBJECT = 'LFB1'
+AND TDID = 'YN01'
+AND TDNAME = TBL_TDNAME-TDNAME.
+L_TBLID = 'YN230'.
+ENDIF.
+IF SY-SUBRC <> 0.
+MESSAGE I755.
+* 20080122 STOP命令置き換え <<<
+LEAVE LIST-PROCESSING.
+*    STOP.
+* 20080122 <<<
+ENDIF.
+
+* テーブルのロック
+*elematec 対応 USDATE START 2011/12/08
+* PERFORM LOCK_TABLE.
+PERFORM LOCK_TBL_YN010200.
+*
+LOOP AT TBL_OBJECT.
+TBL_KEY-BUKRS = TBL_OBJECT-TDNAME+10(4).
+TBL_KEY-KUNNR = TBL_OBJECT-TDNAME+0(10).
+APPEND TBL_KEY.
+ENDLOOP.
+*elematec 対応 UPDATE END   2011/12/08
+
+*-- 20090113 INS STA
+REFRESH:L_TBL_YNX30.
+* 照合マスタの一括取得
+SELECT VRFCTON BUKRS OWNEXITDOC
+INTO TABLE L_TBL_YNX30
+FROM (L_TBLID)
+FOR ALL ENTRIES IN TBL_KEY
+WHERE VRFCTON = TBL_KEY-KUNNR
+AND BUKRS   = TBL_KEY-BUKRS
+*elematec 対応 UPDATE START 2011/12/08
+*         OR VRFCTON = 'DEFAULT'.
+OR  VRFCTON LIKE 'D-%'.
+*elematec 対応 UPDATE END   2011/12/08
+
+*-- 20090113 INS END
+LOOP AT TBL_OBJECT.
+* TDNAME
+*-- 20090113 UPD STA SELECT SINGLE から READ TABLE に変更
+CLEAR:L_WA_YNX30.
+READ TABLE L_TBL_YNX30 INTO L_WA_YNX30
+WITH TABLE KEY VRFCTON = TBL_OBJECT-TDNAME+0(10)
+BUKRS = TBL_OBJECT-TDNAME+10(4).
+IF SY-SUBRC <> 0.
+*elematec 対応 UPDATE START 2011/12/08
+DATA L_VRFCTON TYPE YN130-VRFCTON.
+* DEFAULT
+*      READ TABLE L_TBL_YNX30 INTO L_WA_YNX30
+*           WITH TABLE KEY VRFCTON = 'DEFAULT'
+*                            BUKRS = TBL_OBJECT-TDNAME+10(4).
+*elematec 対応 UPDATE END   2011/12/08
+IF P_SALES = 'X'.
+READ TABLE TBL_KNB1 WITH KEY BUKRS = TBL_OBJECT-TDNAME+10(4)
+KUNNR = TBL_OBJECT-TDNAME+0(10)
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+CONCATENATE 'D-' TBL_KNB1-WAERS INTO L_VRFCTON.
+READ TABLE L_TBL_YNX30 INTO L_WA_YNX30 WITH TABLE KEY
+VRFCTON = L_VRFCTON
+BUKRS   = TBL_OBJECT-TDNAME+10(4).
+IF SY-SUBRC <> 0.
+MESSAGE I754 WITH L_TBLID.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ELSE.
+MESSAGE I754 WITH L_TBLID.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+IF P_PRCHS = 'X'.
+READ TABLE TBL_LFB1 WITH KEY BUKRS = TBL_OBJECT-TDNAME+10(4)
+LIFNR = TBL_OBJECT-TDNAME+0(10)
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+CONCATENATE 'D-' TBL_LFB1-WAERS INTO L_VRFCTON.
+READ TABLE L_TBL_YNX30 INTO L_WA_YNX30 WITH TABLE KEY
+VRFCTON = L_VRFCTON
+BUKRS   = TBL_OBJECT-TDNAME+10(4).
+IF SY-SUBRC <> 0.
+MESSAGE I754 WITH L_TBLID.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ELSE.
+MESSAGE I754 WITH L_TBLID.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+ENDIF.
+TBL_OBJECT-OWNEXITDOC = L_WA_YNX30-OWNEXITDOC.
+MODIFY TBL_OBJECT.
+ENDLOOP.
+
+ENDFORM.                    " GET_EXIT
+
+*&---------------------------------------------------------------------*
+*&      Form  SET_ERRLOG
+*&---------------------------------------------------------------------*
+*       SET ERROR LOG
+*----------------------------------------------------------------------*
+*      -->P_GJAHR   会計年度
+*      -->P_SLPDOC  伝票番号
+*      -->P_DTLDOC  伝票明細番号
+*      -->P_VRFCTON 得意先コード
+*      -->P_BUKRS   会社コード
+*      -->P_ERR     ERR
+*----------------------------------------------------------------------*
+FORM SET_ERRLOG  USING    P_GJAHR
+P_SLPDOC
+P_DTLDOC
+P_VRFCTON
+P_BUKRS
+P_ERR.
+
+DATA: LW_ERRLOG LIKE TBL_ERRLOG.
+
+LW_ERRLOG-GJAHR   = P_GJAHR.
+LW_ERRLOG-SLPDOC  = P_SLPDOC.
+LW_ERRLOG-DTLDOC  = P_DTLDOC.
+LW_ERRLOG-VRFCTON = P_VRFCTON.
+LW_ERRLOG-BUKRS   = P_BUKRS.
+LW_ERRLOG-ERR     = P_ERR.
+
+APPEND LW_ERRLOG TO TBL_ERRLOG.
+
+ENDFORM.                    " SET_ERRLOG
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK_TABLE
+*&---------------------------------------------------------------------*
+*       テーブルのアンロック
+*----------------------------------------------------------------------*
+FORM UNLOCK_TABLE .
+
+DATA: L_TBLID(5) TYPE C.
+
+IF P_SALES = 'X'.
+*elematec 対応 UPDATE START 2012/01/16
+CALL FUNCTION 'DEQUEUE_ALL'
+*      EXPORTING
+*        _SYNCHRON       = ' '
+.
+*    L_TBLID = 'YN120'.
+** [売上照合]が選択された場合
+** テーブルYN120のアンロック
+*    LOOP AT TBL_OBJECT.
+*      CALL FUNCTION 'DEQUEUE_EY_YN120'
+*        EXPORTING
+*          VRFCTON = TBL_OBJECT-TDNAME+0(10)
+*          BUKRS   = TBL_OBJECT-TDNAME+10(4)
+*        EXCEPTIONS
+*          FOREIGN_LOCK   = 1
+*          SYSTEM_FAILURE = 2
+*          OTHERS         = 3.
+*      IF SY-SUBRC <> 0.
+*        ROLLBACK WORK.
+*        MESSAGE I763 WITH L_TBLID.
+** 20080122 STOP命令置き換え <<<
+*        LEAVE LIST-PROCESSING.
+**        STOP.
+** 20080122 <<<
+*      ENDIF.
+*    ENDLOOP.
+*elematec 対応 UPDATE END   2012/01/16
+
+ENDIF.
+IF P_PRCHS = 'X'.
+*elematec 対応 UPDATE START 2011/12/08
+
+* [仕入照合]が選択された場合
+CALL FUNCTION 'DEQUEUE_ALL'
+*      EXPORTING
+*        _SYNCHRON       = ' '
+.
+
+** テーブルYN220のアンロック
+*    LOOP AT TBL_OBJECT.
+*      L_TBLID = 'YN220'.
+*      CALL FUNCTION 'DEQUEUE_EY_YN220'
+*        EXPORTING
+*          VRFCTON = TBL_OBJECT-TDNAME+0(10)
+*          BUKRS   = TBL_OBJECT-TDNAME+10(4)
+*        EXCEPTIONS
+*          FOREIGN_LOCK   = 1
+*          SYSTEM_FAILURE = 2
+*          OTHERS         = 3.
+*      IF SY-SUBRC <> 0.
+*        ROLLBACK WORK.
+*        MESSAGE I763 WITH L_TBLID.
+** 20080122 STOP命令置き換え <<<
+*        LEAVE LIST-PROCESSING.
+**        STOP.
+** 20080122 <<<
+*      ENDIF.
+*    ENDLOOP.
+*elematec 対応 UPDATE END   2011/12/08
+ENDIF.
+
+ENDFORM.                    " UNLOCK_TABLE
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_LOG
+*&---------------------------------------------------------------------*
+*       結果出力
+*----------------------------------------------------------------------*
+FORM WRITE_LOG .
+
+IF SY-REPID <> 'YN010200'.
+WRITE: / TEXT-007.
+ULINE.
+ENDIF.
+IF G_ERR_COUNT > 0.
+*   取引先コード 取引先コード 会計年度 伝票番号 明細番号 エラー内容
+WRITE:  4(12) TEXT-M17,18(10) TEXT-M18, 29(8) TEXT-M19,
+40(10) TEXT-M20,52(8) TEXT-M21,61(128) TEXT-M22.
+ULINE.
+ENDIF.
+DATA: L_LINE TYPE I.
+LOOP AT TBL_ERRLOG.
+WRITE:/4(12)   TBL_ERRLOG-VRFCTON,
+18(10)  TBL_ERRLOG-BUKRS,
+29(8)   TBL_ERRLOG-GJAHR,
+40(10)  TBL_ERRLOG-SLPDOC,
+52(8)   TBL_ERRLOG-DTLDOC,
+61(128) TBL_ERRLOG-ERR.
+L_LINE = SY-TABIX MOD 36.
+IF L_LINE = 0 AND SY-TABIX >= 36.
+NEW-PAGE.
+ENDIF.
+ENDLOOP.
+
+IF G_ERR_COUNT > 0.
+SKIP.
+SKIP.
+ENDIF.
+SKIP.
+* 処理テーブル:
+WRITE: 4 TEXT-M23,G_TBLID.
+SKIP.
+
+* 読込件数:  件
+WRITE:/4 TEXT-M24, 29(8) G_READ_COUNT  , TEXT-M29.
+* 登録件数:  件
+WRITE:/4 TEXT-M25, 29(8) G_INSERT_COUNT, TEXT-M29.
+* 更新件数:  件
+WRITE:/4 TEXT-M26, 29(8) G_UPDATE_COUNT, TEXT-M29.
+* 対象外件数:  件
+WRITE:/4 TEXT-M27, 29(8) G_OUT_COUNT   , TEXT-M29.
+* エラー件数:  件
+WRITE:/4 TEXT-M28, 29(8) G_ERR_COUNT   , TEXT-M29.
+
+IF G_ERR_COUNT > 0.
+MESSAGE I759.
+* 20080122 STOP命令置き換え <<<
+LEAVE LIST-PROCESSING.
+*    STOP.
+* 20080122 <<<
+ENDIF.
+
+ENDFORM.                    " WRITE_LOG
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNB1
+*&---------------------------------------------------------------------*
+*       得意先マスタの取得
+*----------------------------------------------------------------------*
+FORM GET_KNB1 .
+
+DATA: LS_TEXTPOOL LIKE LINE OF T_TEXTPOOL.
+*2011/12/08 UPDATE START
+*  SELECT
+*    BUKRS            " 会社コード
+*    KUNNR            " 得意先コード
+*  INTO CORRESPONDING FIELDS OF TABLE TBL_KNB1
+*  FROM KNB1
+*  WHERE KUNNR IN P_VRFCT1
+*    AND BUKRS IN P_BUKRS1.
+SELECT
+KNB1~BUKRS            " 会社コード
+KNB1~KUNNR            " 得意先コード
+KNVV~WAERS            " 通貨コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_KNB1
+FROM KNB1
+JOIN KNVV ON KNVV~KUNNR = KNB1~KUNNR
+WHERE KNB1~KUNNR IN P_VRFCT1
+AND KNB1~BUKRS IN P_BUKRS1
+AND KNVV~VKORG = P_VKORG
+AND KNVV~VTWEG = P_VTWEG
+AND KNVV~SPART = P_SPART.
+*2011/12/08 UPDATE END
+IF SY-SUBRC <> 0.
+*得意先コード取得エラー
+READ TABLE T_TEXTPOOL INTO LS_TEXTPOOL
+WITH KEY ID = 'I' KEY = 'M01'.
+MESSAGE I754 WITH LS_TEXTPOOL-ENTRY.
+* 20080122 STOP命令置き換え <<<
+LEAVE LIST-PROCESSING.
+*    STOP.
+* 20080122 <<<
+
+ENDIF.
+*
+SORT TBL_KNB1 BY BUKRS KUNNR.
+*
+ENDFORM.                    " GET_KNB1
+*&---------------------------------------------------------------------*
+*&      Form  GET_LFB1
+*&---------------------------------------------------------------------*
+*       仕入先マスタの取得
+*----------------------------------------------------------------------*
+FORM GET_LFB1 .
+
+DATA: LS_TEXTPOOL LIKE LINE OF T_TEXTPOOL.
+*elematec 対応 UPDATE START 2011/12/08
+*  SELECT
+*    BUKRS            " 会社コード
+*    LIFNR            " 仕入先コード
+*  INTO CORRESPONDING FIELDS OF TABLE TBL_LFB1
+*  FROM LFB1
+*  WHERE LIFNR IN P_VRFCT1
+*    AND BUKRS IN P_BUKRS1.
+SELECT
+LFB1~BUKRS            " 会社コード
+LFB1~LIFNR            " 仕入先コード
+LFM1~WAERS            " 通貨コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_LFB1
+FROM LFB1
+JOIN LFM1 ON LFM1~LIFNR = LFB1~LIFNR
+WHERE LFB1~LIFNR IN P_VRFCT1
+AND LFB1~BUKRS IN P_BUKRS1
+AND LFM1~EKORG = P_EKORG.
+*elematec 対応 UPDATE END   2011/12/08
+IF SY-SUBRC <> 0.
+*仕入先コード取得エラー
+READ TABLE T_TEXTPOOL INTO LS_TEXTPOOL
+WITH KEY ID = 'I' KEY = 'M02'.
+MESSAGE I754 WITH LS_TEXTPOOL-ENTRY.
+* 20080122 STOP命令置き換え <<<
+LEAVE LIST-PROCESSING.
+*    STOP.
+* 20080122 <<<
+ENDIF.
+*
+SORT TBL_LFB1 BY BUKRS LIFNR.
+*
+ENDFORM.                    " GET_LFB1
+*&---------------------------------------------------------------------*
+*&      Form  GET_TDNAME
+*&---------------------------------------------------------------------*
+*       TDNAME
+*----------------------------------------------------------------------*
+FORM GET_TDNAME .
+
+DATA: LW_TDNAME LIKE TBL_TDNAME.
+
+* [売上照合]が選択された場合
+IF P_SALES = 'X'.
+LOOP AT TBL_KNB1.
+LW_TDNAME-TDNAME+0(10) = TBL_KNB1-KUNNR.
+LW_TDNAME-TDNAME+10(4) = TBL_KNB1-BUKRS.
+APPEND LW_TDNAME TO TBL_TDNAME.
+ENDLOOP.
+ENDIF.
+* [仕入照合]が選択された場合
+IF P_PRCHS = 'X'.
+LOOP AT TBL_LFB1.
+LW_TDNAME-TDNAME+0(10) = TBL_LFB1-LIFNR.
+LW_TDNAME-TDNAME+10(4) = TBL_LFB1-BUKRS.
+APPEND LW_TDNAME TO TBL_TDNAME.
+ENDLOOP.
+ENDIF.
+*elematec 対応 DELETE START 2011/12/08
+**-- 20090113 INS STA
+*  FREE : TBL_KNB1,
+*         TBL_LFB1.
+**-- 20090113 INS END
+*elematec 対応 DELETE END   2011/12/08
+
+ENDFORM.                    " GET_TDNAME
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_TABLE
+*&---------------------------------------------------------------------*
+*       自社データテーブル更新
+*----------------------------------------------------------------------*
+FORM EDIT_TABLE .
+
+IF P_SALES = 'X'."売上照合
+*-- 20090113 UPD STA
+*-- 新規登録データがある場合はＩＮＳＥＲＴ
+* conversion 対応 2010/12/13 UPD >>>
+*    IF TBL_YN120_INS[] IS NOT INITIAL.
+IF NOT TBL_YN120_INS[] IS INITIAL.
+* conversion 対応 2010/12/13 UPD <<<
+INSERT YN120 FROM TABLE TBL_YN120_INS
+ACCEPTING DUPLICATE KEYS.
+IF SY-SUBRC <> 0. "更新エラーはロールバック
+ROLLBACK WORK.
+MESSAGE I758 WITH TEXT-M12.
+*          STOP.
+* 20080122 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+
+*-- 使用済み内部テーブルの開放
+FREE:TBL_YN120_INS.
+ENDIF.
+
+IF P_PRCHS = 'X'."仕入照合
+*-- 新規登録データがある場合はＩＮＳＥＲＴ
+* conversion 対応 2010/12/13 UPD >>>
+*    IF TBL_YN220_INS[] IS NOT INITIAL.
+IF NOT TBL_YN220_INS[] IS INITIAL.
+* conversion 対応 2010/12/13 UPD <<<
+INSERT YN220 FROM TABLE TBL_YN220_INS
+ACCEPTING DUPLICATE KEYS.
+IF SY-SUBRC <> 0. "更新エラーはロールバック
+ROLLBACK WORK.
+MESSAGE I758 WITH TEXT-M16.
+*          STOP.
+* 20080122 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+
+*-- 使用済み内部テーブルの開放
+FREE:TBL_YN220_INS.
+
+ENDIF.
+
+ENDFORM.                    " EDIT_TABLE
+*&---------------------------------------------------------------------*
+*&      Form  GET_LFB1_LFM1
+*&---------------------------------------------------------------------*
+*       仕入先マスタの取得
+*----------------------------------------------------------------------*
+FORM GET_LFB1_LFM1.
+*
+DATA: LS_TEXTPOOL LIKE LINE OF T_TEXTPOOL.
+
+IF SY-SUBRC <> 0.
+*仕入先コード取得エラー
+READ TABLE T_TEXTPOOL INTO LS_TEXTPOOL
+WITH KEY ID = 'I' KEY = 'M02'.
+MESSAGE I754 WITH LS_TEXTPOOL-ENTRY.
+* 20080122 STOP命令置き換え <<<
+LEAVE LIST-PROCESSING.
+*    STOP.
+* 20080122 <<<
+ENDIF.
+*
+ENDFORM.                    " GET_LFB1_LFM1
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_TABLR_901_902
+*&---------------------------------------------------------------------*
+*       901,902のロック
+*----------------------------------------------------------------------*
+*
+FORM LOCK_TABLR_901_902.
+DATA:T_BUKRS TYPE TABLE OF BUKRS,
+W_BUKRS TYPE BUKRS.
+DATA: L_USER LIKE SY-MSGV1.
+CLEAR:TAB_LOCK.
+REFRESH:TAB_LOCK,T_BUKRS.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+* テーブルYN120のロック
+LOOP AT TBL_OBJECT.
+CLEAR:W_LOCK.
+W_LOCK-BUKRS = TBL_OBJECT-TDNAME+10(4).
+W_LOCK-LIFNR = TBL_OBJECT-TDNAME+0(10).
+LOOP AT P_DVSON3.
+W_LOCK-WERKS = P_DVSON3-LOW.
+APPEND W_LOCK TO TAB_LOCK.
+ENDLOOP.
+ENDLOOP.
+PERFORM TABLE_LOCK_902.
+L_USER = SY-MSGV1.
+IF RC_CODE_LOCK <> 0.
+MESSAGE I756 WITH TEXT-M12 L_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*-- 会社コード、取引先コードのキー項目を持つ内部テーブルを作成
+LOOP AT TBL_OBJECT.
+TBL_KEY-BUKRS = TBL_OBJECT-TDNAME+10(4).
+TBL_KEY-KUNNR = TBL_OBJECT-TDNAME+0(10).
+APPEND TBL_KEY.
+ENDLOOP.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+* 仕入先
+*    IF NOT P_VRFCT1[] IS INITIAL.
+*      SELECT
+*            LFB1~BUKRS            " 会社コード
+*            LFB1~LIFNR            " 仕入先コード
+*            INTO CORRESPONDING FIELDS OF TABLE T_LOCK
+*            FROM LFB1
+*            JOIN LFM1 ON LFM1~LIFNR = LFB1~LIFNR
+*            WHERE LFB1~LIFNR IN P_VRFCT1
+*            AND   LFB1~BUKRS IN P_BUKRS1
+*            AND   LFM1~EKORG = P_EKORG.
+*      LOOP AT T_LOCK INTO WA_LOCK.
+*        IF P_DVSON3[] IS INITIAL.
+*            CALL FUNCTION 'ENQUEUE_EZN901'
+*                EXPORTING
+*                  MODE_ZN901           = 'E'
+*                  MANDT                = SY-MANDT
+*                  BUKRS                = WA_LOCK-BUKRS
+*                  LIFNR                = WA_LOCK-LIFNR
+*                EXCEPTIONS
+*                  FOREIGN_LOCK         = 1
+*                  SYSTEM_FAILURE       = 2
+*                  OTHERS               = 3.
+*            L_USER = SY-MSGV1.
+*            IF SY-SUBRC <> 0.
+*              MESSAGE I756 WITH TEXT-M16 L_USER.
+*              LEAVE LIST-PROCESSING.
+*            ENDIF.
+*        ELSE.
+*          LOOP AT TBL_T001W INTO W_T001W.
+*            LW_LOCK-BUKRS = WA_LOCK-BUKRS.
+*            LW_LOCK-LIFNR = WA_LOCK-LIFNR.
+*            LW_LOCK-WERKS = W_T001W-WERKS.
+*            APPEND LW_LOCK TO TAB_LOCK.
+*          ENDLOOP.
+*        ENDIF.
+*      ENDLOOP.
+**
+*      IF NOT P_DVSON3[] IS INITIAL.
+*         PERFORM TABLE_LOCK_901.
+*         L_USER = SY-MSGV1.
+*         IF RC_CODE_LOCK <> 0.
+*           MESSAGE I756 WITH TEXT-M16 L_USER.
+*           LEAVE LIST-PROCESSING.
+*         ENDIF.
+*      ENDIF.
+*    ELSE.
+** 会社コード/プラント
+*      IF P_BUKRS1[] IS INITIAL AND P_DVSON3[] IS INITIAL.
+*          CALL FUNCTION 'ENQUEUE_EZN901'
+*            EXPORTING
+*              MODE_ZN901           = 'E'
+*              MANDT                = SY-MANDT
+*            EXCEPTIONS
+*              FOREIGN_LOCK         = 1
+*              SYSTEM_FAILURE       = 2
+*              OTHERS               = 3.
+*          L_USER = SY-MSGV1.
+*          IF SY-SUBRC <> 0.
+*            MESSAGE I756 WITH TEXT-M16 L_USER.
+*            LEAVE LIST-PROCESSING.
+*          ENDIF.
+*      ENDIF.
+*      IF NOT P_BUKRS1[] IS INITIAL AND P_DVSON3[] IS INITIAL.
+*        LOOP AT TBL_BUKRS.
+*          CALL FUNCTION 'ENQUEUE_EZN901'
+*            EXPORTING
+*              MODE_ZN901           = 'E'
+*              MANDT                = SY-MANDT
+*              BUKRS                = TBL_BUKRS-BUKRS
+*            EXCEPTIONS
+*              FOREIGN_LOCK         = 1
+*              SYSTEM_FAILURE       = 2
+*              OTHERS               = 3.
+*          L_USER = SY-MSGV1.
+*          IF SY-SUBRC <> 0.
+*            MESSAGE I756 WITH TEXT-M16 L_USER.
+*            LEAVE LIST-PROCESSING.
+*          ENDIF.
+*        ENDLOOP.
+*      ENDIF.
+*      IF P_BUKRS1[] IS INITIAL AND NOT P_DVSON3[] IS INITIAL.
+*        LOOP AT TBL_T001W INTO W_T001W.
+*          CALL FUNCTION 'ENQUEUE_EZN901'
+*            EXPORTING
+*              MODE_ZN901           = 'E'
+*              MANDT                = SY-MANDT
+*              WERKS                = W_T001W-WERKS
+*            EXCEPTIONS
+*              FOREIGN_LOCK         = 1
+*              SYSTEM_FAILURE       = 2
+*              OTHERS               = 3.
+*          L_USER = SY-MSGV1.
+*          IF SY-SUBRC <> 0.
+*            MESSAGE I756 WITH TEXT-M16 L_USER.
+*            LEAVE LIST-PROCESSING.
+*          ENDIF.
+*        ENDLOOP.
+*      ENDIF.
+*      IF NOT P_BUKRS1[] IS INITIAL AND NOT P_DVSON3[] IS INITIAL.
+*        LOOP AT TBL_BUKRS.
+*          LOOP AT TBL_T001W INTO W_T001W.
+*            LW_LOCK-BUKRS = TBL_BUKRS-BUKRS.
+*            LW_LOCK-WERKS = W_T001W-WERKS.
+*            APPEND LW_LOCK TO TAB_LOCK.
+*          ENDLOOP.
+*        ENDLOOP.
+*        LOOP AT TAB_LOCK INTO LW_LOCK.
+*          CALL FUNCTION 'ENQUEUE_EZN901'
+*            EXPORTING
+*              MODE_ZN901           = 'E'
+*              MANDT                = SY-MANDT
+*              BUKRS                = LW_LOCK-BUKRS
+*              WERKS                = LW_LOCK-WERKS
+*            EXCEPTIONS
+*              FOREIGN_LOCK         = 1
+*              SYSTEM_FAILURE       = 2
+*              OTHERS               = 3.
+*          L_USER = SY-MSGV1.
+*          IF SY-SUBRC <> 0.
+*            MESSAGE I756 WITH TEXT-M16 L_USER.
+*            LEAVE LIST-PROCESSING.
+*          ENDIF.
+*        ENDLOOP.
+*      ENDIF.
+*    ENDIF.
+ENDIF.
+*
+*
+ENDFORM.                    " LOCK_TABLR_901_902
+*&---------------------------------------------------------------------*
+*&      Form  GET_WYT3
+*&---------------------------------------------------------------------*
+*       取引先機能
+*----------------------------------------------------------------------*
+FORM GET_WYT3.
+*
+REFRESH TBL_WYT3.
+*
+SELECT LIFNR LIFN2
+INTO TABLE TBL_WYT3
+FROM WYT3
+WHERE LIFNR IN P_VRFCT1 "選択画面の仕入先コード
+AND   EKORG = P_EKORG     "選択画面の購買組織
+AND   LTSNR = SPACE       "★固定値
+AND   WERKS = SPACE       "★固定値
+AND   PARVW = P_PARVW     "選択画面の請求先取引先機能
+AND   PARZA = '000'.      "★固定値
+IF SY-SUBRC <> 0.
+*入力された発注先より、マスタの請求先への置換に失敗しました
+MESSAGE I999 WITH TEXT-E01.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*
+ENDFORM.                    " GET_WYT3
+*&---------------------------------------------------------------------*
+*&      Form  GET_LFB1_WYT3
+*&---------------------------------------------------------------------*
+*       仕入先マスタの取得
+*----------------------------------------------------------------------*
+FORM GET_LFB1_WYT3.
+
+DATA: LS_TEXTPOOL LIKE LINE OF T_TEXTPOOL.
+*
+REFRESH TBL_LFB1.
+*
+IF P_VRFCT1[] IS INITIAL.
+SELECT
+LFB1~BUKRS            " 会社コード
+LFB1~LIFNR            " 仕入先コード
+LFM1~WAERS            " 通貨コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_LFB1
+FROM LFB1
+JOIN LFM1 ON LFM1~LIFNR = LFB1~LIFNR
+WHERE LFB1~BUKRS IN P_BUKRS1
+AND   LFM1~EKORG = P_EKORG.
+ELSE.
+SELECT
+LFB1~BUKRS            " 会社コード
+LFB1~LIFNR            " 仕入先コード
+LFM1~WAERS            " 通貨コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_LFB1
+FROM LFB1
+JOIN LFM1 ON LFM1~LIFNR = LFB1~LIFNR
+FOR ALL ENTRIES IN TBL_WYT3
+WHERE LFB1~LIFNR = TBL_WYT3-LIFN2
+AND   LFB1~BUKRS IN P_BUKRS1
+AND   LFM1~EKORG = P_EKORG.
+ENDIF.
+IF TBL_LFB1[] IS INITIAL.
+*仕入先コード取得エラー
+READ TABLE T_TEXTPOOL INTO LS_TEXTPOOL
+WITH KEY ID = 'I' KEY = 'M02'.
+MESSAGE I754 WITH LS_TEXTPOOL-ENTRY.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*
+SORT TBL_LFB1 BY BUKRS LIFNR.
+*
+ENDFORM.                    " GET_LFB1_WYT3
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNVP
+*&---------------------------------------------------------------------*
+*       得意先マスタ 取引先機能
+*----------------------------------------------------------------------*
+FORM GET_KNVP.
+*
+REFRESH TBL_KNVP.
+*
+SELECT KUNNR KUNN2
+INTO TABLE TBL_KNVP
+FROM KNVP
+WHERE KUNNR IN P_VRFCT1   "選択画面の受注先
+AND   VKORG = P_VKORG     "選択画面の販売組織
+AND   VTWEG = P_VTWEG     "選択画面の流通チャネル
+AND   SPART = P_SPART     "選択画面の製品部門
+AND   PARVW = P_PARVWK    "選択画面の支払人機能
+AND   PARZA = '000'.      "★固定値
+IF SY-SUBRC <> 0.
+*入力された受注先より、マスタの支払人への置換に失敗
+MESSAGE I999 WITH TEXT-E02.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*
+ENDFORM.                    " GET_KNVP
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNB1_KNVP
+*&---------------------------------------------------------------------*
+*       得意先マスタ取得
+*----------------------------------------------------------------------*
+FORM GET_KNB1_KNVV.
+
+DATA: LS_TEXTPOOL LIKE LINE OF T_TEXTPOOL.
+*
+REFRESH TBL_KNB1.
+*
+IF P_VRFCT1[] IS INITIAL.
+SELECT
+KNB1~BUKRS            " 会社コード
+KNB1~KUNNR            " 得意先コード
+KNVV~WAERS            " 通貨コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_KNB1
+FROM KNB1
+JOIN KNVV ON KNVV~KUNNR = KNB1~KUNNR
+WHERE KNB1~BUKRS IN P_BUKRS1
+AND   KNVV~VKORG = P_VKORG
+AND   KNVV~VTWEG = P_VTWEG
+AND   KNVV~SPART = P_SPART.
+ELSE.
+SELECT
+KNB1~BUKRS            " 会社コード
+KNB1~KUNNR            " 得意先コード
+KNVV~WAERS            " 通貨コード
+INTO CORRESPONDING FIELDS OF TABLE TBL_KNB1
+FROM KNB1
+JOIN KNVV ON KNVV~KUNNR = KNB1~KUNNR
+FOR ALL ENTRIES IN TBL_KNVP
+WHERE KNB1~BUKRS IN P_BUKRS1
+AND   KNB1~KUNNR = TBL_KNVP-KUNN2
+AND   KNVV~VKORG = P_VKORG
+AND   KNVV~VTWEG = P_VTWEG
+AND   KNVV~SPART = P_SPART.
+
+ENDIF.
+IF TBL_KNB1[] IS INITIAL.
+*得意先コード取得エラー
+READ TABLE T_TEXTPOOL INTO LS_TEXTPOOL
+WITH KEY ID = 'I' KEY = 'M01'.
+MESSAGE I754 WITH LS_TEXTPOOL-ENTRY.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*
+SORT TBL_KNB1 BY BUKRS KUNNR.
+*
+ENDFORM.                    " GET_KNB1_KNVV
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       自社取込処理ロック
+*----------------------------------------------------------------------*
+FORM LOCK_TBL_YN010200.
+*
+REFRESH GT_LOCK_WORK.
+*
+IF P_VRFCT1[] IS INITIAL.
+LOOP AT TBL_OBJECT.
+GW_LOCK_WORK-BUKRS = TBL_OBJECT-TDNAME+10(4).
+GW_LOCK_WORK-LIFNR = TBL_OBJECT-TDNAME+0(10).
+COLLECT GW_LOCK_WORK INTO GT_LOCK_WORK.
+ENDLOOP.
+ELSE.
+IF P_SALES = 'X'.
+SORT TBL_KNVP BY KUNN2.
+ENDIF.
+IF P_PRCHS = 'X'.
+SORT TBL_WYT3 BY LIFN2.
+ENDIF.
+*
+LOOP AT TBL_OBJECT.
+IF P_SALES = 'X'.
+READ TABLE TBL_KNVP
+WITH KEY KUNN2 = TBL_OBJECT-TDNAME+0(10) BINARY SEARCH.
+GW_LOCK_WORK-BUKRS = TBL_OBJECT-TDNAME+10(4).
+GW_LOCK_WORK-LIFNR = TBL_KNVP-KUNNR.
+COLLECT GW_LOCK_WORK INTO GT_LOCK_WORK.
+ENDIF.
+IF P_PRCHS = 'X'.
+READ TABLE TBL_WYT3
+WITH KEY LIFN2 = TBL_OBJECT-TDNAME+0(10) BINARY SEARCH.
+GW_LOCK_WORK-BUKRS = TBL_OBJECT-TDNAME+10(4).
+GW_LOCK_WORK-LIFNR = TBL_WYT3-LIFNR.
+COLLECT GW_LOCK_WORK INTO GT_LOCK_WORK.
+ENDIF.
+ENDLOOP.
+ENDIF.
+*1
+IF   NOT ( P_BUKRS1[] IS INITIAL ) AND
+NOT ( P_VRFCT1[] IS INITIAL ) AND
+NOT ( P_DVSON3[] IS INITIAL ).
+PERFORM NO1_LOCK_TBL_YN010200.
+ENDIF.
+*2
+IF   NOT ( P_BUKRS1[] IS INITIAL ) AND
+NOT ( P_VRFCT1[] IS INITIAL ) AND
+( P_DVSON3[] IS INITIAL ).
+PERFORM NO2_LOCK_TBL_YN010200.
+ENDIF.
+*3
+IF   NOT ( P_BUKRS1[] IS INITIAL ) AND
+( P_VRFCT1[] IS INITIAL ) AND
+NOT ( P_DVSON3[] IS INITIAL ).
+PERFORM NO3_LOCK_TBL_YN010200.
+ENDIF.
+*4
+IF   NOT ( P_BUKRS1[] IS INITIAL ) AND
+( P_VRFCT1[] IS INITIAL ) AND
+( P_DVSON3[] IS INITIAL ).
+PERFORM NO4_LOCK_TBL_YN010200.
+ENDIF.
+***
+*5
+IF       ( P_BUKRS1[] IS INITIAL ) AND
+NOT ( P_VRFCT1[] IS INITIAL ) AND
+NOT ( P_DVSON3[] IS INITIAL ).
+PERFORM NO1_LOCK_TBL_YN010200.
+ENDIF.
+*6
+IF       ( P_BUKRS1[] IS INITIAL ) AND
+NOT ( P_VRFCT1[] IS INITIAL ) AND
+( P_DVSON3[] IS INITIAL ).
+PERFORM NO2_LOCK_TBL_YN010200.
+ENDIF.
+*7
+IF       ( P_BUKRS1[] IS INITIAL ) AND
+( P_VRFCT1[] IS INITIAL ) AND
+NOT ( P_DVSON3[] IS INITIAL ).
+PERFORM NO7_LOCK_TBL_YN010200.
+ENDIF.
+*8
+IF       ( P_BUKRS1[] IS INITIAL ) AND
+( P_VRFCT1[] IS INITIAL ) AND
+( P_DVSON3[] IS INITIAL ).
+PERFORM NO8_LOCK_TBL_YN010200.
+ENDIF.
+*
+ENDFORM.                    " LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO1_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  あり
+*       P_VRFCT1  あり
+*       P_DVSON3　あり
+*----------------------------------------------------------------------*
+FORM NO1_LOCK_TBL_YN010200.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+LOOP AT GT_LOCK_WORK INTO GW_LOCK_WORK.
+LOOP AT TBL_TVBUR INTO W_TVBUR.
+LW_LOCK-BUKRS = GW_LOCK_WORK-BUKRS.
+LW_LOCK-LIFNR = GW_LOCK_WORK-LIFNR.
+LW_LOCK-WERKS = W_TVBUR-VKBUR.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+ENDLOOP.
+PERFORM NO1_TABLE_LOCK_902.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+LOOP AT GT_LOCK_WORK INTO GW_LOCK_WORK.
+LOOP AT TBL_T001W INTO W_T001W. "プラント
+LW_LOCK-BUKRS = GW_LOCK_WORK-BUKRS.
+LW_LOCK-LIFNR = GW_LOCK_WORK-LIFNR.
+LW_LOCK-WERKS = W_T001W-WERKS.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+ENDLOOP.
+PERFORM NO1_TABLE_LOCK_901.
+ENDIF.
+ENDFORM.                    " NO1_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO2_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  あり
+*       P_VRFCT1  あり
+*       P_DVSON3　なし
+*----------------------------------------------------------------------*
+FORM NO2_LOCK_TBL_YN010200.
+*
+LOOP AT GT_LOCK_WORK INTO GW_LOCK_WORK.
+LW_LOCK-BUKRS = GW_LOCK_WORK-BUKRS.
+LW_LOCK-LIFNR = GW_LOCK_WORK-LIFNR.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+*
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+PERFORM NO2_TABLE_LOCK_902.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+PERFORM NO2_TABLE_LOCK_901.
+ENDIF.
+ENDFORM.                    " NO2_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO3_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  あり
+*       P_VRFCT1  なし
+*       P_DVSON3　あり
+*----------------------------------------------------------------------*
+FORM NO3_LOCK_TBL_YN010200.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+LOOP AT TBL_BUKRS.
+LOOP AT TBL_TVBUR INTO W_TVBUR.
+LW_LOCK-BUKRS = TBL_BUKRS-BUKRS.
+LW_LOCK-WERKS = W_TVBUR-VKBUR.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+ENDLOOP.
+PERFORM NO3_TABLE_LOCK_902.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+LOOP AT TBL_BUKRS.
+LOOP AT TBL_T001W INTO W_T001W. "プラント
+LW_LOCK-BUKRS = TBL_BUKRS-BUKRS.
+LW_LOCK-WERKS = W_T001W-WERKS.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+ENDLOOP.
+PERFORM NO3_TABLE_LOCK_901.
+ENDIF.
+ENDFORM.                    " NO3_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO4_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  あり
+*       P_VRFCT1  なし
+*       P_DVSON3　なし
+*----------------------------------------------------------------------*
+FORM NO4_LOCK_TBL_YN010200.
+*
+LOOP AT TBL_BUKRS.
+LW_LOCK-BUKRS = TBL_BUKRS-BUKRS.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+*
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+PERFORM NO4_TABLE_LOCK_902.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+PERFORM NO4_TABLE_LOCK_901.
+ENDIF.
+ENDFORM.                    " NO4_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO5_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  なし
+*       P_VRFCT1  あり
+*       P_DVSON3　あり
+*----------------------------------------------------------------------*
+FORM NO5_LOCK_TBL_YN010200.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+ENDIF.
+ENDFORM.                    " NO5_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO6_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  なし
+*       P_VRFCT1  あり
+*       P_DVSON3　なし
+*----------------------------------------------------------------------*
+FORM NO6_LOCK_TBL_YN010200.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+ENDIF.
+
+ENDFORM.                    " NO6_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO7_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  なし
+*       P_VRFCT1  なし
+*       P_DVSON3　あり
+*----------------------------------------------------------------------*
+FORM NO7_LOCK_TBL_YN010200.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+LOOP AT TBL_TVBUR INTO W_TVBUR.
+LW_LOCK-WERKS = W_TVBUR-VKBUR.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+PERFORM NO7_TABLE_LOCK_902.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+LOOP AT TBL_T001W INTO W_T001W. "プラント
+LW_LOCK-BUKRS = TBL_BUKRS-BUKRS.
+LW_LOCK-WERKS = W_T001W-WERKS.
+APPEND LW_LOCK TO TAB_LOCK.
+ENDLOOP.
+PERFORM NO7_TABLE_LOCK_901.
+ENDIF.
+ENDFORM.                    " NO7_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO8_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*       P_BUKRS1  なし
+*       P_VRFCT1  なし
+*       P_DVSON3　なし
+*----------------------------------------------------------------------*
+FORM NO8_LOCK_TBL_YN010200.
+IF P_SALES = 'X'.
+* [売上照合]が選択された場合
+PERFORM NO8_TABLE_LOCK_902.
+ENDIF.
+IF P_PRCHS = 'X'.
+* [仕入照合]が選択された場合
+PERFORM NO8_TABLE_LOCK_901.
+ENDIF.
+ENDFORM.                    " NO8_LOCK_TBL_YN010200
+*&---------------------------------------------------------------------*
+*&      Form  NO1_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*       売上 No1
+*----------------------------------------------------------------------*
+FORM NO1_TABLE_LOCK_902.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN902'
+EXPORTING
+MODE_ZN902           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+KUNNR                = LW_LOCK-LIFNR
+VKBUR                = LW_LOCK-WERKS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M34 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO1_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*&      Form  NO1_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*       仕入 No1
+*----------------------------------------------------------------------*
+FORM NO1_TABLE_LOCK_901.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN901'
+EXPORTING
+MODE_ZN901           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+LIFNR                = LW_LOCK-LIFNR
+WERKS                = LW_LOCK-WERKS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M16 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO1_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*&      Form  NO2_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*       売上　No2
+*----------------------------------------------------------------------*
+FORM NO2_TABLE_LOCK_902.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN902'
+EXPORTING
+MODE_ZN902           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+KUNNR                = LW_LOCK-LIFNR
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M34 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO2_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*&      Form  NO2_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*       仕入 No2
+*----------------------------------------------------------------------*
+FORM NO2_TABLE_LOCK_901.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN901'
+EXPORTING
+MODE_ZN901           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+LIFNR                = LW_LOCK-LIFNR
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M16 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO2_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*&      Form  NO3_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*       売上 No3
+*----------------------------------------------------------------------*
+FORM NO3_TABLE_LOCK_902.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN902'
+EXPORTING
+MODE_ZN902           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+VKBUR                = LW_LOCK-WERKS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M34 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO3_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*&      Form  NO3_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*       仕入　No3
+*----------------------------------------------------------------------*
+FORM NO3_TABLE_LOCK_901.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN901'
+EXPORTING
+MODE_ZN901           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+WERKS                = LW_LOCK-WERKS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M16 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO3_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*&      Form  NO4_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*       売上 No4
+*----------------------------------------------------------------------*
+FORM NO4_TABLE_LOCK_902.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN902'
+EXPORTING
+MODE_ZN902           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M34 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO4_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*&      Form  NO4_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*       仕入 No4
+*----------------------------------------------------------------------*
+FORM NO4_TABLE_LOCK_901.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN901'
+EXPORTING
+MODE_ZN901           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = LW_LOCK-BUKRS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M16 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO4_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*&      Form  NO7_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*       売上　No7
+*----------------------------------------------------------------------*
+FORM NO7_TABLE_LOCK_902.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN902'
+EXPORTING
+MODE_ZN902           = 'E'
+MANDT                = SY-MANDT
+VKBUR                = LW_LOCK-WERKS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M34 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO7_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*&      Form  NO7_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*       仕入 No7
+*----------------------------------------------------------------------*
+FORM NO7_TABLE_LOCK_901.
+*
+LOOP AT TAB_LOCK INTO LW_LOCK.
+CALL FUNCTION 'ENQUEUE_EZN901'
+EXPORTING
+MODE_ZN901           = 'E'
+MANDT                = SY-MANDT
+WERKS                = LW_LOCK-WERKS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M16 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDLOOP.
+*
+ENDFORM.                    " NO7_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*&      Form  NO8_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*       売上 No8
+*----------------------------------------------------------------------*
+FORM NO8_TABLE_LOCK_902.
+*
+CALL FUNCTION 'ENQUEUE_EZN902'
+EXPORTING
+MODE_ZN902           = 'E'
+MANDT                = SY-MANDT
+VKBUR                = LW_LOCK-WERKS
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M34 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+*
+ENDFORM.                    " NO8_TABLE_LOCK_902
+*&---------------------------------------------------------------------*
+*&      Form  NO8_TABLE_LOCK_901
+*&---------------------------------------------------------------------*
+*       仕入　No8
+*----------------------------------------------------------------------*
+FORM NO8_TABLE_LOCK_901.
+
+CALL FUNCTION 'ENQUEUE_EZN901'
+EXPORTING
+MODE_ZN901           = 'E'
+MANDT                = SY-MANDT
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+LW_USER = SY-MSGV1.
+MESSAGE I756 WITH TEXT-M16 LW_USER.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " NO8_TABLE_LOCK_901

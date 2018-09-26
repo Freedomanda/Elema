@@ -1,0 +1,629 @@
+REPORT ZARCH002.
+
+***********************************************************************
+***プログラムID  ZARCH002
+***プログラム名  新アーカイブ
+***処理概要      アーカイブ対象スプールをPaplesプリンタへ出力する。
+***
+***作成者        XIOSADMIN（FXIS）
+***作成日        2012.11.30
+***更新履歴
+***
+***  2013.04.25  キュー、一時ファイル削除処理追加 XIOSADMIN(FXIS)
+***
+************************************************************************
+
+DATA : TSP01 LIKE TSP01.
+
+* スプールデータ取得用
+DATA : T_SPOOL TYPE TSP01SYS,
+TAB_SPOOL TYPE STANDARD TABLE OF TSP01SYS.
+
+* アーカイブデータ取得用
+TYPES : BEGIN OF TYP_ARCHIVE,
+RQIDENT TYPE TSP01-RQIDENT,        " スプール依頼番号
+REPORT  TYPE ARC_PARAMS-REPORT,    " レポート名
+INFO    TYPE ARC_PARAMS-INFO,      " 情報項目
+END OF TYP_ARCHIVE.
+
+DATA : T_ARCHIVE TYPE TYP_ARCHIVE,
+TAB_ARCHIVE TYPE STANDARD TABLE OF TYP_ARCHIVE.
+
+DATA : GT_TSP02 TYPE TSP02,
+G_CNT TYPE I,
+G_CHK TYPE C LENGTH 2.
+
+CONSTANTS :
+C_000000    TYPE C LENGTH 6  VALUE '000000',
+C_235959    TYPE C LENGTH 6  VALUE '235959',
+C_2         TYPE C           VALUE '2',
+C_9         TYPE C           VALUE '9',
+C_EQ        TYPE C LENGTH 2  VALUE 'EQ',
+C_I         TYPE C           VALUE 'I',
+C_JA        TYPE C LENGTH 2  VALUE 'JA',
+C_OK        TYPE C LENGTH 2  VALUE 'OK',
+C_NG        TYPE C LENGTH 2  VALUE 'NG',
+C_DC        TYPE C LENGTH 1  VALUE '"',
+C_ARCH      TYPE C LENGTH 4  VALUE 'ARCH',
+C_PARAM1    TYPE C LENGTH 22 VALUE 'PaplesDriver /O /T',
+C_PARAM2    TYPE C LENGTH 2  VALUE '/C',
+C_LSPRR     TYPE C LENGTH 8  VALUE 'SAPLSPRR'.
+
+************************************************************************
+* 2013.04.25 追加
+************************************************************************
+**
+* INCLUDE
+INCLUDE LOPTACON.
+INCLUDE ARCHIVELINK_CARACONSTANTS.
+INCLUDE ARCHIVELINK_QUEUEDECLARATIONS.
+
+DATA: BEGIN OF X_DATA,                 " Hilfsstruktur
+SELFIELD LIKE SY-INPUT,        " f#r xdata1, xdata2 und xdata3
+BUFFER LIKE T_BUFFER,
+END OF X_DATA.
+
+DATA:
+DEST_QUEUE LIKE APQI-QID,
+BEGIN OF BUFFER OCCURS 1,
+UNIT LIKE APQD-TRANS,
+S_BUFFER(1000) TYPE C,
+END OF BUFFER.
+
+DATA: BEGIN OF X_CARA OCCURS 1.        " CARA / CARA_E
+DATA:   SELFIELD LIKE SY-INPUT.
+INCLUDE STRUCTURE TOA_CARA2.
+DATA: END OF X_CARA.
+
+************************************************************************
+**
+
+*-----------------------------------------------------------------------
+* PARAMETERS
+*-----------------------------------------------------------------------
+************
+* 抽出条件 *
+************
+SELECTION-SCREEN BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-T01.
+SELECT-OPTIONS :
+S_IDENT FOR TSP01-RQIDENT.      " スプール依頼番号
+
+PARAMETERS :
+P_OWNER TYPE TSP01-RQOWNER.     " ユーザ名
+
+SELECT-OPTIONS :
+S_CDATE FOR SY-DATUM.           " 登録日
+
+PARAMETERS :
+P_DEST TYPE TSP01-RQDEST.      " 出力デバイス
+
+SELECTION-SCREEN END OF BLOCK BL1.
+
+**********
+* 出力先 *
+**********
+SELECTION-SCREEN BEGIN OF BLOCK BL2 WITH FRAME TITLE TEXT-T02.
+PARAMETERS :
+P_ODEST TYPE TSP01-RQDEST DEFAULT 'PAP' OBLIGATORY.    " 出力先
+SELECTION-SCREEN END OF BLOCK BL2.
+
+****************************
+* コマンド名称、パラメータ *
+****************************
+SELECTION-SCREEN BEGIN OF BLOCK BL3 WITH FRAME TITLE TEXT-T03.
+PARAMETERS :
+P_CMD  TYPE SXPGCOLIST-NAME DEFAULT 'ZPAPLES' OBLIGATORY.  "コマンド
+SELECTION-SCREEN END OF BLOCK BL3.
+
+*-----------------------------------------------------------------------
+* START-OF-SELECTION.
+*-----------------------------------------------------------------------
+START-OF-SELECTION.
+
+PERFORM GET_SPOOL_REC.   " スプール依頼データ取得
+PERFORM GET_ARCHIBE_REC. " アーカイブデータ取得
+PERFORM PRINT_REC.       " プリント出力
+
+END-OF-SELECTION.
+
+*---------------------------------------------------------------------*
+*       FORM get_spool_rec                                            *
+*---------------------------------------------------------------------*
+*       スプール依頼データ取得                                        *
+*---------------------------------------------------------------------*
+FORM GET_SPOOL_REC.
+
+DATA : L_NO_ACC TYPE I,
+L_ACC    TYPE I.
+
+DATA : L_RQIDEN   TYPE RQIDEN_T,
+LR_RQIDEN  TYPE STANDARD TABLE OF RQIDEN_T
+WITH HEADER LINE,
+L_RQCLIE   TYPE RQCLIE_T,
+LR_RQCLIE  TYPE RANGE OF TSP01-RQCLIENT
+WITH HEADER LINE,
+L_RQOWNE   TYPE RQOWNE_T,
+LR_RQOWNE  TYPE RANGE OF TSP01-RQOWNER
+WITH HEADER LINE,
+L_RQDESTL  TYPE RQDESTL_T,
+LR_RQDESTL TYPE STANDARD TABLE OF RQDESTL_T
+WITH HEADER LINE.
+
+* スプール依頼番号設定
+LOOP AT S_IDENT.
+L_RQIDEN-SIGN   = S_IDENT-SIGN.
+L_RQIDEN-OPTION = S_IDENT-OPTION.
+L_RQIDEN-LOW    = S_IDENT-LOW.
+L_RQIDEN-HIGH   = S_IDENT-HIGH.
+APPEND L_RQIDEN TO LR_RQIDEN.
+ENDLOOP.
+
+* クライアント設定
+L_RQCLIE-SIGN   = C_I.
+L_RQCLIE-OPTION = C_EQ.
+L_RQCLIE-LOW    = SY-MANDT.
+APPEND L_RQCLIE TO LR_RQCLIE.
+
+* 登録者設定
+IF P_OWNER <> SPACE.
+L_RQOWNE-SIGN   = C_I.
+L_RQOWNE-OPTION = C_EQ.
+L_RQOWNE-LOW    = P_OWNER.
+APPEND L_RQOWNE TO LR_RQOWNE.
+ENDIF.
+
+* 出力デバイス設定
+IF P_DEST <> SPACE.
+L_RQDESTL-SIGN   = C_I.
+L_RQDESTL-OPTION = C_EQ.
+L_RQDESTL-LOW    = P_DEST.
+APPEND L_RQDESTL TO LR_RQDESTL.
+ENDIF.
+
+
+CALL FUNCTION 'RSPO_ISELECT_SPOOLREQS'
+EXPORTING
+RFCSYSTEM    = SY-SYSID
+RQNONE       = 'X'
+RQPROC       = 'X'
+RQSUCC       = 'X'
+RQERR        = 'X'
+ACCESS       = 'BASE'
+IMPORTING
+RQ_NO_ACCESS = L_NO_ACC
+RQ_ACCESS    = L_ACC
+TABLES
+S_RQIDEN     = LR_RQIDEN
+S_RQCLIE     = LR_RQCLIE
+S_RQOWNE     = LR_RQOWNE
+S_RQCRED     = S_CDATE
+S_RQDESTL    = LR_RQDESTL
+RESULT_TSP01 = TAB_SPOOL
+EXCEPTIONS
+ERROR        = 1
+OTHERS       = 2.
+
+* 正常終了の場合
+IF SY-SUBRC = 0.
+** データが0件の場合メッセージ出力
+IF LINES( TAB_SPOOL ) = 0.
+" 対象データがありません。
+MESSAGE S398(00) WITH TEXT-M01.
+STOP.
+ELSE.
+DELETE TAB_SPOOL WHERE RQARCHSTAT <> C_2.
+
+IF LINES( TAB_SPOOL ) = 0.
+" 対象データがありません。
+MESSAGE S398(00) WITH TEXT-M01.
+STOP.
+ENDIF.
+
+ENDIF.
+* 異常終了の場合
+ELSE.
+" スプールデータ取得できませんでした。
+MESSAGE S398(00) WITH TEXT-M08.
+STOP.
+ENDIF.
+
+ENDFORM.                    "GET_SPOOL_REC
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ARCHIBE_REC
+*&---------------------------------------------------------------------*
+*       アーカイブデータ取得
+*----------------------------------------------------------------------*
+FORM GET_ARCHIBE_REC.
+
+DATA : L_ARC_PARAMS TYPE ARC_PARAMS,
+L_RQIDENT TYPE N LENGTH 10.
+
+LOOP AT TAB_SPOOL INTO T_SPOOL.
+CLEAR : L_RQIDENT.
+
+L_RQIDENT = T_SPOOL-RQIDENT.
+
+CALL FUNCTION 'ARCHIV_GET_STRUCT'
+EXPORTING
+SPOOLID       = L_RQIDENT
+IMPORTING
+PARAMETER     = L_ARC_PARAMS
+EXCEPTIONS
+NOTHING_FOUND = 1
+OTHERS        = 2.
+
+* アーカイブデータ取得できた場合
+IF SY-SUBRC = 0.
+
+T_ARCHIVE-RQIDENT = T_SPOOL-RQIDENT.      " スプール依頼番号
+T_ARCHIVE-REPORT  = L_ARC_PARAMS-REPORT.  " レポート名
+T_ARCHIVE-INFO    = L_ARC_PARAMS-INFO.    " 情報項目
+
+APPEND T_ARCHIVE TO TAB_ARCHIVE.
+
+* アーカイブデータ取得できない場合
+ELSE.
+" spool-no アーカイブデータが取得できませんでした。
+MESSAGE E398(00) WITH T_SPOOL-RQIDENT TEXT-M02.
+
+ENDIF.
+
+ENDLOOP.
+
+ENDFORM.                    "GET_ARCHIBE_REC
+
+*&---------------------------------------------------------------------*
+*&      Form  print_rec
+*&---------------------------------------------------------------------*
+*       PAPLESプリンタへ出力
+*----------------------------------------------------------------------*
+FORM PRINT_REC.
+
+LOOP AT TAB_ARCHIVE INTO T_ARCHIVE.
+PERFORM COMMAND_EXCUTE
+USING T_ARCHIVE-RQIDENT.  " 外部OSコマンド
+
+PERFORM SPOOL_REQ
+USING T_ARCHIVE-RQIDENT.  " プリント出力
+
+PERFORM STATUS_UPDATE
+USING T_ARCHIVE-RQIDENT. " ステータス変更
+
+ENDLOOP.
+
+ENDFORM.                    "print_rec
+*&---------------------------------------------------------------------*
+*&      Form  COMMAND_EXCUTE
+*&---------------------------------------------------------------------*
+*       外部OSコマンド
+*----------------------------------------------------------------------*
+*       --> PI_RQIDENT スプール依頼番号
+*----------------------------------------------------------------------*
+FORM COMMAND_EXCUTE USING PI_RQIDENT.
+
+DATA : L_CMD    TYPE SXPGCOLIST-NAME,
+L_PARA   TYPE SXPGCOLIST-PARAMETERS,
+L_STAT   TYPE EXTCMDEXEX-STATUS,
+L_CODE   TYPE EXTCMDEXEX-EXITCODE,
+L_REPORT TYPE C LENGTH 72,
+L_INFO   TYPE C LENGTH 5.
+
+DATA : LT_TAB   TYPE BTCXPM,
+LTAB_TAB TYPE STANDARD TABLE OF BTCXPM.
+
+* コマンド設定
+L_CMD  = P_CMD.
+
+* レポート名称取得
+SELECT SINGLE TEXT INTO L_REPORT FROM TRDIRT
+WHERE NAME  = T_ARCHIVE-REPORT
+AND SPRSL = C_JA.
+
+* データ取得できた場合
+IF SY-SUBRC = 0.
+" レポートID、レポート名称文字連結
+CONCATENATE T_ARCHIVE-REPORT L_REPORT INTO L_REPORT.
+
+" 禁則文字変換（\/:*?"<>|)全角に変更
+PERFORM CHANGE_REC USING L_REPORT.
+
+CONCATENATE C_DC L_REPORT C_DC INTO L_REPORT.
+* データ取得できない場合
+ELSE.
+CONCATENATE C_DC C_LSPRR C_LSPRR C_DC INTO L_REPORT.
+ENDIF.
+
+L_INFO = T_ARCHIVE-INFO.
+
+" 禁則文字変換（\/:*?"<>|)全角に変更
+PERFORM CHANGE_REC USING L_INFO.
+
+CONCATENATE C_DC L_INFO C_DC INTO L_INFO.
+
+CONCATENATE C_PARAM1 L_REPORT C_PARAM2 L_INFO
+INTO L_PARA SEPARATED BY SPACE.
+
+CALL FUNCTION 'SXPG_COMMAND_EXECUTE'
+EXPORTING
+COMMANDNAME                   = L_CMD
+ADDITIONAL_PARAMETERS         = L_PARA
+IMPORTING
+STATUS                        = L_STAT
+EXITCODE                      = L_CODE
+TABLES
+EXEC_PROTOCOL                 = LTAB_TAB
+EXCEPTIONS
+NO_PERMISSION                 = 1
+COMMAND_NOT_FOUND             = 2
+PARAMETERS_TOO_LONG           = 3
+SECURITY_RISK                 = 4
+WRONG_CHECK_CALL_INTERFACE    = 5
+PROGRAM_START_ERROR           = 6
+PROGRAM_TERMINATION_ERROR     = 7
+X_ERROR                       = 8
+PARAMETER_EXPECTED            = 9
+TOO_MANY_PARAMETERS           = 10
+ILLEGAL_COMMAND               = 11
+WRONG_ASYNCHRONOUS_PARAMETERS = 12
+CANT_ENQ_TBTCO_ENTRY          = 13
+JOBCOUNT_GENERATION_ERROR     = 14
+OTHERS                        = 15.
+
+* エラーの場合処理終了
+IF SY-SUBRC <> 0.
+" spool-no コマンド実行時エラーが発生しました。
+MESSAGE E398(00) WITH PI_RQIDENT TEXT-M03 SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    "COMMAND_EXCUTE
+*&---------------------------------------------------------------------*
+*&      Form  SPOOL_REQ
+*&---------------------------------------------------------------------*
+*       PAPLESプリンタへ出力
+*----------------------------------------------------------------------*
+*      -->PI_RQIDENT  スプール依頼番号
+*----------------------------------------------------------------------*
+FORM SPOOL_REQ  USING    PI_RQIDENT.
+
+* スプールリクエスト
+
+CALL FUNCTION 'RSPO_OUTPUT_SPOOL_REQUEST'
+EXPORTING
+SPOOL_REQUEST_ID         = PI_RQIDENT
+* 仕様ミス対応　 START　2013.01.07
+DEVICE                   = P_ODEST
+* 仕様ミス対応　 END    2013.01.07
+EXCEPTIONS
+ARCHIVE_DEST_INVALID     = 1
+ARCHIVE_DEST_NOT_FOUND   = 2
+ARCHIVE_DEST_NO_RIGHT    = 3
+CANNOT_ARCHIVE           = 4
+CHANGE_ARCHDEST_NO_RIGHT = 5
+CHANGE_COPIES_NO_RIGHT   = 6
+CHANGE_DEST_NO_RIGHT     = 7
+CHANGE_DEVTYPE_NO_RIGHT  = 8
+CHANGE_PRIO_NO_RIGHT     = 9
+CHANGE_TELENUM_NO_RIGHT  = 10
+CHANGE_TITLE_NO_RIGHT    = 11
+DEST_INVALID             = 12
+DEST_NOT_FOUND           = 13
+DEST_NO_RIGHT            = 14
+INTERNAL_PROBLEM         = 15
+INVALID_FAX_ATTRIBUTE    = 16
+INVALID_PARAMETERS       = 17
+NON_OWNER_NO_RIGHT       = 18
+NO_LAYOUT                = 19
+NO_SPOOL_REQUEST         = 20
+OUT_AGAIN_NO_RIGHT       = 21
+SPOOLER_PROBLEM          = 22
+OTHERS                   = 23.
+
+* 正常の場合ステータス取得
+IF SY-SUBRC = 0.
+CLEAR : G_CNT.
+
+DO.
+** 対象スプール取得
+CLEAR : GT_TSP02.
+
+SELECT * FROM TSP02
+INTO  GT_TSP02
+UP TO 1 ROWS
+WHERE PJIDENT = PI_RQIDENT
+AND PJDEST = P_ODEST
+ORDER BY PJNUMMER DESCENDING.
+ENDSELECT.
+
+** データ取得できた場合
+IF SY-SUBRC = 0.
+
+WAIT UP TO 1 SECONDS.
+ADD 1 TO G_CNT.
+
+IF G_CNT > 600.
+" spool-no 印刷ステータスが取得できませんでした。
+MESSAGE E398(00) WITH PI_RQIDENT TEXT-M06 SY-SUBRC.
+ENDIF.
+
+** データ取得できない場合
+ELSE.
+" spool-no 印刷ステータスが取得できませんでした。
+MESSAGE E398(00) WITH PI_RQIDENT TEXT-M06 SY-SUBRC.
+
+ENDIF.
+
+CASE GT_TSP02-PJSTATUS.
+WHEN 0.       " 未定義
+G_CHK = C_NG.
+WHEN 1.       " スケジュール
+G_CHK = C_NG.
+WHEN 2.       " 処理中フラグ
+G_CHK = C_NG.
+WHEN 3.       " クエリ障害
+G_CHK = C_NG.
+EXIT.
+WHEN 4.       " ホストスプーラに送信中
+G_CHK = C_NG.
+WHEN 5.       " ホストスプーラで待機中
+G_CHK = C_NG.
+WHEN 6.       " 問題
+G_CHK = C_NG.
+EXIT.
+WHEN 7.       " 印刷中
+G_CHK = C_NG.
+WHEN 8.       " 不適切
+G_CHK = C_NG.
+EXIT.
+WHEN 9.       " 終了
+G_CHK = C_OK.
+EXIT.
+WHEN OTHERS.  " その他
+G_CHK = C_NG.
+
+ENDCASE.
+
+*** 印刷ステータス
+*      IF G_CHK = C_OK.
+*        EXIT.
+*      ENDIF.
+*
+ENDDO.
+
+** 印刷ステータス
+IF G_CHK = C_NG.
+" spool-no 印刷にてエラーが発生しました。
+MESSAGE E398(00) WITH PI_RQIDENT TEXT-M05 SY-SUBRC.
+ENDIF.
+
+* エラーの場合
+ELSE.
+" spool-no 印刷設定にてエラーが発生しました。 SY-SUBRC
+MESSAGE E398(00) WITH PI_RQIDENT TEXT-M04 SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " SPOOL_REQ
+*&---------------------------------------------------------------------*
+*&      Form  STATUS_UPDATE
+*&---------------------------------------------------------------------*
+*       ステータス変更
+*----------------------------------------------------------------------*
+*      -->PI_RQIDENT  スプール依頼番号
+*----------------------------------------------------------------------*
+FORM STATUS_UPDATE  USING    PI_RQIDENT.
+
+CLEAR : GT_TSP02.
+
+* 対象スプール取得
+SELECT * FROM TSP02
+INTO  GT_TSP02
+WHERE PJIDENT = PI_RQIDENT
+AND PJDEST = C_ARCH
+ORDER BY PJNUMMER DESCENDING.
+ENDSELECT.
+
+* データ取得できた場合
+IF SY-SUBRC = 0.
+
+CALL FUNCTION 'RSPO_SET_JOB_STATE'
+EXPORTING
+PJIDENT  = GT_TSP02-PJIDENT
+PJNUMMER = GT_TSP02-PJNUMMER
+STATUS   = C_9.
+
+" spool-no 正常終了
+MESSAGE S398(00) WITH PI_RQIDENT TEXT-M09.
+
+* start insertion 2013.04.25 ixosadmin(fxis)
+* キュー、テンポラリファイル削除
+PERFORM DEL_REC.
+* end insertion  2013.04.25 ixosadmin(fxis)
+
+* データ取得できない場合
+ELSE.
+" spool-no 印刷ステータス変更ができませんでした。
+MESSAGE E398(00) WITH PI_RQIDENT TEXT-M07 SY-SUBRC.
+ENDIF.
+
+ENDFORM.                    " STATUS_UPDATE
+*&---------------------------------------------------------------------*
+*&      Form  CHANGE_REC
+*&---------------------------------------------------------------------*
+*       禁則文字を全角へ変換
+*----------------------------------------------------------------------*
+*  -->  O_ITEXT   変換後
+*----------------------------------------------------------------------*
+FORM CHANGE_REC CHANGING O_ITEXT.
+
+DATA : L_TEXT TYPE STRING.
+
+L_TEXT = O_ITEXT.
+
+REPLACE ALL OCCURRENCES  OF '\' IN L_TEXT WITH '￥'.
+
+REPLACE ALL OCCURRENCES  OF '/' IN L_TEXT WITH '／'.
+
+REPLACE ALL OCCURRENCES  OF ':' IN L_TEXT WITH '：'.
+
+REPLACE ALL OCCURRENCES  OF '?' IN L_TEXT WITH '？'.
+
+REPLACE ALL OCCURRENCES  OF '"' IN L_TEXT WITH '”'.
+
+REPLACE ALL OCCURRENCES  OF '<' IN L_TEXT WITH '＜'.
+
+REPLACE ALL OCCURRENCES  OF '>' IN L_TEXT WITH '＞'.
+
+REPLACE ALL OCCURRENCES  OF '|' IN L_TEXT WITH '｜'.
+
+REPLACE ALL OCCURRENCES  OF '*' IN L_TEXT WITH '＊'.
+
+O_ITEXT = L_TEXT.
+
+ENDFORM.                    " CHANGE_REC
+
+*&---------------------------------------------------------------------*
+*&      Form  del_rec
+*&---------------------------------------------------------------------*
+*       キュー、テンポラリファイル削除
+*----------------------------------------------------------------------*
+FORM DEL_REC.
+DATA : L_PJIDENT  TYPE N LENGTH 10,
+L_PJNUMMER TYPE N LENGTH 5,
+L_SIGN     TYPE C LENGTH 40,
+L_PATH     TYPE C LENGTH 70.
+
+L_PJIDENT  = GT_TSP02-PJIDENT.
+L_PJNUMMER = GT_TSP02-PJNUMMER.
+
+CONCATENATE L_PJIDENT '_' L_PJNUMMER INTO L_SIGN.
+
+PERFORM QUEUE_OPEN(OAQUEUES) USING 'CARA' 'R'.
+PERFORM QUEUE_GET(OAQUEUES) TABLES BUFFER USING 'CARA'.
+
+LOOP AT BUFFER.
+
+X_DATA-BUFFER = BUFFER. X_CARA = X_DATA.
+
+IF X_CARA-SIGN = L_SIGN.
+PERFORM QUEUE_DELETE(OAQUEUES) USING 'CARA' BUFFER-UNIT.
+
+* ファイル削除１
+DELETE DATASET X_CARA-S_PATH.
+* ファイル削除エラーの場合メッセージ出力
+IF SY-SUBRC <> 0.
+MESSAGE S398(00) WITH X_CARA-S_PATH '削除エラー'.
+ENDIF.
+* ファイル削除２（s付ファイル）
+CONCATENATE X_CARA-S_PATH 's' INTO L_PATH.
+DELETE DATASET L_PATH.
+* ファイル削除エラーの場合メッセージ出力
+IF SY-SUBRC <> 0.
+MESSAGE S398(00) WITH L_PATH '削除エラー'.
+ENDIF.
+
+ENDIF.
+ENDLOOP.
+
+PERFORM QUEUE_CLOSE(OAQUEUES) USING 'CARA'.
+
+ENDFORM.                    "del_rec

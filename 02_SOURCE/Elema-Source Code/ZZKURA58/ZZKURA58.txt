@@ -1,0 +1,905 @@
+*----------------------------------------------------------------------*
+*    受注先１：１支払人、支払人ｎ：１入金先の階層を想定                *
+*    会計で起票した得意先明細の参照キー１には、支払人コードが格納され  *
+*    ていることを想定                                                  *
+*----------------------------------------------------------------------*
+REPORT yk013300 .
+
+* 使用テーブル
+TABLES bsid.  "会計管理: 得意先の二次索引
+TABLES bsad.  "会計管理: 得意先の二次索引 (決済明細)
+TABLES knvv.  "得意先マスタ: 販売データ
+TABLES knvp.  "得意先マスタ 取引先機能
+TABLES yk110. "検収データ
+TABLES yk130. "売上データ
+TABLES yk310. "入金予定データ
+TABLES yk330. "売掛管理表
+
+* グローバル変数
+DATA i_yk330 LIKE STANDARD TABLE OF yk330 WITH HEADER LINE.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk330-bukrs OBLIGATORY. "会社コード
+PARAMETERS p_vkorg LIKE yk330-vkorg OBLIGATORY. "販売組織
+PARAMETERS p_vtweg LIKE yk330-vtweg OBLIGATORY. "流通チャネル
+PARAMETERS p_spart LIKE yk330-spart OBLIGATORY. "製品部門
+PARAMETERS p_zfbdt LIKE yk330-zfbdt OBLIGATORY. "締日
+SELECT-OPTIONS s_kunnr FOR yk330-kunnr. "得意先コード
+SELECT-OPTIONS s_vkbur FOR yk330-vkbur. "営業所
+SELECT-OPTIONS s_vkgrp FOR yk330-vkgrp. "営業グループ
+SELECT-OPTIONS s_hkont FOR bsid-hkont. "売掛金勘定コード
+
+*----------------------------------------------------------------------*
+INITIALIZATION.
+PERFORM f_init. "選択画面初期化
+
+START-OF-SELECTION.
+PERFORM f_urikakezan.  "売掛残①
+PERFORM f_kensyu.      "当月検収額②
+PERFORM f_zenzenmiken. "前々回以前未検収③
+PERFORM f_zenmiken.    "前回以前未検収④
+PERFORM f_toumiken.    "当回以前未検収⑤
+PERFORM f_minyuryoku.  "未入力⑥
+PERFORM f_unmatch.     "アンマッチ⑦
+PERFORM f_nyukinyotei. "入金予定⑧
+PERFORM f_sai.         "残高差異⑨
+PERFORM f_update.      "テーブル更新
+
+*---------------------------------------------------------------------*
+*       FORM f_init                                                   *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_init.
+* 選択画面の初期化
+GET PARAMETER ID 'BUK' FIELD p_bukrs. "会社コード
+GET PARAMETER ID 'VKO' FIELD p_vkorg. "販売組織
+GET PARAMETER ID 'VTW' FIELD p_vtweg. "流通チャネル
+GET PARAMETER ID 'SPA' FIELD p_spart. "製品部門
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_urikakezan                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_urikakezan.
+* ローカル変数
+TYPES: BEGIN OF st_bsid,
+bukrs LIKE bsid-bukrs,
+kunnr LIKE bsid-kunnr,
+xref1 LIKE bsid-xref1, "支払人＝受注先
+waers LIKE bsid-waers,
+shkzg LIKE bsid-shkzg,
+wrbtr LIKE bsid-wrbtr,
+vkbur LIKE knvv-vkbur, "営業所
+vkgrp LIKE knvv-vkgrp, "営業グループ
+END OF st_bsid.
+DATA i_bsid TYPE STANDARD TABLE OF st_bsid WITH HEADER LINE.
+* 未決済明細検索
+SELECT bukrs kunnr xref1 waers shkzg SUM( wrbtr )
+FROM   bsid
+INTO   TABLE i_bsid
+WHERE  bukrs  = p_bukrs  "指定された会社
+AND    kunnr IN s_kunnr  "指定された得意先
+AND    budat <= p_zfbdt  "締日以前に転記
+AND    hkont IN s_hkont  "売掛金勘定
+GROUP  BY BUKRS kunnr XREF1 waers shkzg.
+* 決済明細検索
+SELECT bukrs kunnr xref1 waers shkzg SUM( wrbtr )
+FROM   bsad
+APPENDING TABLE i_bsid
+WHERE  bukrs  = p_bukrs  "指定された会社
+AND    kunnr IN s_kunnr  "指定された得意先
+AND    budat <= p_zfbdt  "締日以前に転記
+AND    augdt  > p_zfbdt  "締日の後で決済
+AND    hkont IN s_hkont  "売掛金勘定
+GROUP  BY BUKRS kunnr XREF1 waers shkzg.
+* 営業所/営業グループの取付けと更新用内部テーブルへの保存
+* （営業所/営業グループは、得意先マスタで決定される）
+SORT i_bsid BY xref1 kunnr.
+LOOP AT i_bsid.
+IF i_bsid-xref1 IS INITIAL.
+SELECT SINGLE vkbur vkgrp
+FROM   knvv
+INTO   (i_bsid-vkbur,i_bsid-vkgrp)
+WHERE  kunnr  = i_bsid-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart.
+ELSE.
+SELECT SINGLE vkbur vkgrp
+FROM   knvv
+INTO   (i_bsid-vkbur,i_bsid-vkgrp)
+WHERE  kunnr  = i_bsid-xref1
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart.
+IF sy-subrc = 0.
+i_bsid-kunnr = i_bsid-xref1. "得意先コード←支払人
+ELSE.
+SELECT SINGLE vkbur vkgrp
+FROM   knvv
+INTO   (i_bsid-vkbur,i_bsid-vkgrp)
+WHERE  kunnr  = i_bsid-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart.
+ENDIF.
+ENDIF.
+IF i_bsid-vkbur IN s_vkbur AND
+i_bsid-vkgrp IN s_vkgrp.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_bsid-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_bsid-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_bsid-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_bsid-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_bsid-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt.
+i_yk330-waers = i_bsid-waers.
+i_yk330-vkbur = i_bsid-vkbur.
+i_yk330-vkgrp = i_bsid-vkgrp.
+IF i_bsid-shkzg = 'S'. "借方が正
+i_yk330-urikakezan = i_bsid-wrbtr.
+ELSE.
+i_yk330-urikakezan = i_bsid-wrbtr * -1.
+ENDIF.
+IF i_bsid-vkbur IN s_vkbur AND "選択条件に合致
+i_bsid-vkgrp IN s_vkgrp AND
+i_bsid-kunnr IN s_kunnr.
+APPEND i_yk330.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_kensyu                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_kensyu.
+* ローカル変数
+TYPES: BEGIN OF st_yk110,
+kunnr LIKE yk110-kunnr,
+vkbur LIKE yk110-vkbur,
+vkgrp LIKE yk110-vkgrp,
+waers LIKE yk110-waers,
+knetxamt LIKE yk110-knetxamt,
+END OF st_yk110.
+DATA i_yk110 TYPE STANDARD TABLE OF st_yk110 WITH HEADER LINE.
+* 当月検収額検索
+REFRESH i_yk110.
+SELECT kunnr vkbur vkgrp waers SUM( knetxamt )
+FROM   yk110
+INTO   TABLE  i_yk110
+WHERE  bukrs   = p_bukrs
+AND    delflg  = space
+AND    kunnr  IN s_kunnr
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    zfbdt   = p_zfbdt "当月分
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk110.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk110-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk110-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk110-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt.
+i_yk330-waers = i_yk110-waers.
+i_yk330-vkbur = i_yk110-vkbur.
+i_yk330-vkgrp = i_yk110-vkgrp.
+i_yk330-kensyu = i_yk110-knetxamt. "当月検収額←税込金額
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_zenzenmiken                                            *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_zenzenmiken.
+* ローカル変数
+DATA w_date LIKE sy-datum.
+TYPES: BEGIN OF st_yk130,
+kunnr LIKE yk130-kunnr,
+vkbur LIKE yk130-vkbur,
+vkgrp LIKE yk130-vkgrp,
+waers LIKE yk130-waers,
+knetxamt LIKE yk130-knetxamt,
+END OF st_yk130.
+DATA i_yk130 TYPE STANDARD TABLE OF st_yk130 WITH HEADER LINE.
+* 前々回の締日の作成
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+day_in            = p_zfbdt
+IMPORTING
+last_day_of_month = w_date
+EXCEPTIONS
+day_in_no_date    = 1
+OTHERS            = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+IF p_zfbdt = w_date. "締日が月末の場合
+w_date+6(2) = '01'. "当月月初
+w_date = w_date - 1. "前月月末
+w_date+6(2) = '01'. "前月月初
+w_date = w_date - 1. "前々月月末
+ELSE. "締日が月末でない場合
+w_date+6(2) = '01'. "当月月初
+w_date = w_date - 1. "前月月末
+w_date+6(2) = '01'. "前月月初
+w_date = w_date - 1. "前々月月末
+w_date+6(2) = p_zfbdt+6(2).
+ENDIF.
+* 売上データの検索
+SELECT kunnr vkbur vkgrp waers SUM( knetxamt )
+FROM   yk130
+INTO   TABLE  i_yk130
+WHERE  kekkbn  = '1' "未検収
+AND    kunnr  IN s_kunnr
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    bukrs   = p_bukrs
+AND    zfbdt  <= w_date  "前々回以前
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk130.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk130-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk130-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk130-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt. "締日
+i_yk330-waers = i_yk130-waers.
+i_yk330-vkbur = i_yk130-vkbur.
+i_yk330-vkgrp = i_yk130-vkgrp.
+i_yk330-zenzenmiken = i_yk130-knetxamt. "前々回未検収←税込金額
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_zenmiken                                               *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_zenmiken.
+* ローカル変数
+DATA w_date LIKE sy-datum.
+TYPES: BEGIN OF st_yk130,
+kunnr LIKE yk130-kunnr,
+vkbur LIKE yk130-vkbur,
+vkgrp LIKE yk130-vkgrp,
+waers LIKE yk130-waers,
+knetxamt LIKE yk130-knetxamt,
+END OF st_yk130.
+DATA i_yk130 TYPE STANDARD TABLE OF st_yk130 WITH HEADER LINE.
+* 前回の締日の作成
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+day_in            = p_zfbdt
+IMPORTING
+last_day_of_month = w_date
+EXCEPTIONS
+day_in_no_date    = 1
+OTHERS            = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+IF p_zfbdt = w_date. "締日が月末の場合
+w_date+6(2) = '01'. "当月月初
+w_date = w_date - 1. "前月月末
+ELSE. "締日が月末でない場合
+w_date+6(2) = '01'. "当月月初
+w_date = w_date - 1. "前月月末
+w_date+6(2) = p_zfbdt+6(2).
+ENDIF.
+* 売上データの検索
+SELECT kunnr vkbur vkgrp waers SUM( knetxamt )
+FROM   yk130
+INTO   TABLE  i_yk130
+WHERE  kekkbn  = '1' "未検収
+AND    kunnr  IN s_kunnr
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    bukrs   = p_bukrs
+AND    zfbdt   = w_date  "前回
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk130.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk130-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk130-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk130-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt. "締日
+i_yk330-waers = i_yk130-waers.
+i_yk330-vkbur = i_yk130-vkbur.
+i_yk330-vkgrp = i_yk130-vkgrp.
+i_yk330-zenmiken = i_yk130-knetxamt. "前回未検収←税込金額
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_toumiken                                               *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_toumiken.
+* ローカル変数
+DATA w_date LIKE sy-datum.
+TYPES: BEGIN OF st_yk130,
+kunnr LIKE yk130-kunnr,
+vkbur LIKE yk130-vkbur,
+vkgrp LIKE yk130-vkgrp,
+waers LIKE yk130-waers,
+knetxamt LIKE yk130-knetxamt,
+END OF st_yk130.
+DATA i_yk130 TYPE STANDARD TABLE OF st_yk130 WITH HEADER LINE.
+* 売上データの検索
+SELECT kunnr vkbur vkgrp waers SUM( knetxamt )
+FROM   yk130
+INTO   TABLE  i_yk130
+WHERE  kekkbn  = '1' "未検収
+AND    kunnr  IN s_kunnr
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    bukrs   = p_bukrs
+AND    zfbdt   = p_zfbdt  "当回
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk130.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk130-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk130-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk130-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt. "締日
+i_yk330-waers = i_yk130-waers.
+i_yk330-vkbur = i_yk130-vkbur.
+i_yk330-vkgrp = i_yk130-vkgrp.
+i_yk330-toumiken = i_yk130-knetxamt. "当回未検収←税込金額
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_minyuryoku                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_minyuryoku.
+* ローカル変数
+TYPES: BEGIN OF st_yk110,
+kunnr LIKE yk110-kunnr,
+vkbur LIKE yk110-vkbur,
+vkgrp LIKE yk110-vkgrp,
+waers LIKE yk110-waers,
+knetxamt LIKE yk110-knetxamt,
+END OF st_yk110.
+DATA i_yk110 TYPE STANDARD TABLE OF st_yk110 WITH HEADER LINE.
+* 検収データの検索
+SELECT kunnr vkbur vkgrp waers SUM( knetxamt )
+FROM   yk110
+INTO   TABLE  i_yk110
+WHERE  kekkbn  = '2'      "未入力
+AND    kunnr  IN s_kunnr
+AND    delflg  = space    "有効
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    bukrs   = p_bukrs
+AND    zfbdt   = p_zfbdt  "当回
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk110.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk110-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk110-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk110-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt. "締日
+i_yk330-waers = i_yk110-waers.
+i_yk330-vkbur = i_yk110-vkbur.
+i_yk330-vkgrp = i_yk110-vkgrp.
+i_yk330-minyuryoku = i_yk110-knetxamt. "未入力←税込金額
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_unmatch                                                *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_unmatch.
+* ローカル変数
+TYPES: BEGIN OF st_yk130,
+kunnr LIKE yk130-kunnr,
+vkbur LIKE yk130-vkbur,
+vkgrp LIKE yk130-vkgrp,
+waers LIKE yk130-waers,
+knetxamt LIKE yk130-knetxamt,
+END OF st_yk130.
+DATA i_yk130 TYPE STANDARD TABLE OF st_yk130 WITH HEADER LINE.
+TYPES: BEGIN OF st_yk110,
+kunnr LIKE yk110-kunnr,
+vkbur LIKE yk110-vkbur,
+vkgrp LIKE yk110-vkgrp,
+waers LIKE yk110-waers,
+knetxamt LIKE yk110-knetxamt,
+END OF st_yk110.
+DATA i_yk110 TYPE STANDARD TABLE OF st_yk110 WITH HEADER LINE.
+* 検収データの検索
+SELECT kunnr vkbur vkgrp waers SUM( knetxamt )
+FROM   yk110
+INTO   TABLE  i_yk110
+WHERE  kekkbn  = '3'      "アンマッチ
+AND    kunnr  IN s_kunnr
+AND    delflg <> 'X'      "有効
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    bukrs   = p_bukrs
+AND    zfbdt   = p_zfbdt  "当回
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk110.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk110-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk110-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk110-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk110-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt. "締日
+i_yk330-waers = i_yk110-waers.
+i_yk330-vkbur = i_yk110-vkbur.
+i_yk330-vkgrp = i_yk110-vkgrp.
+i_yk330-unmatch = i_yk110-knetxamt * -1.
+"アンマッチ＝売上－検収
+APPEND i_yk330.
+ENDLOOP.
+* 売上データの検索
+SELECT kunnr vkbur vkgrp waers SUM( knetxamt )
+FROM   yk130
+INTO   TABLE  i_yk130
+WHERE  kekkbn  = '3' "アンマッチ
+AND    kunnr  IN s_kunnr
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    bukrs   = p_bukrs
+AND    zfbdt   = p_zfbdt  "当回
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk130.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk130-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk130-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk130-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk130-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt. "締日
+i_yk330-waers = i_yk130-waers.
+i_yk330-vkbur = i_yk130-vkbur.
+i_yk330-vkgrp = i_yk130-vkgrp.
+i_yk330-unmatch = i_yk130-knetxamt.
+"アンマッチ＝売上－検収
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_nyukinyotei                                            *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_nyukinyotei.
+* ローカル変数
+TYPES: BEGIN OF st_yk310,
+kunnr LIKE yk310-kunnr,
+vkbur LIKE yk310-vkbur,
+vkgrp LIKE yk310-vkgrp,
+waers LIKE yk310-waers,
+incamt LIKE yk310-incamt,
+END OF st_yk310.
+DATA i_yk310 TYPE STANDARD TABLE OF st_yk310 WITH HEADER LINE.
+* 入金予定の検索
+SELECT kunnr vkbur vkgrp waers SUM( incamt )
+FROM   yk310
+INTO   TABLE  i_yk310
+WHERE  bukrs   = p_bukrs
+AND    kunnr  IN s_kunnr
+AND    zfbdt  <= p_zfbdt "締日以前に登録されたもので
+AND    incdat  > p_zfbdt "締日以降に入金予定日がくるもの
+AND    vkorg   = p_vkorg
+AND    vtweg   = p_vtweg
+AND    spart   = p_spart
+AND    vkbur  IN s_vkbur
+AND    vkgrp  IN s_vkgrp
+AND    delflg  = space   "2002/07/12 ADD
+GROUP  by kunnr vkbur vkgrp waers.
+* 更新用内部テーブルへ保存
+LOOP AT i_yk310.
+CLEAR i_yk330.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunrg
+WHERE  kunnr  = i_yk310-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'PY'. "支払人（RG）
+IF sy-subrc <> 0.
+i_yk330-kunrg = i_yk310-kunnr.
+ENDIF.
+SELECT SINGLE kunnr
+FROM   knvp
+INTO   i_yk330-kunr1
+WHERE  kunnr  = i_yk310-kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    parvw  = 'Y3'. "入金先（Y3）
+IF sy-subrc <> 0.
+i_yk330-kunr1 = i_yk310-kunnr.
+ENDIF.
+i_yk330-bukrs = p_bukrs.
+i_yk330-kunnr = i_yk310-kunnr.
+i_yk330-vkorg = p_vkorg.
+i_yk330-vtweg = p_vtweg.
+i_yk330-spart = p_spart.
+i_yk330-zfbdt = p_zfbdt. "締日
+i_yk330-waers = i_yk310-waers.
+i_yk330-vkbur = i_yk310-vkbur.
+i_yk330-vkgrp = i_yk310-vkgrp.
+i_yk330-nyukinyotei = i_yk310-incamt. "入金予定←入金予定額
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_sai                                                    *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_sai.
+* ローカル変数
+DATA i_yk330_sum LIKE STANDARD TABLE OF yk330 WITH HEADER LINE.
+* 集計
+SORT i_yk330 BY kunnr waers.
+LOOP AT i_yk330.
+CLEAR i_yk330_sum.
+MOVE-CORRESPONDING i_yk330 TO i_yk330_sum.
+COLLECT i_yk330_sum. "集計
+ENDLOOP.
+* 残高差異と変更用データ格納
+REFRESH i_yk330.
+LOOP AT i_yk330_sum.
+CLEAR i_yk330.
+MOVE-CORRESPONDING i_yk330_sum TO i_yk330.
+i_yk330-sai = i_yk330-urikakezan   "売掛残①
+- i_yk330-zenzenmiken  "前々回以前未検収③
+- i_yk330-zenmiken     "前回以前未検収④
+- i_yk330-toumiken     "当回以前未検収⑤
++ i_yk330-minyuryoku   "未入力⑥
+- i_yk330-unmatch      "アンマッチ⑦
+- i_yk330-nyukinyotei. "入金予定⑧
+APPEND i_yk330.
+ENDLOOP.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_update                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_update.
+* ローカル変数
+DATA w_inscnt LIKE sy-dbcnt.
+DATA w_updcnt LIKE sy-dbcnt.
+* 締日チェック 2002/08/05 ADD
+LOOP AT i_yk330.
+CALL FUNCTION 'YK_ZFBDT_CHECK_BY_KNVV'
+EXPORTING
+i_cord        = i_yk330-kunnr
+i_vkorg       = i_yk330-vkorg
+i_vtweg       = i_yk330-vtweg
+i_spart       = i_yk330-spart
+i_day         = p_zfbdt
+EXCEPTIONS
+invalid_zfbdt = 1
+no_get_zterm  = 2
+OTHERS        = 3.
+IF sy-subrc <> 0.
+DELETE i_yk330.
+ENDIF.
+ENDLOOP.
+* ロック
+LOOP AT i_yk330.
+CALL FUNCTION 'ENQUEUE_EY_YK330'
+EXPORTING
+bukrs          = i_yk330-bukrs
+kunnr          = i_yk330-kunnr
+vkorg          = i_yk330-vkorg
+vtweg          = i_yk330-vtweg
+spart          = i_yk330-spart
+zfbdt          = i_yk330-zfbdt
+waers          = i_yk330-waers
+vkbur          = i_yk330-vkbur
+vkgrp          = i_yk330-vkgrp
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+ENDLOOP.
+* 更新
+LOOP AT i_yk330.
+CLEAR yk330.
+SELECT SINGLE *
+FROM   yk330
+WHERE  bukrs  = i_yk330-bukrs
+AND    kunnr  = i_yk330-kunnr
+AND    vkorg  = i_yk330-vkorg
+AND    vtweg  = i_yk330-vtweg
+AND    spart  = i_yk330-spart
+AND    zfbdt  = i_yk330-zfbdt
+AND    waers  = i_yk330-waers
+AND    vkbur  = i_yk330-vkbur
+AND    vkgrp  = i_yk330-vkgrp.
+IF sy-subrc = 0. "売掛管理データが存在する場合
+i_yk330-sgtxt = yk330-sgtxt.
+i_yk330-insdat = yk330-insdat.
+i_yk330-instim = yk330-instim.
+i_yk330-insusr = yk330-insusr.
+i_yk330-upddat = sy-datum.
+i_yk330-updtim = sy-uzeit.
+i_yk330-updusr = sy-uname.
+UPDATE yk330 FROM i_yk330.
+IF sy-subrc <> 0.
+MESSAGE e400(y1) WITH '売掛管理データが変更できません'.
+ELSE.
+ADD 1 TO w_updcnt.
+ENDIF.
+ELSE. "存在しない場合
+i_yk330-insdat = sy-datum.
+i_yk330-instim = sy-uzeit.
+i_yk330-insusr = sy-uname.
+INSERT INTO yk330 VALUES i_yk330.
+IF sy-subrc <> 0.
+MESSAGE e400(y1) WITH '売掛管理データが登録できません'.
+ELSE.
+ADD 1 TO w_inscnt.
+ENDIF.
+ENDIF.
+ENDLOOP.
+* アンロック
+LOOP AT i_yk330.
+CALL FUNCTION 'DEQUEUE_EY_YK330'
+EXPORTING
+bukrs = i_yk330-bukrs
+kunnr = i_yk330-kunnr
+vkorg = i_yk330-vkorg
+vtweg = i_yk330-vtweg
+spart = i_yk330-spart
+zfbdt = i_yk330-zfbdt
+waers = i_yk330-waers
+vkbur = i_yk330-vkbur
+vkgrp = i_yk330-vkgrp.
+
+ENDLOOP.
+* 件数表示
+MESSAGE s403(y1) WITH '登録件数' w_inscnt '更新件数' w_updcnt.
+
+ENDFORM.

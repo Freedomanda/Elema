@@ -1,0 +1,1654 @@
+REPORT YF010300 MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID：YF010300                                               *
+*    ﾌﾟﾛｸﾞﾗﾑ名：売上帳作成                                             *
+*    処理種別 ：ﾊﾞｯﾁ(ABAP/4)                                           *
+*    処理概要 ：バリアントにより指定された、対象年月日・自～           *
+*               対象年月日・至、得意先コード・自～得意先コード・至より *
+*               請求書：ヘッダデータ（VBRK）を読み込み、               *
+*               日付と各キー項目を取得し、それをもとに                 *
+*               請求伝票：明細データ（VBRP）、                         *
+*               SalesDocument：HeaderData（VBRK）、                    *
+*               会計伝票ヘッダ（BKPF）、得意先マスタ：一般（KNA1）、   *
+*               得意先マスタ：会社コード（KNB1）、                     *
+*               請求伝票：伝票タイプ(TVFK）を読み込み、各情報を付与し、*
+*               支払条件の説明（T052U）、品目テキスト（MAKT）、        *
+*               内部単位を言語依存単位に割当（T006A）、                *
+*               請求伝票タイプ：テキスト（TVFKT）、                    *
+*               販売伝票：受注理由：テキスト（TVAUT）より              *
+*               テキスト項目を取得する。                               *
+*               以上の情報により、売上帳を作成する。                   *
+*    入力     ：対象年月日、得意先ｺｰﾄﾞ、会社ｺｰﾄﾞ                       *
+*----------------------------------------------------------------------*
+*    作成日   ：1998/12/01                                             *
+*    作成者   ：大屋                                                   *
+*    変更履歴 ：1999/01/05 大屋                                        *
+*                 単価の桁数(ｶﾝﾏ込)を9桁(百万)から11桁(1億)に変更。    *
+*                 それに伴い、品目ﾃｷｽﾄの桁数を2Byte縮小し、            *
+*                 ﾚｲｱｳﾄを微調整。                                      *
+*               1999/01/07 大屋                                        *
+*                 明細が0件のﾃﾞｰﾀについてﾍｯﾀﾞと繰越額を出力するように  *
+*                 修正。                                               *
+*               1999/01/08 大屋                                        *
+*                 ﾍｯﾀﾞに対象年月日・自～対象年月日・至を出力するように *
+*                 修正。                                               *
+*              2000/07/07 加治佐                                       *
+*                 ﾊﾟﾗﾒｰﾀ'会社コード'の初期値を変更                     *
+************************************************************************
+*使用テーブル定義
+TABLES: VBRK,
+VBRP,
+VBAK,
+VBAP,
+BKPF,
+KNA1,
+KNB1,
+MAKT,
+T006A,
+T052U,
+TVFKT,
+TVAUT,
+TVFK,
+T001.
+
+*内部テーブルの定義
+DATA: BEGIN OF T_MEISAI OCCURS 10,
+FKDAT      LIKE VBRK-FKDAT,  "請求日付
+KUNRG      LIKE VBRK-KUNRG,  "支払人
+AUBEL      LIKE VBRP-AUBEL,  "販売伝票番号
+BELNR      LIKE BKPF-BELNR,  "会計伝票番号
+POSNR      LIKE VBRP-POSNR,  "請求伝票明細
+ZTERM      LIKE KNB1-ZTERM,  "支払条件
+FKART      LIKE VBRK-FKART,  "請求伝票ﾀｲﾌﾟ
+AUGRU      LIKE VBAK-AUGRU,  "受注理由
+H_VBTYP    LIKE VBAK-VBTYP,  "販売伝票ｶﾃｺﾞﾘ
+MATNR      LIKE VBRP-MATNR,  "品目ｺｰﾄﾞ
+FKIMG      LIKE VBRP-FKIMG,  "売上数量
+NETWR      LIKE VBRP-NETWR,  "内訳金額
+VRKME      LIKE VBRP-VRKME,  "販売単位
+TANKA      TYPE P DECIMALS 2,"単価
+S_VBTYP    LIKE TVFK-VBTYP,  "
+END   OF T_MEISAI.
+
+*テキスト項目取得用内部テーブルの定義
+DATA: BEGIN OF T_T006A OCCURS 10.
+INCLUDE STRUCTURE T006A.
+DATA: END   OF T_T006A.
+
+DATA: BEGIN OF T_T052U OCCURS 10.
+INCLUDE STRUCTURE T052U.
+DATA: END   OF T_T052U.
+
+DATA: BEGIN OF T_TVFKT OCCURS 10.
+INCLUDE STRUCTURE TVFKT.
+DATA: END   OF T_TVFKT.
+
+DATA: BEGIN OF T_MAKT OCCURS 10.
+INCLUDE STRUCTURE MAKT.
+DATA: END   OF T_MAKT.
+
+DATA: BEGIN OF T_TVAUT OCCURS 10.
+INCLUDE STRUCTURE TVAUT.
+DATA: END   OF T_TVAUT.
+
+*得意先編集エリアの定義
+DATA: BEGIN OF TOKUI,
+CODE(10)   TYPE C,
+NAME(35)   TYPE C,
+END   OF TOKUI.
+
+*住所編集用エリアの定義
+DATA: BEGIN OF JUSYO,
+STRAS(35)  TYPE C, SEPARATION1,
+ORT01(35)  TYPE C, SEPARATION2,
+ORT02(35)  TYPE C,
+END   OF JUSYO.
+
+*支払条件テキストエリアの定義
+DATA: BEGIN OF SIHARAI,
+WORK1(2)   TYPE C,
+TEXT1      LIKE T052U-TEXT1,
+WORK2(2)   TYPE C,
+END   OF SIHARAI.
+
+*摘要編集エリアの定義
+DATA: BEGIN OF TEKIYO,
+NAIYO      LIKE TVFKT-VTEXT,
+WORK(2)    TYPE C,
+RIYUU      LIKE TVAUT-BEZEI,
+END   OF TEKIYO.
+
+*1999/01/07 ADD START
+*日付編集用エリアの定義
+DATA: BEGIN OF DATE,
+NEN(4)     TYPE N,
+TUKI(2)    TYPE N,
+HI(2)      TYPE N,
+END   OF DATE.
+*1999/01/07 ADD END
+
+*ワークエリアの定義
+DATA: W_GJAHR      LIKE BKPF-GJAHR, "会計年度格納エリア
+W_MONAT      LIKE BKPF-MONAT, "会計期間格納エリア
+W_SPRAS      LIKE T002-SPRAS, "言語コード格納エリア
+
+W_FKDAT      LIKE VBRK-FKDAT, "転記日付待避域
+W_AUBEL      LIKE VBRP-AUBEL, "受注番号待避域
+W_KUNRG      LIKE VBRK-KUNRG, "得意先ｺｰﾄﾞ待避域
+W_BELNR      LIKE BKPF-BELNR, "会計伝票番号待避域
+
+PRI_FKDAT    LIKE VBRK-FKDAT, "転記日付印刷ｴﾘｱ
+PRI_AUBEL    LIKE VBRP-AUBEL, "受注番号印刷ｴﾘｱ
+PRI_BELNR    LIKE BKPF-BELNR, "会計伝票番号印刷ｴﾘｱ
+
+W_MAKTX      LIKE MAKT-MAKTX, "品目ﾃｷｽﾄﾜｰｸｴﾘｱ
+W_MSEHT      LIKE T006A-MSEHT,"単位ﾃｷｽﾄﾜｰｸｴﾘｱ
+W_VTEXT      LIKE TVFKT-VTEXT,"請求伝票ﾀｲﾌﾟﾃｷｽﾄﾜｰｸｴﾘｱ
+W_BEZEI      LIKE TVAUT-BEZEI,"受注理由ﾃｷｽﾄﾜｰｸｴﾘｱ
+
+W_NAME       LIKE KNA1-NAME1, "得意先名称ﾜｰｸｴﾘｱ
+
+W_NETWR      TYPE P,          "伝票通貨での請求明細の正味額
+W_KIN        TYPE P,          "金額計算用ﾜｰｸｴﾘｱ
+
+SOUURI       TYPE P,          "総売上高
+MODOSI       TYPE P,          "売上戻・値引高
+JUNURI       TYPE P,          "純売上高
+
+LINE_CNT     TYPE I,          "明細行カウンタ
+PAGE_CNT     TYPE I,          "ページカウンタ
+LOOP_CNT     TYPE I,          "ループカウンタ
+
+*1999/01/07 ADD START
+C_FLG        TYPE C,          "存在チェックフラグ
+W_NEN(4)     TYPE N,
+W_TUKI(2)    TYPE N,
+C_NEN(4)     TYPE N,
+C_TUKI(2)    TYPE N,
+W_DATE       LIKE SY-DATUM.
+*1999/01/07 ADD END
+
+*インクルード
+INCLUDE YF01NUMC.
+
+************************************************************************
+*         パラメータ入力画面                                           *
+************************************************************************
+SELECTION-SCREEN SKIP 2.
+
+PARAMETERS: P_BUKRS LIKE T001-BUKRS      "会社コード
+*2000/07/07 MOD START
+*                        DEFAULT 'C001'
+MEMORY ID BUK
+*2000/07/07 MOD END
+OBLIGATORY.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_DATUM FOR SY-DATUM     "対象年月日
+OBLIGATORY.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_KUNNR FOR KNA1-KUNNR   "得意先コード
+MATCHCODE OBJECT DEBI.
+
+************************************************************************
+*         請求伝票ヘッダの存在チェック                                 *
+************************************************************************
+AT SELECTION-SCREEN.
+C_FLG = '0'.
+SELECT COUNT(*) FROM VBRK
+WHERE FKDAT IN P_DATUM
+AND   KUNRG IN P_KUNNR.
+
+IF SY-SUBRC = 4.
+C_FLG = '1'.
+*    MESSAGE E008(Y1).
+*    STOP.
+ENDIF.
+
+************************************************************************
+*         会社コードの存在チェック                                     *
+************************************************************************
+AT SELECTION-SCREEN ON P_BUKRS.
+CLEAR T001.
+SELECT SINGLE * FROM T001 WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC = 0.
+W_SPRAS = T001-SPRAS.
+ELSE.
+MESSAGE E350(F4) WITH P_BUKRS.
+STOP.
+ENDIF.
+
+*1999/01/07 ADD START
+************************************************************************
+*         得意先コードの存在チェック                                   *
+************************************************************************
+AT SELECTION-SCREEN ON P_KUNNR.
+CLEAR KNA1.
+SELECT * FROM KNA1 WHERE KUNNR IN P_KUNNR.
+ENDSELECT.
+IF SY-SUBRC = 4.
+MESSAGE E153(F2) WITH P_KUNNR-LOW.
+STOP.
+ENDIF.
+*1999/01/07 ADD END
+
+************************************************************************
+*         メイン                                                       *
+************************************************************************
+START-OF-SELECTION.
+
+IF C_FLG = '0'.
+*テキスト取得用内部テーブルの作成
+SELECT * FROM T006A INTO TABLE T_T006A
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM MAKT  INTO TABLE T_MAKT
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM TVFKT INTO TABLE T_TVFKT
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM TVAUT INTO TABLE T_TVAUT
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM T052U INTO TABLE T_T052U
+WHERE SPRAS = W_SPRAS.
+
+PERFORM DATA_SELECT.
+PERFORM PRINT.
+*1999/01/07 ADD START
+ELSE.
+C_NEN  = P_DATUM-LOW+0(4).
+C_TUKI = P_DATUM-LOW+4(2).
+IF P_DATUM-HIGH <> '00000000'.
+W_NEN  = P_DATUM-HIGH+0(4).
+W_TUKI = P_DATUM-HIGH+4(2).
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+PERFORM TUKI_GET.
+ENDIF.
+ENDIF.
+PERFORM M_ZERO.
+*1999/01/07 ADD END
+ENDIF.
+
+END-OF-SELECTION.
+
+*----------------------------------------------------------------------*
+*         明細データの取得                                             *
+*----------------------------------------------------------------------*
+FORM DATA_SELECT.
+
+*データ読込処理
+SELECT * FROM VBRK
+WHERE FKDAT IN P_DATUM
+AND   KUNRG IN P_KUNNR.
+
+SELECT * FROM TVFK
+WHERE FKART = VBRK-FKART.
+ENDSELECT.
+
+CASE TVFK-VBTYP.
+WHEN 'M' OR 'P' OR 'S' OR 'N' OR 'O'.
+
+PERFORM BELNR_GET.
+
+SELECT * FROM VBRP
+WHERE VBELN = VBRK-VBELN.
+
+SELECT * FROM VBAK
+WHERE VBELN = VBRP-AUBEL.
+ENDSELECT.
+
+SELECT * FROM VBAP
+WHERE VBELN = VBRP-AUBEL
+AND   POSNR = VBRP-AUPOS.
+ENDSELECT.
+
+SELECT * FROM KNB1
+WHERE KUNNR = VBRK-KUNRG
+AND   BUKRS = P_BUKRS.
+ENDSELECT.
+
+PERFORM DATA_MOVE.
+
+ENDSELECT.
+
+ENDCASE.
+
+ENDSELECT.
+
+SORT T_MEISAI BY FKDAT KUNRG AUBEL BELNR POSNR.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細テーブルの作成                                           *
+*----------------------------------------------------------------------*
+FORM DATA_MOVE.
+
+T_MEISAI-FKDAT   = VBRK-FKDAT.
+T_MEISAI-KUNRG   = VBRK-KUNRG.
+T_MEISAI-AUBEL   = VBRP-AUBEL.
+T_MEISAI-BELNR   = W_BELNR.
+T_MEISAI-POSNR   = VBRP-POSNR.
+T_MEISAI-ZTERM   = KNB1-ZTERM.
+T_MEISAI-FKART   = VBRK-FKART.
+T_MEISAI-AUGRU   = VBAK-AUGRU.
+T_MEISAI-H_VBTYP = VBAK-VBTYP.
+T_MEISAI-MATNR   = VBRP-MATNR.
+T_MEISAI-FKIMG   = VBRP-FKIMG.
+T_MEISAI-NETWR   = VBRP-NETWR.
+T_MEISAI-VRKME   = VBRP-VRKME.
+T_MEISAI-TANKA   = VBAP-NETPR * 100 / VBAP-KPEIN.
+T_MEISAI-S_VBTYP = TVFK-VBTYP.
+
+APPEND T_MEISAI.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         帳票出力処理                                                 *
+*----------------------------------------------------------------------*
+FORM PRINT.
+
+*初期化
+LINE_CNT = 0.
+PAGE_CNT = 1.
+W_KIN    = 0.
+LOOP_CNT = 1.
+
+CLEAR: W_FKDAT,
+W_KUNRG,
+W_AUBEL,
+W_BELNR.
+
+*1999/01/07 ADD START
+C_NEN  = P_DATUM-LOW+0(4).
+C_TUKI = P_DATUM-LOW+4(2).
+*1999/01/07 ADD END
+
+LOOP AT T_MEISAI.
+
+*1999/01/07 ADD START
+W_NEN  = T_MEISAI-FKDAT+0(4).
+W_TUKI = T_MEISAI-FKDAT+4(2).
+
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+IF SY-TABIX = 1.
+PERFORM TUKI_GET.
+ENDIF.
+ENDIF.
+*1999/01/07 ADD END
+
+PERFORM TEXT_GET.
+
+W_NETWR = T_MEISAI-NETWR * 100.
+
+IF   LOOP_CNT <> 1
+AND ( W_FKDAT  <> T_MEISAI-FKDAT
+OR   W_KUNRG  <> T_MEISAI-KUNRG
+OR   W_AUBEL  <> T_MEISAI-AUBEL
+OR   W_BELNR  <> T_MEISAI-BELNR ).
+W_KIN = ABS( W_KIN ).
+PERFORM YF01NUMC USING W_KIN 13 0.
+WRITE: 157     O_NUM USING EDIT MASK 'RR______________'.
+W_KIN = 0.
+
+IF W_FKDAT+0(6) <> T_MEISAI-FKDAT+0(6).
+PERFORM GOUKEI.
+LINE_CNT = 0.
+PAGE_CNT = 1.
+*1999/01/07 ADD START
+C_TUKI = C_TUKI + 1.
+IF C_TUKI = '13'.
+C_NEN  = C_NEN + 1.
+C_TUKI = 1.
+ENDIF.
+IF ( W_NEN > C_NEN )
+OR ( W_NEN = C_NEN AND W_TUKI > C_TUKI ).
+PERFORM TUKI_GET.
+ENDIF.
+*1999/01/07 ADD END
+ELSE.
+IF W_FKDAT <> T_MEISAI-FKDAT
+OR W_KUNRG <> T_MEISAI-KUNRG.
+IF LINE_CNT > 43.
+LINE_CNT = 0.
+PAGE_CNT = PAGE_CNT + 1.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+
+IF LINE_CNT = 0.
+IF PAGE_CNT <> 1.
+ULINE (170).
+ENDIF.
+W_DATE = T_MEISAI-FKDAT.  "1999/01/07 ADD
+PERFORM HEADER.
+ENDIF.
+
+*ﾌﾞﾚｲｸの判定を行う
+IF W_FKDAT <> T_MEISAI-FKDAT
+OR W_KUNRG <> T_MEISAI-KUNRG.
+IF LINE_CNT <> 0.
+ULINE (170).
+LINE_CNT = LINE_CNT + 1.
+ENDIF.
+
+PERFORM TOKUI_GET.
+PERFORM TOKUI_WRITE.
+LINE_CNT = LINE_CNT + 1.
+
+PRI_FKDAT  = T_MEISAI-FKDAT.
+PRI_AUBEL  = T_MEISAI-AUBEL.
+PRI_BELNR  = T_MEISAI-BELNR.
+ELSEIF W_AUBEL <> T_MEISAI-AUBEL.
+PRI_FKDAT  = SPACE.
+PRI_AUBEL  = T_MEISAI-AUBEL.
+PRI_BELNR  = T_MEISAI-BELNR.
+ELSEIF W_BELNR <> T_MEISAI-BELNR.
+PRI_FKDAT  = SPACE.
+PRI_AUBEL  = SPACE.
+PRI_BELNR  = T_MEISAI-BELNR.
+ELSE.
+PRI_FKDAT  = SPACE.
+PRI_AUBEL  = SPACE.
+PRI_BELNR  = SPACE.
+ENDIF.
+
+IF LINE_CNT = 0.
+PRI_FKDAT  = T_MEISAI-FKDAT.
+PRI_AUBEL  = T_MEISAI-AUBEL.
+PRI_BELNR  = T_MEISAI-BELNR.
+ENDIF.
+
+PERFORM M_WRITE.
+LINE_CNT = LINE_CNT + 1.
+
+W_FKDAT = T_MEISAI-FKDAT.
+W_KUNRG = T_MEISAI-KUNRG.
+W_AUBEL = T_MEISAI-AUBEL.
+W_BELNR = T_MEISAI-BELNR.
+
+*内訳金額の計算
+CASE T_MEISAI-S_VBTYP.
+WHEN 'M' OR 'P' OR 'S'.
+W_KIN   = W_KIN + W_NETWR.
+WHEN 'N' OR 'O'.
+W_KIN   = W_KIN - W_NETWR.
+ENDCASE.
+
+*総売上高、売上戻・割引額の集計
+CASE T_MEISAI-S_VBTYP.
+WHEN 'M' OR 'P' OR 'S'.
+SOUURI = SOUURI + W_NETWR.
+WHEN 'N' OR 'O'.
+MODOSI = MODOSI + W_NETWR.
+ENDCASE.
+
+IF LINE_CNT > 45.
+LINE_CNT = 0.
+PAGE_CNT = PAGE_CNT + 1.
+ENDIF.
+
+LOOP_CNT = LOOP_CNT + 1.
+
+ENDLOOP.
+
+W_KIN = ABS( W_KIN ).
+PERFORM YF01NUMC USING W_KIN 13 0.
+WRITE: 157     O_NUM USING EDIT MASK 'RR______________'.
+
+PERFORM GOUKEI.
+
+*1999/01/07 ADD START
+IF P_DATUM-HIGH <> '00000000'.
+W_NEN  = P_DATUM-HIGH+0(4).
+W_TUKI = P_DATUM-HIGH+4(2).
+C_NEN  = T_MEISAI-FKDAT+0(4).
+C_TUKI = T_MEISAI-FKDAT+4(2).
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+C_TUKI = C_TUKI + 1.
+IF C_TUKI = '13'.
+C_NEN  = C_NEN + 1.
+C_TUKI = 1.
+ENDIF.
+
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+PERFORM TUKI_GET.
+ENDIF.
+PERFORM M_ZERO.
+ENDIF.
+ENDIF.
+*1999/01/07 ADD END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         ヘッダ出力処理                                               *
+*----------------------------------------------------------------------*
+FORM HEADER.
+
+NEW-PAGE.
+
+*会計年度、会計期間取得関数呼び出し
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUKRS = P_BUKRS
+I_BUDAT = W_DATE
+IMPORTING
+E_GJAHR = W_GJAHR
+E_MONAT = W_MONAT.
+
+WRITE: /160 'ページ',
+167(3) PAGE_CNT USING EDIT MASK 'RR___',
+/11  W_GJAHR,
+15  '年度',
+81  '売　上　帳',
+138 '作成年月日',
+148 SY-DATUM+0(4) NO-ZERO,
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+165 SY-UZEIT USING EDIT MASK '__:__',
+/162 '単位：円',
+*1999/01/08 ADD START（対象年月日・自～至の表示）
+/69  '（',
+71  P_DATUM-LOW+0(4) NO-ZERO,
+75  '年',
+77  P_DATUM-LOW+4(2) NO-ZERO,
+79  '月',
+81  P_DATUM-LOW+6(2) NO-ZERO,
+83  '日',
+85  '～'.
+IF P_DATUM-HIGH <> '00000000'.
+WRITE: 87  P_DATUM-HIGH+0(4) NO-ZERO,
+91  '年',
+93  P_DATUM-HIGH+4(2) NO-ZERO,
+95  '月',
+97  P_DATUM-HIGH+6(2) NO-ZERO,
+99  '日'.
+ELSE.
+WRITE: 87  P_DATUM-LOW+0(4) NO-ZERO,
+91  '年',
+93  P_DATUM-LOW+4(2) NO-ZERO,
+95  '月',
+97  P_DATUM-LOW+6(2) NO-ZERO,
+99  '日'.
+ENDIF.
+WRITE:  101 '）'.
+*1999/01/08 ADD END
+ULINE (170).
+WRITE: /2   '日付',
+7   '受注番号',
+18  '元帳照合',
+30  '科目名',
+52  '品名',
+114 '数量',
+119 '単位',
+135 '単価',
+148 '内　訳',
+162 '金　額'.
+ULINE (170).
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         得意先情報の取得、編集                                       *
+*----------------------------------------------------------------------*
+FORM TOKUI_GET.
+
+CLEAR: JUSYO.
+
+SELECT * FROM KNA1
+WHERE KUNNR = T_MEISAI-KUNRG.
+ENDSELECT.
+
+JUSYO-STRAS = KNA1-STRAS.
+JUSYO-ORT01 = KNA1-ORT01.
+JUSYO-ORT02 = KNA1-ORT02.
+CONDENSE JUSYO NO-GAPS.
+
+W_NAME = KNA1-NAME1.
+
+TOKUI-CODE = T_MEISAI-KUNRG.
+TOKUI-NAME = W_NAME.
+CONDENSE TOKUI.
+
+READ TABLE T_T052U WITH KEY SPRAS = W_SPRAS
+ZTERM = T_MEISAI-ZTERM.
+
+*支払条件テキストの編集
+IF T_T052U-TEXT1 = SPACE.
+SIHARAI-WORK1 = SPACE.
+SIHARAI-TEXT1 = SPACE.
+SIHARAI-WORK2 = SPACE.
+ELSE.
+SIHARAI-WORK1 = '【'.
+SIHARAI-TEXT1 = T_T052U-TEXT1+0(30).
+SIHARAI-WORK2 = '】'.
+CONDENSE SIHARAI NO-GAPS.
+ENDIF.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         テキスト項目取得                                             *
+*----------------------------------------------------------------------*
+FORM TEXT_GET.
+
+CLEAR: TEKIYO.
+
+CLEAR: W_MAKTX,
+W_MSEHT,
+W_VTEXT,
+W_BEZEI.
+
+READ TABLE T_MAKT  WITH KEY MATNR = T_MEISAI-MATNR
+SPRAS = W_SPRAS.
+IF SY-SUBRC = 0.
+W_MAKTX = T_MAKT-MAKTX.
+ELSE.
+W_MAKTX = SPACE.
+ENDIF.
+
+READ TABLE T_T006A WITH KEY SPRAS = W_SPRAS
+MSEHI = T_MEISAI-VRKME.
+IF SY-SUBRC = 0.
+W_MSEHT = T_T006A-MSEHT.
+ELSE.
+W_MSEHT = SPACE.
+ENDIF.
+
+READ TABLE T_TVFKT WITH KEY SPRAS = W_SPRAS
+FKART = T_MEISAI-FKART.
+IF SY-SUBRC = 0.
+W_VTEXT = T_TVFKT-VTEXT.
+ELSE.
+W_VTEXT = SPACE.
+ENDIF.
+
+READ TABLE T_TVAUT WITH KEY SPRAS = W_SPRAS
+AUGRU = T_MEISAI-AUGRU.
+IF SY-SUBRC = 0.
+W_BEZEI = T_TVAUT-BEZEI.
+ELSE.
+W_BEZEI = SPACE.
+ENDIF.
+
+*摘要の編集
+IF T_MEISAI-H_VBTYP = 'H'.
+TEKIYO-NAIYO = W_VTEXT.
+TEKIYO-WORK  = '・'.
+TEKIYO-RIYUU = W_BEZEI.
+ELSE.
+TEKIYO-NAIYO = W_VTEXT.
+TEKIYO-WORK  = SPACE.
+TEKIYO-RIYUU = SPACE.
+ENDIF.
+CONDENSE TEKIYO NO-GAPS.
+
+ENDFORM.
+
+
+*----------------------------------------------------------------------*
+*         会計伝票番号取得                                             *
+*----------------------------------------------------------------------*
+FORM BELNR_GET.
+
+SELECT * FROM BKPF
+WHERE AWKEY = VBRK-VBELN
+AND   AWTYP = 'VBRK'
+AND   AWSYS = VBRK-LOGSYS.
+ENDSELECT.
+
+IF SY-SUBRC = 0.
+W_BELNR = BKPF-BELNR.
+ELSE.
+W_BELNR = SPACE.
+ENDIF.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         得意先情報出力                                               *
+*----------------------------------------------------------------------*
+FORM TOKUI_WRITE.
+WRITE: /30   TOKUI+0(41),
+71   SIHARAI,
+107  JUSYO+0(64).
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細出力                                                     *
+*----------------------------------------------------------------------*
+FORM M_WRITE.
+WRITE: /1(5)    PRI_FKDAT+4(4) USING EDIT MASK '__.__',
+7       PRI_AUBEL,
+18      PRI_BELNR,
+30      TEKIYO+0(20),
+51      T_MEISAI-MATNR,
+*1999/01/05 UPDT START
+*         70      W_MAKTX.
+* PERFORM YF01NUMC USING T_MEISAI-FKIMG 7 0.
+* WRITE:  110     O_NUM USING EDIT MASK 'RR________'.
+* WRITE:  119     W_MSEHT.
+* PERFORM YF01NUMC USING T_MEISAI-TANKA 9 2.
+* WRITE:  130     O_NUM USING EDIT MASK 'RR_____________'.
+70      W_MAKTX+0(38).
+PERFORM YF01NUMC USING T_MEISAI-FKIMG 7 0.
+WRITE:  108     O_NUM USING EDIT MASK 'RR________'.
+WRITE:  117     W_MSEHT.
+PERFORM YF01NUMC USING T_MEISAI-TANKA 11 2.
+WRITE:  128     O_NUM USING EDIT MASK 'RR_______________'.
+*1999/01/05 UPDT END
+PERFORM YF01NUMC USING W_NETWR 13 0.
+WRITE:  143     O_NUM USING EDIT MASK 'RR______________'.
+ENDFORM.
+
+
+*----------------------------------------------------------------------*
+*         合計欄出力                                                   *
+*----------------------------------------------------------------------*
+FORM GOUKEI.
+*合計欄の印刷
+JUNURI = SOUURI - MODOSI.
+
+ULINE (170).
+WRITE: /139 '総売上高'.
+PERFORM YF01NUMC USING SOUURI 15 0.
+WRITE:  155     O_NUM USING EDIT MASK 'RR________________'.
+WRITE: /139 '売上戻・値引高'.
+PERFORM YF01NUMC USING MODOSI 15 0.
+WRITE:  155     O_NUM USING EDIT MASK 'RR________________'.
+WRITE: /139 '純売上高'.
+PERFORM YF01NUMC USING JUNURI 15 0.
+WRITE:  155     O_NUM USING EDIT MASK 'RR________________'.
+ULINE (170).
+
+CLEAR: SOUURI,
+MODOSI,
+JUNURI.
+
+ENDFORM.
+
+*1999/01/07 ADD START
+*----------------------------------------------------------------------*
+*         明細0件の月の抽出                                            *
+*----------------------------------------------------------------------*
+FORM TUKI_GET.
+DO.
+PERFORM M_ZERO.
+C_TUKI = C_TUKI + 1.
+IF C_TUKI = '13'.
+C_NEN  = C_NEN + 1.
+C_TUKI = 1.
+ENDIF.
+IF W_NEN  = C_NEN
+AND W_TUKI = C_TUKI.
+EXIT.
+ENDIF.
+ENDDO.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細0件の場合の編集                                          *
+*----------------------------------------------------------------------*
+FORM M_ZERO.
+DATE-NEN  = C_NEN.
+DATE-TUKI = C_TUKI.
+DATE-HI   = '01'.
+CONDENSE DATE NO-GAPS.
+
+W_DATE = DATE.
+PAGE_CNT = 1.
+
+PERFORM HEADER.
+SKIP 1.
+WRITE: /2 C_NEN NO-ZERO,
+'年',
+C_TUKI NO-ZERO,
+'月'.
+SKIP 1.
+WRITE: /2 '【該当データなし】'.
+SKIP 42.
+PERFORM GOUKEI.
+
+ENDFORM.
+*1999/01/07 ADD END
+REPORT YF010300 MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID：YF010300                                               *
+*    ﾌﾟﾛｸﾞﾗﾑ名：売上帳作成                                             *
+*    処理種別 ：ﾊﾞｯﾁ(ABAP/4)                                           *
+*    処理概要 ：バリアントにより指定された、対象年月日・自～           *
+*               対象年月日・至、得意先コード・自～得意先コード・至より *
+*               請求書：ヘッダデータ（VBRK）を読み込み、               *
+*               日付と各キー項目を取得し、それをもとに                 *
+*               請求伝票：明細データ（VBRP）、                         *
+*               SalesDocument：HeaderData（VBRK）、                    *
+*               会計伝票ヘッダ（BKPF）、得意先マスタ：一般（KNA1）、   *
+*               得意先マスタ：会社コード（KNB1）、                     *
+*               請求伝票：伝票タイプ(TVFK）を読み込み、各情報を付与し、*
+*               支払条件の説明（T052U）、品目テキスト（MAKT）、        *
+*               内部単位を言語依存単位に割当（T006A）、                *
+*               請求伝票タイプ：テキスト（TVFKT）、                    *
+*               販売伝票：受注理由：テキスト（TVAUT）より              *
+*               テキスト項目を取得する。                               *
+*               以上の情報により、売上帳を作成する。                   *
+*    入力     ：対象年月日、得意先ｺｰﾄﾞ、会社ｺｰﾄﾞ                       *
+*----------------------------------------------------------------------*
+*    作成日   ：1998/12/01                                             *
+*    作成者   ：大屋                                                   *
+*    変更履歴 ：1999/01/05 大屋                                        *
+*                 単価の桁数(ｶﾝﾏ込)を9桁(百万)から11桁(1億)に変更。    *
+*                 それに伴い、品目ﾃｷｽﾄの桁数を2Byte縮小し、            *
+*                 ﾚｲｱｳﾄを微調整。                                      *
+*               1999/01/07 大屋                                        *
+*                 明細が0件のﾃﾞｰﾀについてﾍｯﾀﾞと繰越額を出力するように  *
+*                 修正。                                               *
+*               1999/01/08 大屋                                        *
+*                 ﾍｯﾀﾞに対象年月日・自～対象年月日・至を出力するように *
+*                 修正。                                               *
+*              2000/07/07 加治佐                                       *
+*                 ﾊﾟﾗﾒｰﾀ'会社コード'の初期値を変更                     *
+************************************************************************
+*使用テーブル定義
+TABLES: VBRK,
+VBRP,
+VBAK,
+VBAP,
+BKPF,
+KNA1,
+KNB1,
+MAKT,
+T006A,
+T052U,
+TVFKT,
+TVAUT,
+TVFK,
+T001.
+
+*内部テーブルの定義
+DATA: BEGIN OF T_MEISAI OCCURS 10,
+FKDAT      LIKE VBRK-FKDAT,  "請求日付
+KUNRG      LIKE VBRK-KUNRG,  "支払人
+AUBEL      LIKE VBRP-AUBEL,  "販売伝票番号
+BELNR      LIKE BKPF-BELNR,  "会計伝票番号
+POSNR      LIKE VBRP-POSNR,  "請求伝票明細
+ZTERM      LIKE KNB1-ZTERM,  "支払条件
+FKART      LIKE VBRK-FKART,  "請求伝票ﾀｲﾌﾟ
+AUGRU      LIKE VBAK-AUGRU,  "受注理由
+H_VBTYP    LIKE VBAK-VBTYP,  "販売伝票ｶﾃｺﾞﾘ
+MATNR      LIKE VBRP-MATNR,  "品目ｺｰﾄﾞ
+FKIMG      LIKE VBRP-FKIMG,  "売上数量
+NETWR      LIKE VBRP-NETWR,  "内訳金額
+VRKME      LIKE VBRP-VRKME,  "販売単位
+TANKA      TYPE P DECIMALS 2,"単価
+S_VBTYP    LIKE TVFK-VBTYP,  "
+END   OF T_MEISAI.
+
+*テキスト項目取得用内部テーブルの定義
+DATA: BEGIN OF T_T006A OCCURS 10.
+INCLUDE STRUCTURE T006A.
+DATA: END   OF T_T006A.
+
+DATA: BEGIN OF T_T052U OCCURS 10.
+INCLUDE STRUCTURE T052U.
+DATA: END   OF T_T052U.
+
+DATA: BEGIN OF T_TVFKT OCCURS 10.
+INCLUDE STRUCTURE TVFKT.
+DATA: END   OF T_TVFKT.
+
+DATA: BEGIN OF T_MAKT OCCURS 10.
+INCLUDE STRUCTURE MAKT.
+DATA: END   OF T_MAKT.
+
+DATA: BEGIN OF T_TVAUT OCCURS 10.
+INCLUDE STRUCTURE TVAUT.
+DATA: END   OF T_TVAUT.
+
+*得意先編集エリアの定義
+DATA: BEGIN OF TOKUI,
+CODE(10)   TYPE C,
+NAME(35)   TYPE C,
+END   OF TOKUI.
+
+*住所編集用エリアの定義
+DATA: BEGIN OF JUSYO,
+STRAS(35)  TYPE C, SEPARATION1,
+ORT01(35)  TYPE C, SEPARATION2,
+ORT02(35)  TYPE C,
+END   OF JUSYO.
+
+*支払条件テキストエリアの定義
+DATA: BEGIN OF SIHARAI,
+WORK1(2)   TYPE C,
+TEXT1      LIKE T052U-TEXT1,
+WORK2(2)   TYPE C,
+END   OF SIHARAI.
+
+*摘要編集エリアの定義
+DATA: BEGIN OF TEKIYO,
+NAIYO      LIKE TVFKT-VTEXT,
+WORK(2)    TYPE C,
+RIYUU      LIKE TVAUT-BEZEI,
+END   OF TEKIYO.
+
+*1999/01/07 ADD START
+*日付編集用エリアの定義
+DATA: BEGIN OF DATE,
+NEN(4)     TYPE N,
+TUKI(2)    TYPE N,
+HI(2)      TYPE N,
+END   OF DATE.
+*1999/01/07 ADD END
+
+*ワークエリアの定義
+DATA: W_GJAHR      LIKE BKPF-GJAHR, "会計年度格納エリア
+W_MONAT      LIKE BKPF-MONAT, "会計期間格納エリア
+W_SPRAS      LIKE T002-SPRAS, "言語コード格納エリア
+
+W_FKDAT      LIKE VBRK-FKDAT, "転記日付待避域
+W_AUBEL      LIKE VBRP-AUBEL, "受注番号待避域
+W_KUNRG      LIKE VBRK-KUNRG, "得意先ｺｰﾄﾞ待避域
+W_BELNR      LIKE BKPF-BELNR, "会計伝票番号待避域
+
+PRI_FKDAT    LIKE VBRK-FKDAT, "転記日付印刷ｴﾘｱ
+PRI_AUBEL    LIKE VBRP-AUBEL, "受注番号印刷ｴﾘｱ
+PRI_BELNR    LIKE BKPF-BELNR, "会計伝票番号印刷ｴﾘｱ
+
+W_MAKTX      LIKE MAKT-MAKTX, "品目ﾃｷｽﾄﾜｰｸｴﾘｱ
+W_MSEHT      LIKE T006A-MSEHT,"単位ﾃｷｽﾄﾜｰｸｴﾘｱ
+W_VTEXT      LIKE TVFKT-VTEXT,"請求伝票ﾀｲﾌﾟﾃｷｽﾄﾜｰｸｴﾘｱ
+W_BEZEI      LIKE TVAUT-BEZEI,"受注理由ﾃｷｽﾄﾜｰｸｴﾘｱ
+
+W_NAME       LIKE KNA1-NAME1, "得意先名称ﾜｰｸｴﾘｱ
+
+W_NETWR      TYPE P,          "伝票通貨での請求明細の正味額
+W_KIN        TYPE P,          "金額計算用ﾜｰｸｴﾘｱ
+
+SOUURI       TYPE P,          "総売上高
+MODOSI       TYPE P,          "売上戻・値引高
+JUNURI       TYPE P,          "純売上高
+
+LINE_CNT     TYPE I,          "明細行カウンタ
+PAGE_CNT     TYPE I,          "ページカウンタ
+LOOP_CNT     TYPE I,          "ループカウンタ
+
+*1999/01/07 ADD START
+C_FLG        TYPE C,          "存在チェックフラグ
+W_NEN(4)     TYPE N,
+W_TUKI(2)    TYPE N,
+C_NEN(4)     TYPE N,
+C_TUKI(2)    TYPE N,
+W_DATE       LIKE SY-DATUM.
+*1999/01/07 ADD END
+
+*インクルード
+INCLUDE YF01NUMC.
+
+************************************************************************
+*         パラメータ入力画面                                           *
+************************************************************************
+SELECTION-SCREEN SKIP 2.
+
+PARAMETERS: P_BUKRS LIKE T001-BUKRS      "会社コード
+*2000/07/07 MOD START
+*                        DEFAULT 'C001'
+MEMORY ID BUK
+*2000/07/07 MOD END
+OBLIGATORY.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_DATUM FOR SY-DATUM     "対象年月日
+OBLIGATORY.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS: P_KUNNR FOR KNA1-KUNNR   "得意先コード
+MATCHCODE OBJECT DEBI.
+
+************************************************************************
+*         請求伝票ヘッダの存在チェック                                 *
+************************************************************************
+AT SELECTION-SCREEN.
+C_FLG = '0'.
+SELECT COUNT(*) FROM VBRK
+WHERE FKDAT IN P_DATUM
+AND   KUNRG IN P_KUNNR.
+
+IF SY-SUBRC = 4.
+C_FLG = '1'.
+*    MESSAGE E008(Y1).
+*    STOP.
+ENDIF.
+
+************************************************************************
+*         会社コードの存在チェック                                     *
+************************************************************************
+AT SELECTION-SCREEN ON P_BUKRS.
+CLEAR T001.
+SELECT SINGLE * FROM T001 WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC = 0.
+W_SPRAS = T001-SPRAS.
+ELSE.
+MESSAGE E350(F4) WITH P_BUKRS.
+STOP.
+ENDIF.
+
+*1999/01/07 ADD START
+************************************************************************
+*         得意先コードの存在チェック                                   *
+************************************************************************
+AT SELECTION-SCREEN ON P_KUNNR.
+CLEAR KNA1.
+SELECT * FROM KNA1 WHERE KUNNR IN P_KUNNR.
+ENDSELECT.
+IF SY-SUBRC = 4.
+MESSAGE E153(F2) WITH P_KUNNR-LOW.
+STOP.
+ENDIF.
+*1999/01/07 ADD END
+
+************************************************************************
+*         メイン                                                       *
+************************************************************************
+START-OF-SELECTION.
+
+IF C_FLG = '0'.
+*テキスト取得用内部テーブルの作成
+SELECT * FROM T006A INTO TABLE T_T006A
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM MAKT  INTO TABLE T_MAKT
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM TVFKT INTO TABLE T_TVFKT
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM TVAUT INTO TABLE T_TVAUT
+WHERE SPRAS = W_SPRAS.
+SELECT * FROM T052U INTO TABLE T_T052U
+WHERE SPRAS = W_SPRAS.
+
+PERFORM DATA_SELECT.
+PERFORM PRINT.
+*1999/01/07 ADD START
+ELSE.
+C_NEN  = P_DATUM-LOW+0(4).
+C_TUKI = P_DATUM-LOW+4(2).
+IF P_DATUM-HIGH <> '00000000'.
+W_NEN  = P_DATUM-HIGH+0(4).
+W_TUKI = P_DATUM-HIGH+4(2).
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+PERFORM TUKI_GET.
+ENDIF.
+ENDIF.
+PERFORM M_ZERO.
+*1999/01/07 ADD END
+ENDIF.
+
+END-OF-SELECTION.
+
+*----------------------------------------------------------------------*
+*         明細データの取得                                             *
+*----------------------------------------------------------------------*
+FORM DATA_SELECT.
+
+*データ読込処理
+SELECT * FROM VBRK
+WHERE FKDAT IN P_DATUM
+AND   KUNRG IN P_KUNNR.
+
+SELECT * FROM TVFK
+WHERE FKART = VBRK-FKART.
+ENDSELECT.
+
+CASE TVFK-VBTYP.
+WHEN 'M' OR 'P' OR 'S' OR 'N' OR 'O'.
+
+PERFORM BELNR_GET.
+
+SELECT * FROM VBRP
+WHERE VBELN = VBRK-VBELN.
+
+SELECT * FROM VBAK
+WHERE VBELN = VBRP-AUBEL.
+ENDSELECT.
+
+SELECT * FROM VBAP
+WHERE VBELN = VBRP-AUBEL
+AND   POSNR = VBRP-AUPOS.
+ENDSELECT.
+
+SELECT * FROM KNB1
+WHERE KUNNR = VBRK-KUNRG
+AND   BUKRS = P_BUKRS.
+ENDSELECT.
+
+PERFORM DATA_MOVE.
+
+ENDSELECT.
+
+ENDCASE.
+
+ENDSELECT.
+
+SORT T_MEISAI BY FKDAT KUNRG AUBEL BELNR POSNR.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細テーブルの作成                                           *
+*----------------------------------------------------------------------*
+FORM DATA_MOVE.
+
+T_MEISAI-FKDAT   = VBRK-FKDAT.
+T_MEISAI-KUNRG   = VBRK-KUNRG.
+T_MEISAI-AUBEL   = VBRP-AUBEL.
+T_MEISAI-BELNR   = W_BELNR.
+T_MEISAI-POSNR   = VBRP-POSNR.
+T_MEISAI-ZTERM   = KNB1-ZTERM.
+T_MEISAI-FKART   = VBRK-FKART.
+T_MEISAI-AUGRU   = VBAK-AUGRU.
+T_MEISAI-H_VBTYP = VBAK-VBTYP.
+T_MEISAI-MATNR   = VBRP-MATNR.
+T_MEISAI-FKIMG   = VBRP-FKIMG.
+T_MEISAI-NETWR   = VBRP-NETWR.
+T_MEISAI-VRKME   = VBRP-VRKME.
+T_MEISAI-TANKA   = VBAP-NETPR * 100 / VBAP-KPEIN.
+T_MEISAI-S_VBTYP = TVFK-VBTYP.
+
+APPEND T_MEISAI.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         帳票出力処理                                                 *
+*----------------------------------------------------------------------*
+FORM PRINT.
+
+*初期化
+LINE_CNT = 0.
+PAGE_CNT = 1.
+W_KIN    = 0.
+LOOP_CNT = 1.
+
+CLEAR: W_FKDAT,
+W_KUNRG,
+W_AUBEL,
+W_BELNR.
+
+*1999/01/07 ADD START
+C_NEN  = P_DATUM-LOW+0(4).
+C_TUKI = P_DATUM-LOW+4(2).
+*1999/01/07 ADD END
+
+LOOP AT T_MEISAI.
+
+*1999/01/07 ADD START
+W_NEN  = T_MEISAI-FKDAT+0(4).
+W_TUKI = T_MEISAI-FKDAT+4(2).
+
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+IF SY-TABIX = 1.
+PERFORM TUKI_GET.
+ENDIF.
+ENDIF.
+*1999/01/07 ADD END
+
+PERFORM TEXT_GET.
+
+W_NETWR = T_MEISAI-NETWR * 100.
+
+IF   LOOP_CNT <> 1
+AND ( W_FKDAT  <> T_MEISAI-FKDAT
+OR   W_KUNRG  <> T_MEISAI-KUNRG
+OR   W_AUBEL  <> T_MEISAI-AUBEL
+OR   W_BELNR  <> T_MEISAI-BELNR ).
+W_KIN = ABS( W_KIN ).
+PERFORM YF01NUMC USING W_KIN 13 0.
+WRITE: 157     O_NUM USING EDIT MASK 'RR______________'.
+W_KIN = 0.
+
+IF W_FKDAT+0(6) <> T_MEISAI-FKDAT+0(6).
+PERFORM GOUKEI.
+LINE_CNT = 0.
+PAGE_CNT = 1.
+*1999/01/07 ADD START
+C_TUKI = C_TUKI + 1.
+IF C_TUKI = '13'.
+C_NEN  = C_NEN + 1.
+C_TUKI = 1.
+ENDIF.
+IF ( W_NEN > C_NEN )
+OR ( W_NEN = C_NEN AND W_TUKI > C_TUKI ).
+PERFORM TUKI_GET.
+ENDIF.
+*1999/01/07 ADD END
+ELSE.
+IF W_FKDAT <> T_MEISAI-FKDAT
+OR W_KUNRG <> T_MEISAI-KUNRG.
+IF LINE_CNT > 43.
+LINE_CNT = 0.
+PAGE_CNT = PAGE_CNT + 1.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+
+IF LINE_CNT = 0.
+IF PAGE_CNT <> 1.
+ULINE (170).
+ENDIF.
+W_DATE = T_MEISAI-FKDAT.  "1999/01/07 ADD
+PERFORM HEADER.
+ENDIF.
+
+*ﾌﾞﾚｲｸの判定を行う
+IF W_FKDAT <> T_MEISAI-FKDAT
+OR W_KUNRG <> T_MEISAI-KUNRG.
+IF LINE_CNT <> 0.
+ULINE (170).
+LINE_CNT = LINE_CNT + 1.
+ENDIF.
+
+PERFORM TOKUI_GET.
+PERFORM TOKUI_WRITE.
+LINE_CNT = LINE_CNT + 1.
+
+PRI_FKDAT  = T_MEISAI-FKDAT.
+PRI_AUBEL  = T_MEISAI-AUBEL.
+PRI_BELNR  = T_MEISAI-BELNR.
+ELSEIF W_AUBEL <> T_MEISAI-AUBEL.
+PRI_FKDAT  = SPACE.
+PRI_AUBEL  = T_MEISAI-AUBEL.
+PRI_BELNR  = T_MEISAI-BELNR.
+ELSEIF W_BELNR <> T_MEISAI-BELNR.
+PRI_FKDAT  = SPACE.
+PRI_AUBEL  = SPACE.
+PRI_BELNR  = T_MEISAI-BELNR.
+ELSE.
+PRI_FKDAT  = SPACE.
+PRI_AUBEL  = SPACE.
+PRI_BELNR  = SPACE.
+ENDIF.
+
+IF LINE_CNT = 0.
+PRI_FKDAT  = T_MEISAI-FKDAT.
+PRI_AUBEL  = T_MEISAI-AUBEL.
+PRI_BELNR  = T_MEISAI-BELNR.
+ENDIF.
+
+PERFORM M_WRITE.
+LINE_CNT = LINE_CNT + 1.
+
+W_FKDAT = T_MEISAI-FKDAT.
+W_KUNRG = T_MEISAI-KUNRG.
+W_AUBEL = T_MEISAI-AUBEL.
+W_BELNR = T_MEISAI-BELNR.
+
+*内訳金額の計算
+CASE T_MEISAI-S_VBTYP.
+WHEN 'M' OR 'P' OR 'S'.
+W_KIN   = W_KIN + W_NETWR.
+WHEN 'N' OR 'O'.
+W_KIN   = W_KIN - W_NETWR.
+ENDCASE.
+
+*総売上高、売上戻・割引額の集計
+CASE T_MEISAI-S_VBTYP.
+WHEN 'M' OR 'P' OR 'S'.
+SOUURI = SOUURI + W_NETWR.
+WHEN 'N' OR 'O'.
+MODOSI = MODOSI + W_NETWR.
+ENDCASE.
+
+IF LINE_CNT > 45.
+LINE_CNT = 0.
+PAGE_CNT = PAGE_CNT + 1.
+ENDIF.
+
+LOOP_CNT = LOOP_CNT + 1.
+
+ENDLOOP.
+
+W_KIN = ABS( W_KIN ).
+PERFORM YF01NUMC USING W_KIN 13 0.
+WRITE: 157     O_NUM USING EDIT MASK 'RR______________'.
+
+PERFORM GOUKEI.
+
+*1999/01/07 ADD START
+IF P_DATUM-HIGH <> '00000000'.
+W_NEN  = P_DATUM-HIGH+0(4).
+W_TUKI = P_DATUM-HIGH+4(2).
+C_NEN  = T_MEISAI-FKDAT+0(4).
+C_TUKI = T_MEISAI-FKDAT+4(2).
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+C_TUKI = C_TUKI + 1.
+IF C_TUKI = '13'.
+C_NEN  = C_NEN + 1.
+C_TUKI = 1.
+ENDIF.
+
+IF W_NEN  <> C_NEN
+OR W_TUKI <> C_TUKI.
+PERFORM TUKI_GET.
+ENDIF.
+PERFORM M_ZERO.
+ENDIF.
+ENDIF.
+*1999/01/07 ADD END
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         ヘッダ出力処理                                               *
+*----------------------------------------------------------------------*
+FORM HEADER.
+
+NEW-PAGE.
+
+*会計年度、会計期間取得関数呼び出し
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUKRS = P_BUKRS
+I_BUDAT = W_DATE
+IMPORTING
+E_GJAHR = W_GJAHR
+E_MONAT = W_MONAT.
+
+WRITE: /160 'ページ',
+167(3) PAGE_CNT USING EDIT MASK 'RR___',
+/11  W_GJAHR,
+15  '年度',
+81  '売　上　帳',
+138 '作成年月日',
+148 SY-DATUM+0(4) NO-ZERO,
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+165 SY-UZEIT USING EDIT MASK '__:__',
+/162 '単位：円',
+*1999/01/08 ADD START（対象年月日・自～至の表示）
+/69  '（',
+71  P_DATUM-LOW+0(4) NO-ZERO,
+75  '年',
+77  P_DATUM-LOW+4(2) NO-ZERO,
+79  '月',
+81  P_DATUM-LOW+6(2) NO-ZERO,
+83  '日',
+85  '～'.
+IF P_DATUM-HIGH <> '00000000'.
+WRITE: 87  P_DATUM-HIGH+0(4) NO-ZERO,
+91  '年',
+93  P_DATUM-HIGH+4(2) NO-ZERO,
+95  '月',
+97  P_DATUM-HIGH+6(2) NO-ZERO,
+99  '日'.
+ELSE.
+WRITE: 87  P_DATUM-LOW+0(4) NO-ZERO,
+91  '年',
+93  P_DATUM-LOW+4(2) NO-ZERO,
+95  '月',
+97  P_DATUM-LOW+6(2) NO-ZERO,
+99  '日'.
+ENDIF.
+WRITE:  101 '）'.
+*1999/01/08 ADD END
+ULINE (170).
+WRITE: /2   '日付',
+7   '受注番号',
+18  '元帳照合',
+30  '科目名',
+52  '品名',
+114 '数量',
+119 '単位',
+135 '単価',
+148 '内　訳',
+162 '金　額'.
+ULINE (170).
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         得意先情報の取得、編集                                       *
+*----------------------------------------------------------------------*
+FORM TOKUI_GET.
+
+CLEAR: JUSYO.
+
+SELECT * FROM KNA1
+WHERE KUNNR = T_MEISAI-KUNRG.
+ENDSELECT.
+
+JUSYO-STRAS = KNA1-STRAS.
+JUSYO-ORT01 = KNA1-ORT01.
+JUSYO-ORT02 = KNA1-ORT02.
+CONDENSE JUSYO NO-GAPS.
+
+W_NAME = KNA1-NAME1.
+
+TOKUI-CODE = T_MEISAI-KUNRG.
+TOKUI-NAME = W_NAME.
+CONDENSE TOKUI.
+
+READ TABLE T_T052U WITH KEY SPRAS = W_SPRAS
+ZTERM = T_MEISAI-ZTERM.
+
+*支払条件テキストの編集
+IF T_T052U-TEXT1 = SPACE.
+SIHARAI-WORK1 = SPACE.
+SIHARAI-TEXT1 = SPACE.
+SIHARAI-WORK2 = SPACE.
+ELSE.
+SIHARAI-WORK1 = '【'.
+SIHARAI-TEXT1 = T_T052U-TEXT1+0(30).
+SIHARAI-WORK2 = '】'.
+CONDENSE SIHARAI NO-GAPS.
+ENDIF.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         テキスト項目取得                                             *
+*----------------------------------------------------------------------*
+FORM TEXT_GET.
+
+CLEAR: TEKIYO.
+
+CLEAR: W_MAKTX,
+W_MSEHT,
+W_VTEXT,
+W_BEZEI.
+
+READ TABLE T_MAKT  WITH KEY MATNR = T_MEISAI-MATNR
+SPRAS = W_SPRAS.
+IF SY-SUBRC = 0.
+W_MAKTX = T_MAKT-MAKTX.
+ELSE.
+W_MAKTX = SPACE.
+ENDIF.
+
+READ TABLE T_T006A WITH KEY SPRAS = W_SPRAS
+MSEHI = T_MEISAI-VRKME.
+IF SY-SUBRC = 0.
+W_MSEHT = T_T006A-MSEHT.
+ELSE.
+W_MSEHT = SPACE.
+ENDIF.
+
+READ TABLE T_TVFKT WITH KEY SPRAS = W_SPRAS
+FKART = T_MEISAI-FKART.
+IF SY-SUBRC = 0.
+W_VTEXT = T_TVFKT-VTEXT.
+ELSE.
+W_VTEXT = SPACE.
+ENDIF.
+
+READ TABLE T_TVAUT WITH KEY SPRAS = W_SPRAS
+AUGRU = T_MEISAI-AUGRU.
+IF SY-SUBRC = 0.
+W_BEZEI = T_TVAUT-BEZEI.
+ELSE.
+W_BEZEI = SPACE.
+ENDIF.
+
+*摘要の編集
+IF T_MEISAI-H_VBTYP = 'H'.
+TEKIYO-NAIYO = W_VTEXT.
+TEKIYO-WORK  = '・'.
+TEKIYO-RIYUU = W_BEZEI.
+ELSE.
+TEKIYO-NAIYO = W_VTEXT.
+TEKIYO-WORK  = SPACE.
+TEKIYO-RIYUU = SPACE.
+ENDIF.
+CONDENSE TEKIYO NO-GAPS.
+
+ENDFORM.
+
+
+*----------------------------------------------------------------------*
+*         会計伝票番号取得                                             *
+*----------------------------------------------------------------------*
+FORM BELNR_GET.
+
+SELECT * FROM BKPF
+WHERE AWKEY = VBRK-VBELN
+AND   AWTYP = 'VBRK'
+AND   AWSYS = VBRK-LOGSYS.
+ENDSELECT.
+
+IF SY-SUBRC = 0.
+W_BELNR = BKPF-BELNR.
+ELSE.
+W_BELNR = SPACE.
+ENDIF.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         得意先情報出力                                               *
+*----------------------------------------------------------------------*
+FORM TOKUI_WRITE.
+WRITE: /30   TOKUI+0(41),
+71   SIHARAI,
+107  JUSYO+0(64).
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細出力                                                     *
+*----------------------------------------------------------------------*
+FORM M_WRITE.
+WRITE: /1(5)    PRI_FKDAT+4(4) USING EDIT MASK '__.__',
+7       PRI_AUBEL,
+18      PRI_BELNR,
+30      TEKIYO+0(20),
+51      T_MEISAI-MATNR,
+*1999/01/05 UPDT START
+*         70      W_MAKTX.
+* PERFORM YF01NUMC USING T_MEISAI-FKIMG 7 0.
+* WRITE:  110     O_NUM USING EDIT MASK 'RR________'.
+* WRITE:  119     W_MSEHT.
+* PERFORM YF01NUMC USING T_MEISAI-TANKA 9 2.
+* WRITE:  130     O_NUM USING EDIT MASK 'RR_____________'.
+70      W_MAKTX+0(38).
+PERFORM YF01NUMC USING T_MEISAI-FKIMG 7 0.
+WRITE:  108     O_NUM USING EDIT MASK 'RR________'.
+WRITE:  117     W_MSEHT.
+PERFORM YF01NUMC USING T_MEISAI-TANKA 11 2.
+WRITE:  128     O_NUM USING EDIT MASK 'RR_______________'.
+*1999/01/05 UPDT END
+PERFORM YF01NUMC USING W_NETWR 13 0.
+WRITE:  143     O_NUM USING EDIT MASK 'RR______________'.
+ENDFORM.
+
+
+*----------------------------------------------------------------------*
+*         合計欄出力                                                   *
+*----------------------------------------------------------------------*
+FORM GOUKEI.
+*合計欄の印刷
+JUNURI = SOUURI - MODOSI.
+
+ULINE (170).
+WRITE: /139 '総売上高'.
+PERFORM YF01NUMC USING SOUURI 15 0.
+WRITE:  155     O_NUM USING EDIT MASK 'RR________________'.
+WRITE: /139 '売上戻・値引高'.
+PERFORM YF01NUMC USING MODOSI 15 0.
+WRITE:  155     O_NUM USING EDIT MASK 'RR________________'.
+WRITE: /139 '純売上高'.
+PERFORM YF01NUMC USING JUNURI 15 0.
+WRITE:  155     O_NUM USING EDIT MASK 'RR________________'.
+ULINE (170).
+
+CLEAR: SOUURI,
+MODOSI,
+JUNURI.
+
+ENDFORM.
+
+*1999/01/07 ADD START
+*----------------------------------------------------------------------*
+*         明細0件の月の抽出                                            *
+*----------------------------------------------------------------------*
+FORM TUKI_GET.
+DO.
+PERFORM M_ZERO.
+C_TUKI = C_TUKI + 1.
+IF C_TUKI = '13'.
+C_NEN  = C_NEN + 1.
+C_TUKI = 1.
+ENDIF.
+IF W_NEN  = C_NEN
+AND W_TUKI = C_TUKI.
+EXIT.
+ENDIF.
+ENDDO.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*         明細0件の場合の編集                                          *
+*----------------------------------------------------------------------*
+FORM M_ZERO.
+DATE-NEN  = C_NEN.
+DATE-TUKI = C_TUKI.
+DATE-HI   = '01'.
+CONDENSE DATE NO-GAPS.
+
+W_DATE = DATE.
+PAGE_CNT = 1.
+
+PERFORM HEADER.
+SKIP 1.
+WRITE: /2 C_NEN NO-ZERO,
+'年',
+C_TUKI NO-ZERO,
+'月'.
+SKIP 1.
+WRITE: /2 '【該当データなし】'.
+SKIP 42.
+PERFORM GOUKEI.
+
+ENDFORM.
+*1999/01/07 ADD END

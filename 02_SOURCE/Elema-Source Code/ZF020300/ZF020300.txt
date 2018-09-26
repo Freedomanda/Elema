@@ -1,0 +1,419 @@
+************************************************************************
+*  プログラムＩＤ：  ZF020300
+*  プログラム名称：  得意先決済BDC
+*　機能　　　　　：  請求書と検収照合済の未決済として残っている売掛金の
+* 　　　　　　　 ：  未決済明細の自動決済(消し込み)をする
+*  作成日　　　　：　2004/01/05
+*  作成者　　　　：　DMC(K.FURUYA)
+*  変更履歴　　　：　2004/02/09　伝票番号指定 DMC(K.FURUYA)
+*                   2004/02/17  バグ修正
+*&[改定履歴]
+*& YYYY/MM/DD  Programar         Description
+************************************************************************
+REPORT zf020300  MESSAGE-ID y1
+LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+************************************************************************
+*TABLES定義
+************************************************************************
+TABLES: kna1,    "得意先マスタ：一般データ
+knvv,    "得意先マスタ：販売データ
+bsid.    "得意先の二次索引
+************************************************************************
+*TYPES定義
+************************************************************************
+* 得意先取得用
+TYPES: BEGIN OF typ_kna1,
+kunnr TYPE kna1-kunnr,   "得意先コード
+waers TYPE knvv-waers,   "通貨コード
+END OF typ_kna1.
+* 未決済金額取得用
+TYPES: BEGIN OF typ_bsid,
+kunnr TYPE bsid-kunnr,   "得意先コード
+belnr TYPE bsid-belnr,   "会計伝票番号
+shkzg TYPE bsid-shkzg,   "貸借フラグ
+wrbtr TYPE bsid-wrbtr,   "未決済金額
+END OF typ_bsid.
+* 2004/02/09 ADD START
+* 伝票番号退避用
+TYPES: BEGIN OF typ_dpno,
+kunnr TYPE bsid-kunnr,   "得意先コード
+belnr TYPE bsid-belnr,   "会計伝票番号
+END OF typ_dpno.
+* 2004/02/09 ADD END
+* 金額集計用
+TYPES: BEGIN OF typ_sum,
+kunnr     TYPE kna1-kunnr,    "得意先コード
+wrbtr     TYPE bsid-wrbtr,    "集計金額
+waers     TYPE knvv-waers,    "通貨コード
+END OF typ_sum.
+* 出力用
+TYPES: BEGIN OF typ_out,
+kunnr(10)    TYPE c,           "得意先コード
+msg          LIKE message,     "メッセージ内容
+END   OF typ_out.
+************************************************************************
+*DATA定義
+************************************************************************
+DATA: gw_kna1 TYPE          typ_kna1,
+gt_kna1 TYPE TABLE OF typ_kna1.
+DATA: gw_bsid TYPE          typ_bsid,
+gt_bsid TYPE TABLE OF typ_bsid.
+DATA: gw_dpno TYPE          typ_dpno, "2004/02/09 ADD
+gt_dpno TYPE TABLE OF typ_dpno.
+DATA: gw_sum  TYPE          typ_sum,
+gt_sum  TYPE TABLE OF typ_sum.
+DATA: g_msg(100)  TYPE c.                 "エラーメッセージ用
+DATA: g_txt       LIKE bseg-sgtxt.        "テキスト用
+DATA: g_tenki     LIKE bsid-bschl.        "転記キー
+DATA: gw_bdc      LIKE          bdcdata,  "バッチ用
+gt_bdc      LIKE TABLE OF gw_bdc.
+DATA: g_cnt    TYPE i,                    "読込件数
+g_okcnt  TYPE i,                    "登録件数
+g_errcnt TYPE i.                    "エラー件数
+DATA: gw_out   TYPE          typ_out,
+gt_out   TYPE TABLE OF typ_out.
+DATA: g_kingaku(13) TYPE c.               "金額変換
+************************************************************************
+*CONSTANTS定義
+************************************************************************
+CONSTANTS: cns_err1(100) TYPE c VALUE '得意先マスタが存在しません',
+cns_err2(100) TYPE c VALUE '処理データは存在しません'.
+CONSTANTS: cns_c001(4)   TYPE c VALUE 'C001'.
+CONSTANTS: cns_s                VALUE 'S',
+cns_h                VALUE 'H'.
+CONSTANTS: cns_04(2)     TYPE c VALUE '04',
+cns_17(2)     TYPE c VALUE '17'.
+CONSTANTS: cns_x                VALUE 'X'.
+CONSTANTS: cns_m                VALUE 'M'.
+CONSTANTS: cns_1000(4)   TYPE c VALUE '1000',
+cns_10(2)     TYPE c VALUE '10'.
+CONSTANTS: cns_bk               VALUE ''.
+CONSTANTS: cns_txt1(20)  TYPE c VALUE '未決済明細の一括決済',
+cns_txt2(2)   TYPE c VALUE '件',
+cns_txt3(9)   TYPE c VALUE '読込件数=',
+cns_txt4(9)   TYPE c VALUE '登録件数=',
+cns_txt5(9)   TYPE c VALUE 'ｴﾗｰ 件数=',
+cns_txt6(10)  TYPE c VALUE '得意先',
+cns_txt7(140) TYPE c VALUE 'メッセージ',
+cns_txt8(40) TYPE c VALUE '* * *  得意先決済ＢＤＣ結果リスト  * * *',
+cns_txt9      TYPE c VALUE '(',
+cns_txt10     TYPE c VALUE ')',
+cns_txt11(2)  TYPE c VALUE '頁',
+cns_txt12(8)  TYPE c VALUE '正常処理'.
+************************************************************************
+* 選択画面定義
+************************************************************************
+DATA: g_kunnr TYPE bsid-kunnr.
+SELECT-OPTIONS: s_kunnr FOR g_kunnr OBLIGATORY.   "得意先コード
+PARAMETERS: p_budat TYPE sy-datum OBLIGATORY.     "転記日付
+PARAMETERS: p_augdt TYPE sy-datum OBLIGATORY.     "決済日付
+************************************************************************
+*INITIALIZATION.
+************************************************************************
+INITIALIZATION.
+* 決済日にシステム日付セット
+p_augdt = sy-datum.
+* 項目初期化
+CLEAR: gw_kna1,
+gt_kna1,
+gw_bsid,
+gt_bsid,
+gw_dpno,   "2004/02/09 ADD
+gt_dpno,   "2004/02/09 ADD
+gw_sum,
+gt_sum,
+g_msg,
+g_txt,
+g_tenki,
+gw_bdc,
+gt_bdc,
+g_cnt,
+g_okcnt,
+g_errcnt,
+gw_out,
+gt_out,
+g_kingaku.
+************************************************************************
+*START-OF-SELECTION.
+************************************************************************
+START-OF-SELECTION.
+PERFORM frm_main.
+************************************************************************
+*END-OF-SELECTION.
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+*TOP-OF-PAGE.
+************************************************************************
+TOP-OF-PAGE.
+PERFORM frm_top.
+*&---------------------------------------------------------------------*
+*&      Form  frm_main
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM frm_main.
+PERFORM frm_check_data.   "データ存在チェック
+PERFORM frm_get_bsid.     "未決済明細集計
+PERFORM frm_bdc.          "バッチインプット
+PERFORM frm_out.          "出力
+ENDFORM.                    " frm_main
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_data
+*&---------------------------------------------------------------------*
+*       存在チェックと得意先コード取得
+*----------------------------------------------------------------------*
+FORM frm_check_data.
+SELECT a~kunnr b~waers
+FROM kna1 AS a
+INNER JOIN knvv AS b
+ON a~kunnr = b~kunnr
+INTO TABLE gt_kna1
+WHERE a~kunnr IN s_kunnr
+AND b~vkorg = cns_1000
+AND b~vtweg = cns_10
+AND b~spart = cns_10.
+IF ( sy-subrc <> 0 ).
+g_msg = cns_err1.
+MESSAGE i400 WITH g_msg.
+STOP.
+ENDIF.
+ENDFORM.                    " frm_check_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_bsid
+*&---------------------------------------------------------------------*
+*       未決済金額取得
+*----------------------------------------------------------------------*
+FORM frm_get_bsid.
+LOOP AT gt_kna1 INTO gw_kna1.
+SELECT kunnr belnr shkzg wrbtr  "2004/02/09 得意先コード、伝票番号追
+FROM bsid
+INTO TABLE gt_bsid
+WHERE bukrs  = cns_c001
+AND kunnr  = gw_kna1-kunnr
+AND budat <= p_budat
+AND umsks  = cns_bk.
+
+IF ( sy-subrc = 0 ).
+gw_sum-kunnr = gw_kna1-kunnr.
+gw_sum-waers = gw_kna1-waers.
+LOOP AT gt_bsid INTO gw_bsid.
+IF ( gw_bsid-shkzg = cns_s ).
+gw_sum-wrbtr = gw_sum-wrbtr + gw_bsid-wrbtr.
+ELSE.
+gw_sum-wrbtr = gw_sum-wrbtr + gw_bsid-wrbtr * -1.
+ENDIF.
+* 2004/02/09 ADD START
+gw_dpno-kunnr = gw_bsid-kunnr.
+gw_dpno-belnr = gw_bsid-belnr.
+APPEND gw_dpno TO gt_dpno.   "伝票番号退避
+CLEAR: gw_dpno.
+* 2004/02/09 ADD END
+ENDLOOP.
+APPEND gw_sum TO gt_sum.       "金額集計
+ENDIF.
+CLEAR: gw_sum.
+CLEAR: gw_bsid,gt_bsid.
+ENDLOOP.
+* 件数チェック
+DESCRIBE TABLE gt_sum LINES g_cnt.
+IF ( g_cnt = 0 ).
+g_msg = cns_err2.
+MESSAGE i400 WITH g_msg.
+STOP.
+ENDIF.
+ENDFORM.                    " frm_get_bsid
+*&---------------------------------------------------------------------*
+*&      Form  frm_bdc
+*&---------------------------------------------------------------------*
+*       バッチインプット
+*----------------------------------------------------------------------*
+FORM frm_bdc.
+SORT gt_sum BY kunnr ASCENDING.
+SORT gt_dpno BY kunnr belnr ASCENDING.
+DELETE ADJACENT DUPLICATES FROM gt_dpno COMPARING ALL FIELDS.
+CONCATENATE cns_txt1 p_budat INTO g_txt.
+LOOP AT gt_sum INTO gw_sum.
+* 転記キーセット
+IF ( gw_sum-wrbtr > 0 ).
+g_tenki = cns_04.
+ELSEIF ( gw_sum-wrbtr < 0 ).
+gw_sum-wrbtr = gw_sum-wrbtr * -1.
+g_tenki = cns_17.
+ENDIF.
+* 通貨変換
+WRITE: gw_sum-wrbtr TO g_kingaku CURRENCY gw_sum-waers NO-GROUPING.
+
+** ヘッダ処理 *********************************************************
+* 得意先決済：ヘッダデータ
+PERFORM frm_dynpro USING:
+'X'  'SAPMF05A'         '0131',              "
+' '  'RF05A-AGKON'      gw_sum-kunnr,        "得意先コード
+' '  'BKPF-BUDAT'       p_augdt,             "決済日付
+' '  'BKPF-BUKRS'       'C001',              "会社コード
+' '  'RF05A-XNOPS'      'X',                 "標準未決済明細
+*          ' '  'RF05A-XPOS1(05)'  'X',                 "転記日付
+' '  'RF05A-XPOS1(04)'  'X',                 "伝票番号
+' '  'BKPF-WAERS'       gw_sum-waers,        "通貨コード
+' '  'BDC_OKCODE'       '=PA'.               "未決済明細処理
+* 2004/02/09 DEL START
+** 得意先決済:選択基準入力
+*    perform frm_dynpro using:
+*      'X'  'SAPMF05A'         '0732',              "
+*      ' '  'RF05A-BISDT(01)'   p_budat,            "転記日付
+*      ' '  'BDC_OKCODE'       '=PA'.               "未決済明細処理
+* 2004/02/09 DEL END
+* 2004/02/09 ADD START
+* 得意先決済：選択基準入力
+LOOP AT gt_dpno INTO gw_dpno WHERE kunnr = gw_sum-kunnr.
+PERFORM frm_dynpro USING:
+'X'  'SAPMF05A'         '0731',
+' '  'RF05A-SEL01(01)'  gw_dpno-belnr,        "伝票番号
+' '  'BDC_OKCODE'       '/00'.                "Enter
+*      AT LAST.
+*        PERFORM frm_dynpro USING:
+*        'X'  'SAPMF05A'         '0731',
+*        ' '  'BDC_OKCODE'       '=PA'.                "未決済明細処理
+*      ENDAT.
+ENDLOOP.
+* 2004/02/09 ADD END
+* 2004/02/17 ADD START
+PERFORM frm_dynpro USING:
+'X'  'SAPMF05A'         '0731',
+' '  'BDC_OKCODE'       '=PA'.                "未決済明細処理
+* 2004/02/17 ADD END
+** 明細処理1 ***********************************************************
+IF ( gw_sum-wrbtr <> 0 ).
+* 得意決済:未決済明細処理
+PERFORM frm_dynpro USING:
+'X'  'SAPDF05X'         '3100',              "
+' '  'BDC_OKCODE'       '=KMD'.              "差額処理
+* 得意先決済:照会　概要
+PERFORM frm_dynpro USING:
+'X'  'SAPMF05A'         '0700',              "
+' '  'RF05A-NEWBS'      g_tenki,             "転記キー
+' '  'RF05A-NEWKO'      gw_sum-kunnr,        "勘定コード
+' '  'BDC_OKCODE'       '/00'.               "Enter
+* 得意先決済:追加　得意先明細
+PERFORM frm_dynpro USING:
+'X'  'SAPMF05A'         '0301',              "
+' '  'BSEG-WRBTR'       g_kingaku,           "金額
+' '  'BKPF-XMWST'       'X',                 "税額計算
+' '  'BSEG-SGTXT'       g_txt,               "テキスト
+' '  'BDC_OKCODE'       '=BS'.               "シミュレート
+** 明細処理2 ***********************************************************
+ELSE.
+* 得意決済:未決済明細処理
+PERFORM frm_dynpro USING:
+'X'  'SAPDF05X'         '3100',              "
+' '  'BDC_OKCODE'       '=BS'.               "シミュレート
+ENDIF.
+************************************************************************
+* 得意先決済:照会 概要
+PERFORM frm_dynpro USING:
+'X'  'SAPMF05A'         '0700',              "
+
+' '  'BDC_OKCODE'       'BU'.                "保存
+PERFORM srm_call_tran.                     "CALL TRANSACTION処理
+CLEAR: gw_sum,g_kingaku.
+CLEAR: gt_bdc.
+ENDLOOP.
+ENDFORM.                    " frm_bdc
+*&---------------------------------------------------------------------*
+*&      Form  frm_dynpro
+*&---------------------------------------------------------------------*
+*       バッチインプット用テーブル更新
+*----------------------------------------------------------------------*
+*      -->P_DYNBEGIN   DYNPRO開始フラグ
+*      -->P_NAME       項目名
+*      -->P_VALUE      項目値
+*----------------------------------------------------------------------*
+FORM frm_dynpro USING    p_dynbegin
+p_name
+p_value.
+IF ( p_dynbegin = cns_x ).
+CLEAR gw_bdc.
+MOVE: p_name  TO gw_bdc-program,
+p_value TO gw_bdc-dynpro,
+cns_x   TO gw_bdc-dynbegin.
+APPEND gw_bdc TO gt_bdc.
+ELSE.
+CLEAR gw_bdc.
+MOVE: p_name  TO gw_bdc-fnam,
+p_value TO gw_bdc-fval.
+APPEND gw_bdc TO gt_bdc.
+ENDIF.
+ENDFORM.                    " frm_dynpro
+*&---------------------------------------------------------------------*
+*&      Form  srm_call_tran
+*&---------------------------------------------------------------------*
+*       CALL TRANSACTION処理
+*----------------------------------------------------------------------*
+FORM srm_call_tran.
+CALL TRANSACTION 'F-32' USING gt_bdc
+MODE  'N'
+UPDATE 'S'.
+IF ( sy-subrc = 0 ).
+g_okcnt = g_okcnt + 1.
+gw_out-kunnr = gw_sum-kunnr.
+gw_out-msg = cns_txt12.
+APPEND gw_out TO gt_out.
+CLEAR  gw_out.
+ELSE.
+g_errcnt = g_errcnt + 1.                  "決済エラー件数
+gw_out-kunnr = gw_sum-kunnr.
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+msgid  = sy-msgid
+msgno  = sy-msgno
+msgty  = sy-msgty
+msgv1  = sy-msgv1
+msgv2  = sy-msgv2
+msgv3  = sy-msgv3
+msgv4  = sy-msgv4
+msgv5  = sy-msgv4
+IMPORTING
+messg  = gw_out-msg
+EXCEPTIONS
+OTHERS = 1.
+APPEND gw_out TO gt_out.
+CLEAR  gw_out.
+ENDIF.
+ENDFORM.                    " srm_call_tran
+*&---------------------------------------------------------------------*
+*&      Form  frm_out
+*&---------------------------------------------------------------------*
+*       出力
+*----------------------------------------------------------------------*
+FORM frm_out.
+MESSAGE i402 WITH cns_txt3 g_cnt    cns_txt2.  "読込件数
+MESSAGE i402 WITH cns_txt4 g_okcnt  cns_txt2.  "登録件数
+MESSAGE i402 WITH cns_txt5 g_errcnt cns_txt2.  "エラー件数
+* ログ出力
+LOOP AT gt_out INTO gw_out.
+WRITE: /1(10) gw_out-kunnr,
+13(140) gw_out-msg.
+ENDLOOP.
+ENDFORM.                    " frm_out
+*&---------------------------------------------------------------------*
+*&      Form  frm_top
+*&---------------------------------------------------------------------*
+*       ヘッダ出力
+*----------------------------------------------------------------------*
+FORM frm_top.
+SKIP.
+ULINE.
+WRITE: /51  cns_txt8,   "
+135 cns_txt9,   "
+136 sy-datum,   "システム日付
+149 sy-uzeit,   "システム時間
+157 cns_txt10,  "
+160 sy-pagno,   "頁数
+165 cns_txt11.  "
+ULINE.
+WRITE: /1(10) cns_txt6,
+13(140) cns_txt7.
+ULINE.
+ENDFORM.                    " frm_top

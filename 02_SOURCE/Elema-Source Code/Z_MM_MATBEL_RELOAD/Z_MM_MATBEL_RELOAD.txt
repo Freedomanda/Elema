@@ -1,0 +1,878 @@
+*&---------------------------------------------------------------------*
+*& Report  Z_MM_MATBEL_RELOAD
+*&
+*&---------------------------------------------------------------------*
+*&
+*&
+*&---------------------------------------------------------------------*
+
+REPORT  Z_MM_MATBEL_RELOAD MESSAGE-ID m7 NO STANDARD PAGE HEADING LINE-SIZE 72.
+
+*&---------------------------------------------------------------------*
+
+PARAMETERS:
+p_object  TYPE arch_obj-object.
+SELECTION-SCREEN SKIP.
+PARAMETERS:
+p_ac_dup  TYPE boole_d  DEFAULT space.
+SELECTION-SCREEN SKIP.
+
+INCLUDE arch_reload_prg_standard2.              "processing options
+
+
+
+*--------------------------------------------------------------------
+*      CONSTANTS
+*--------------------------------------------------------------------
+CONSTANTS:
+gc_relo_stat_selection  TYPE c VALUE 'S'.
+
+
+
+*--------------------------------------------------------------------
+*      TYPES
+*--------------------------------------------------------------------
+TYPE-POOLS:
+arrel.
+
+TYPES:
+ty_record    TYPE c LENGTH 2048,
+tt_record    TYPE STANDARD TABLE OF ty_record,
+tt_x030l     TYPE STANDARD TABLE OF x030l,
+tt_dfies     TYPE STANDARD TABLE OF dfies,
+
+* data structure for reload program
+BEGIN OF ty_obj_data,
+tabname     TYPE dd02l-tabname,
+tabref      TYPE REF TO data,
+tabref_ins  TYPE REF TO data,
+cnt_tab     TYPE i,
+cnt_ins     TYPE i,
+END OF ty_obj_data,
+tt_data_obj  TYPE STANDARD TABLE OF ty_obj_data,
+
+BEGIN OF ty_obj_id,
+id          TYPE c  LENGTH 100,
+type        TYPE string,
+END OF ty_obj_id.
+
+
+
+*--------------------------------------------------------------------
+*      EVENTS
+*--------------------------------------------------------------------
+INITIALIZATION.
+
+PERFORM standard_opt_init.
+
+AT SELECTION-SCREEN ON p_object.
+
+* the user needs authorization for debugging
+
+AUTHORITY-CHECK OBJECT 'S_DEVELOP'
+ID 'DEVCLASS' DUMMY
+ID 'OBJTYPE'  FIELD 'DEBUG'
+ID 'OBJNAME'  DUMMY
+ID 'P_GROUP'  DUMMY
+ID 'ACTVT'    FIELD '03'.
+
+if  sy-subrc <> 0.
+*   You have no authorization for this trans./event
+message e858(m7).
+endif.
+
+if p_object ne 'MM_MATBEL'.
+MESSAGE e398(00) WITH 'Enter Archving Object MM_MATBEL'.
+endif.
+
+START-OF-SELECTION.
+
+PERFORM do_it
+USING
+p_object
+p_reltst
+p_ac_dup
+p_prot
+p_prot_o.
+
+
+
+*--------------------------------------------------------------------
+*      FORMS
+*--------------------------------------------------------------------
+
+
+*&--------------------------------------------------------------------*
+*&      Form  do_it
+*&--------------------------------------------------------------------*
+FORM do_it
+USING
+value(iv_object)       LIKE p_object
+value(iv_reltst)       LIKE p_reltst
+value(iv_ac_dup)       LIKE p_ac_dup
+value(iv_prot_detail)  LIKE p_prot
+value(iv_prot_output)  LIKE p_prot_o.
+
+DATA:
+lv_archive_write_handle  TYPE  sy-tabix,
+lv_archive_read_handle   TYPE  sy-tabix,
+lv_n_o_objects           TYPE i.
+
+
+PERFORM protocol_init  USING iv_prot_detail iv_prot_output.
+
+
+PERFORM archive_open_for_move   USING iv_object iv_reltst
+CHANGING lv_archive_read_handle
+lv_archive_write_handle
+lv_n_o_objects.
+PERFORM main_loop
+USING
+iv_reltst
+iv_ac_dup
+lv_archive_read_handle
+lv_archive_write_handle
+lv_n_o_objects.
+
+PERFORM archive_close_file
+USING
+lv_archive_read_handle.
+
+ENDFORM.                    "do_it
+
+
+*&--------------------------------------------------------------------*
+*&      Form  main_loop
+*&--------------------------------------------------------------------*
+FORM main_loop
+USING
+value(iv_reltst)        LIKE p_reltst
+value(iv_ac_dup)        LIKE p_ac_dup
+value(iv_read_handle)   TYPE sy-tabix
+value(iv_write_handle)  TYPE sy-tabix
+value(iv_cnt_tot)       TYPE sy-tabix.
+
+DATA:
+lv_archive_key  TYPE arch_idx-archivekey,
+lv_offset       TYPE arch_idx-offset,
+lv_cnt_pro      TYPE sy-tabix.
+
+
+PERFORM prog_ind  USING lv_cnt_pro iv_cnt_tot 'X'.
+
+DO.
+CALL FUNCTION 'ARCHIVE_GET_NEXT_OBJECT'
+EXPORTING
+archive_handle = iv_read_handle
+IMPORTING
+archive_name   = lv_archive_key
+object_offset  = lv_offset
+EXCEPTIONS
+end_of_file    = 1.
+
+IF sy-subrc = 1.
+EXIT.
+ENDIF.
+
+ADD 1 TO lv_cnt_pro.
+
+PERFORM single_object_process
+USING
+iv_read_handle
+iv_write_handle
+lv_archive_key
+lv_offset
+iv_reltst
+iv_ac_dup.
+
+PERFORM prog_ind  USING lv_cnt_pro iv_cnt_tot space.
+ENDDO.
+
+PERFORM prog_ind  USING lv_cnt_pro iv_cnt_tot 'X'.
+
+ENDFORM.                    "main_loop
+
+
+*&--------------------------------------------------------------------*
+*&      Form  single_object_process
+*&--------------------------------------------------------------------*
+FORM single_object_process
+USING
+value(iv_read_handle)   TYPE sy-tabix
+value(iv_write_handle)  TYPE sy-tabix
+value(iv_archive_key)   TYPE arch_idx-archivekey
+value(iv_offset)        TYPE arch_idx-offset
+value(iv_reltst)        LIKE p_reltst
+value(iv_ac_dup)        LIKE p_ac_dup.
+
+DATA:
+lt_obj_data                TYPE tt_data_obj,
+lv_obj_id                  TYPE ty_obj_id,
+lv_object_reload_property  TYPE arrel_reload_property.
+
+
+PERFORM single_object_get
+USING
+iv_read_handle
+CHANGING
+lt_obj_data.
+
+* EXIT_OBJECT_ID
+PERFORM object_id_get  USING p_object lt_obj_data
+CHANGING lv_obj_id.
+
+* EXIT_OBJECT_CHECK
+*
+
+* EXIT_INSERT_TEST_PREPROCESS
+*
+
+PERFORM tables_insert_test
+USING
+iv_archive_key
+iv_offset
+iv_ac_dup
+CHANGING
+lt_obj_data
+lv_object_reload_property.
+
+* EXIT_INSERT_TEST_POSTPROCESS
+*
+
+PERFORM single_object_reload
+USING
+lt_obj_data
+lv_object_reload_property
+iv_reltst
+iv_read_handle
+iv_write_handle.
+
+* fill protocol
+PERFORM protocol_fill
+USING
+lv_obj_id
+lv_object_reload_property.
+
+ENDFORM.                    "single_object_process
+
+
+*&--------------------------------------------------------------------*
+*&      Form  single_object_get
+*&--------------------------------------------------------------------*
+FORM single_object_get
+USING
+value(iv_read_handle)  TYPE sy-tabix
+CHANGING
+et_obj_data            TYPE tt_data_obj.
+
+DATA:
+lt_data_obj   TYPE as_t_tablebuffer,
+lw_data_obj   TYPE astablebuffer,
+
+lw_obj_data   TYPE ty_obj_data.
+
+FIELD-SYMBOLS:
+<lt_records>  TYPE STANDARD TABLE.
+
+
+CLEAR et_obj_data.
+
+CALL FUNCTION 'ARCHIVE_READ_OBJECT_BY_HANDLE'
+EXPORTING
+iv_handle   = iv_read_handle
+CHANGING
+ct_obj_data = lt_data_obj.
+
+LOOP AT lt_data_obj INTO lw_data_obj.
+MOVE-CORRESPONDING lw_data_obj TO lw_obj_data.
+
+ASSIGN lw_obj_data-tabref->* TO <lt_records>.
+DESCRIBE TABLE <lt_records> LINES lw_obj_data-cnt_tab.
+
+APPEND lw_obj_data TO et_obj_data.
+ENDLOOP.
+
+ENDFORM.                    "single_object_get
+
+
+*&--------------------------------------------------------------------*
+*&      Form  tables_insert_test
+*&--------------------------------------------------------------------*
+FORM tables_insert_test
+USING
+value(iv_archive_key)      TYPE arch_idx-archivekey
+value(iv_offset)           TYPE arch_idx-offset
+value(iv_ac_dup)           LIKE p_ac_dup
+CHANGING
+ct_obj_data                TYPE tt_data_obj
+ev_object_reload_property  TYPE arrel_reload_property.
+
+DATA:
+lt_ignore_fields          TYPE trfieldnames,
+lr_data                   TYPE REF TO data,
+lv_table_reload_property  TYPE arrel_reload_property.
+
+FIELD-SYMBOLS:
+<lw_obj_data>  TYPE ty_obj_data,
+<lt_src>       TYPE STANDARD TABLE,
+<lt_insert>    TYPE STANDARD TABLE.
+
+
+LOOP AT ct_obj_data ASSIGNING <lw_obj_data>.
+ASSIGN <lw_obj_data>-tabref->* TO <lt_src>.
+
+*   EXIT_PRE_INSERT_TEST:
+*   *****************************
+*   workaround for IAOM_EXTOB:
+IF <lw_obj_data>-tabname = 'IAOM_TOPLEVEL'.
+DELETE ct_obj_data.
+CONTINUE.
+ENDIF.
+*   *****************************
+
+*   EXIT_IGNORE_FIELDS: set fields to inore for special tables
+*
+CREATE DATA lr_data  TYPE STANDARD TABLE OF (<lw_obj_data>-tabname).
+ASSIGN lr_data->* TO <lt_insert>.
+
+*   check what to do with data object
+CALL FUNCTION 'ARCH_RELO_TABLE_INSERT_TEST'
+EXPORTING
+i_structure                   = <lw_obj_data>-tabname
+i_accepting_duplicate_records = iv_ac_dup
+it_ignore_fields              = lt_ignore_fields
+IMPORTING
+e_reload_property             = lv_table_reload_property
+TABLES
+t_data                        = <lt_src>
+t_could_be_inserted           = <lt_insert>
+EXCEPTIONS
+table_not_active              = 1.
+
+IF sy-subrc = 1.
+*     write object to delta archive if table not active
+lv_table_reload_property = arrel_c_property_write.
+ENDIF.
+
+*   copy insertable records and update table insert counter
+GET REFERENCE OF <lt_insert> INTO <lw_obj_data>-tabref_ins.
+DESCRIBE TABLE <lt_insert> LINES <lw_obj_data>-cnt_ins.
+
+*   update object reload property
+CALL FUNCTION 'ARCH_RELO_PROPERTY_DECIDE'
+EXPORTING
+i_table_reload_property       = lv_table_reload_property
+i_archiv_key                  = iv_archive_key
+i_offset                      = iv_offset
+i_accepting_duplicate_records = iv_ac_dup
+IMPORTING
+e_object_reload_property      = ev_object_reload_property.
+
+*    the following may be done for performance reasons:
+*    IF ev_object_reload_property = 'W'.
+*      EXIT.
+*    ENDIF.
+ENDLOOP.
+
+ENDFORM.                    "tables_insert_test
+
+
+*&--------------------------------------------------------------------*
+*&      Form  single_object_reload
+*&--------------------------------------------------------------------*
+FORM single_object_reload
+USING
+it_obj_data                       TYPE tt_data_obj
+value(iv_object_reload_property)  TYPE arrel_reload_property
+value(iv_reltst)                  LIKE p_reltst
+value(iv_read_handle)             TYPE sy-tabix
+value(iv_write_handle)            TYPE sy-tabix.
+
+
+CASE iv_object_reload_property.
+WHEN arrel_c_property_insert.
+*     insert document
+PERFORM single_object_insert
+USING
+it_obj_data
+iv_reltst
+iv_read_handle.
+
+WHEN arrel_c_property_write.
+*     write data object to delta archive
+CALL FUNCTION 'ARCHIVE_SAVE_OBJECT'
+EXPORTING
+archive_handle = iv_write_handle.
+
+WHEN arrel_c_property_omit.
+*     nothing to do
+ENDCASE.
+
+ENDFORM.                    "single_object_reload
+
+
+*&--------------------------------------------------------------------*
+*&      Form  single_object_insert
+*&--------------------------------------------------------------------*
+FORM  single_object_insert
+USING
+it_obj_data            TYPE tt_data_obj
+value(iv_reltst)       LIKE p_reltst
+value(iv_read_handle)  TYPE sy-tabix.
+
+DATA:
+lt_statistic  TYPE STANDARD TABLE OF arch_stat,
+lw_statistic  TYPE arch_stat,
+
+lw_obj_data   TYPE ty_obj_data.
+
+FIELD-SYMBOLS:
+<lt_records>  TYPE STANDARD TABLE.
+
+
+LOOP AT it_obj_data INTO lw_obj_data.
+IF iv_reltst IS INITIAL.
+ASSIGN lw_obj_data-tabref_ins->* TO <lt_records>.
+
+CALL FUNCTION 'ARCH_RELO_TABLE_INSERT'
+EXPORTING
+i_structure = lw_obj_data-tabname
+TABLES
+t_data      = <lt_records>.
+ENDIF.
+
+*   collect data for ADK-statistic - record counter
+IF NOT lw_obj_data-cnt_ins IS INITIAL.
+lw_statistic-tabname = lw_obj_data-tabname.
+lw_statistic-count   = lw_obj_data-cnt_ins.
+APPEND lw_statistic TO lt_statistic.
+ENDIF.
+ENDLOOP.
+
+* reload class data
+CALL FUNCTION 'ARCHIVE_RELOAD_OBJECT_DATA'
+EXPORTING
+archive_handle = iv_read_handle.
+
+* collect data for ADK-statistic - object counter
+CLEAR lw_statistic-tabname.
+lw_statistic-count   = 1.
+INSERT lw_statistic INTO lt_statistic INDEX 1.
+
+* give statistics
+CALL FUNCTION 'ARCHIVE_GIVE_STATISTICS'
+EXPORTING
+archive_handle = iv_read_handle
+TABLES
+table          = lt_statistic.
+
+ENDFORM.                    "single_object_insert
+
+
+*&--------------------------------------------------------------------*
+*&      Form  archive_close_file
+*&--------------------------------------------------------------------*
+FORM archive_close_file
+USING
+value(iv_read_handle)  TYPE sy-tabix.
+
+* write statistics
+CALL FUNCTION 'ARCHIVE_WRITE_STATISTICS'
+EXPORTING
+archive_handle = iv_read_handle
+EXCEPTIONS
+OTHERS         = 0.
+
+* write protocol
+CALL FUNCTION 'ARCHIVE_PROTOCOL_WRITE'.
+
+
+CALL FUNCTION 'ARCHIVE_CLOSE_FILE'
+EXPORTING
+archive_handle = iv_read_handle.
+
+
+ENDFORM.                    "archive_close_file
+
+
+*&---------------------------------------------------------------------*
+*&      Form  archive_open_for_move
+*&---------------------------------------------------------------------*
+FORM archive_open_for_move
+USING
+value(iv_object)  LIKE p_object
+value(iv_reltst)  LIKE p_reltst
+CHANGING
+ev_read_handle    TYPE sy-tabix
+ev_write_handle   TYPE sy-tabix
+ev_n_o_objects    TYPE i.
+
+DATA:
+lv_document     TYPE admi_run-document.
+
+
+CALL FUNCTION 'ARCHIVE_OPEN_FOR_MOVE'
+EXPORTING
+object               = iv_object
+test_mode            = iv_reltst
+IMPORTING
+archive_read_handle  = ev_read_handle
+archive_write_handle = ev_write_handle.
+
+** get total number of objects in selected archives
+*  CALL FUNCTION 'ARCHIVE_GET_INFORMATION'
+*    EXPORTING
+*      archive_handle       = ev_read_handle
+*    IMPORTING
+*      object_number_in_run = ev_n_o_objects.
+
+* get total number of objects in selected archives
+CALL FUNCTION 'ARCHIVE_GET_INFORMATION'
+EXPORTING
+archive_handle   = ev_read_handle
+IMPORTING
+archive_document = lv_document.
+
+SELECT SUM( obj_count ) FROM admi_files INTO ev_n_o_objects
+WHERE document = lv_document.
+
+ENDFORM.                    " archive_open_for_move
+
+
+*&--------------------------------------------------------------------*
+*&      Form  prog_ind
+*&--------------------------------------------------------------------*
+FORM prog_ind
+USING
+value(iv_cnt_pro)    TYPE sy-tabix
+value(iv_cnt_tot)    TYPE sy-tabix
+value(iv_immediate)  TYPE boole_d.
+
+DATA:
+lv_text  TYPE string,
+lv_sent  TYPE boole_d.
+
+
+lv_text = '&1% der Datenobjekte bearbeitet (&2 of &3)'(006)."#EC *
+
+CALL FUNCTION 'PROGRESS_INDICATOR'
+EXPORTING
+i_text               = lv_text
+*     &1% of data objects processed (&2 of &3)
+i_processed          = iv_cnt_pro
+i_total              = iv_cnt_tot
+i_output_immediately = iv_immediate
+IMPORTING
+e_progress_sent      = lv_sent.
+
+IF lv_sent = 'X'.
+CALL FUNCTION 'DB_COMMIT'.    "force immediate output of message
+ENDIF.
+
+ENDFORM.                    "prog_ind
+
+
+*&---------------------------------------------------------------------*
+*&      Form  protocol_init
+*&---------------------------------------------------------------------*
+FORM protocol_init
+USING
+value(iv_prot_detail)  LIKE p_prot
+value(iv_prot_output)  LIKE p_prot_o.
+
+
+CALL FUNCTION 'ARCHIVE_PROTOCOL_INIT'
+EXPORTING
+i_detailprotocol = iv_prot_detail
+i_protocol_output = iv_prot_output.
+
+ENDFORM.                    "protocol_init
+
+
+*&---------------------------------------------------------------------*
+*&      Form  protocol_fill
+*&---------------------------------------------------------------------*
+FORM protocol_fill
+USING
+value(iw_obj_id)       TYPE ty_obj_id
+value(iv_relo_status)  TYPE c.
+
+DATA:
+lv_objtext      TYPE ty_obj_id-id,
+lv_message      TYPE c LENGTH 50,
+lv_msgtype      TYPE i.
+
+
+lv_objtext = iw_obj_id-id.
+
+CASE iv_relo_status.
+WHEN arrel_c_property_insert.
+lv_msgtype = 1.                      "object processed
+lv_message = 'Data object has been reloaded'(010).    "#EC *
+*                  'Data object has been reloaded'.
+
+WHEN arrel_c_property_write.
+lv_msgtype = 2.                      "object processed
+lv_message = 'Data Object has been written into Delta-Archive'(011).
+"#EC *
+*                  'Data Object has been written into Delta-Archive'.
+
+WHEN arrel_c_property_omit.
+lv_msgtype = 1.                      "object not processed
+lv_message = 'Data Object exists already in DB'(012). "#EC *
+*                  'Data Object exists already in DB'.
+
+WHEN gc_relo_stat_selection.
+lv_msgtype = 2.                      "object not processed
+lv_message = 'Data Object not selected'(013).         "#EC *
+*                  'Data Object not selected'.
+ENDCASE.
+
+
+CALL FUNCTION 'ARCHIVE_PROTOCOL_COLLECT'
+EXPORTING
+i_object  = lv_objtext
+i_msgtype = lv_msgtype
+i_text    = lv_message.
+
+ENDFORM.                    " protocol_fill
+
+
+*&--------------------------------------------------------------------*
+*&      Form  object_id_get
+*&--------------------------------------------------------------------*
+FORM object_id_get
+USING
+value(iv_object)  LIKE p_object
+it_obj_data       TYPE tt_data_obj
+CHANGING
+ew_obj_id         TYPE ty_obj_id.
+
+CLEAR ew_obj_id.
+
+*  CASE iv_object.
+*    WHEN 'BC_SFLIGHT'.
+*      PERFORM obj_id_get_bc_sflight  USING it_obj_data
+*                                    CHANGING ew_obj_id.
+*    WHEN 'FI_ACCOUNT'.
+*      PERFORM obj_id_get_fi_account  USING it_obj_data
+*                                  CHANGING ew_obj_id.
+*    WHEN 'FI_ACCPAYB'.
+*      PERFORM object_id_get_fi_accpayb  USING it_obj_data
+*                                     CHANGING ew_obj_id.
+*    WHEN 'FI_ACCRECV'.
+*      PERFORM object_id_get_fi_accrecv  USING it_obj_data
+*                                     CHANGING ew_obj_id.
+*
+*    WHEN 'FI_TF_GLF'.
+*      PERFORM obj_id_get_fi_tf_glf  USING it_obj_data
+*                                    CHANGING ew_obj_id.
+
+*    WHEN OTHERS.
+PERFORM obj_id_get_default  USING iv_object it_obj_data
+CHANGING ew_obj_id.
+*  ENDCASE.
+
+ENDFORM.                    "object_id_get
+
+
+*&--------------------------------------------------------------------*
+*&      Form  obj_id_get_default
+*&--------------------------------------------------------------------*
+* Get the ID of the current data object.
+*
+* Attention: This works only for typical data objects, where the object
+* ID can be composed of the primary key fields of the first record in
+* the current data object.
+* In other cases a more special implemntation is needed.
+*&--------------------------------------------------------------------*
+FORM obj_id_get_default
+USING
+value(iv_object)  TYPE arch_obj-object
+it_obj_data       TYPE tt_data_obj
+CHANGING
+ev_obj_id         TYPE ty_obj_id.
+
+STATICS:
+sv_tabname      TYPE tabname.
+
+DATA:
+lt_arch_def     TYPE STANDARD TABLE OF arch_def,
+lt_dummy        TYPE trfieldnames,
+lw_arch_def     TYPE arch_def,
+lw_obj_data     TYPE ty_obj_data,
+lr_record       TYPE REF TO data.
+
+FIELD-SYMBOLS:
+<lt_records>      TYPE STANDARD TABLE,
+<lw_record>       TYPE ANY.
+
+IF sv_tabname IS INITIAL.
+*    guess leading table from archive object definition
+SELECT * FROM arch_def INTO TABLE lt_arch_def
+WHERE object = iv_object
+ORDER BY sequence ASCENDING.                "#EC CI_BYPASS
+READ TABLE lt_arch_def INDEX 1 INTO lw_arch_def.
+
+IF NOT lw_arch_def-son IS INITIAL.
+sv_tabname = lw_arch_def-son.
+ELSE.
+sv_tabname = lw_arch_def-structure.
+ENDIF.
+ENDIF.
+
+* read leading table of data object
+READ TABLE it_obj_data WITH KEY tabname = sv_tabname
+INTO lw_obj_data.
+
+IF sy-subrc = 0.
+ASSIGN lw_obj_data-tabref->* TO <lt_records>.
+
+CREATE DATA lr_record TYPE (lw_obj_data-tabname).
+ASSIGN lr_record->* TO <lw_record>
+CASTING TYPE (lw_obj_data-tabname).
+*   get first record of the table
+READ TABLE <lt_records> INDEX 1 INTO <lw_record>.
+
+PERFORM obj_id_get_from_record  USING lw_obj_data-tabname <lw_record> lt_dummy
+CHANGING ev_obj_id-id.
+
+*    SHIFT ev_obj_id-id.                     "don't output leading '/'
+*not needed for the MM_EINA case
+ENDIF.
+
+ENDFORM.                    "obj_id_get_default
+
+
+*&--------------------------------------------------------------------*
+*&      Form  nametab_get_buffered
+*&--------------------------------------------------------------------*
+FORM nametab_get_buffered
+USING
+value(i_structure)  TYPE dd02l-tabname
+CHANGING
+e_x030l_wa          TYPE x030l
+e_dfies_tab         TYPE tt_dfies.
+
+DATA:
+BEGIN OF lw_table,
+structure  TYPE dd02l-tabname,
+x030l_wa   TYPE x030l,
+dfies_tab  TYPE STANDARD TABLE OF dfies,
+END OF lw_table.
+
+STATICS:
+lt_tables LIKE SORTED TABLE OF lw_table WITH UNIQUE KEY structure.
+
+
+* read buffer
+READ TABLE lt_tables WITH TABLE KEY structure = i_structure
+INTO lw_table.
+IF sy-subrc <> 0.
+*   not in buffer, get it
+CALL FUNCTION 'DDIF_NAMETAB_GET'
+EXPORTING
+tabname   = i_structure
+all_types = 'X'
+IMPORTING
+x030l_wa  = lw_table-x030l_wa
+TABLES
+dfies_tab = lw_table-dfies_tab.
+
+lw_table-structure = i_structure.
+INSERT lw_table INTO TABLE lt_tables.
+ENDIF.
+
+e_x030l_wa = lw_table-x030l_wa.
+e_dfies_tab = lw_table-dfies_tab.
+
+ENDFORM.                    "nametab_get_buffered
+
+
+
+*&--------------------------------------------------------------------*
+*&      Form  obj_id_get_from_record
+*&--------------------------------------------------------------------*
+* Derive ID of data object from given IW_RECORD.
+*
+* If IT_FIELDS is initial the values of the key fields of IW_RECORD
+* are concatenated and the result is returned.
+* If IT_FIELDS is not initial then the values of the fields given in
+* IT_FIELDS are concatenated and returned.
+* The single values are separated by '/' and blanks are currently
+* ignored.
+*&--------------------------------------------------------------------*
+FORM obj_id_get_from_record
+USING
+value(iv_tabname)  TYPE tabname
+iw_record          TYPE any
+it_fields          TYPE trfieldnames
+CHANGING
+ev_obj_id          TYPE ty_obj_id-id.
+
+DATA:
+lt_dfies      TYPE STANDARD TABLE OF dfies,
+lw_dfies      TYPE dfies,
+lw_x030l      TYPE x030l.
+
+
+CLEAR ev_obj_id.
+
+PERFORM nametab_get_buffered
+USING
+iv_tabname
+CHANGING
+lw_x030l
+lt_dfies.
+
+IF NOT it_fields IS INITIAL.
+*   compose Object ID using given fields
+TYPES:
+BEGIN OF ty_info,
+fieldname  TYPE fieldname,
+position   TYPE tabfdpos,
+END OF ty_info,
+tt_info TYPE STANDARD TABLE OF ty_info.
+
+DATA: lt_info       TYPE tt_info,
+lw_info       TYPE ty_info,
+lv_fieldname  TYPE fieldname.
+
+FIELD-SYMBOLS: <lv_field_value>  TYPE ANY.
+
+
+LOOP AT it_fields INTO lv_fieldname.
+READ TABLE lt_dfies INTO lw_dfies
+WITH KEY tabname   = iv_tabname
+fieldname = lv_fieldname.
+IF NOT lw_dfies-domname = 'MANDT'.
+lw_info-fieldname = lw_dfies-fieldname.
+lw_info-position  = lw_dfies-position.
+APPEND lw_info TO lt_info.
+ENDIF.
+ENDLOOP.
+
+LOOP AT lt_info INTO lw_info.
+ASSIGN COMPONENT lw_info-position OF STRUCTURE iw_record
+TO <lv_field_value>.
+CONCATENATE ev_obj_id <lv_field_value>
+INTO ev_obj_id SEPARATED BY '/'.
+ENDLOOP.
+ELSE.
+*   compose Object ID using primary key fields (exluding client)
+DATA: lv_field_value  TYPE string.
+
+LOOP AT lt_dfies INTO lw_dfies
+WHERE keyflag = 'X'
+AND position <> lw_x030l-clpos.
+ASSIGN COMPONENT lw_dfies-position OF STRUCTURE iw_record
+TO <lv_field_value>.
+MOVE <lv_field_value> TO lv_field_value.
+CONCATENATE ev_obj_id lv_field_value INTO ev_obj_id
+SEPARATED BY '/'.
+ENDLOOP.
+ENDIF.
+
+SHIFT ev_obj_id.
+
+ENDFORM.                    "obj_id_get_from_record

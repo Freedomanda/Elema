@@ -1,0 +1,745 @@
+************************************************************************
+* [プログラム名]
+*   ZS012200        予算バッファテーブル取込処理
+*
+* [処理概要]
+*   タブ区切りで取り込んだ予算ファイルをテーブルZBS002に登録する。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2004/08/11   金額10倍対応
+************************************************************************
+REPORT ZS012200 LINE-SIZE 255
+NO STANDARD PAGE HEADING
+MESSAGE-ID  Z1.
+TABLES : ZSB002 .
+
+DATA : T_FILE TYPE TABLE OF ZSREAD_FILE01 ,  "ファイルテーブル
+W_FILE TYPE ZSREAD_FILE01 ,  "ファイルワーク
+U_FILE TYPE ZSREAD_FILE01 ,  "売上バッファ
+A_FILE TYPE ZSREAD_FILE01 ,  "粗利バッファ
+T_TABL TYPE TABLE OF ZSB002 , "更新用テーブル
+W_TABL TYPE ZSB002 , "更新用ワーク
+W_VKBUR LIKE ZSB002-VKBUR ,  "営業所
+W_VKGRP LIKE ZSB002-VKGRP ,  "営業グループ
+W_KUNNR LIKE ZSB002-PKUNAG , "得意先
+W_PRODH LIKE ZSB002-PRODH ,  "セグメント
+W_SPMON LIKE ZSB002-SPMON ,  "月
+W_VER(3) TYPE N,             "予算バージョン
+
+W_INS        TYPE I,         " ZSB002登録件数
+W_ERR        TYPE I,         " ｴﾗｰ件数
+W_EDIT(1000) TYPE C,         "サーバファイル取込
+F_ERR(1)     TYPE C.         "ﾌｧｲﾙﾁｪｯｸでｴﾗｰがある場合'X'
+
+CONSTANTS :
+C_KUNNR LIKE ZSB002-PKUNAG VALUE 'ZZZZZZZZZZ',
+C_TAB   TYPE X             VALUE '09'.
+
+* 取込ファイル編集
+DATA:  BEGIN OF TY_TAB.
+INCLUDE STRUCTURE ZSREAD_FILE01.
+DATA     GOUKEI(30) TYPE C.
+DATA   END   OF TY_TAB.
+DATA   W_TAB    LIKE TY_TAB.
+
+DATA: H_ZSB001 TYPE ZSB001,
+T_ZSB001 TYPE TABLE OF ZSB001.
+
+* エラーリスト出力
+TYPES :BEGIN OF TY_ERR,
+VRSIO    TYPE ZSB002-VRSIO,  "バージョン
+SPMON    TYPE ZSB002-SPMON,  "分析期間 - 月
+VKBUR    TYPE ZSB002-VKORG,  "営業所
+PKUNAG   TYPE ZSB002-PKUNAG, "受注先コード
+PRODH    TYPE ZSB002-PRODH,  "品目階層
+TEXT(70) TYPE C,             "エラー内容
+END   OF TY_ERR.
+DATA:  T_ERR TYPE TABLE OF TY_ERR,
+H_ERR TYPE TY_ERR.
+
+
+*-----------------------------------------------------------*
+PARAMETERS :  P_LOCAL  RADIOBUTTON GROUP R1,
+P_SERVE  RADIOBUTTON GROUP R1.
+
+PARAMETERS :  P_FILE(128) TYPE C OBLIGATORY DEFAULT 'C:\.TXT',
+P_NEN(4) TYPE N DEFAULT SY-DATUM(4) ,
+P_VER LIKE ZSB002-ZVRSIO OBLIGATORY ,
+P_GETSU(2) TYPE N OBLIGATORY .
+*************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE .
+*************************************************************
+CALL FUNCTION 'WS_FILENAME_GET'
+EXPORTING
+DEF_PATH         = 'C:\SAPDATA'
+MASK             = ',*.TXT,*.TXT,*.*,*.*.'
+MODE             = 'O'
+IMPORTING
+FILENAME         = P_FILE
+EXCEPTIONS
+INV_WINSYS       = 1
+NO_BATCH         = 2
+SELECTION_CANCEL = 3
+SELECTION_ERROR  = 4
+OTHERS           = 5.
+
+
+*************************************************************
+AT SELECTION-SCREEN ON P_VER.
+*************************************************************
+*　文字のチェック
+IF P_VER CN '0123456789 '.
+MESSAGE E400 WITH '予算バージョンに文字が含まれています'.
+ENDIF.
+
+*************************************************************
+AT SELECTION-SCREEN ON P_GETSU.
+*************************************************************
+IF P_GETSU <  1 OR
+P_GETSU >  12 .
+MESSAGE E400(Z1) WITH '会計月を正しく入力してください' .
+ENDIF .
+
+*************************************************************
+START-OF-SELECTION .
+*************************************************************
+PERFORM INIT_SEC .
+IF P_LOCAL = 'X'.
+PERFORM FILE_READ .
+ELSE.
+PERFORM OPEN_FILE.
+ENDIF.
+
+PERFORM DATA_CHECK .
+PERFORM DATA_INSERT .
+
+IF F_ERR = ' '.
+PERFORM LIST_OUT.          "登録結果リスト出力
+ENDIF.
+*************************************************************
+* END-OF-SELECTION.
+*************************************************************
+END-OF-SELECTION.
+*************************************************************
+* TOP-OF-PAGE.
+*************************************************************
+TOP-OF-PAGE.
+IF F_ERR = 'X'.
+PERFORM ERR_HEADER.
+ELSE.
+PERFORM LIST_HEADER.           "正常終了時のヘッダ出力
+ENDIF.
+
+*************************************************************
+*初期処理
+*************************************************************
+FORM INIT_SEC .
+DATA :L_NEN(4)   TYPE N ,
+L_GETSU(2) TYPE N.
+*-- 項目クリア
+REFRESH: T_FILE , T_TABL .
+CLEAR  :  W_FILE , W_TABL ,F_ERR,
+L_NEN,L_GETSU.
+*-- 年度編集
+MOVE: P_NEN   TO L_NEN ,
+P_GETSU TO L_GETSU.
+
+* 会計年度⇒年月に変更
+IF L_GETSU >= 01 AND              "1月～9月なら3ヶ月追加
+L_GETSU <= 09.
+L_GETSU = L_GETSU + 3.
+ELSEIF L_GETSU >= 10.             "10月以降は次の年
+L_GETSU = L_GETSU - 9.
+L_NEN   = L_NEN + 1.
+ENDIF.
+
+CONCATENATE : L_NEN L_GETSU INTO W_SPMON .
+*  CONCATENATE : L_NEN P_GETSU INTO W_SPMON .
+
+*-- 予算バージョン編集
+MOVE P_VER TO W_VER .
+SUBTRACT 1 FROM W_VER .
+ENDFORM .
+*************************************************************
+*ファイル読み込み
+*************************************************************
+FORM FILE_READ .
+CALL FUNCTION 'WS_UPLOAD'
+EXPORTING
+FILENAME                      = P_FILE
+FILETYPE                      = 'DAT'
+TABLES
+DATA_TAB                      = T_FILE
+EXCEPTIONS
+CONVERSION_ERROR              = 1
+FILE_OPEN_ERROR               = 2
+FILE_READ_ERROR               = 3
+INVALID_TYPE                  = 4
+NO_BATCH                      = 5
+UNKNOWN_ERROR                 = 6
+INVALID_TABLE_WIDTH           = 7
+GUI_REFUSE_FILETRANSFER       = 8
+CUSTOMER_ERROR                = 9
+OTHERS                        = 10
+.
+IF SY-SUBRC NE 0.
+MESSAGE S400(Z1) WITH 'ファイルオープンエラーです。' .
+STOP.
+ENDIF.
+
+
+ENDFORM .
+
+*************************************************************
+*データチェック
+*************************************************************
+FORM DATA_CHECK .
+CLEAR : W_FILE .
+LOOP AT T_FILE INTO W_FILE WHERE DATATYPE EQ 'D' .
+* 営業所取得
+IF W_FILE-VKBUR NE SPACE .
+PERFORM CHK_VKBUR.
+MOVE : W_FILE-VKBUR TO W_VKBUR.
+ENDIF .
+* 営業グループ取得
+IF W_FILE-VKGRP NE SPACE .
+PERFORM CHK_VKGRP." USING W_FILE-VKGRP.
+MOVE : W_FILE-VKGRP TO W_VKGRP .
+ENDIF .
+* 得意先取得
+IF W_FILE-KUNNR <> SPACE .
+PERFORM CHK_KUNNR." USING W_FILE-KUNNR.
+ENDIF .
+
+* セグメント取得
+IF W_FILE-PRODH NE SPACE .
+MOVE : W_FILE-PRODH TO W_PRODH .
+*   文字のﾁｪｯｸ
+IF W_FILE-PRODH CN '0123456789 '.
+PERFORM LOG_MSG  USING P_VER
+SPACE                         "W_SPMON
+W_VKBUR
+W_KUNNR
+W_PRODH
+TEXT-E05.
+"セグメントに文字が含まれています。
+F_ERR = 'X'.          " ｴﾗｰﾌﾗｸﾞ
+ENDIF.
+ENDIF .
+
+CASE W_FILE-ZCOMMENT.
+WHEN '売上' .
+MOVE : W_FILE TO U_FILE .
+WHEN '粗利' .
+MOVE : W_FILE TO A_FILE .
+PERFORM DATA_SET .
+CLEAR : A_FILE , U_FILE .
+ENDCASE .
+ENDLOOP .
+ENDFORM .
+
+*************************************************************
+*データ挿入
+*************************************************************
+FORM DATA_INSERT .
+
+DESCRIBE TABLE T_TABL LINES W_INS.
+DESCRIBE TABLE T_ERR  LINES W_ERR.
+
+SORT T_TABL.
+
+IF W_ERR > 0.                         " ﾌｧｲﾙにｴﾗｰが存在する場合
+PERFORM ERR_LIST.
+ELSE.                                 " ｴﾗｰなし
+IF W_INS = 0.                       "空ﾌｧｲﾙはINSERTしない
+MESSAGE S400 WITH '更新対象データがありません。ご確認ください。'.
+STOP.
+ELSE.
+
+*   ZSB002 INSERT
+DELETE ZSB002 FROM TABLE T_TABL .
+
+*      LOOP AT T_TABL INTO ZSB002.
+*
+*      INSERT ZSB002 FROM ZSB002.
+*
+*      WRITE ZSB002.
+*
+*
+*      ENDLOOP.
+
+IF SY-SUBRC = 0.
+MESSAGE S900(Z1) WITH '予算バッファテーブル(ZSB002)' W_INS.
+"&に&件  格納しました
+ELSEIF SY-SUBRC = 4.
+ROLLBACK WORK.
+MESSAGE E401 WITH 'データ登録時にエラーが発生しました(ZSB002)'
+SY-SUBRC.
+ENDIF.
+*   ZSB001 INSERT
+PERFORM UPD_ZSB001.        "予算バッファ管理テーブル更新
+ENDIF.
+ENDIF.
+ENDFORM .
+
+*************************************************************
+* データ編集
+*************************************************************
+FORM DATA_SET .
+
+DATA : L_TSUKI(2) TYPE N ,
+L_NEN(4)   TYPE N ,
+A_NAME(12) TYPE C ,
+U_NAME(12) TYPE C ,
+L_SPMON(6) TYPE C ,
+L_ERR(1)   TYPE C ,
+W_NET      TYPE  ZSB002-NETWR,
+W_ARARI    TYPE  ZSB002-ZZARAIGAKU.
+
+
+FIELD-SYMBOLS : <U_MON> TYPE ANY ,
+<A_MON> TYPE ANY .
+
+MOVE : 4 TO L_TSUKI ,
+P_NEN TO L_NEN .
+
+*  IF P_GETSU <= 3.         "01～03が指定された場合は前年04月からの処理
+*    L_NEN = L_NEN - 1.
+*  ENDIF.
+
+
+DO 12 TIMES .
+CONCATENATE : 'U_FILE-MON' L_TSUKI INTO U_NAME ,
+'A_FILE-MON' L_TSUKI INTO A_NAME .
+ASSIGN : (U_NAME) TO <U_MON> ,
+(A_NAME) TO <A_MON> .
+CONCATENATE L_NEN L_TSUKI INTO L_SPMON .
+
+* 数字のチェック
+IF <U_MON> CN '0123456789, "'.
+PERFORM LOG_MSG  USING P_VER
+L_SPMON
+W_VKBUR
+W_KUNNR
+W_PRODH
+TEXT-E04.
+"数値項目に文字が含まれています。
+F_ERR = 'X'.          " ｴﾗｰﾌﾗｸﾞ
+ENDIF.
+IF <A_MON> CN '0123456789, "'.
+PERFORM LOG_MSG  USING  P_VER
+L_SPMON
+W_VKBUR
+W_KUNNR
+W_PRODH
+TEXT-E04.
+F_ERR = 'X'.          " ｴﾗｰﾌﾗｸﾞ
+ENDIF.
+
+*  取込ﾌｧｲﾙに１つでもｴﾗｰがある場合は全データ登録しない。
+*  ﾌｧｲﾙのｴﾗｰﾁｪｯｸは全て行う。
+IF F_ERR = ' '.
+
+*   処理年04月よりｽﾀｰﾄ.入力した「処理年」+「処理月」以前ならば
+*   前ﾊﾞｰｼﾞｮﾝで存在ﾁｪｯｸを行う。
+*   得意先'ZZZZZZZZZZ'の場合は１年分の処理を行う。
+IF L_SPMON < W_SPMON
+AND W_VER <> 0
+AND W_KUNNR <> C_KUNNR.
+SELECT SINGLE * FROM ZSB002
+INTO W_TABL
+WHERE VRSIO EQ '001'
+AND  SPMON EQ L_SPMON
+AND  VKORG EQ '1000'
+AND  VKBUR EQ W_VKBUR
+AND  VKGRP EQ W_VKGRP
+AND PKUNAG EQ W_KUNNR
+AND  PRODH EQ W_PRODH
+AND ZVRSIO EQ W_VER.
+
+*   存在する場合は既存のﾃﾞｰﾀをそのまま反映させる。
+*   選択画面の予算ﾊﾞｰｼﾞｮﾝをセットする。
+IF SY-SUBRC EQ 0 .
+MOVE 'X' TO L_ERR .
+MOVE : P_VER      TO  W_TABL-ZVRSIO .
+ENDIF .
+ENDIF .
+*   存在しない場合はﾌｧｲﾙ内容を登録する。
+IF L_ERR NE 'X' .
+TRANSLATE <U_MON> USING ', " '.   CONDENSE  <U_MON> NO-GAPS.
+W_NET   = <U_MON>.
+TRANSLATE <A_MON> USING ', " '.   CONDENSE  <A_MON> NO-GAPS.
+W_ARARI = <A_MON>.
+
+*** 2004/08/11  帳票の数字合わせのため、一時的対応  *******************
+
+W_NET   = W_NET   * 10.       "10倍する
+W_ARARI = W_ARARI * 10.
+
+*        W_NET   = W_NET   * 1000.       "ファイル単位は千円なので1000倍
+*        W_ARARI = W_ARARI * 1000.
+************************************************************************
+
+
+*   計算項目
+W_TABL-WAVWR      = W_NET - W_ARARI.         "原価
+* Modify 2004/10/12 -->
+IF W_NET NE 0 .
+W_TABL-ZZARAIRITU = W_ARARI / W_NET.         "粗利率
+ELSE .
+W_TABL-ZZARAIRITU = 0 .
+ENDIF .
+* Modify 2004/10/12 <--
+MOVE : SY-MANDT   TO  W_TABL-MANDT ,
+'001'      TO  W_TABL-VRSIO ,
+L_SPMON    TO  W_TABL-SPMON ,
+'1000'     TO  W_TABL-VKORG ,
+W_VKBUR    TO  W_TABL-VKBUR ,
+W_VKGRP    TO  W_TABL-VKGRP ,
+W_KUNNR    TO  W_TABL-PKUNAG ,
+W_PRODH    TO  W_TABL-PRODH ,
+P_VER      TO  W_TABL-ZVRSIO ,
+'JPY'      TO  W_TABL-STWAE ,
+W_NET      TO  W_TABL-NETWR ,
+W_ARARI    TO  W_TABL-ZZARAIGAKU ,
+SY-DATUM   TO  W_TABL-ZINSDAT ,
+SY-UNAME   TO  W_TABL-ZINSUSR ,
+SY-UZEIT   TO  W_TABL-ZINSTIM.
+ENDIF .
+* ZSB002 登録データ
+APPEND W_TABL TO T_TABL .
+* ZSB001登録データ
+H_ZSB001-SPMON  = L_SPMON.
+H_ZSB001-VKBUR  = W_VKBUR.
+APPEND H_ZSB001 TO T_ZSB001.
+ENDIF.
+
+CLEAR : W_TABL , L_ERR ,W_NET,W_ARARI.
+ADD 1 TO L_TSUKI .
+IF L_TSUKI EQ 13 .
+MOVE 1 TO L_TSUKI .
+ADD 1 TO L_NEN .
+ENDIF .
+ENDDO .
+ENDFORM .
+*&---------------------------------------------------------------------*
+*&      Form  CHK_VKBUR
+*&---------------------------------------------------------------------*
+*       営業所コード存在チェック
+*----------------------------------------------------------------------*
+*      -->P_VKBUR  text
+*----------------------------------------------------------------------*
+FORM CHK_VKBUR.
+DATA: LW_VKBUR   TYPE  TVKBT-VKBUR,
+LW_SPMON   TYPE  ZSB002-SPMON.
+
+SELECT SINGLE VKBUR INTO LW_VKBUR
+FROM TVKBT
+WHERE SPRAS = 'J'
+AND VKBUR = W_FILE-VKBUR.
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+PERFORM LOG_MSG  USING P_VER
+SPACE                           "W_SPMON
+W_FILE-VKBUR
+W_FILE-KUNNR
+W_FILE-PRODH
+TEXT-E01.
+"営業所コードが登録されていません
+F_ERR = 'X'.          " ｴﾗｰﾌﾗｸﾞ
+WHEN OTHERS.
+ENDCASE.
+ENDFORM.                    " CHK_VKBUR
+*&---------------------------------------------------------------------*
+*&      Form  CHK_VKGRP
+*&---------------------------------------------------------------------*
+*       営業グループ存在チェック
+*----------------------------------------------------------------------*
+*      -->P_VKGRP  text
+*----------------------------------------------------------------------*
+FORM CHK_VKGRP.  "USING    P_VKGRP TYPE ZSB002-VKGRP.
+
+DATA: LW_VKGRP TYPE    TVGRT-VKGRP,
+LW_SPMON TYPE    ZSB002-SPMON.
+
+SELECT SINGLE VKGRP INTO LW_VKGRP
+FROM TVGRT
+WHERE SPRAS  = 'J'
+AND VKGRP  = W_FILE-VKGRP.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+PERFORM LOG_MSG  USING P_VER
+SPACE                              "W_SPMON
+W_FILE-VKBUR
+W_FILE-KUNNR
+W_FILE-PRODH
+TEXT-E02.
+"営業グループが登録されていません
+F_ERR = 'X'.          " ｴﾗｰﾌﾗｸﾞ
+WHEN OTHERS.
+ENDCASE.
+
+ENDFORM.                    " CHK_VKGRP
+*&---------------------------------------------------------------------*
+*&      Form  CHK_KUNNR
+*&---------------------------------------------------------------------*
+*       得意先存在チェック
+*----------------------------------------------------------------------*
+*      -->P_KUNNR  text
+*----------------------------------------------------------------------*
+FORM CHK_KUNNR." USING    P_KUNNR TYPE KNA1-KUNNR.
+DATA: LW_KUNNR   TYPE    KNA1-KUNNR,
+LW_KUN(10) TYPE    N,
+LW_SPMON   TYPE    ZSB002-SPMON.
+
+CLEAR: LW_KUNNR,LW_KUN,LW_SPMON.
+
+IF W_FILE-KUNNR = C_KUNNR.
+MOVE C_KUNNR TO W_KUNNR.               "'ZZZZZZZZZZ'の場合
+ELSE.
+LW_KUN = W_FILE-KUNNR.
+SELECT SINGLE KUNNR INTO LW_KUNNR
+FROM KNA1
+WHERE KUNNR = LW_KUN.
+
+CASE SY-SUBRC.
+WHEN 0.
+W_KUNNR = LW_KUNNR.
+WHEN 4.
+W_KUNNR = LW_KUN.
+PERFORM LOG_MSG  USING P_VER
+SPACE                    "W_SPMON
+W_FILE-VKBUR
+W_FILE-KUNNR
+W_FILE-PRODH
+TEXT-E03.
+"得意先コードが登録されていません
+F_ERR = 'X'.          " ｴﾗｰﾌﾗｸﾞ
+WHEN OTHERS.
+ENDCASE.
+ENDIF.
+ENDFORM.                    " CHK_KUNNR
+*&---------------------------------------------------------------------*
+*&      Form  OPEN_FILE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM OPEN_FILE.
+OPEN DATASET P_FILE FOR INPUT IN TEXT MODE.
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 8.
+MESSAGE S209."ファイルオープンエラーです
+STOP.
+ENDCASE.
+
+DO.
+CLEAR W_FILE.
+READ DATASET P_FILE INTO W_EDIT.
+IF SY-SUBRC = 0.
+PERFORM EDIT_FILE.
+APPEND W_FILE TO T_FILE.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+
+CLOSE DATASET P_FILE.
+ENDFORM.                    " OPEN_FILE
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_FILE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM EDIT_FILE.
+SPLIT W_EDIT  AT C_TAB INTO W_TAB-DATATYPE
+W_TAB-MVGR4
+W_TAB-VKBUR
+W_TAB-VKGRP
+W_TAB-VKGRPT
+W_TAB-KUNNR
+W_TAB-KUNNRT
+W_TAB-PRODH
+W_TAB-PRODHT
+W_TAB-ZCOMMENT
+W_TAB-MON04
+W_TAB-MON05
+W_TAB-MON06
+W_TAB-MON07
+W_TAB-MON08
+W_TAB-MON09
+W_TAB-MON10
+W_TAB-MON11
+W_TAB-MON12
+W_TAB-MON01
+W_TAB-MON02
+W_TAB-MON03
+W_TAB-GOUKEI.
+MOVE-CORRESPONDING W_TAB TO W_FILE.
+ENDFORM.                    " EDIT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  UPD_ZSB001
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM UPD_ZSB001.
+SORT T_ZSB001 BY SPMON VKBUR ZVRSIO.
+
+LOOP AT T_ZSB001 INTO H_ZSB001.
+AT NEW VKBUR.
+CLEAR: H_ZSB001-ZFIXFLG.
+H_ZSB001-ZVRSIO  = P_VER.
+H_ZSB001-ZINSDAT = SY-DATUM.
+H_ZSB001-ZINSUSR = SY-UNAME.
+H_ZSB001-ZINSTIM = SY-UZEIT.
+
+DELETE FROM ZSB001 WHERE SPMON  = H_ZSB001-SPMON
+AND VKBUR  = H_ZSB001-VKBUR
+AND ZVRSIO = P_VER.
+INSERT INTO ZSB001 VALUES H_ZSB001.
+
+IF SY-SUBRC = 0.
+ELSEIF SY-SUBRC = 4.
+ROLLBACK WORK.
+MESSAGE E401 WITH 'データ登録時にエラーが発生しました(ZSB001)'
+SY-SUBRC.
+ENDIF.
+ENDAT.
+ENDLOOP.
+ENDFORM.                    " UPD_ZSB001
+*&---------------------------------------------------------------------*
+*&      Form  LIST_OUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM LIST_OUT.
+DATA : W_SOMON  TYPE ZSB002-SPMON,
+W_VKBUR  TYPE ZSB002-VKBUR,
+W_VKGRP  TYPE ZSB002-VKGRP,
+W_PKUNAG TYPE ZSB002-PKUNAG.
+
+
+SORT T_TABL BY SPMON VKBUR VKGRP PKUNAG PRODH.
+LOOP AT T_TABL INTO W_TABL.
+WRITE :/1     '001',           "バージョン
+12    W_TABL-SPMON,    "処理年月'
+22    W_TABL-VKBUR,    "営業所',
+30    W_TABL-VKGRP,    "営業グループ
+46    W_TABL-PKUNAG,   "受注先',
+58    W_TABL-PRODH,    "品目階層',
+78    P_VER,           "予算バージョン
+94    TEXT-001.        "正常に登録されました。
+
+ENDLOOP.
+ENDFORM.                    " LIST_OUT
+*&---------------------------------------------------------------------*
+*&      Form  LIST_HEADER
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM LIST_HEADER.
+WRITE:/1    '予算バッファテーブル登録処理結果'.
+SKIP.
+
+WRITE :/1   '予算バッファテーブル登録件数',W_INS,'件'.
+SKIP.
+WRITE :/1     'バージョン',
+12    '処理年月',
+22    '営業所',
+30    '営業グループ',
+46    '受注先',
+58    'セグメント',
+78    '予算バージョン',
+94    '処理内容'.
+ULINE.
+
+ENDFORM.                    " LIST_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  LOG_MSG
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_VRSIO  text
+*      -->P_NEN    text
+*      -->P_VKBUR  text
+*      -->P_PKUNAG text
+*      -->P_PRODH  text
+*      -->P_TEXT   text
+*----------------------------------------------------------------------*
+FORM LOG_MSG USING    P_VRSIO
+P_SPMON
+P_VKBUR
+P_PKUNAG
+P_PRODH
+P_TEXT.
+CLEAR H_ERR.
+H_ERR-VRSIO  = P_VRSIO.
+H_ERR-SPMON  = P_SPMON.
+H_ERR-VKBUR  = P_VKBUR.
+H_ERR-PKUNAG = P_PKUNAG.
+H_ERR-PRODH  = P_PRODH.
+H_ERR-TEXT   = P_TEXT.
+
+APPEND H_ERR TO T_ERR.
+ENDFORM.                    " LOG_MSG
+*&---------------------------------------------------------------------*
+*&      Form  ERR_HEADER
+*&---------------------------------------------------------------------*
+*       ERRヘッダ出力
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM ERR_HEADER.
+WRITE:/1     '予算バッファテーブルエラー内容'.
+SKIP.
+WRITE :/1    'エラー件数',W_ERR,'件'.
+SKIP.
+WRITE :/1     'バージョン',
+12    '処理年月',
+22    '営業所',
+30    '受注先',
+44    'セグメント',
+64    'エラー内容'.
+
+ULINE.
+ENDFORM.                    " ERR_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  ERR_LIST
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM ERR_LIST.
+
+LOOP AT T_ERR INTO H_ERR.
+
+WRITE :/1    H_ERR-VRSIO,           "バージョン
+12   H_ERR-SPMON,           "分析期間 - 月
+22   H_ERR-VKBUR,           "営業所
+30   H_ERR-PKUNAG,          "受注先コード
+44   H_ERR-PRODH,           "品目階層
+64   H_ERR-TEXT.            "エラー内容
+ENDLOOP.
+ENDFORM.                    " ERR_LIST

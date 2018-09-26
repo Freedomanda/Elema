@@ -1,0 +1,1561 @@
+************************************************************************
+* [プログラム名]
+*   ZS012700        UTL IFファイル取込み
+* [処理概要]
+*   ・出荷出庫IFファイルを取込みアドオンテーブルに取り込む。
+*   ・出荷出庫IFファイルをバックアップする。
+*   ・取り込んだ結果を帳票に出力する。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2007/06/20   DMC               新規開発　
+*  2007/10/30   DMC               仕様変更
+*   ・複数のファイルを取込むように変更。
+*   ・入力パラメータに転記日を追加。
+*  2009/01/05   DMC               仕様変更
+*   ・指定した処理日送信された対象を出荷対象レコードとして登録
+*   ・ﾌｧｲﾙ受信時にﾌｧｲﾙのﾚｺｰﾄﾞがDelete/Insertを行なうように変更
+*   ・入力ﾊﾟﾗﾒｰﾀに処理日を追加
+*  2009/03/25   NDSC(TSUJIMOTO)   ファイル取込みエラー対応
+*   ・受信数量OVERFLOWチェック時にZSD003（取込ログ管理テーブル）取得
+* 　　条件にダミーレコード（取込み回数０）を除外する
+*  2009/04/02   NDSC(KODAMA)   取込ログテーブルに追加するレコード項目に
+*                             「出荷ポイント」を追加
+*                             「出荷数量(受信)」を削除(重複のため)
+*  2009/04/03   NDSC(KODAMA)   取込ログ更新処理において
+*                             対象を当日のデータから全てのデータへと変更
+*  2009/04/07   NDSC(KODAMA)   再受信可能なように対応
+************************************************************************
+REPORT ZS012700 MESSAGE-ID Z1
+LINE-SIZE 170
+NO STANDARD PAGE HEADING.
+
+* {{{{{ 2007/10/30 INSERT -----
+TABLES: MKPF.
+* ----- 2007/10/30 INSERT }}}}}
+
+*---------------------------------------------------------------------
+* TYPES
+*---------------------------------------------------------------------
+* サーバファイル
+TYPES: BEGIN OF TYP_DATASET,
+LINE_LENGTH      TYPE I,
+LINE_TEXT(1000)  TYPE C,
+* {{{{{ 2007/10/30 INSERT -----
+FILENAME         TYPE RLGRAP-FILENAME,
+* ----- 2007/10/30 INSERT }}}}}
+END OF TYP_DATASET.
+* サーバファイル内部テーブル
+TYPES: TYP_T_DATASET TYPE STANDARD TABLE OF TYP_DATASET.
+
+* 読込みファイル
+TYPES: BEGIN OF TYP_IF_FILE,
+SENDID(12)  TYPE C,            " 送信ID
+VBELN(10)   TYPE C,            " 受注番号
+POSNR(6)    TYPE C,            " 明細
+LFIMG(12)   TYPE C,            " 数量
+SHPDAT(10)   TYPE C,            " 出荷日付
+WADAT(10)    TYPE C,            " 出庫日付
+INVOICE(15) TYPE C,            " インボイスNO
+ASNNO(20)   TYPE C,            " ASN番号
+KUNNR(10)   TYPE C,            " 得意先コード
+BLNO(20)    TYPE C,            " BL番号
+SINO(12)    TYPE C,            " S/I №
+RESEND(1)   TYPE C,            " 再送信フラグ
+END OF TYP_IF_FILE.
+* 読込みファイル内部テーブル
+TYPES: TYP_T_IF_FILE TYPE STANDARD TABLE OF TYP_IF_FILE.
+
+* 受信数量集計用
+TYPES: BEGIN OF TYP_QUANTITY_SUM,
+SENDID       TYPE ZSD002-SENDID,           " 送信ID
+VBELN        TYPE ZSD002-VBELN,            " 受注番号
+POSNR        TYPE ZSD002-POSNR,            " 明細
+SDMENG       TYPE ZSD002-SDMENG,           " 送信数量
+RCMENG       TYPE ZSD002-RCMENG,           " 受信数量
+LFIMG_TOTAL  TYPE ZSD003-LFIMG,
+LFIMG_NORMAL TYPE ZSD003-LFIMG,
+END OF TYP_QUANTITY_SUM.
+* 受信数量集計用内部テーブル
+TYPES: TYP_T_QUANTITY_SUM TYPE STANDARD TABLE OF TYP_QUANTITY_SUM.
+
+* エラーメッセージ
+TYPES: BEGIN OF TYP_ERROR_INFO,
+LINE_NO      TYPE SY-TABIX,           " 行番
+MESSAGE(80)  TYPE C,                  " エラーメッセージ
+END OF TYP_ERROR_INFO.
+* エラーメッセージ内部テーブル
+TYPES: TYP_T_ERROR_INFO TYPE STANDARD TABLE OF TYP_ERROR_INFO.
+
+*---------------------------------------------------------------------
+* 定数宣言
+*---------------------------------------------------------------------
+CONSTANTS: CNS_TAB_CHAR TYPE X VALUE '09'.
+
+CONSTANTS: CNS_RC_CODE_CANCEL        TYPE SY-SUBRC VALUE 1,
+CNS_RC_CODE_NOT_FOUND     TYPE SY-SUBRC VALUE 4,
+CNS_RC_CODE_DB_ERROR      TYPE SY-SUBRC VALUE 8,
+CNS_RC_CODE_ERROR         TYPE SY-SUBRC VALUE 9.
+
+CONSTANTS: CNS_FILE_TYPE_ERROR  TYPE C VALUE 'E',
+CNS_FILE_TYPE_BACKUP TYPE C VALUE 'B'.
+
+*---------------------------------------------------------------------
+* 内部テーブル・作業領域
+*---------------------------------------------------------------------
+DATA: GT_DATASET TYPE TYP_T_DATASET.
+DATA: GT_IF_FILE TYPE TYP_T_IF_FILE.
+DATA: GT_QUANTITY_SUM TYPE TYP_T_QUANTITY_SUM.
+DATA: GT_ERROR_INFO TYPE TYP_T_ERROR_INFO.
+* {{{{{ 2007/10/30 INSERT -----
+DATA: GT_FILE_LIST TYPE STANDARD TABLE OF RSFILLST.
+* ----- 2007/10/30 INSERT }}}}}
+
+*---------------------------------------------------------------------
+* 変数宣言
+*---------------------------------------------------------------------
+DATA: G_COUNT_TOTAL TYPE I,
+G_COUNT_NORMAL TYPE I,
+G_COUNT_ERROR TYPE I,
+G_BFILE       TYPE RLGRAP-FILENAME,
+G_EFILE       TYPE RLGRAP-FILENAME.
+
+DATA: G_RC TYPE SY-SUBRC.
+
+*---------------------------------------------------------------------
+* 選択画面定義
+*---------------------------------------------------------------------
+* 【IFファイル取込】
+SELECTION-SCREEN BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+* 読込みファイル
+PARAMETERS: P_RFILE TYPE RLGRAP-FILENAME OBLIGATORY.
+* バックアップファイル
+PARAMETERS: P_BFILE TYPE RLGRAP-FILENAME.
+* エラーファイル
+PARAMETERS: P_EFILE TYPE RLGRAP-FILENAME.
+* テスト実行
+PARAMETERS: P_TEST TYPE C AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN END   OF BLOCK BL1.
+* {{{{{ 2007/10/30 INSERT -----
+SELECTION-SCREEN BEGIN OF BLOCK BL2 WITH FRAME TITLE TEXT-002.
+* 転記日
+SELECT-OPTIONS: S_BUDAT FOR MKPF-BUDAT.
+* ADD 2009/01/05 {
+* 処理日
+SELECT-OPTIONS: S_DATUM FOR SY-DATUM DEFAULT SY-DATUM OBLIGATORY.
+* } ADD 2009/01/05
+SELECTION-SCREEN END   OF BLOCK BL2.
+* ----- 2007/10/30 INSERT }}}}}
+
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN.
+
+* 入力チェック
+PERFORM CHECK_INPUT.
+
+*---------------------------------------------------------------------
+* START-OF-SELECTION
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+
+* 読込処理
+PERFORM PROCESS_IF_FILE.
+IF G_RC = 0.
+IF P_TEST = ' '.
+*     送受信ログ更新
+PERFORM UPDATE_LOG.
+IF G_RC = 0.
+*       エラーファイル出力
+PERFORM OUTPUT_ERROR_FILE.
+IF G_RC = 0.
+*         IFファイルバックアップ
+PERFORM BACKUP_IF_FILE.
+IF G_RC = 0.
+*           IFファイル削除
+PERFORM DELETE_IF_FILE.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+
+*---------------------------------------------------------------------
+* END-OF-SELECTION
+*---------------------------------------------------------------------
+END-OF-SELECTION.
+
+CASE G_RC.
+WHEN 0.
+*     処理結果出力
+PERFORM OUTPUT_RESULT.
+IF P_TEST = 'X'.
+*       テスト実行結果を出力しました
+MESSAGE S645.
+ELSE.
+IF G_COUNT_TOTAL = G_COUNT_NORMAL.
+*         IFファイル取込処理が終了しました
+MESSAGE S646.
+ELSE.
+*         エラーレコードがあります、
+*         スプール/エラーファイルを確認してください
+MESSAGE S647.
+ENDIF.
+ENDIF.
+WHEN CNS_RC_CODE_CANCEL.
+*     ファイルの項目数が不正です
+MESSAGE S644.
+WHEN OTHERS.
+*     取込み処理でエラーが発生しました
+MESSAGE S649.
+ENDCASE.
+
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_IF_FILE
+*&---------------------------------------------------------------------*
+*       読込処理
+*----------------------------------------------------------------------*
+FORM PROCESS_IF_FILE.
+
+DATA: LF_FILE LIKE LINE OF GT_IF_FILE,
+LF_DATASET LIKE LINE OF GT_DATASET.
+DATA: L_INDEX TYPE SY-INDEX.
+DATA: L_ERROR_FLAG(1) TYPE C.
+* {{{{{ 2007/10/30 INSERT -----
+DATA: LF_FILE_INFO LIKE LINE OF GT_FILE_LIST.
+DATA: L_FILENAME LIKE RLGRAP-FILENAME.
+* ----- 2007/10/30 INSERT }}}}}
+
+CLEAR: G_RC.
+CLEAR: GT_DATASET[], GT_IF_FILE[],
+GT_QUANTITY_SUM[], GT_ERROR_INFO[].
+
+* {{{{{ 2007/10/30 INSERT -----
+LOOP AT GT_FILE_LIST INTO LF_FILE_INFO
+WHERE TYPE(4) = 'file'.
+CONCATENATE LF_FILE_INFO-DIRNAME LF_FILE_INFO-NAME
+INTO L_FILENAME.
+* ----- 2007/10/30 INSERT }}}}}
+* {{{{{ 2007/10/30 MODIFY -----
+*    OPEN DATASET P_RFILE FOR INPUT IN TEXT MODE.
+OPEN DATASET L_FILENAME FOR INPUT IN TEXT MODE.
+* ----- 2007/10/30 MODIFY }}}}}
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_ERROR.
+* {{{{{ 2007/10/30 INSERT -----
+EXIT.
+* ----- 2007/10/30 INSERT }}}}}
+ENDIF.
+
+CHECK G_RC = 0.
+DO.
+* {{{{{ 2007/10/30 DELETE -----
+*      L_INDEX = SY-INDEX.
+* ----- 2007/10/30 DELETE }}}}}
+* {{{{{ 2007/10/30 MODIFY -----
+*      READ DATASET P_RFILE INTO LF_DATASET-LINE_TEXT
+*                           LENGTH LF_DATASET-LINE_LENGTH.
+READ DATASET L_FILENAME INTO LF_DATASET-LINE_TEXT
+LENGTH LF_DATASET-LINE_LENGTH.
+* ----- 2007/10/30 MODIFY }}}}}
+IF SY-SUBRC <> 0.
+CLEAR G_RC.
+EXIT.
+ENDIF.
+
+CLEAR L_ERROR_FLAG.
+G_COUNT_TOTAL = G_COUNT_TOTAL + 1.
+* {{{{{ 2007/10/30 INSERT -----
+L_INDEX = L_INDEX + 1.
+LF_DATASET-FILENAME = L_FILENAME.
+* ----- 2007/10/30 INSERT }}}}}
+APPEND LF_DATASET TO GT_DATASET.
+
+*     項目数チェック
+PERFORM CHECK_FIELD_COUNT USING LF_DATASET-LINE_TEXT
+LF_FILE.
+IF G_RC <> 0.
+G_RC = CNS_RC_CODE_CANCEL.
+EXIT.
+ENDIF.
+
+*     行読込
+PERFORM PARSE_LINE USING    LF_DATASET-LINE_TEXT
+CHANGING LF_FILE.
+APPEND LF_FILE TO GT_IF_FILE.
+
+PERFORM CONVET_VBELN_TO_INPUT CHANGING LF_FILE-VBELN.
+PERFORM CONVET_KUNNR_TO_INPUT CHANGING LF_FILE-KUNNR.
+
+*   ---------- 基本チェック 開始 ----------
+*     明細番号妥当性チェック
+PERFORM CHECK_NUMBER USING LF_FILE-POSNR 6 0.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E02.
+ENDIF.
+*     数量妥当性チェック
+PERFORM CHECK_NUMBER USING LF_FILE-LFIMG 10 2.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E03.
+ENDIF.
+*     出荷日付妥当性チェック
+PERFORM CHECK_DATE USING LF_FILE-SHPDAT.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E04.
+ENDIF.
+*     出庫日付妥当性チェック
+PERFORM CHECK_DATE USING LF_FILE-WADAT.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E05.
+ENDIF.
+* {{{{{ 2007/10/30 INSERT -----
+IF NOT LF_FILE-WADAT IN S_BUDAT.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E16.
+ENDIF.
+* ----- 2007/10/30 INSERT }}}}}
+*     再送信フラグチェック
+PERFORM CHECK_RESEND_FLAG USING LF_FILE-RESEND.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E06.
+ENDIF.
+*   ---------- 基本チェック 終了 ----------
+
+IF L_ERROR_FLAG IS INITIAL.
+*   ---------- 関連チェック 開始 ----------
+*       送信ログ存在チェック
+PERFORM CHECK_SEND_LOG_IS_EXIST USING LF_FILE.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E11.
+ENDIF.
+*       受信ログ存在チェック
+PERFORM CHECK_RECEIVE_LOG_IS_NOT_EXIST USING LF_FILE.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E12.
+ENDIF.
+*       受信ログ重複チェック
+PERFORM CHECK_RECEIVE_LOG_IS_OVERLAP USING LF_FILE.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E15.
+ENDIF.
+*       受信数量OVERFLOWチェック
+PERFORM CHECK_QUANTITY_IS_NOT_OVERFLOW USING LF_FILE.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E13.
+ENDIF.
+*       得意先コード存在チェック
+PERFORM CHECK_KUNNR_IS_EXIST USING LF_FILE-KUNNR.
+IF G_RC <> 0.
+L_ERROR_FLAG = 'X'.
+PERFORM ADD_ERROR_MESSAGE USING L_INDEX
+TEXT-E14.
+ENDIF.
+*   ---------- 関連チェック 終了 ----------
+ENDIF.
+
+IF L_ERROR_FLAG = 'X'.
+G_COUNT_ERROR = G_COUNT_ERROR + 1.
+ELSE.
+G_COUNT_NORMAL = G_COUNT_NORMAL + 1.
+ENDIF.
+
+ENDDO.
+
+* {{{{{ 2007/10/30 MODIFY -----
+*    CLOSE DATASET P_RFILE.
+CLOSE DATASET L_FILENAME.
+* ----- 2007/10/30 MODIFY }}}}}
+
+* {{{{{ 2007/10/30 INSERT -----
+IF G_RC <> 0.
+EXIT.
+ENDIF.
+
+ENDLOOP.
+* ----- 2007/10/30 INSERT }}}}}
+
+ENDFORM.                    " PROCESS_IF_FILE
+*&---------------------------------------------------------------------*
+*&      Form  BUILD_LINE
+*&---------------------------------------------------------------------*
+*       行編集
+*----------------------------------------------------------------------*
+*      -->IF_STRUC  構造行
+*      <--E_LINE    テキスト行
+*----------------------------------------------------------------------*
+FORM BUILD_LINE USING    IF_STRUC
+CHANGING E_LINE.
+
+DATA: L_INDEX TYPE SY-INDEX.
+
+FIELD-SYMBOLS: <F_FIELD> TYPE C.
+
+CLEAR E_LINE.
+DO.
+L_INDEX = SY-INDEX.
+ASSIGN COMPONENT L_INDEX OF STRUCTURE IF_STRUC TO <F_FIELD>.
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+IF L_INDEX = 1.
+E_LINE = <F_FIELD>.
+ELSE.
+CONCATENATE E_LINE <F_FIELD> INTO E_LINE
+SEPARATED BY CNS_TAB_CHAR.
+ENDIF.
+ENDDO.
+
+ENDFORM.                    " BUILD_LINE
+*&---------------------------------------------------------------------*
+*&      Form  PARSE_LINE
+*&---------------------------------------------------------------------*
+*       行読込
+*----------------------------------------------------------------------*
+*      -->IF_STRUC  構造行
+*      <--E_LINE    テキスト行
+*----------------------------------------------------------------------*
+FORM PARSE_LINE USING    I_LINE
+CHANGING EF_STRUC.
+
+DATA: L_LINE TYPE STRING.
+
+FIELD-SYMBOLS: <F_FIELD> TYPE C.
+
+CLEAR G_RC.
+CLEAR EF_STRUC.
+
+L_LINE = I_LINE.
+DO.
+ASSIGN COMPONENT SY-INDEX OF STRUCTURE EF_STRUC TO <F_FIELD>.
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+SPLIT L_LINE AT CNS_TAB_CHAR INTO <F_FIELD> L_LINE.
+ENDDO.
+
+ENDFORM.                    " PARSE_LINE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_FIELD_COUNT
+*&---------------------------------------------------------------------*
+*       項目数チェック
+*----------------------------------------------------------------------*
+*      -->I_LINE    テキスト行
+*      -->IF_STRUC  構造行
+*----------------------------------------------------------------------*
+FORM CHECK_FIELD_COUNT USING    I_LINE
+IF_STRUC.
+
+DATA: L_LINE TYPE STRING.
+DATA: L_COUNT_L TYPE I,
+L_COUNT_S TYPE I.
+DATA: L_TYPE(1) TYPE C,
+L_POS TYPE SY-FDPOS.
+
+CLEAR G_RC.
+L_LINE = I_LINE.
+DO.
+L_COUNT_L = L_COUNT_L + 1.
+SEARCH L_LINE FOR CNS_TAB_CHAR.
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+L_POS = SY-FDPOS + 1.
+L_LINE = L_LINE+L_POS.
+ENDDO.
+DESCRIBE FIELD IF_STRUC TYPE L_TYPE COMPONENTS L_COUNT_S.
+IF L_COUNT_L <> L_COUNT_S.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+ENDFORM.                    " CHECK_FIELD_COUNT
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_RESEND_FLAG
+*&---------------------------------------------------------------------*
+*       再送信フラグチェック
+*----------------------------------------------------------------------*
+*      -->I_RESEND  再送信フラグ
+*----------------------------------------------------------------------*
+FORM CHECK_RESEND_FLAG USING    I_RESEND.
+
+CLEAR G_RC.
+IF NOT ( I_RESEND = '0' OR I_RESEND = '1' ).
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+ENDFORM.                    " CHECK_RESEND_FLAG
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_RESULT
+*&---------------------------------------------------------------------*
+*       処理結果出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_RESULT.
+
+DATA: LF_FILE LIKE LINE OF GT_IF_FILE,
+LF_ERROR_INFO LIKE LINE OF GT_ERROR_INFO.
+* {{{{{ 2007/10/30 INSERT -----
+DATA: LF_DATASET LIKE LINE OF GT_DATASET,
+L_FILENAME TYPE  RLGRAP-FILENAME.
+* ----- 2007/10/30 INSERT }}}}}
+DATA: L_LINE_NO TYPE SY-TABIX,
+L_START TYPE SY-TABIX,
+L_ERROR_FLAG(1) TYPE C.
+DATA: L_PAGE_NO TYPE I VALUE 1.
+DATA: L_SHPDAT TYPE ZSD003-SHPDAT,
+L_WADAT TYPE ZSD003-WADAT.
+
+IF P_TEST = 'X'.
+*   ※テスト実行(更新は行われません)
+WRITE: 1 TEXT-R02.
+ENDIF.
+* *** IFファイル取込み結果 ***
+WRITE: 62 TEXT-R01.
+* 処理日付:
+WRITE: 114 TEXT-R03, 123(10) SY-DATUM.
+* 処理時刻:
+WRITE: 137 TEXT-R04, 146(8) SY-UZEIT.
+* PAGE:
+WRITE: 158 TEXT-R05, 163(3) L_PAGE_NO.
+WRITE: / SY-ULINE.
+
+* 取込みファイル
+WRITE: /1 TEXT-R06, 26 P_RFILE.
+* バックアップファイル
+WRITE: /1 TEXT-R07, 26 G_BFILE.
+* エラーファイル
+WRITE: /1 TEXT-R08, 26 G_EFILE.
+SKIP.
+
+* 読込件数
+WRITE: /1 TEXT-R09, 17(5) G_COUNT_TOTAL, 22 TEXT-R12.
+* 正常処理件数
+WRITE: /1 TEXT-R10, 17(5) G_COUNT_NORMAL, 22 TEXT-R12.
+* エラー件数
+WRITE: /1 TEXT-R11, 17(5) G_COUNT_ERROR, 22 TEXT-R12.
+SKIP.
+
+* {{{{{ 2007/10/30 DELETE -----
+*  WRITE: / SY-ULINE.
+** 列名
+*  WRITE: /1 TEXT-R13, 16 TEXT-R14, 34 TEXT-R15, 47 TEXT-R16,
+*         65 TEXT-R17, 72 TEXT-R18, 85 TEXT-R19, 98 TEXT-R20,
+*         121 TEXT-R21, 133 TEXT-R22.
+*  WRITE: / SY-ULINE.
+*  WRITE: / ''.
+* ----- 2007/10/30 DELETE }}}}}
+
+LOOP AT GT_IF_FILE INTO LF_FILE.
+CLEAR L_ERROR_FLAG.
+L_LINE_NO = SY-TABIX.
+*   エラー有無判断
+READ TABLE GT_ERROR_INFO INTO LF_ERROR_INFO
+WITH KEY LINE_NO = L_LINE_NO.
+IF SY-SUBRC = 0.
+L_START = SY-TABIX.
+L_ERROR_FLAG = 'X'.
+ENDIF.
+* {{{{{ 2007/10/30 INSERT -----
+*   ファイル名取得
+READ TABLE GT_DATASET INTO LF_DATASET INDEX L_LINE_NO.
+IF LF_DATASET-FILENAME <> L_FILENAME.
+*     ファイル名出力
+SKIP 2.
+WRITE: 1 TEXT-R25, LF_DATASET-FILENAME.
+L_FILENAME = LF_DATASET-FILENAME.
+WRITE: / SY-ULINE.
+*     列名
+WRITE: /1 TEXT-R13, 16 TEXT-R14, 34 TEXT-R15, 47 TEXT-R16,
+65 TEXT-R17, 72 TEXT-R18, 85 TEXT-R19, 98 TEXT-R20,
+121 TEXT-R21, 133 TEXT-R22.
+WRITE: / SY-ULINE.
+WRITE: / ''.
+ENDIF.
+* ----- 2007/10/30 INSERT }}}}}
+*   送信ID、インボイスNO、受注番号、明細番号
+WRITE: 1 LF_FILE-SENDID, 16 LF_FILE-INVOICE,
+34 LF_FILE-VBELN,  47 LF_FILE-POSNR.
+*   数量、出荷日
+IF L_ERROR_FLAG = ' '.
+L_SHPDAT = LF_FILE-SHPDAT.
+L_WADAT = LF_FILE-WADAT.
+WRITE: 57(12) LF_FILE-LFIMG RIGHT-JUSTIFIED NO-GAP.
+WRITE: 72(10) L_SHPDAT, 85(10) L_WADAT.
+ELSE.
+WRITE: 57(12) LF_FILE-LFIMG.
+WRITE: 72(10) LF_FILE-SHPDAT, 85(10) LF_FILE-WADAT.
+ENDIF.
+*   ASN番号
+WRITE: 98 LF_FILE-ASNNO.
+*   処理結果
+IF L_ERROR_FLAG = ' '.
+*     正常
+WRITE: 121 TEXT-R23.
+WRITE: / ''.
+ELSE.
+*     エラー
+WRITE: 121 TEXT-R24.
+LOOP AT GT_ERROR_INFO INTO LF_ERROR_INFO FROM L_START.
+IF LF_ERROR_INFO-LINE_NO <> L_LINE_NO.
+EXIT.
+ENDIF.
+*       メッセージ
+WRITE: 133(38) LF_ERROR_INFO-MESSAGE.
+WRITE: / ''.
+ENDLOOP.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " OUTPUT_RESULT
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_LOG
+*&---------------------------------------------------------------------*
+*       送受信ログ更新
+*----------------------------------------------------------------------*
+FORM UPDATE_LOG.
+
+DATA: LF_FILE LIKE LINE OF GT_IF_FILE,
+LF_QUANTITY_SUM LIKE LINE OF GT_QUANTITY_SUM.
+DATA: L_SEQUENCE_NO TYPE ZSD003-TORIKOMI.
+DATA: L_RCMENG TYPE ZSD002-RCMENG.
+
+* ADD 2009/01/05 {
+* 当日送信された対象を送信ログテーブルより取得する
+PERFORM EDIT_ZSD002_DATA.
+IF G_RC <> 0.
+EXIT.
+ENDIF.
+* } ADD 2009/01/05
+LOOP AT GT_IF_FILE INTO LF_FILE.
+
+READ TABLE GT_ERROR_INFO TRANSPORTING NO FIELDS
+WITH KEY LINE_NO = SY-TABIX.
+IF SY-SUBRC = 0.
+CONTINUE.
+ENDIF.
+
+PERFORM CONVET_VBELN_TO_INPUT CHANGING LF_FILE-VBELN.
+PERFORM CONVET_KUNNR_TO_INPUT CHANGING LF_FILE-KUNNR.
+*   ADD 2009/01/05 {
+DATA:L_FLG TYPE C.
+DATA: LW_ZSD003 TYPE ZSD003.
+*   受信ログテーブルから登録したレコードが存在ﾁｪｯｸ
+PERFORM GET_ZSD003_DATA USING LF_FILE
+CHANGING L_FLG
+LW_ZSD003.
+*2009/04/07 MODIFY START
+*    IF L_FLG = 'X'.
+*   } ADD 2009/01/05
+*   取込№取得
+PERFORM GET_NEXT_SEQUENCE USING    LF_FILE
+CHANGING L_SEQUENCE_NO.
+*   ADD 2009/01/05 {
+*    ELSE.
+*      L_SEQUENCE_NO = 1.
+*    ENDIF.
+*2009/04/07 MODIFY END
+
+*   } ADD 2009/01/05
+*   受信ログ登録
+PERFORM INSERT_RECEIVE_LOG USING LF_FILE
+*                                    ADD 2009/01/05 {
+L_FLG
+LW_ZSD003
+*                                    } ADD 2009/01/05
+L_SEQUENCE_NO.
+IF G_RC <> 0.
+EXIT.
+ENDIF.
+
+*   更新数量累計
+LF_QUANTITY_SUM-SENDID = LF_FILE-SENDID.
+LF_QUANTITY_SUM-VBELN = LF_FILE-VBELN.
+LF_QUANTITY_SUM-POSNR = LF_FILE-POSNR.
+LF_QUANTITY_SUM-LFIMG_NORMAL = LF_FILE-LFIMG.
+COLLECT LF_QUANTITY_SUM INTO GT_QUANTITY_SUM.
+
+ENDLOOP.
+
+CHECK G_RC = 0.
+LOOP AT GT_QUANTITY_SUM INTO LF_QUANTITY_SUM
+WHERE LFIMG_NORMAL > 0.
+L_RCMENG = LF_QUANTITY_SUM-RCMENG + LF_QUANTITY_SUM-LFIMG_NORMAL.
+*   受信数量更新
+PERFORM UPDATE_SEND_LOG USING LF_QUANTITY_SUM
+L_RCMENG.
+IF G_RC <> 0.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+CHECK G_RC = 0.
+COMMIT WORK.
+
+ENDFORM.                    " UPDATE_LOG
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ERROR_FILE
+*&---------------------------------------------------------------------*
+*       エラーファイル出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_ERROR_FILE.
+
+* エラーファイル
+TYPES: BEGIN OF TYP_ERROR_FILE.
+INCLUDE TYPE TYP_IF_FILE.
+TYPES:   MESSAGE(80) TYPE C,
+END OF TYP_ERROR_FILE.
+
+DATA: LF_DATASET LIKE LINE OF GT_DATASET.
+DATA: LF_ERROR_FILE TYPE TYP_ERROR_FILE,
+LF_ERROR_INFO LIKE LINE OF GT_ERROR_INFO.
+DATA: L_FULLNAME TYPE RLGRAP-FILENAME.
+DATA: L_LINE(1000) TYPE C,
+L_MESSAGE(80) TYPE C.
+
+* エラーファイル名取得
+PERFORM GET_FILE_NAME USING    CNS_FILE_TYPE_ERROR
+CHANGING L_FULLNAME.
+
+CLEAR G_RC.
+*2007/07/17 ADD START
+* エラーがある場合のみ、エラーファイルを出力する
+CHECK NOT GT_ERROR_INFO[] IS INITIAL.
+*2007/07/17 ADD END
+G_EFILE = L_FULLNAME.
+OPEN DATASET L_FULLNAME FOR OUTPUT IN TEXT MODE.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+CHECK G_RC = 0.
+LOOP AT GT_ERROR_INFO INTO LF_ERROR_INFO.
+CLEAR LF_ERROR_FILE.
+L_MESSAGE = LF_ERROR_INFO-MESSAGE.
+AT NEW LINE_NO.
+READ TABLE GT_DATASET INTO LF_DATASET
+INDEX LF_ERROR_INFO-LINE_NO.
+CONCATENATE LF_DATASET-LINE_TEXT L_MESSAGE
+INTO LF_DATASET-LINE_TEXT SEPARATED BY CNS_TAB_CHAR.
+TRANSFER LF_DATASET-LINE_TEXT TO L_FULLNAME.
+CONTINUE.
+ENDAT.
+LF_ERROR_FILE-MESSAGE = L_MESSAGE.
+PERFORM BUILD_LINE USING    LF_ERROR_FILE
+CHANGING L_LINE.
+TRANSFER L_LINE TO L_FULLNAME.
+ENDLOOP.
+CLOSE DATASET L_FULLNAME.
+
+ENDFORM.                    " OUTPUT_ERROR_FILE
+*&---------------------------------------------------------------------*
+*&      Form  BACKUP_IF_FILE
+*&---------------------------------------------------------------------*
+*       IFファイルバックアップ
+*----------------------------------------------------------------------*
+FORM BACKUP_IF_FILE.
+
+DATA: LF_DATASET LIKE LINE OF GT_DATASET.
+DATA: L_FULLNAME TYPE RLGRAP-FILENAME.
+
+IF NOT P_BFILE IS INITIAL.
+*   バックアップファイル名取得
+PERFORM GET_FILE_NAME USING    CNS_FILE_TYPE_BACKUP
+CHANGING L_FULLNAME.
+
+CLEAR G_RC.
+G_BFILE = L_FULLNAME.
+OPEN DATASET L_FULLNAME FOR OUTPUT IN TEXT MODE.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_ERROR.
+ELSE.
+LOOP AT GT_DATASET INTO LF_DATASET.
+TRANSFER LF_DATASET-LINE_TEXT TO L_FULLNAME.
+ENDLOOP.
+CLOSE DATASET L_FULLNAME.
+ENDIF.
+CLOSE DATASET P_RFILE.
+ENDIF.
+
+ENDFORM.                    " BACKUP_IF_FILE
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_IF_FILE
+*&---------------------------------------------------------------------*
+*       IFファイル削除
+*----------------------------------------------------------------------*
+FORM DELETE_IF_FILE.
+
+* {{{{{ 2007/10/30 INSERT -----
+DATA: LF_FILE_INFO LIKE LINE OF GT_FILE_LIST.
+DATA: L_FILENAME LIKE RLGRAP-FILENAME.
+
+LOOP AT GT_FILE_LIST INTO LF_FILE_INFO
+WHERE TYPE(4) = 'file'.
+CLEAR: L_FILENAME.
+CONCATENATE LF_FILE_INFO-DIRNAME LF_FILE_INFO-NAME
+INTO L_FILENAME.
+
+DELETE DATASET L_FILENAME.
+
+
+ENDLOOP.
+* ----- 2007/10/30 INSERT }}}}}
+
+* {{{{{ 2007/10/30 DELETE -----
+*   DELETE DATASET P_RFILE.
+* ----- 2007/10/30 DELETE }}}}}
+
+
+ENDFORM.                    " DELETE_IF_FILE
+*&---------------------------------------------------------------------*
+*&      Form  GET_NEXT_SEQUENCE
+*&---------------------------------------------------------------------*
+*       取込№取得
+*----------------------------------------------------------------------*
+*      -->IF_FILE        IFファイルレコード
+*      <--E_SEQUENCE_NO  取込№
+*----------------------------------------------------------------------*
+FORM GET_NEXT_SEQUENCE USING    IF_FILE TYPE TYP_IF_FILE
+CHANGING E_SEQUENCE_NO.
+
+CLEAR E_SEQUENCE_NO.
+SELECT MAX( TORIKOMI )
+INTO E_SEQUENCE_NO
+FROM ZSD003
+WHERE SENDID = IF_FILE-SENDID
+AND VBELN = IF_FILE-VBELN
+AND POSNR = IF_FILE-POSNR
+AND INVOICE = IF_FILE-INVOICE.
+
+IF SY-SUBRC <> 0.
+E_SEQUENCE_NO = 1.
+ELSE.
+E_SEQUENCE_NO = E_SEQUENCE_NO + 1.
+ENDIF.
+
+ENDFORM.                    " GET_NEXT_SEQUENCE
+*&---------------------------------------------------------------------*
+*&      Form  INSERT_RECEIVE_LOG
+*&---------------------------------------------------------------------*
+*       受信ログ登録
+*----------------------------------------------------------------------*
+*      -->IF_FILE        IFファイルレコード
+*      -->I_SEQUENCE_NO  取込№
+*----------------------------------------------------------------------*
+FORM INSERT_RECEIVE_LOG USING    IF_FILE TYPE TYP_IF_FILE
+*                                ADD 2009/01/05 {
+I_FLG
+IF_ZSD003 TYPE ZSD003
+*                                } ADD 2009/01/05
+I_SEQUENCE_NO.
+
+DATA: L_ZSD003 TYPE ZSD003.
+
+L_ZSD003-SENDID = IF_FILE-SENDID.
+L_ZSD003-VBELN = IF_FILE-VBELN.
+L_ZSD003-POSNR = IF_FILE-POSNR.
+L_ZSD003-INVOICE = IF_FILE-INVOICE.
+L_ZSD003-TORIKOMI = I_SEQUENCE_NO.
+L_ZSD003-LFIMG = IF_FILE-LFIMG.
+L_ZSD003-SHPDAT = IF_FILE-SHPDAT.
+L_ZSD003-WADAT = IF_FILE-WADAT.
+L_ZSD003-ASNNO = IF_FILE-ASNNO.
+L_ZSD003-KUNNR = IF_FILE-KUNNR.
+L_ZSD003-BLNO = IF_FILE-BLNO.
+L_ZSD003-SINO = IF_FILE-SINO.
+L_ZSD003-INDATE = SY-DATUM.
+L_ZSD003-INTIME = SY-UZEIT.
+L_ZSD003-INNAME = SY-UNAME.
+* ADD 2009/01/05 {
+IF I_FLG = ''.
+* 2009/04/02 MODIFY START
+*    L_ZSD003-LFIMG   = IF_ZSD003-LFIMG.   "出荷数量（受信）
+L_ZSD003-VSTEL   = IF_ZSD003-VSTEL.   "出荷ポイント
+* 2009/04/02 MODIFY END
+L_ZSD003-SHPDAT  = IF_ZSD003-SHPDAT.  "出荷日
+L_ZSD003-SBDC    = IF_ZSD003-SBDC.    "出荷BDC
+L_ZSD003-SBDCDAT = IF_ZSD003-SBDCDAT. "出荷BDC実行日
+L_ZSD003-SBDCTIM = IF_ZSD003-SBDCTIM. "出荷BDC実行時刻
+L_ZSD003-SBDCNAM = IF_ZSD003-SBDCNAM. "出荷BDC実行ユーザ
+L_ZSD003-VBELN_S = IF_ZSD003-VBELN_S. "出荷伝票
+ENDIF.
+* } ADD 2009/01/05
+
+CLEAR G_RC.
+* 登録
+INSERT INTO ZSD003 VALUES L_ZSD003.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+ENDIF.
+
+ENDFORM.                    " INSERT_RECEIVE_LOG
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_SEND_LOG
+*&---------------------------------------------------------------------*
+*       受信数量更新
+*----------------------------------------------------------------------*
+*      -->IF_QUANTITY_SUM     数量合計データ
+*      -->I_RECEIVE_QUANTITY  受信数量
+*----------------------------------------------------------------------*
+FORM UPDATE_SEND_LOG USING    IF_QUANTITY_SUM TYPE TYP_QUANTITY_SUM
+I_RECEIVE_QUANTITY.
+
+CLEAR G_RC.
+UPDATE ZSD002
+SET RCMENG = I_RECEIVE_QUANTITY
+WHERE SENDID = IF_QUANTITY_SUM-SENDID
+AND VBELN = IF_QUANTITY_SUM-VBELN
+AND POSNR = IF_QUANTITY_SUM-POSNR.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+ENDIF.
+
+ENDFORM.                    " UPDATE_SEND_LOG
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATE
+*&---------------------------------------------------------------------*
+*       日付妥当性チェック
+*----------------------------------------------------------------------*
+*      -->I_DATE_STRING  日付ストリング
+*----------------------------------------------------------------------*
+FORM CHECK_DATE USING    I_DATE_STRING.
+
+CLEAR G_RC.
+CALL FUNCTION 'CONVERT_DATE_TO_INTERNAL'
+EXPORTING
+DATE_EXTERNAL            = I_DATE_STRING
+EXCEPTIONS
+DATE_EXTERNAL_IS_INVALID = 1
+OTHERS                   = 2.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+ENDFORM.                    " CHECK_DATE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_NUMBER
+*&---------------------------------------------------------------------*
+*       数値妥当性チェック
+*----------------------------------------------------------------------*
+*      -->I_NUMBER_STRING  数値ストリング
+*----------------------------------------------------------------------*
+FORM CHECK_NUMBER USING    I_NUMBER_STRING
+I_INTEGER
+I_DECIMAL.
+
+DATA: L_INT(20) TYPE C,
+L_FRAC(20) TYPE C,
+L_NUMBER(20) TYPE C,
+L_CHAR TYPE C,
+L_LEN TYPE I,
+L_POS TYPE I.
+
+CLEAR G_RC.
+DESCRIBE FIELD I_NUMBER_STRING LENGTH L_LEN.
+SEARCH I_NUMBER_STRING FOR '...'.
+IF SY-SUBRC = 0.
+L_INT = I_NUMBER_STRING(SY-FDPOS).
+L_POS = SY-FDPOS + 1.
+IF L_POS < L_LEN.
+L_FRAC = I_NUMBER_STRING+L_POS.
+ENDIF.
+L_NUMBER = L_INT.
+L_NUMBER+SY-FDPOS = L_FRAC.
+IF L_FRAC IS INITIAL.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+ELSE.
+L_INT = I_NUMBER_STRING.
+L_NUMBER = L_INT.
+ENDIF.
+
+CHECK G_RC = 0.
+IF L_INT IS INITIAL.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+CHECK G_RC = 0.
+CONDENSE L_INT.
+L_LEN = STRLEN( L_INT ).
+IF I_INTEGER < L_LEN.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+CHECK G_RC = 0.
+L_LEN = STRLEN( L_FRAC ).
+IF I_DECIMAL < L_LEN.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+CHECK G_RC = 0.
+CONDENSE L_NUMBER.
+L_LEN = STRLEN( L_NUMBER ).
+DO L_LEN TIMES.
+L_POS = SY-INDEX - 1.
+L_CHAR = L_NUMBER+L_POS(1).
+IF L_CHAR CN '0123456789'.
+G_RC = CNS_RC_CODE_ERROR.
+EXIT.
+ENDIF.
+ENDDO.
+
+ENDFORM.                    " CHECK_NUMBER
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_SEND_LOG_IS_EXIST
+*&---------------------------------------------------------------------*
+*       送信ログ存在チェック
+*----------------------------------------------------------------------*
+*      -->IF_FILE  IFファイル
+*----------------------------------------------------------------------*
+FORM CHECK_SEND_LOG_IS_EXIST USING    IF_FILE TYPE TYP_IF_FILE.
+
+CLEAR G_RC.
+SELECT COUNT(*) FROM ZSD002
+WHERE SENDID = IF_FILE-SENDID
+AND VBELN = IF_FILE-VBELN
+AND POSNR = IF_FILE-POSNR
+AND LOEVM <> 'X'.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " CHECK_SEND_LOG_IS_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_RECEIVE_LOG_IS_NOT_EXIST
+*&---------------------------------------------------------------------*
+*       受信ログ存在チェック
+*----------------------------------------------------------------------*
+*      -->IF_FILE  IFファイル
+*----------------------------------------------------------------------*
+FORM CHECK_RECEIVE_LOG_IS_NOT_EXIST USING    IF_FILE TYPE TYP_IF_FILE.
+
+CLEAR G_RC.
+SELECT COUNT(*) FROM ZSD003
+WHERE SENDID = IF_FILE-SENDID
+AND VBELN = IF_FILE-VBELN
+AND POSNR = IF_FILE-POSNR
+AND INVOICE = IF_FILE-INVOICE
+AND LOEVM <> 'X'.
+IF SY-SUBRC = 0.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+ENDFORM.                    " CHECK_RECEIVE_LOG_IS_NOT_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_KUNNR_IS_EXIST
+*&---------------------------------------------------------------------*
+*       得意先コード存在チェック
+*----------------------------------------------------------------------*
+*      -->I_KUNNR  得意先コード
+*----------------------------------------------------------------------*
+FORM CHECK_KUNNR_IS_EXIST USING    I_KUNNR.
+
+CLEAR G_RC.
+SELECT COUNT(*) FROM KNA1
+WHERE KUNNR = I_KUNNR.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " CHECK_KUNNR_IS_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_QUANTITY_IS_NOT_OVERFLOW
+*&---------------------------------------------------------------------*
+*       受信数量OVERFLOWチェック
+*----------------------------------------------------------------------*
+*      -->IF_FILE  IFファイル
+*----------------------------------------------------------------------*
+FORM CHECK_QUANTITY_IS_NOT_OVERFLOW USING    IF_FILE TYPE TYP_IF_FILE.
+
+DATA: LF_QUANTITY_SUM LIKE LINE OF GT_QUANTITY_SUM.
+DATA: L_SDMENG TYPE ZSD002-SDMENG,
+L_RCMENG TYPE ZSD002-RCMENG.
+
+READ TABLE GT_QUANTITY_SUM INTO LF_QUANTITY_SUM
+WITH KEY SENDID = IF_FILE-SENDID
+VBELN = IF_FILE-VBELN
+POSNR = IF_FILE-POSNR.
+IF SY-SUBRC <> 0.
+LF_QUANTITY_SUM-SENDID = IF_FILE-SENDID.
+LF_QUANTITY_SUM-VBELN = IF_FILE-VBELN.
+LF_QUANTITY_SUM-POSNR = IF_FILE-POSNR.
+*   送信数量取得
+PERFORM GET_SEND_QUANTITY USING    IF_FILE
+CHANGING LF_QUANTITY_SUM-SDMENG.
+*   受信数量取得
+PERFORM GET_RECEIVE_QUANTITY USING    IF_FILE
+CHANGING LF_QUANTITY_SUM-RCMENG.
+L_SDMENG = LF_QUANTITY_SUM-SDMENG.
+L_RCMENG = LF_QUANTITY_SUM-RCMENG + IF_FILE-LFIMG.
+ELSE.
+L_SDMENG = LF_QUANTITY_SUM-SDMENG.
+L_RCMENG = LF_QUANTITY_SUM-RCMENG +
+LF_QUANTITY_SUM-LFIMG_TOTAL +
+IF_FILE-LFIMG.
+LF_QUANTITY_SUM-SDMENG = 0.
+LF_QUANTITY_SUM-RCMENG = 0.
+ENDIF.
+
+* 取込数量累計
+LF_QUANTITY_SUM-LFIMG_TOTAL = IF_FILE-LFIMG.
+COLLECT LF_QUANTITY_SUM INTO GT_QUANTITY_SUM.
+
+CLEAR G_RC.
+IF L_RCMENG > L_SDMENG AND L_SDMENG > 0.
+G_RC = CNS_RC_CODE_ERROR.
+ENDIF.
+
+ENDFORM.                    " CHECK_QUANTITY_IS_NOT_OVERFLOW
+*&---------------------------------------------------------------------*
+*&      Form  GET_SEND_QUANTITY
+*&---------------------------------------------------------------------*
+*       送信数量取得
+*----------------------------------------------------------------------*
+*      -->IF_FILE          IFファイル
+*      <--E_SEND_QUANTITY  送信数量
+*----------------------------------------------------------------------*
+FORM GET_SEND_QUANTITY USING    IF_FILE TYPE TYP_IF_FILE
+CHANGING E_SEND_QUANTITY.
+
+CLEAR: G_RC.
+CLEAR: E_SEND_QUANTITY.
+SELECT SDMENG INTO E_SEND_QUANTITY
+FROM ZSD002 UP TO 1 ROWS
+WHERE SENDID = IF_FILE-SENDID
+AND VBELN = IF_FILE-VBELN
+AND POSNR = IF_FILE-POSNR
+AND LOEVM <> 'X'.
+ENDSELECT.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_SEND_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  GET_RECEIVE_QUANTITY
+*&---------------------------------------------------------------------*
+*       受信数量取得
+*----------------------------------------------------------------------*
+*      -->IF_FILE             IFファイル
+*      <--E_RECEIVE_QUANTITY  送信数量
+*----------------------------------------------------------------------*
+FORM GET_RECEIVE_QUANTITY USING    IF_FILE TYPE TYP_IF_FILE
+CHANGING E_RECEIVE_QUANTITY.
+
+CLEAR: G_RC.
+CLEAR: E_RECEIVE_QUANTITY.
+SELECT SUM( LFIMG ) INTO E_RECEIVE_QUANTITY
+FROM ZSD003
+WHERE SENDID = IF_FILE-SENDID
+AND VBELN = IF_FILE-VBELN
+AND POSNR = IF_FILE-POSNR
+* ADD 2009/03/25 {
+* 当日送信された対象を送信ログテーブルより取得する
+AND TORIKOMI > 0
+* } ADD 2009/03/25
+AND LOEVM <> 'X'.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " GET_RECEIVE_QUANTITY
+*&---------------------------------------------------------------------*
+*&      Form  ADD_ERROR_MESSAGE
+*&---------------------------------------------------------------------*
+*       エラーメッセージ追加
+*----------------------------------------------------------------------*
+*      -->I_LINE_NO  行番
+*      -->I_MESSAGE  エラーメッセージ
+*----------------------------------------------------------------------*
+FORM ADD_ERROR_MESSAGE USING    I_LINE_NO
+I_MESSAGE.
+
+DATA: LF_ERROR_INFO LIKE LINE OF GT_ERROR_INFO.
+
+LF_ERROR_INFO-LINE_NO = I_LINE_NO.
+LF_ERROR_INFO-MESSAGE = I_MESSAGE.
+APPEND LF_ERROR_INFO TO GT_ERROR_INFO.
+
+ENDFORM.                    " ADD_ERROR_MESSAGE
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_NAME
+*&---------------------------------------------------------------------*
+*       ファイル名取得
+*----------------------------------------------------------------------*
+*      -->I_FILE_TYPE  ファイルタイプ
+*      <--E_FILE_NAME  ファイル名
+*----------------------------------------------------------------------*
+FORM GET_FILE_NAME USING    I_FILE_TYPE
+CHANGING E_FILE_NAME.
+
+DATA: L_DATE(8) TYPE C,
+L_TIME(6) TYPE C.
+DATA: L_PATH TYPE RLGRAP-FILENAME,
+L_PREFIX(6) TYPE C,
+L_SEPARATOR(1) TYPE C.
+DATA: L_LENGTH TYPE I,
+L_INDEX TYPE I.
+
+L_DATE = SY-DATUM.
+L_TIME = SY-UZEIT.
+CASE I_FILE_TYPE.
+WHEN CNS_FILE_TYPE_ERROR.
+L_PATH = P_EFILE.
+L_PREFIX = 'ERROR'.
+WHEN CNS_FILE_TYPE_BACKUP.
+L_PATH = P_BFILE.
+L_PREFIX = 'BACKUP'.
+ENDCASE.
+
+DESCRIBE FIELD L_PATH LENGTH L_LENGTH.
+DO L_LENGTH TIMES.
+L_INDEX = SY-INDEX.
+SHIFT L_PATH CIRCULAR RIGHT.
+L_SEPARATOR = L_PATH(1).
+IF L_SEPARATOR = '\' OR L_SEPARATOR = '/'.
+EXIT.
+ENDIF.
+ENDDO.
+IF L_SEPARATOR = '\' OR L_SEPARATOR = '/'.
+SHIFT L_PATH CIRCULAR LEFT BY L_INDEX PLACES.
+IF L_INDEX > 1.
+CONCATENATE L_PATH L_SEPARATOR INTO L_PATH.
+ENDIF.
+ELSE.
+CONCATENATE L_PATH '/' INTO L_PATH.
+ENDIF.
+
+CONCATENATE L_DATE L_TIME '.txt' INTO E_FILE_NAME.
+CONCATENATE SY-REPID L_PREFIX E_FILE_NAME INTO E_FILE_NAME
+SEPARATED BY '_'.
+CONCATENATE L_PATH E_FILE_NAME INTO E_FILE_NAME.
+
+ENDFORM.                    " GET_FILE_NAME
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_INPUT
+*&---------------------------------------------------------------------*
+*       入力チェック
+*----------------------------------------------------------------------*
+FORM CHECK_INPUT.
+
+PERFORM CHECK_FILE_IS_EXIST USING P_RFILE.
+IF G_RC <> 0.
+SET CURSOR FIELD 'P_RFILE'.
+*   読込ファイルが存在しません
+MESSAGE E614 WITH TEXT-M01.
+ENDIF.
+
+PERFORM CHECK_PATH_IS_EXIST USING P_BFILE.
+IF G_RC <> 0.
+SET CURSOR FIELD 'P_BFILE'.
+*   バックアップファイルパスが存在しません
+MESSAGE E614 WITH TEXT-M02.
+ENDIF.
+
+IF P_TEST = ' '.
+IF P_EFILE IS INITIAL.
+SET CURSOR FIELD 'P_EFILE'.
+*     本実行時はエラーファイルを入力してください
+MESSAGE E648.
+ENDIF.
+ENDIF.
+
+PERFORM CHECK_PATH_IS_EXIST USING P_EFILE.
+IF G_RC <> 0.
+SET CURSOR FIELD 'P_EFILE'.
+*   エラーファイルパスが存在しません
+MESSAGE E614 WITH TEXT-M03.
+ENDIF.
+
+
+ENDFORM.                    " CHECK_INPUT
+*&---------------------------------------------------------------------
+*&      Form  CHECK_FILE_IS_EXIST
+*&---------------------------------------------------------------------
+*       ファイル存在チェック
+*----------------------------------------------------------------------
+*      -->I_FULLNAME  ファイル名
+*----------------------------------------------------------------------
+FORM CHECK_FILE_IS_EXIST USING    I_FULLNAME.
+
+* {{{{{ 2007/10/30 INSERT -----
+DATA: L_FNAME TYPE RSMRGSTR-NAME.
+* ----- 2007/10/30 INSERT }}}}}
+* {{{{{ 2007/10/30 MODIFY -----
+*  DATA: L_DIR TYPE BTCH0000-TEXT80,
+DATA: L_DIR TYPE RSMRGSTR-PATH,
+* ----- 2007/10/30 MODIFY }}}}}
+L_FILENAME TYPE  BTCH0000-TEXT80,
+L_SEPARATOR(1) TYPE C.
+DATA: L_LENGTH TYPE I,
+L_INDEX TYPE I.
+
+* ファイル名とパスをSPLITする
+L_FILENAME = I_FULLNAME.
+DESCRIBE FIELD I_FULLNAME LENGTH L_LENGTH.
+DO L_LENGTH TIMES.
+L_INDEX = SY-INDEX.
+SHIFT L_FILENAME CIRCULAR RIGHT.
+L_SEPARATOR = L_FILENAME(1).
+IF L_SEPARATOR = '\' OR L_SEPARATOR = '/'.
+EXIT.
+ENDIF.
+ENDDO.
+IF L_SEPARATOR = '\' OR L_SEPARATOR = '/'.
+L_DIR = L_FILENAME+L_INDEX.
+L_FILENAME = L_FILENAME(L_INDEX).
+SHIFT L_FILENAME.
+ELSE.
+L_DIR = '.'.
+CONDENSE L_FILENAME.
+ENDIF.
+
+* {{{{{ 2007/10/30 MODIFY -----
+*  CLEAR G_RC.
+** チェック
+*  CALL FUNCTION 'PFL_CHECK_DIRECTORY'
+*       EXPORTING
+*            DIRECTORY                   = L_DIR
+*            FILNAME                     = L_FILENAME
+*       EXCEPTIONS
+*            PFL_DIR_NOT_EXIST           = 1
+*            PFL_PERMISSION_DENIED       = 2
+*            PFL_CANT_BUILD_DATASET_NAME = 3
+*            PFL_FILE_NOT_EXIST          = 4
+*            OTHERS                      = 5.
+*  IF SY-SUBRC <> 0.
+*    G_RC = CNS_RC_CODE_NOT_FOUND.
+*  ENDIF.
+
+DATA: L_COUNT TYPE I.
+
+IF L_SEPARATOR = '\' OR L_SEPARATOR = '/'.
+CONCATENATE L_DIR L_SEPARATOR INTO L_DIR.
+ELSE.
+L_DIR = ' '.
+ENDIF.
+CONCATENATE L_FILENAME '*' INTO L_FNAME.
+
+CLEAR G_RC.
+CLEAR GT_FILE_LIST[].
+* チェック
+CALL FUNCTION 'SUBST_GET_FILE_LIST'
+EXPORTING
+DIRNAME            = L_DIR
+FILENM             = L_FNAME
+*     PATTERN            =
+TABLES
+FILE_LIST          = GT_FILE_LIST
+EXCEPTIONS
+ACCESS_ERROR       = 1
+OTHERS             = 2.
+
+DESCRIBE TABLE GT_FILE_LIST LINES L_COUNT.
+IF L_COUNT = 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ELSE.
+SORT GT_FILE_LIST BY DIRNAME NAME.
+ENDIF.
+* ----- 2007/10/30 MODIFY }}}}}
+
+ENDFORM.                    " CHECK_FILE_IS_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PATH_IS_EXIST
+*&---------------------------------------------------------------------*
+*       ファイルパス存在チェック
+*----------------------------------------------------------------------*
+*      -->I_PATH  ファイルパス
+*----------------------------------------------------------------------*
+FORM CHECK_PATH_IS_EXIST USING I_PATH.
+
+DATA: L_DIR TYPE BTCH0000-TEXT80.
+
+CLEAR G_RC.
+L_DIR = I_PATH.
+CALL FUNCTION 'PFL_CHECK_DIRECTORY'
+EXPORTING
+DIRECTORY                   = L_DIR
+FILNAME                     = ' '
+EXCEPTIONS
+PFL_DIR_NOT_EXIST           = 1
+PFL_PERMISSION_DENIED       = 2
+PFL_CANT_BUILD_DATASET_NAME = 3
+PFL_FILE_NOT_EXIST          = 4
+OTHERS                      = 5.
+IF SY-SUBRC <> 0.
+G_RC = CNS_RC_CODE_NOT_FOUND.
+ENDIF.
+
+ENDFORM.                    " CHECK_PATH_IS_EXIST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_RECEIVE_LOG_IS_OVERLAP
+*&---------------------------------------------------------------------*
+*       受信ログ重複チェック
+*----------------------------------------------------------------------*
+*      -->IF_FILE  IFファイル
+*----------------------------------------------------------------------*
+FORM CHECK_RECEIVE_LOG_IS_OVERLAP USING    IF_FILE TYPE TYP_IF_FILE.
+
+DATA: LF_FILE LIKE LINE OF GT_IF_FILE.
+DATA: L_COUNT TYPE I.
+
+DESCRIBE TABLE GT_IF_FILE LINES L_COUNT.
+L_COUNT = L_COUNT - 1.
+
+CLEAR G_RC.
+LOOP AT GT_IF_FILE INTO LF_FILE TO L_COUNT
+WHERE SENDID = IF_FILE-SENDID
+AND INVOICE = IF_FILE-INVOICE.
+PERFORM CONVET_VBELN_TO_INPUT CHANGING LF_FILE-VBELN.
+IF LF_FILE-VBELN = IF_FILE-VBELN AND
+LF_FILE-POSNR = IF_FILE-POSNR.
+G_RC = CNS_RC_CODE_ERROR.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_RECEIVE_LOG_IS_OVERLAP
+*&---------------------------------------------------------------------*
+*&      Form  CONVET_VBELN_TO_INPUT
+*&---------------------------------------------------------------------*
+*       伝票番号内部変換
+*----------------------------------------------------------------------*
+*      <--E_VBELN  伝票番号
+*----------------------------------------------------------------------*
+FORM CONVET_VBELN_TO_INPUT CHANGING E_VBELN.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = E_VBELN
+IMPORTING
+OUTPUT = E_VBELN.
+
+ENDFORM.                    " CONVET_VBELN
+*&---------------------------------------------------------------------*
+*&      Form  CONVET_KUNNR_TO_INPUT
+*&---------------------------------------------------------------------*
+*       得意先コード内部変換
+*----------------------------------------------------------------------*
+*      <--E_KUNNR  得意先コード
+*----------------------------------------------------------------------*
+FORM CONVET_KUNNR_TO_INPUT CHANGING E_KUNNR.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = E_KUNNR
+IMPORTING
+OUTPUT = E_KUNNR.
+
+ENDFORM.                    " CONVET_KUNNR_TO_INPUT
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ZSD002_DATA
+*&---------------------------------------------------------------------*
+*       送信された対象を送信ログテーブルより取得する
+*----------------------------------------------------------------------*
+FORM EDIT_ZSD002_DATA.
+
+DATA: LT_ZSD002 TYPE STANDARD TABLE OF ZSD002,
+LW_ZSD002 TYPE ZSD002.
+DATA: LW_ZSD003 TYPE ZSD003.
+
+SELECT *
+INTO TABLE LT_ZSD002
+FROM ZSD002
+*2009/04/03 MODIFY START
+*   WHERE SDDATE IN S_DATUM "送信日
+*     AND RCMENG = '0'     "受信数量
+WHERE RCMENG = '0'     "受信数量
+*2009/04/03 MODIFY END
+AND LFIMG  = '0'     "出荷数量
+AND LOEVM <> 'X'.    "削除フラグ
+IF SY-SUBRC = 0.
+LOOP AT LT_ZSD002 INTO LW_ZSD002.
+
+MOVE-CORRESPONDING LW_ZSD002 TO LW_ZSD003.
+LW_ZSD003-INVOICE  = LW_ZSD002-SENDID. "インボイス№
+LW_ZSD003-TORIKOMI = '0'.              "取込回数(N回目)
+LW_ZSD003-SHPDAT   = LW_ZSD002-SDDATE. "出荷日
+LW_ZSD003-WADAT    = '99991231'.       "出庫日
+LW_ZSD003-LFIMG    = LW_ZSD002-SDMENG. "出荷数量（受信）
+
+CLEAR G_RC.
+*     取得したﾚｺｰﾄﾞを取込ログテーブルに出荷対象レコードとして登録
+INSERT INTO ZSD003 VALUES LW_ZSD003.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+EXIT.
+ENDIF.
+
+*     出荷対象レコードは送信ログテーブルに更新
+CLEAR G_RC.
+UPDATE ZSD002
+SET LFIMG  = LW_ZSD002-SDMENG  "出荷数量(BDC)
+WHERE SENDID = LW_ZSD002-SENDID
+AND VBELN = LW_ZSD002-VBELN
+AND POSNR = LW_ZSD002-POSNR
+AND NRFLG = LW_ZSD002-NRFLG.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+G_RC = CNS_RC_CODE_DB_ERROR.
+EXIT.
+ENDIF.
+
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " EDIT_ZSD002_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZSD003_DATA
+*&---------------------------------------------------------------------*
+*       受信ログテーブルから登録したレコードが存在ﾁｪｯｸ
+*----------------------------------------------------------------------*
+*      -->P_IFILE  IFファイルレコード
+*      <--P_FLG    レコードの存在ﾌﾗｸﾞ
+*      <--P_OFILE  出荷関連情報
+*----------------------------------------------------------------------*
+FORM GET_ZSD003_DATA USING    P_IFILE TYPE TYP_IF_FILE
+CHANGING P_FLG
+P_OFILE TYPE ZSD003.
+CLEAR:P_OFILE.
+SELECT SINGLE *
+INTO P_OFILE
+FROM ZSD003
+WHERE SENDID = P_IFILE-SENDID    "送信ID
+AND VBELN  = P_IFILE-VBELN     "販売伝票
+AND POSNR  = P_IFILE-POSNR     "販売伝票明細
+AND INVOICE  = P_IFILE-SENDID  "インボイス№
+AND TORIKOMI = '0'.            "取込回数
+
+IF SY-SUBRC = 0.
+P_FLG = ''.
+*   当該レコードを削除する
+DELETE FROM ZSD003 WHERE SENDID = P_OFILE-SENDID
+AND VBELN = P_OFILE-VBELN
+AND POSNR = P_OFILE-POSNR
+AND INVOICE = P_OFILE-INVOICE
+AND TORIKOMI = P_OFILE-TORIKOMI.
+ELSE.
+P_FLG = 'X'.
+ENDIF.
+
+ENDFORM.                    " GET_ZSD003_DATA

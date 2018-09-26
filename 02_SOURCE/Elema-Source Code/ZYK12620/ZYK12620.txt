@@ -1,0 +1,1741 @@
+REPORT ZYK12620 LINE-SIZE  210    LINE-COUNT 58
+MESSAGE-ID Y1
+NO STANDARD PAGE HEADING .
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID： YK012620(→ZYK12620)                                  *
+*    ﾌﾟﾛｸﾞﾗﾑ名： 仕入自動照合処理                                      *
+*    処理種別 ： 更新(ABAP/4)                                          *
+*    処理概要 ： 選択条件より｢請求データ｣/｢仕入データ｣を検索           *
+*                ｢照合キー｣により、データを集計                        *
+*                ｢照合条件｣によりマッチしたかを判断                    *
+*----------------------------------------------------------------------*
+*    作成日   ：2002/01/07                                             *
+*    作成者   ：舘林 裕香                                              *
+*    変更履歴 ：2002/02/14 RRFLG='X'のものは集計対象外 K.KAJISA        *
+*               2002/02/15 請求の税抜金額 → 未請求額                  *
+*                          請求の消費税額 → 消費税ー消込税額          *
+*                          請求の税込税額                              *
+*                                   → 未請求額 ＋ 消費税ー消込税      *
+*               2002/04/01 今回請求額への値のセット                    *
+*               2002/05/17 購買グループ提案の修正                      *
+*               2002/05/27 許容差額確認の修正                          *
+*               2002/07/12 YK210/YK230のロック単位を明細に変更         *
+*               2002/09/20 部分照合データは未請求にしない              *
+*               2002/10/09 照合結果区分による未請求額の操作追加        *
+*               2002/12/18 ログ出力抑制                                *
+*               2003/05/06 仕入データのみ照合される現象への対応
+*               2003/05/28 番号範囲オブジェクトでのチェック修正
+*    ↓以下 ZYK12620
+*               2006/12/21 今回請求額計算ロジック変更
+************************************************************************
+*// データベース定義 //*
+TABLES     : YK210  ,            " 請求データ
+YK230  .            " 仕入データ
+************************************************************************
+*// 内部テーブル定義 //*
+*- 照合キー
+DATA : BEGIN OF ST_KEY ,
+KEY01(40)    TYPE   C ,   " プラント
+KEY02(40)    TYPE   C ,   " 購買組織
+KEY03(40)    TYPE   C ,   " 購買グループ
+KEY04(40)    TYPE   C ,   " 会社コード
+KEY05(40)    TYPE   C ,   " 事業領域
+KEY06(40)    TYPE   C ,   " 発注番号
+KEY07(40)    TYPE   C ,   " 品目コード
+KEY08(40)    TYPE   C ,   " 仕入先品目コード
+KEY09(40)    TYPE   C ,   " 品目テキスト
+KEY10(40)    TYPE   C ,   " 締日
+END   OF ST_KEY .
+*- データ取得用 請求データ｢yk210｣
+DATA : I_YK210_SEL LIKE TABLE OF YK210 WITH HEADER LINE ,
+*-              仕入データ｢yk230｣
+I_YK230_SEL LIKE TABLE OF YK230 WITH HEADER LINE .
+*- 照合キーにて取得用 請求データ｢yk210｣
+DATA : BEGIN OF ST_YK210 .
+INCLUDE STRUCTURE ST_KEY .
+DATA : TANKA(3) TYPE  C  .
+INCLUDE STRUCTURE YK210  .
+DATA : END   OF ST_YK210 .
+DATA : I_YK210     LIKE TABLE OF ST_YK210 WITH HEADER LINE .
+*-                    仕入データ｢yk230｣
+DATA : BEGIN OF ST_YK230 .
+INCLUDE STRUCTURE ST_KEY .
+DATA : TANKA(3) TYPE  C  .
+INCLUDE STRUCTURE YK230  .
+DATA : END   OF ST_YK230 .
+DATA : I_YK230     LIKE TABLE OF ST_YK230 WITH HEADER LINE .
+*- 集計用 請求データ｢yk210｣
+DATA : I_YK210_TOL LIKE TABLE OF ST_YK210 WITH HEADER LINE ,
+*-        仕入データ｢yk230｣
+I_YK230_TOL LIKE TABLE OF ST_YK230 WITH HEADER LINE .
+*- エラー用
+DATA : BEGIN OF ST_ERR .
+INCLUDE STRUCTURE ST_KEY .
+DATA : ERR(20)  TYPE  C  .
+DATA : FLG      TYPE  C  .
+DATA : SORT     TYPE  C  .
+INCLUDE STRUCTURE YK210  .
+DATA : END   OF ST_ERR .
+DATA : I_ERR LIKE TABLE OF ST_ERR WITH HEADER LINE .
+DATA : I_PRAMETER LIKE TABLE OF RSPARAMS WITH HEADER LINE ,
+I_TEXTPOOL LIKE TABLE OF TEXTPOOL WITH HEADER LINE .
+*2003/05/06 ADD START
+DATA : W_INIT_NO(10) TYPE P,         "2003/05/06 ADD 初期番号
+W_END_NO(10)  TYPE P.         "2003/05/06 ADD 処理後番号
+DATA: BEGIN OF I_YK210_SUM OCCURS 0, "YK210集計判定用テーブル
+PRCNO    LIKE YK210-PRCNO,
+KNITXAMT LIKE YK210-KNITXAMT,
+END OF I_YK210_SUM.
+DATA: BEGIN OF I_YK230_SUM OCCURS 0, "YK230集計判定用テーブル
+PRCNO  LIKE YK230-PRCNO,
+PIDAMT LIKE YK230-PIDAMT,
+END OF I_YK230_SUM.
+*2003/05/06 ADD END
+************************************************************************
+*// 作業領域定義(ワーク変数、フラグ、カウンタ等) //*
+CONSTANTS : C_TANKA_E(17)    TYPE C VALUE '単価不整合(E)'     ,
+C_TANKA(17)      TYPE C VALUE '単価不整合(W)'     ,
+C_SURYO_E(20)    TYPE C VALUE '数量不整合(E)'     ,
+C_SURYO_W(20)    TYPE C VALUE '数量不整合(W)'     ,
+*             c_kingaku(17)    type c value '金額不整合'        ,
+C_ZEINUKI_E(20)  TYPE C VALUE '税抜金額不整合(E)' ,
+C_ZEINUKI_W(20)  TYPE C VALUE '税抜金額不整合(W)' ,
+C_TAX_E(20)      TYPE C VALUE '消費税額不整合(E)' ,
+C_TAX_W(20)      TYPE C VALUE '消費税額不整合(W)' ,
+C_ZEIKOMI_E(20)  TYPE C VALUE '税込金額不整合(E)' ,
+C_ZEIKOMI_W(20)  TYPE C VALUE '税込金額不整合(W)' ,
+C_FLG_ON(2)      TYPE C VALUE 'ON'                ,
+C_FLG_OFF(3)     TYPE C VALUE 'OFF'               ,
+C_FLG_WAR(3)     TYPE C VALUE 'WAR'               ,
+C_FLG_ERR(3)     TYPE C VALUE 'ERR'               ,
+*             c_currency(3)    type c value 'JPY'               ,
+C_KEKKBN_1       TYPE C VALUE '1'                 ,
+C_KEKKBN_2       TYPE C VALUE '2'                 ,
+C_KEKKBN_3       TYPE C VALUE '3'                 ,
+C_KEKKBN_4       TYPE C VALUE '4'                 .
+DATA : W_LIFNR          LIKE YK210-LIFNR    ,
+W_EKORG          LIKE YK210-EKORG    ,
+W_KINGAKU        LIKE YK210-KNTAXAMT ,
+W_SORT           TYPE  C          ,   "
+W_CONDITIONS(3)  TYPE  C          ,   " 照合条件
+W_CONSTANTS(20)  TYPE  C          ,   " エラー理由
+W_TANKA(3)       TYPE  C          ,   " 単価整合フラグ
+W_SURYO(3)       TYPE  C          ,   " 数量整合フラグ
+W_ZEINUKI(3)     TYPE  C          ,   " 税抜金額整合フラグ
+W_TAX(3)         TYPE  C          ,   " 消費税額整合フラグ
+W_ZEIKOMI(3)     TYPE  C          ,   " 税込金額整合フラグ
+W_CNT_1          LIKE  SY-DBCNT   ,   " 未請求件数
+W_CNT_2          LIKE  SY-DBCNT   ,   " 未計上件数
+W_CNT_3          LIKE  SY-DBCNT   ,   " アンマッチ件数
+W_CNT_4          LIKE  SY-DBCNT   ,   " 照合件数(マッチング)
+W_CURRENCY       LIKE  LFM1-WAERS ,   " 出力用通貨コード
+W_KEKKBN         LIKE YK210-KEKKBN,   "2003/05/28
+W_SYORI          LIKE YK210-PRCNO.    "2003/05/28
+************************************************************************
+*選択画面定義
+
+*-- 照合キー
+SELECTION-SCREEN BEGIN OF BLOCK SL1 WITH FRAME TITLE TEXT-F01 .
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN POSITION 1 .
+PARAMETERS : B_WERKS AS CHECKBOX             .  " プラント
+SELECTION-SCREEN COMMENT 04(16) TEXT-K01 .
+SELECTION-SCREEN POSITION 29 .
+PARAMETERS : B_GSBER AS CHECKBOX             .  " 事業領域
+SELECTION-SCREEN COMMENT 32(16) TEXT-K05 .
+SELECTION-SCREEN POSITION 57 .
+PARAMETERS : B_IDNLF AS CHECKBOX             .  " 仕入先品目cd
+SELECTION-SCREEN COMMENT 60(16) TEXT-K08 .
+SELECTION-SCREEN END   OF LINE .
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN POSITION 1 .
+PARAMETERS : B_EKORG AS CHECKBOX             .  " 購買組織
+SELECTION-SCREEN COMMENT 04(16) TEXT-K02 .
+SELECTION-SCREEN POSITION 29 .
+PARAMETERS : B_EBELN AS CHECKBOX DEFAULT 'X' .  " 発注番号
+SELECTION-SCREEN COMMENT 32(16) TEXT-K06 .
+SELECTION-SCREEN POSITION 57 .
+PARAMETERS : B_MAKTX AS CHECKBOX             .  " 品目テキスト
+SELECTION-SCREEN COMMENT 60(16) TEXT-K09 .
+SELECTION-SCREEN END   OF LINE .
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN POSITION 1 .
+PARAMETERS : B_EKGRP AS CHECKBOX             .  " 購買グループ
+SELECTION-SCREEN COMMENT 04(16) TEXT-K03 .
+SELECTION-SCREEN POSITION 29 .
+PARAMETERS : B_MATNR AS CHECKBOX             .  " 品目cd
+SELECTION-SCREEN COMMENT 32(16) TEXT-K07 .
+SELECTION-SCREEN POSITION 57 .
+PARAMETERS : B_DATUM AS CHECKBOX DEFAULT 'X' .  " 締日
+SELECTION-SCREEN COMMENT 60(16) TEXT-K10 .
+SELECTION-SCREEN END   OF LINE .
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN POSITION 1 .
+PARAMETERS : B_BUKRS AS CHECKBOX DEFAULT 'X' .  " 会社コード
+SELECTION-SCREEN COMMENT 04(16) TEXT-K04 .
+SELECTION-SCREEN END   OF LINE .
+SELECTION-SCREEN END   OF BLOCK SL1 .
+
+*-- 照合条件
+SELECTION-SCREEN BEGIN OF BLOCK SL2 WITH FRAME TITLE TEXT-F02 .
+*-- 数量
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN COMMENT 01(10) TEXT-S01 .
+SELECTION-SCREEN POSITION 13 .                  " 警告
+PARAMETERS : B_SU_W RADIOBUTTON GROUP SO1
+DEFAULT 'X' .
+SELECTION-SCREEN COMMENT 16(04) TEXT-E01          .
+SELECTION-SCREEN POSITION 23 .                  " エラー
+PARAMETERS : B_SU_E RADIOBUTTON GROUP SO1     .
+SELECTION-SCREEN COMMENT 26(06) TEXT-E02 FOR FIELD B_SU_E .
+SELECTION-SCREEN POSITION 35 .                  " チェックなし
+PARAMETERS : B_SU_N RADIOBUTTON GROUP SO1     .
+SELECTION-SCREEN COMMENT 38(14) TEXT-E03          .
+SELECTION-SCREEN END   OF LINE .
+*-- 単価
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN COMMENT 01(10) TEXT-S02 .
+SELECTION-SCREEN POSITION 13 .                  " 警告
+PARAMETERS : B_TA_W RADIOBUTTON GROUP SO2
+DEFAULT 'X' .
+SELECTION-SCREEN COMMENT 16(04) TEXT-E01        .
+SELECTION-SCREEN POSITION 23 .                  " エラー
+PARAMETERS : B_TA_E RADIOBUTTON GROUP SO2     .
+SELECTION-SCREEN COMMENT 26(06) TEXT-E02        .
+SELECTION-SCREEN POSITION 35 .                  " チェックなし
+PARAMETERS : B_TA_N RADIOBUTTON GROUP SO2     .
+SELECTION-SCREEN COMMENT 38(14) TEXT-E03        .
+SELECTION-SCREEN END   OF LINE .
+*-- 税抜金額
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN COMMENT 01(10) TEXT-S03 .
+SELECTION-SCREEN POSITION 13 .                  " 警告
+PARAMETERS : B_ZE_W RADIOBUTTON GROUP SO3     .
+SELECTION-SCREEN COMMENT 16(04) TEXT-E01        .
+SELECTION-SCREEN POSITION 23 .                  " エラー
+PARAMETERS : B_ZE_E RADIOBUTTON GROUP SO3
+DEFAULT 'X' .
+SELECTION-SCREEN COMMENT 26(06) TEXT-E02        .
+SELECTION-SCREEN POSITION 35 .                  " チェックなし
+PARAMETERS : B_ZE_N RADIOBUTTON GROUP SO3     .
+SELECTION-SCREEN COMMENT 38(14) TEXT-E03          .
+SELECTION-SCREEN POSITION 53 .                  " 許容差額
+SELECTION-SCREEN COMMENT (08) TEXT-E04 .
+PARAMETERS : P_KNIT LIKE YK210-KNITXAMT
+DEFAULT 0  .
+SELECTION-SCREEN END   OF LINE .
+*-- 消費税額
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN COMMENT 01(10) TEXT-S04          .
+SELECTION-SCREEN POSITION 13 .                  " 警告
+PARAMETERS : B_SH_W RADIOBUTTON GROUP SO4     .
+SELECTION-SCREEN COMMENT 16(04) TEXT-E01          .
+SELECTION-SCREEN POSITION 23 .                  " エラー
+PARAMETERS : B_SH_E RADIOBUTTON GROUP SO4     .
+SELECTION-SCREEN COMMENT 26(06) TEXT-E02          .
+SELECTION-SCREEN POSITION 35 .                  " チェックなし
+PARAMETERS : B_SH_N RADIOBUTTON GROUP SO4
+DEFAULT 'X' .
+SELECTION-SCREEN COMMENT 38(14) TEXT-E03          .
+SELECTION-SCREEN POSITION 53 .                  " 許容差額
+SELECTION-SCREEN COMMENT (08) TEXT-E04 .
+PARAMETERS : P_KNTA LIKE YK210-KNTAXAMT
+DEFAULT 0  .
+SELECTION-SCREEN END   OF LINE .
+*-- 税込金額
+SELECTION-SCREEN BEGIN OF LINE .
+SELECTION-SCREEN COMMENT 01(10) TEXT-S05          .
+SELECTION-SCREEN POSITION 13 .                  " 警告
+PARAMETERS : B_KO_W RADIOBUTTON GROUP SO5     .
+SELECTION-SCREEN COMMENT 16(04) TEXT-E01 .
+SELECTION-SCREEN POSITION 23 .                  " エラー
+PARAMETERS : B_KO_E RADIOBUTTON GROUP SO5     .
+SELECTION-SCREEN COMMENT 26(06) TEXT-E02 .
+SELECTION-SCREEN POSITION 35 .                  " チェックなし
+PARAMETERS : B_KO_N RADIOBUTTON GROUP SO5
+DEFAULT 'X' .
+SELECTION-SCREEN COMMENT 38(14) TEXT-E03 .
+SELECTION-SCREEN POSITION 53 .                  " 許容差額
+SELECTION-SCREEN COMMENT (08) TEXT-E04 .
+PARAMETERS : P_KNET LIKE YK210-KNETXAMT
+DEFAULT 0  .
+SELECTION-SCREEN END   OF LINE .
+SELECTION-SCREEN END   OF BLOCK SL2 .
+*-- 選択条件
+SELECTION-SCREEN BEGIN OF BLOCK SL3 WITH FRAME TITLE TEXT-F03 .
+PARAMETERS     : P_LIFN2  LIKE  YK210-LIFN2
+OBLIGATORY , " 請求先
+P_BUKRS  LIKE  YK210-BUKRS
+MEMORY ID BUK OBLIGATORY . " 会社コード
+SELECT-OPTIONS : S_ZFBDT  FOR   YK210-ZFBDT  ,        " 締日
+S_WERKS  FOR   YK210-WERKS  ,        " プラント
+S_EKORG  FOR   YK210-EKORG  ,        " 購買組織
+S_EKGRP  FOR   YK210-EKGRP  ,        " 購買グループ
+S_GSBER  FOR   YK210-GSBER  ,        " 事業領域
+S_KEKKBN FOR   YK210-KEKKBN .        " 照合結果区分
+SELECTION-SCREEN END   OF BLOCK SL3 .
+*-- 実行パラメータ
+SELECTION-SCREEN BEGIN OF BLOCK SL4 WITH FRAME TITLE TEXT-F04 .
+PARAMETERS     : P_DATUM LIKE SY-DATUM OBLIGATORY .   " 照合締日
+SELECTION-SCREEN END   OF BLOCK SL4 .
+PARAMETERS P_CHK1 AS CHECKBOX. "購買グループの初期設定 ADD 2002/05/17a
+PARAMETERS P_LOGU  AS CHECKBOX MEMORY ID YKB. "ログ出力 2002/12/18 ADD
+************************************************************************
+INITIALIZATION .
+*- 実行パラメータ
+GET PARAMETER ID 'LIF' FIELD W_LIFNR .            " 仕入先の取得
+GET PARAMETER ID 'EKO' FIELD W_EKORG .            " 購買組織の取得
+*- 照合締日取得
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+I_CORD               = W_LIFNR
+I_EKORG              = W_EKORG
+I_DAY                = SY-DATUM
+IMPORTING
+E_ZFBDT              = P_DATUM
+EXCEPTIONS
+NO_GET_T052          = 1
+NO_GOOD_GETDAY       = 2
+NO_GET_ZTERM         = 3
+OTHERS               = 4 .
+IF SY-SUBRC <> 0 .
+P_DATUM = SPACE .
+ENDIF.
+*2003/05/06 ADD START
+REFRESH: I_YK210_SUM,I_YK230_SUM.
+*2003/05/06 ADD END
+************************************************************************
+AT SELECTION-SCREEN .
+*- パラメータチェック
+PERFORM FRM_TRANS_PARAMETER .
+*- 購買グループ提案　ADD 2002/05/17a
+TABLES LFM1.
+DATA W_CNT TYPE P.
+DESCRIBE TABLE S_EKGRP LINES W_CNT.
+IF P_CHK1 = 'X' AND W_CNT = 0.
+SELECT * FROM   LFM1
+WHERE  LIFNR = P_LIFN2
+AND  EKORG IN S_EKORG.
+S_EKGRP-LOW = LFM1-EKGRP.
+S_EKGRP-SIGN  = 'I'.
+S_EKGRP-OPTION ='EQ'.
+APPEND S_EKGRP.
+ENDSELECT.
+ENDIF.
+************************************************************************
+START-OF-SELECTION .
+PERFORM GET_NUMBER USING W_INIT_NO. "2003/05/06 ADD
+*2003/05/28 ADD START
+IF W_INIT_NO < 5.
+W_INIT_NO = 0.
+ELSE.
+W_INIT_NO =  W_INIT_NO - 5.
+ENDIF.
+*2003/05/28 ADD END
+*- データ抽出
+PERFORM FRM_SELECT_DATA .
+*- テーブルロック
+PERFORM FRM_ENQUEUE_TABLE .
+*- 照合キーによるデータ集計
+PERFORM FRM_TOTAL_DATA .
+PERFORM GET_NUMBER USING W_END_NO. "2003/05/06 ADD
+*- テーブルの更新
+PERFORM FRM_UPDATE_TABLE .
+*2003/05/06 ADD START
+IF B_ZE_E = 'X'.
+PERFORM TABLE_CHK.
+ENDIF.
+*2003/05/06 ADD END
+
+*- リスト出力
+PERFORM FRM_WRITE_LIST .
+*- commit work
+*- テーブルロック解除
+PERFORM FRM_DEQUEUE_TABLE .
+*&---------------------------------------------------------------------*
+*&      Form  frm_trans_parameter
+*&---------------------------------------------------------------------*
+*       パラメータチェック
+*----------------------------------------------------------------------*
+FORM FRM_TRANS_PARAMETER.
+
+*- 照合キー
+IF B_WERKS = SPACE AND B_GSBER = SPACE AND B_IDNLF = SPACE AND
+B_EKORG = SPACE AND B_EBELN  = SPACE AND B_MAKTX = SPACE AND
+B_EKGRP = SPACE AND B_MATNR = SPACE AND B_DATUM = SPACE AND
+B_BUKRS = SPACE .
+MESSAGE S628 WITH TEXT-E11 .
+STOP .
+ENDIF .
+*- 照合条件
+IF B_SU_N <> SPACE AND B_TA_N <> SPACE AND B_ZE_N <> SPACE AND
+B_SH_N <> SPACE AND B_KO_N <> SPACE .
+MESSAGE S628 WITH TEXT-E12 .
+STOP .
+ENDIF .
+*-
+
+
+ENDFORM.                    " frm_trans_parameter
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_data
+*&---------------------------------------------------------------------*
+*       データ抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_DATA.
+
+*- データ有無の確認<存在しない場合=ON>
+DATA : W_CHECK_YK210  TYPE C ,
+W_CHECK_YK230  TYPE C .
+*- 請求データの抽出
+PERFORM FRM_SELECT_YK210 CHANGING W_CHECK_YK210 .
+*- 仕入データの抽出
+PERFORM FRM_SELECT_YK230 CHANGING W_CHECK_YK230 .
+*- 請求データ/仕入データ共にデータがない場合処理の終了
+IF W_CHECK_YK210 = 'X' AND W_CHECK_YK230 = 'X' .
+MESSAGE S629 .
+STOP .
+ENDIF .
+
+ENDFORM.                    " frm_select_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_yk210
+*&---------------------------------------------------------------------*
+*       請求データの抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_YK210 CHANGING P_YK210 .
+
+SELECT * FROM YK210
+INTO TABLE I_YK210_SEL
+WHERE BUKRS  =  P_BUKRS       " 会社コード
+AND WERKS  IN S_WERKS       " プラント
+AND EKORG  IN S_EKORG       " 購買組織
+AND EKGRP  IN S_EKGRP       " 購買グループ
+AND FIXFLG =  'X'           " 確定フラグ
+AND DELFLG <> 'X'           " 削除区分
+AND KEKKBN IN S_KEKKBN      " 照合結果区分
+AND LIFN2  =  P_LIFN2       " 請求先
+AND GSBER  IN S_GSBER       " 事業領域
+AND ZFBDT  IN S_ZFBDT  .    " 締日
+IF SY-SUBRC <> 0 .
+P_YK210 = 'X' .
+ENDIF .
+
+ENDFORM.                    " frm_select_yk210
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_yk230
+*&---------------------------------------------------------------------*
+*       仕入データの抽出
+*----------------------------------------------------------------------*
+FORM FRM_SELECT_YK230 CHANGING P_YK230 .
+
+SELECT * FROM YK230
+INTO TABLE I_YK230_SEL
+WHERE WERKS  IN S_WERKS       " プラント
+AND EKORG  IN S_EKORG       " 購買組織
+AND EKGRP  IN S_EKGRP       " 購買グループ
+AND LIFN2  =  P_LIFN2       " 請求先
+AND BUKRS  =  P_BUKRS       " 会社コード
+AND ZFBDT  IN S_ZFBDT       " 締日
+AND GSBER  IN S_GSBER       " 事業領域
+AND KEKKBN IN S_KEKKBN .    " 照合結果区分
+IF SY-SUBRC <> 0 .
+P_YK230 = 'X' .
+ENDIF .
+
+ENDFORM.                    " frm_select_yk230
+*&---------------------------------------------------------------------*
+*&      Form  frm_enqueue_table
+*&---------------------------------------------------------------------*
+*       テーブルロック
+*----------------------------------------------------------------------*
+FORM FRM_ENQUEUE_TABLE.
+
+DATA : W_MSGV1 LIKE SY-MSGV1 .   " ロックしてるユーザ取得用
+
+*- テーブルロック<YK210>
+LOOP AT I_YK210_SEL. "2002/07/12 明細ロック
+CALL FUNCTION 'ENQUEUE_EY_YK210'
+EXPORTING
+*       mode_yk210           = 'E'
+*       mandt                = sy-mandt
+BUKRS                = I_YK210_SEL-BUKRS
+YKYEAR               = I_YK210_SEL-YKYEAR
+BILDOC               = I_YK210_SEL-BILDOC
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3 .
+IF SY-SUBRC <> 0 .
+W_MSGV1 = SY-MSGV1 .
+MESSAGE S630 WITH 'YK210' W_MSGV1 .
+PERFORM FRM_DEQUEUE_TABLE .
+STOP .
+ENDIF.
+ENDLOOP.
+*- テーブルロック<YK230>
+LOOP AT I_YK230_SEL. "2002/07/12 明細ロック
+CALL FUNCTION 'ENQUEUE_EY_YK230'
+EXPORTING
+*       mode_yk230           = 'E'
+*       mandt                = sy-mandt
+BELNR                = I_YK230_SEL-BELNR
+BUZEI                = I_YK230_SEL-BUZEI
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3 .
+IF SY-SUBRC <> 0.
+W_MSGV1 = SY-MSGV1 .
+MESSAGE S630 WITH 'YK230' W_MSGV1 .
+PERFORM FRM_DEQUEUE_TABLE .
+STOP .
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " frm_enqueue_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_total_data
+*&---------------------------------------------------------------------*
+*       照合キーによるデータ集計
+*----------------------------------------------------------------------*
+FORM FRM_TOTAL_DATA.
+
+*- 照合キーにてデータコピー
+PERFORM FRM_COPY_DATA .
+*- データ集計 & 単価チェック
+PERFORM FRM_TOTAL_CHECK .
+*- 照合チェック
+PERFORM FRM_SHOGO_CHECK .
+
+ENDFORM.                    " frm_total_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_copy_data
+*&---------------------------------------------------------------------*
+*       照合キーにてデータコピー
+*----------------------------------------------------------------------*
+FORM FRM_COPY_DATA.
+
+*- 請求データのコピー
+PERFORM FRM_COPY_YK210 .
+*- 仕入データのコピー
+PERFORM FRM_COPY_YK230 .
+
+ENDFORM.                    " frm_copy_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_copy_yk210
+*&---------------------------------------------------------------------*
+*       請求データのコピー
+*----------------------------------------------------------------------*
+FORM FRM_COPY_YK210.
+
+LOOP AT I_YK210_SEL .
+MOVE-CORRESPONDING I_YK210_SEL TO I_YK210 .
+CLEAR I_YK210-KEKKBN .
+*-- プラント
+IF B_WERKS  = 'X' .
+I_YK210-KEY01  = I_YK210_SEL-WERKS .
+ENDIF .
+*-- 購買組織
+IF B_EKORG  = 'X' .
+I_YK210-KEY02  = I_YK210_SEL-EKORG .
+ENDIF .
+*-- 購買グループ
+IF B_MATNR  = 'X' .
+I_YK210-KEY03  = I_YK210_SEL-MATNR .
+ENDIF .
+*-- 会社コード
+IF B_BUKRS  = 'X' .
+I_YK210-KEY04  = I_YK210_SEL-BUKRS .
+ENDIF .
+*-- 事業領域
+IF B_GSBER  = 'X' .
+I_YK210-KEY05  = I_YK210_SEL-GSBER .
+ENDIF .
+*-- 発注番号
+IF B_EBELN  = 'X' .
+I_YK210-KEY06  = I_YK210_SEL-EBELN .
+ENDIF .
+*-- 品目cd
+IF B_MATNR  = 'X' .
+I_YK210-KEY07  = I_YK210_SEL-MATNR .
+ENDIF .
+*-- 仕入先品目cd
+IF B_IDNLF  = 'X' .
+I_YK210-KEY08  = I_YK210_SEL-IDNLF .
+ENDIF .
+*-- 品目テキスト
+IF B_MAKTX  = 'X' .
+I_YK210-KEY09  = I_YK210_SEL-MAKTX .
+ENDIF .
+*-- 締日
+IF B_DATUM  = 'X' .
+I_YK210-KEY10  = I_YK210_SEL-ZFBDT .
+ENDIF .
+
+APPEND   I_YK210 .
+CLEAR  : I_YK210 , I_YK210_SEL .
+
+ENDLOOP .
+
+ENDFORM.                    " frm_copy_yk210
+*&---------------------------------------------------------------------*
+*&      Form  frm_copy_yk230
+*&---------------------------------------------------------------------*
+*       仕入データのコピー
+*----------------------------------------------------------------------*
+FORM FRM_COPY_YK230.
+
+LOOP AT I_YK230_SEL .
+MOVE-CORRESPONDING I_YK230_SEL TO I_YK230 .
+CLEAR I_YK230-KEKKBN .
+*-- プラント
+IF B_WERKS  = 'X' .
+I_YK230-KEY01  = I_YK230_SEL-WERKS .
+ENDIF .
+*-- 購買組織
+IF B_EKORG  = 'X' .
+I_YK230-KEY02  = I_YK230_SEL-EKORG .
+ENDIF .
+*-- 購買グループ
+IF B_MATNR  = 'X' .
+I_YK230-KEY03  = I_YK230_SEL-MATNR .
+ENDIF .
+*-- 会社コード
+IF B_BUKRS  = 'X' .
+I_YK230-KEY04  = I_YK230_SEL-BUKRS .
+ENDIF .
+*-- 事業領域
+IF B_GSBER  = 'X' .
+I_YK230-KEY05  = I_YK230_SEL-GSBER .
+ENDIF .
+*-- 発注番号
+IF B_EBELN  = 'X' .
+I_YK230-KEY06  = I_YK230_SEL-EBELN .
+ENDIF .
+*-- 品目cd
+IF B_MATNR  = 'X' .
+I_YK230-KEY07  = I_YK230_SEL-MATNR .
+ENDIF .
+*-- 仕入先品目cd
+IF B_IDNLF  = 'X' .
+I_YK230-KEY08  = I_YK230_SEL-IDNLF .
+ENDIF .
+*-- 品目テキスト
+IF B_MAKTX  = 'X' .
+I_YK230-KEY09  = I_YK230_SEL-MAKTX .
+ENDIF .
+*-- 締日
+IF B_DATUM  = 'X' .
+I_YK230-KEY10  = I_YK230_SEL-ZFBDT .
+ENDIF .
+
+APPEND   I_YK230 .
+CLEAR  : I_YK230 , I_YK230_SEL .
+
+ENDLOOP .
+
+ENDFORM.                    " frm_copy_yk230
+*&---------------------------------------------------------------------*
+*&      Form  frm_total_check
+*&---------------------------------------------------------------------*
+*       データ集計 & 単価チェック
+*----------------------------------------------------------------------*
+FORM FRM_TOTAL_CHECK.
+
+*- ソート
+SORT I_YK210 BY KEY01 KEY02 KEY03 KEY04 KEY05
+KEY06 KEY07 KEY08 KEY09 KEY10 .
+SORT I_YK230 BY KEY01 KEY02 KEY03 KEY04 KEY05
+KEY06 KEY07 KEY08 KEY09 KEY10 .
+*- 請求データの集計
+PERFORM FRM_TOTAL_YK210 .
+*- 仕入データの集計
+PERFORM FRM_TOTAL_YK230 .
+
+ENDFORM.                    " frm_total_check
+*&---------------------------------------------------------------------*
+*&      Form  frm_total_yk210
+*&---------------------------------------------------------------------*
+*       請求データの集計
+*----------------------------------------------------------------------*
+FORM FRM_TOTAL_YK210.
+
+DATA : W_L_KNUNTPRC  LIKE YK210-KNUNTPRC ,    " 単価
+W_TANKA_CHECK TYPE C              ,    " 単価
+W_KNQUAN      LIKE YK210-KNQUAN   ,    " 数量
+W_KNITXAMT    LIKE YK210-KNITXAMT ,    " 税抜金額
+W_KNTAXAMT    LIKE YK210-KNTAXAMT ,    " 消費税額
+W_KNETXAMT    LIKE YK210-KNETXAMT .    " 税込金額
+LOOP AT I_YK210 .
+*-- ブレイクによる文字化け防止
+MOVE-CORRESPONDING I_YK210 TO ST_YK210 .
+*-- 照合キーの値が変わったら変数をクリア
+AT NEW KEY10 .
+CLEAR : W_L_KNUNTPRC , W_KNQUAN   , W_TANKA_CHECK ,
+W_KNITXAMT   , W_KNTAXAMT , W_KNETXAMT .
+ENDAT .
+*-- 単価｢照合条件｣のチェック
+IF W_L_KNUNTPRC <> SPACE AND B_TA_N <> 'X' .
+CASE 'X' .
+*------ 警告の場合
+WHEN B_TA_W .
+IF W_L_KNUNTPRC <> ST_YK210-KNUNTPRC .
+MOVE-CORRESPONDING ST_YK210 TO I_ERR .
+I_ERR-ERR  = C_TANKA .
+I_ERR-FLG  = 'W' .
+I_ERR-SORT = '1' .
+*           i_yk210_tol-tanka = c_flg_on  .    "
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+*------ エラーの場合
+WHEN B_TA_E .
+IF W_L_KNUNTPRC <> ST_YK210-KNUNTPRC .
+*           message s631 .
+*           stop .
+MOVE-CORRESPONDING ST_YK210 TO I_ERR .
+I_ERR-ERR  = C_TANKA_E .
+I_ERR-FLG  = 'E'       .
+I_ERR-SORT = '1'       .
+W_TANKA_CHECK = 'X'  .    "
+*           st_yk210-tanka = c_flg_off .    "
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+ENDCASE .
+ENDIF .
+*-- 金額集計
+IF I_YK210-RRFLG <> 'X'.                          "2002/02/15 ADD
+W_KNQUAN   = ST_YK210-KNQUAN   + W_KNQUAN   .   " 数量
+ENDIF .
+W_KNITXAMT = ST_YK210-KNITXAMT + W_KNITXAMT .   " 税抜金額
+W_KNTAXAMT = ST_YK210-KNTAXAMT + W_KNTAXAMT .   " 消費税
+W_KNETXAMT = ST_YK210-KNETXAMT + W_KNETXAMT .   " 税込金額
+*--
+AT END OF KEY10 .
+MOVE-CORRESPONDING ST_YK210 TO I_YK210_TOL .
+I_YK210_TOL-KNQUAN   = W_KNQUAN   .    " 数量
+I_YK210_TOL-KNITXAMT = W_KNITXAMT .    " 税抜金額
+I_YK210_TOL-KNTAXAMT = W_KNTAXAMT .    " 消費税
+I_YK210_TOL-KNETXAMT = W_KNETXAMT .    " 税込金額
+IF W_TANKA_CHECK = 'X' .
+I_YK210_TOL-TANKA = C_FLG_OFF .    "
+ENDIF .
+APPEND   I_YK210_TOL .
+CLEAR  : I_YK210_TOL .
+ENDAT .
+*-- 単価を対比用変数へ
+W_L_KNUNTPRC = ST_YK210-KNUNTPRC .
+ENDLOOP .
+
+ENDFORM.                    " frm_total_yk210
+*&---------------------------------------------------------------------*
+*&      Form  frm_total_yk230
+*&---------------------------------------------------------------------*
+*       仕入データの集計
+*----------------------------------------------------------------------*
+FORM FRM_TOTAL_YK230.
+
+DATA : W_L_KNUNTPRC  LIKE YK230-KNUNTPRC ,    " 単価
+W_TANKA_CHECK TYPE C              ,    " 単価
+W_KNQUAN      LIKE YK230-KNQUAN   ,    " 数量
+W_KNITXAMT    LIKE YK230-KNITXAMT ,    " 税抜金額
+W_KNTAXAMT    LIKE YK230-KNTAXAMT ,    " 消費税額
+W_KNETXAMT    LIKE YK230-KNETXAMT .    " 税込金額
+
+LOOP AT I_YK230 .
+*-- ブレイクによる文字化け防止
+MOVE-CORRESPONDING I_YK230 TO ST_YK230 .
+*-- 照合キーの値が変わったら変数をクリア
+AT NEW KEY10 .
+CLEAR : W_L_KNUNTPRC , W_KNQUAN   , W_TANKA_CHECK ,
+W_KNITXAMT   , W_KNTAXAMT , W_KNETXAMT .
+ENDAT .
+*-- 単価｢照合条件｣のチェック
+IF W_L_KNUNTPRC <> SPACE AND B_TA_N <> 'X' .
+CASE 'X' .
+*------ 警告の場合
+WHEN B_TA_W .
+IF W_L_KNUNTPRC <> ST_YK230-KNUNTPRC .
+MOVE-CORRESPONDING ST_YK230 TO I_ERR .
+I_ERR-ERR  = C_TANKA .
+I_ERR-FLG  = 'W' .
+I_ERR-SORT = '1' .
+*           i_yk230_tol-tanka = c_flg_on  .    "
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+*------ エラーの場合
+WHEN B_TA_E .
+IF W_L_KNUNTPRC <> ST_YK230-KNUNTPRC .
+*           message s631 .
+*           stop .
+MOVE-CORRESPONDING ST_YK230 TO I_ERR .
+I_ERR-ERR  = C_TANKA_E .
+I_ERR-FLG  = 'E' .
+I_ERR-SORT = '1' .
+*           st_yk230-tanka = c_flg_off .    "
+W_TANKA_CHECK  = 'X'       .    "
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+ENDCASE .
+ENDIF .
+*-- 金額集計
+IF I_YK230-RRFLG <> 'X'.                          "2002/02/14 ADD
+W_KNQUAN   = ST_YK230-KNQUAN   + W_KNQUAN   .   " 数量
+ENDIF.
+*     w_knitxamt = st_yk230-knitxamt + w_knitxamt .   " 税抜金額
+*     w_kntaxamt = st_yk230-kntaxamt + w_kntaxamt .   " 消費税
+*     w_knetxamt = st_yk230-knetxamt + w_knetxamt .   " 税込金額
+W_KNITXAMT = W_KNITXAMT + ST_YK230-UPYAMT   . " 未請求額
+W_KNTAXAMT                                    " 消費税 - 消込税額
+= W_KNTAXAMT + ( ST_YK230-KNTAXAMT - ST_YK230-PIDTAX ) .
+W_KNETXAMT = ( W_KNITXAMT + W_KNTAXAMT ) .
+*--
+AT END OF KEY10 .
+MOVE-CORRESPONDING ST_YK230 TO I_YK230_TOL .
+I_YK230_TOL-KNQUAN   = W_KNQUAN   .    " 数量
+I_YK230_TOL-KNITXAMT = W_KNITXAMT .    " 税抜金額
+I_YK230_TOL-KNTAXAMT = W_KNTAXAMT .    " 消費税
+I_YK230_TOL-KNETXAMT = W_KNETXAMT .    " 税込金額
+IF W_TANKA_CHECK = 'X' .
+I_YK230_TOL-TANKA = C_FLG_OFF .
+ENDIF .
+APPEND   I_YK230_TOL .
+CLEAR  : I_YK230_TOL .
+ENDAT .
+*-- 単価を対比用変数へ
+W_L_KNUNTPRC = ST_YK230-KNUNTPRC .
+ENDLOOP .
+
+
+ENDFORM.                    " frm_total_yk230
+*&---------------------------------------------------------------------*
+*&      Form  frm_shogo_check
+*&---------------------------------------------------------------------*
+*       照合チェック
+*----------------------------------------------------------------------*
+FORM FRM_SHOGO_CHECK.
+*  DATA : W_KEKKBN LIKE YK230-KEKKBN.  "2002/10/09 ADD DEL 2003/05/28
+DATA : W_L_FLG(3)       TYPE  C .   " フラグ
+
+LOOP AT I_YK210_TOL .
+CLEAR W_L_FLG  .
+LOOP AT I_YK230_TOL
+WHERE KEY01 = I_YK210_TOL-KEY01 AND KEY02 = I_YK210_TOL-KEY02
+AND KEY03 = I_YK210_TOL-KEY03 AND KEY04 = I_YK210_TOL-KEY04
+AND KEY05 = I_YK210_TOL-KEY05 AND KEY06 = I_YK210_TOL-KEY06
+AND KEY07 = I_YK210_TOL-KEY07 AND KEY08 = I_YK210_TOL-KEY08
+AND KEY09 = I_YK210_TOL-KEY09 AND KEY10 = I_YK210_TOL-KEY10 .
+*---- 請求データ/仕入データ 共にチェックした場合 ON
+W_L_FLG = C_FLG_ON .
+*---- 単価チェック
+PERFORM FRM_CHECK_TANKA .
+*---- 数量チェック
+PERFORM FRM_CHECK_SURYO .
+*---- 税抜金額チェック
+PERFORM FRM_CHECK_ZEINUKI .
+*---- 消費税チェック
+PERFORM FRM_CHECK_TAX .
+*---- 税込金額チェック
+PERFORM FRM_CHECK_ZEIKOMI .
+*---- 整合フラグの反映
+PERFORM FRM_FLG_REFLECTION .
+ENDLOOP .
+*-- 請求データのみの場合
+IF W_L_FLG <> C_FLG_ON .
+PERFORM FRM_YK210_REFLECTION USING C_KEKKBN_2 .
+*---- 件数
+W_CNT_2 = W_CNT_2 + 1 .
+ENDIF .
+ENDLOOP .
+
+*- 仕入データのみの場合
+LOOP AT I_YK230 WHERE KEKKBN = SPACE .
+*    perform frm_yk230_reflection using c_kekkbn_1 .
+*2002/10/09 (09/20分再修正) MOD START
+*    i_yk230-kekkbn = c_kekkbn_1      .         " 照合結果区分
+CLEAR W_SYORI.
+SELECT SINGLE PRCNO INTO W_SYORI FROM YK230
+WHERE BELNR = I_YK230-BELNR
+AND BUZEI = I_YK230-BUZEI.
+IF not W_SYORI IS initial.          "処理済
+I_YK230-KEKKBN = '5'.
+ELSE.
+I_YK230-KEKKBN = C_KEKKBN_1 .     " 照合結果区分
+ENDIF.
+*2002/10/09 (09/20分再修正) MOD END
+I_YK230-UPDDAT = SY-DATUM .         " 変更日
+I_YK230-UPDTIM = SY-UZEIT .         " 変更時刻
+I_YK230-UPDUSR = SY-UNAME .         " 変更ユーザ
+*2003/05/28 MOD START
+*   MODIFY I_YK230 .
+MODIFY I_YK230 TRANSPORTING KEKKBN UPDDAT UPDTIM UPDUSR
+WHERE BELNR = I_YK230-BELNR AND BUZEI = I_YK230-BUZEI.
+*2003/05/28 MOD END
+CLEAR  I_YK230 .
+*-- 件数
+W_CNT_1 = W_CNT_1 + 1 .
+ENDLOOP .
+
+ENDFORM.                    " frm_shogo_check
+*&---------------------------------------------------------------------*
+*&      Form  frm_item_check
+*&---------------------------------------------------------------------*
+*       各項目チェック
+*----------------------------------------------------------------------*
+FORM FRM_ITEM_CHECK  USING    P_YK210_ITEM         " 数量{請求データ}
+P_YK230_ITEM         " 数量{仕入データ}
+P_CONDITIONS         " 照合条件
+P_CONSTANTS          " エラー理由
+P_SORT               "
+CHANGING P_FLG        .       " 数量整合フラグ
+
+IF P_YK210_ITEM  =  P_YK230_ITEM  .
+P_FLG = C_FLG_ON .
+ELSE  .
+CASE P_CONDITIONS .
+*---- 警告の場合
+WHEN C_FLG_WAR .
+P_FLG = C_FLG_ON   .
+I_ERR-FLG = 'W' .
+*---- エラーの場合
+WHEN C_FLG_ERR .
+P_FLG = C_FLG_OFF   .
+I_ERR-FLG = 'E' .
+ENDCASE .
+*-- エラー用内部tab に書き込み
+MOVE-CORRESPONDING I_YK210_TOL TO I_ERR .
+I_ERR-ERR  = P_CONSTANTS .
+I_ERR-SORT = P_SORT .
+APPEND I_ERR .
+CLEAR  I_ERR .
+ENDIF .
+
+ENDFORM.                    " frm_item_check
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_suryo
+*&---------------------------------------------------------------------*
+*       数量チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_SURYO.
+
+IF B_SU_N <> 'X' .
+IF B_SU_W = 'X' AND B_SU_E = SPACE .
+W_CONDITIONS = C_FLG_WAR .
+W_CONSTANTS  = C_SURYO_W .
+ELSE .
+W_CONDITIONS = C_FLG_ERR .
+W_CONSTANTS  = C_SURYO_E .
+ENDIF .
+PERFORM FRM_ITEM_CHECK
+USING    I_YK210_TOL-KNQUAN   " 数量{請求データ}
+I_YK230_TOL-KNQUAN   " 数量{仕入データ}
+W_CONDITIONS         " 照合条件
+W_CONSTANTS          " エラー理由
+'2'                  " ソート
+CHANGING W_SURYO           .  " 数量整合フラグ
+ENDIF .
+
+ENDFORM.                    " frm_check_suryo
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_zeinuki
+*&---------------------------------------------------------------------*
+*       税抜金額チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_ZEINUKI.
+
+*- (仕入データ － 請求データ) の 絶対値
+W_KINGAKU = ABS( I_YK210_TOL-KNITXAMT - I_YK230_TOL-KNITXAMT ) .
+
+IF B_ZE_N <> 'X' .
+*   if w_kingaku < p_knit .
+IF W_KINGAKU <= P_KNIT .     "ADD 2002/05/27
+W_ZEINUKI = C_FLG_ON .
+ELSE  .
+IF B_ZE_W = 'X' AND B_ZE_E = SPACE .
+W_CONDITIONS = C_FLG_WAR .
+W_CONSTANTS  = C_ZEINUKI_W .
+ELSE .
+W_CONDITIONS = C_FLG_ERR .
+W_CONSTANTS  = C_ZEINUKI_E .
+ENDIF .
+PERFORM FRM_ITEM_CHECK
+USING    I_YK210_TOL-KNITXAMT " 税抜{請求データ}
+I_YK230_TOL-KNITXAMT " 税抜{仕入データ}
+W_CONDITIONS         " 照合条件
+W_CONSTANTS          " エラー理由
+'3'                  " ソート
+CHANGING W_ZEINUKI           ." 税抜整合フラグ
+ENDIF .
+ENDIF .
+
+ENDFORM.                    " frm_check_zeinuki
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_tax
+*&---------------------------------------------------------------------*
+*       消費税チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_TAX.
+
+*- (仕入データ － 請求データ) の 絶対値
+W_KINGAKU = ABS( I_YK210_TOL-KNTAXAMT - I_YK230_TOL-KNTAXAMT ) .
+
+IF B_SH_N <> 'X' .
+IF W_KINGAKU < P_KNTA .
+W_TAX = C_FLG_ON .
+ELSE  .
+IF B_SH_W = 'X' AND B_SH_E = SPACE .
+W_CONDITIONS = C_FLG_WAR .
+W_CONSTANTS  = C_TAX_W   .
+ELSE .
+W_CONDITIONS = C_FLG_ERR .
+W_CONSTANTS  = C_TAX_E   .
+ENDIF .
+PERFORM FRM_ITEM_CHECK
+USING    I_YK210_TOL-KNTAXAMT " 税抜{請求データ}
+I_YK230_TOL-KNTAXAMT " 税抜{仕入データ}
+W_CONDITIONS         " 照合条件
+W_CONSTANTS          " エラー理由
+'4'                  " ソート
+CHANGING W_TAX             .  " 消費税整合フラグ
+ENDIF .
+ENDIF .
+
+ENDFORM.                    " frm_check_tax
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_zeikomi
+*&---------------------------------------------------------------------*
+*       税込金額チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_ZEIKOMI.
+
+*- (仕入データ － 請求データ) の 絶対値
+W_KINGAKU = ABS( I_YK210_TOL-KNETXAMT - I_YK230_TOL-KNETXAMT ) .
+
+IF B_KO_N <> 'X' .
+IF W_KINGAKU < P_KNET .
+W_ZEIKOMI  = C_FLG_ON .
+ELSE  .
+IF B_KO_W = 'X' AND B_KO_E = SPACE .
+W_CONDITIONS = C_FLG_WAR   .
+W_CONSTANTS  = C_ZEIKOMI_W .
+ELSE .
+W_CONDITIONS = C_FLG_ERR   .
+W_CONSTANTS  = C_ZEIKOMI_E .
+ENDIF .
+PERFORM FRM_ITEM_CHECK
+USING    I_YK210_TOL-KNETXAMT " 税抜{請求データ}
+I_YK230_TOL-KNETXAMT " 税抜{仕入データ}
+W_CONDITIONS         " 照合条件
+W_CONSTANTS          " エラー理由
+'5'                  " ソート
+CHANGING W_ZEIKOMI           ." 税込額整合フラグ
+ENDIF .
+ENDIF .
+
+ENDFORM.                    " frm_check_zeikomi
+*&---------------------------------------------------------------------*
+*&      Form  frm_flg_reflection
+*&---------------------------------------------------------------------*
+*       整合フラグの反映
+*----------------------------------------------------------------------*
+FORM FRM_FLG_REFLECTION.
+
+IF ( W_TANKA   = C_FLG_ON OR W_TANKA   = SPACE ) AND
+( W_SURYO   = C_FLG_ON OR W_SURYO   = SPACE ) AND
+( W_ZEIKOMI = C_FLG_ON OR W_ZEIKOMI = SPACE ) AND
+( W_TAX     = C_FLG_ON OR W_TAX     = SPACE ) AND
+( W_ZEINUKI = C_FLG_ON OR W_ZEINUKI = SPACE ) AND
+( I_YK210_TOL-TANKA <> C_FLG_OFF            ) AND
+( I_YK230_TOL-TANKA <> C_FLG_OFF            ) .
+*-- 処理番号の自動採番
+PERFORM FRM_EXTRACTION_NUMBER .
+*-- 請求データの反映
+PERFORM FRM_YK210_REFLECTION USING C_KEKKBN_4 .
+*-- 仕入データの反映
+PERFORM FRM_YK230_REFLECTION USING C_KEKKBN_4 .
+*-- 件数
+W_CNT_4 = W_CNT_4 + 1 .
+ELSE  .
+*-- 請求データの反映
+PERFORM FRM_YK210_REFLECTION USING C_KEKKBN_3 .
+*-- 仕入データの反映
+PERFORM FRM_YK230_REFLECTION USING C_KEKKBN_3 .
+*-- 件数
+W_CNT_3 = W_CNT_3 + 1 .
+ENDIF .
+
+ENDFORM.                    " frm_flg_reflection
+*&---------------------------------------------------------------------*
+*&      Form  frm_extraction_number
+*&---------------------------------------------------------------------*
+*       処理番号の自動採番
+*----------------------------------------------------------------------*
+FORM FRM_EXTRACTION_NUMBER.
+
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+NR_RANGE_NR                   = '10'
+OBJECT                        = 'YKPRCNO'
+QUANTITY                      = '1'
+TOYEAR                        = '2001'
+IMPORTING
+NUMBER                        = I_YK210_TOL-PRCNO
+EXCEPTIONS
+INTERVAL_NOT_FOUND            = 1
+NUMBER_RANGE_NOT_INTERN       = 2
+OBJECT_NOT_FOUND              = 3
+QUANTITY_IS_0                 = 4
+QUANTITY_IS_NOT_1             = 5
+INTERVAL_OVERFLOW             = 6
+OTHERS                        = 7 .
+
+IF SY-SUBRC = 0 .
+I_YK230_TOL-PRCNO = I_YK210_TOL-PRCNO .
+ENDIF.
+
+
+
+
+ENDFORM.                    " frm_extraction_number
+*&---------------------------------------------------------------------*
+*&      Form  frm_yk210_reflection
+*&---------------------------------------------------------------------*
+*       請求データの反映
+*----------------------------------------------------------------------*
+FORM FRM_YK210_REFLECTION USING P_KEKKBN .
+
+IF P_KEKKBN = C_KEKKBN_4 .
+*      i_yk210-zfbdt2 = i_yk210_tol-zfbdt2 .  " 照合締日
+I_YK210-ZFBDT2 = P_DATUM.              "2002/03/04 MOD
+I_YK210-PRCDAT = SY-DATUM           .  " 処理日
+I_YK210-PRCNO  = I_YK210_TOL-PRCNO  .  " 処理番号
+ENDIF .
+* 2002/09/20 MOD START
+*   i_yk210-kekkbn = p_kekkbn .         " 照合結果区分
+*   IF P_KEKKBN = C_KEKKBN_4.
+I_YK210-KEKKBN = P_KEKKBN.
+*   ELSEIF I_YK210-KEKKBN <> '5'.
+*     I_YK210-KEKKBN = P_KEKKBN.
+*   ENDIF.
+* 2002/09/20 MOD END
+I_YK210-UPDDAT = SY-DATUM .         " 変更日
+I_YK210-UPDTIM = SY-UZEIT .         " 変更時刻
+I_YK210-UPDUSR = SY-UNAME .         " 変更ユーザ
+MODIFY I_YK210 TRANSPORTING KEKKBN UPDDAT UPDTIM UPDUSR
+ZFBDT2 PRCDAT PRCNO
+WHERE KEY01 = I_YK210_TOL-KEY01  AND KEY02 = I_YK210_TOL-KEY02
+AND KEY03 = I_YK210_TOL-KEY03  AND KEY04 = I_YK210_TOL-KEY04
+AND KEY05 = I_YK210_TOL-KEY05  AND KEY06 = I_YK210_TOL-KEY06
+AND KEY07 = I_YK210_TOL-KEY07  AND KEY08 = I_YK210_TOL-KEY08
+AND KEY09 = I_YK210_TOL-KEY09  AND KEY10 = I_YK210_TOL-KEY10 .
+CLEAR  I_YK210 .
+
+ENDFORM.                    " frm_yk210_reflection
+*&---------------------------------------------------------------------*
+*&      Form  frm_yk230_reflection
+*&---------------------------------------------------------------------*
+*       仕入データの反映
+*----------------------------------------------------------------------*
+FORM FRM_YK230_REFLECTION USING P_KEKKBN .
+*ADD 2003/05/28 START
+DATA:  W_ZFBDT2 LIKE YK230-ZFBDT2,
+W_PRCDAT LIKE YK230-PRCDAT,
+W_PRCNO  LIKE YK230-PRCNO.
+*ADD 2003/05/28 END
+IF P_KEKKBN = C_KEKKBN_4 .
+I_YK230-UPDDAT = SY-DATUM .            " 変更日
+I_YK230-UPDTIM = SY-UZEIT .            " 変更時刻
+I_YK230-UPDUSR = SY-UNAME .            " 変更ユーザ
+I_YK230-KEKKBN = P_KEKKBN.
+I_YK230-ZFBDT2 = P_DATUM .             " 照合締日 2002/03/04
+I_YK230-PRCDAT = SY-DATUM           .  " 処理日
+I_YK230-PRCNO  = I_YK230_TOL-PRCNO  .  " 処理番号
+MODIFY I_YK230 TRANSPORTING KEKKBN UPDDAT UPDTIM UPDUSR
+ZFBDT2 PRCDAT PRCNO
+WHERE KEY01 = I_YK230_TOL-KEY01  AND KEY02 = I_YK230_TOL-KEY02
+AND KEY03 = I_YK230_TOL-KEY03  AND KEY04 = I_YK230_TOL-KEY04
+AND KEY05 = I_YK230_TOL-KEY05  AND KEY06 = I_YK230_TOL-KEY06
+AND KEY07 = I_YK230_TOL-KEY07  AND KEY08 = I_YK230_TOL-KEY08
+AND KEY09 = I_YK230_TOL-KEY09  AND KEY10 = I_YK230_TOL-KEY10.
+CLEAR  I_YK230 .
+ENDIF .
+* 2002/09/20 MOD START
+*   i_yk230-kekkbn = p_kekkbn .         " 照合結果区分
+*   IF P_KEKKBN = C_KEKKBN_4.
+*      I_YK230-KEKKBN = P_KEKKBN.
+*   ELSEIF I_YK230-KEKKBN <> '5'.
+*     I_YK230-KEKKBN = P_KEKKBN.
+*   ENDIF.
+*2003/05/28 MOD START
+IF P_KEKKBN = C_KEKKBN_3.             "照合エラー時
+LOOP AT I_YK230
+WHERE KEY01 = I_YK230_TOL-KEY01  AND KEY02 = I_YK230_TOL-KEY02
+AND KEY03 = I_YK230_TOL-KEY03  AND KEY04 = I_YK230_TOL-KEY04
+AND KEY05 = I_YK230_TOL-KEY05  AND KEY06 = I_YK230_TOL-KEY06
+AND KEY07 = I_YK230_TOL-KEY07  AND KEY08 = I_YK230_TOL-KEY08
+AND KEY09 = I_YK230_TOL-KEY09  AND KEY10 = I_YK230_TOL-KEY10.
+CLEAR W_KEKKBN.
+SELECT SINGLE KEKKBN ZFBDT2 PRCDAT PRCNO
+INTO (W_KEKKBN,W_ZFBDT2,W_PRCDAT,W_PRCNO) FROM YK230
+WHERE BELNR = I_YK230-BELNR
+AND BUZEI = I_YK230-BUZEI.
+IF W_KEKKBN = '5'.
+I_YK230-KEKKBN = C_KEKKBN_3.
+MODIFY I_YK230 TRANSPORTING KEKKBN
+WHERE BELNR = I_YK230-BELNR AND BUZEI = I_YK230-BUZEI.
+ELSE.
+I_YK230-KEKKBN = P_KEKKBN.     " 照合結果区分
+I_YK230-UPDDAT = SY-DATUM .    " 変更日
+I_YK230-UPDTIM = SY-UZEIT .    " 変更時刻
+I_YK230-UPDUSR = SY-UNAME .    " 変更ユーザ
+MODIFY I_YK230 TRANSPORTING KEKKBN UPDDAT UPDTIM UPDUSR
+WHERE BELNR = I_YK230-BELNR AND BUZEI = I_YK230-BUZEI.
+ENDIF.
+ENDLOOP.
+ENDIF.
+*2003/05/28 MOD END
+* 2002/09/20 MOD END
+
+
+ENDFORM.                    " frm_yk230_reflection
+*&---------------------------------------------------------------------*
+*&      Form  frm_update_table
+*&---------------------------------------------------------------------*
+*       テーブルの更新
+*----------------------------------------------------------------------*
+FORM FRM_UPDATE_TABLE.
+*2002/10/09 ADD START
+DATA: BEGIN OF ST_YK230_UPD,
+KEKKBN LIKE YK230-KEKKBN,
+UPYAMT LIKE YK230-UPYAMT,
+ZFBDT2 LIKE YK230-ZFBDT2,
+BEYAMT LIKE YK230-BEYAMT
+*2006/12/26 ADD START
+* .
+,
+PRCNO  LIKE YK230-PRCNO.
+*2006/12/26 ADD END
+DATA END OF ST_YK230_UPD.
+*2002/10/09 ADD END
+*- YK210 の 更新
+LOOP AT I_YK210 .
+MOVE-CORRESPONDING I_YK210 TO YK210 .
+*2003/05/06 ADD START
+MOVE-CORRESPONDING I_YK210 TO I_YK210_SUM.
+COLLECT I_YK210_SUM.
+*2003/05/06 ADD END
+UPDATE   YK210 .
+CLEAR  : YK210 , I_YK210 .
+ENDLOOP .
+*- YK230 の 更新
+LOOP AT I_YK230 .
+CLEAR  YK230. "2003/05/28 ADD
+MOVE-CORRESPONDING I_YK230 TO YK230 .
+IF YK230-KEKKBN = C_KEKKBN_4 .
+YK230-PIDAMT = YK230-KNITXAMT .  " 消込金額 = 税抜金額
+*---- 項目追加
+YK230-PIDTAX = YK230-KNTAXAMT .  " 消込税額 = 消費税額
+YK230-UPYAMT = '0'            .  " 未請求額 = ０
+*2002/10/09 MOD START
+*      yk230-beyamt = yk230-pidamt   .  " 今回請求額 = 消込金額 02/04/01
+*2007/01/05 MOD START
+*       ST_YK230_UPD = YK230.
+MOVE-CORRESPONDING YK230 TO ST_YK230_UPD.
+
+*2006/12/21 MOD START
+*       SELECT SINGLE KEKKBN ZFBDT2 UPYAMT BEYAMT INTO
+SELECT SINGLE KEKKBN ZFBDT2 UPYAMT BEYAMT PRCNO INTO
+*2006/12/21 MOD END
+CORRESPONDING FIELDS OF ST_YK230_UPD
+FROM YK230  WHERE BELNR = YK230-BELNR
+AND BUZEI = YK230-BUZEI.
+*2006/12/21 MOD START
+*      IF ST_YK230_UPD-KEKKBN = '5'.
+IF NOT ST_YK230_UPD-PRCNO IS INITIAl.
+*2006/12/21 MOD END
+
+IF ST_YK230_UPD-ZFBDT2 = YK230-ZFBDT2.
+YK230-BEYAMT = ST_YK230_UPD-UPYAMT +  ST_YK230_UPD-BEYAMT.
+"今回請求額 = 元未請求+
+ELSE.                                              "元請求
+YK230-BEYAMT = ST_YK230_UPD-UPYAMT." 今回請求額 = 元未請求額
+ENDIF.
+ELSE.
+YK230-BEYAMT =  YK230-KNITXAMT.  " 今回請求額 = 税抜き金額
+ENDIF.
+*2002/10/09 MOD END
+ENDIF .
+*2003/05/06 ADD START
+MOVE-CORRESPONDING YK230 TO I_YK230_SUM.
+I_YK230_SUM-PIDAMT = I_YK230_SUM-PIDAMT - I_YK230-PIDAMT.
+COLLECT I_YK230_SUM.
+*2003/05/06 ADD END
+UPDATE   YK230 .
+CLEAR  : YK230 , I_YK230 .
+ENDLOOP .
+
+ENDFORM.                    " frm_update_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_list
+*&---------------------------------------------------------------------*
+*       リスト出力
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_LIST.
+CHECK P_LOGU = 'X'.                      "2002/12/18 ADD
+PERFORM FRM_SHOUGO_KEY      .            " 照合キー
+SKIP 1 .
+PERFORM FRM_SHOUGO_JYOKEN   .            " 照合条件
+SKIP 1 .
+PERFORM FRM_SENTAKU_JYOKEN  .            " 選択条件
+SKIP 2 .
+PERFORM FRM_WRITE_KENSU     .            " 件数表示
+SKIP 2 .
+IF NOT I_ERR[] IS INITIAL .
+PERFORM FRM_WRITE_ERRLIST   .          " エラーリスト
+ENDIF .
+
+ENDFORM.                    " frm_write_list
+*&---------------------------------------------------------------------*
+*&      Form  frm_dequeue_table
+*&---------------------------------------------------------------------*
+*       テーブルロック解除
+*----------------------------------------------------------------------*
+FORM FRM_DEQUEUE_TABLE.
+
+*- テーブルロック解除<YK210>
+LOOP AT I_YK210_SEL. "2002/07/12 明細ロック
+CALL FUNCTION 'DEQUEUE_EY_YK210'
+EXPORTING
+*       mode_yk210       = 'E'
+*       mandt            = sy-mandt .
+BUKRS            = I_YK210_SEL-BUKRS
+YKYEAR           = I_YK210_SEL-YKYEAR
+BILDOC           = I_YK210_SEL-BILDOC.
+ENDLOOP.
+*- テーブルロック解除<YK230>
+LOOP AT I_YK230_SEL. "2002/07/12 明細ロック
+CALL FUNCTION 'DEQUEUE_EY_YK230'
+EXPORTING
+*       mode_yk230       = 'E'
+*       mandt            = sy-mandt .
+BELNR            = I_YK230_SEL-BELNR
+BUZEI            = I_YK230_SEL-BUZEI.
+ENDLOOP.
+
+ENDFORM.                    " frm_dequeue_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_keycheck
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_KEYCHECK USING P_CHECK    " チェックの有無
+P_BEAM     " 書き出し位置
+P_SIZE .   " 項目サイズ
+
+IF P_CHECK = 'X' .
+WRITE AT P_BEAM(P_SIZE)  TEXT-L13 CENTERED .
+ELSE  .
+WRITE AT P_BEAM(P_SIZE)  TEXT-L14 CENTERED .
+ENDIF .
+
+ENDFORM.                    " frm_write_keycheck
+*&---------------------------------------------------------------------*
+*&      Form  frm_shougo_key
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_SHOUGO_KEY.
+
+WRITE:/01      TEXT-L02 .   " 照合キー
+SKIP 1 .
+WRITE:/003(08) TEXT-L03 ,   " プラント
+012(08) TEXT-L04 ,   " 購買組織
+021(12) TEXT-L05 ,   " 購買グループ
+034(10) TEXT-L06 ,   " 会社コード
+045(08) TEXT-L07 ,   " 事業領域
+054(08) TEXT-L08 ,   " 発注番号
+063(10) TEXT-L09 ,   " 品目コード
+074(16) TEXT-L10 ,   " 仕入先品目コード
+091(12) TEXT-L11 ,   " 品目テキスト
+104(04) TEXT-L12 .   " 締日
+ULINE .
+
+PERFORM FRM_WRITE_KEYCHECK USING B_WERKS '003' '08' .  " プラント
+PERFORM FRM_WRITE_KEYCHECK USING B_EKORG '012' '08' .  " 購買組織
+PERFORM FRM_WRITE_KEYCHECK USING B_EKGRP '021' '12' .  " 購買グループ
+PERFORM FRM_WRITE_KEYCHECK USING B_BUKRS '034' '10' .  " 会社コード
+PERFORM FRM_WRITE_KEYCHECK USING B_GSBER '045' '08' .  " 事業領域
+PERFORM FRM_WRITE_KEYCHECK USING B_EBELN  '054' '08' .  " 発注番号
+PERFORM FRM_WRITE_KEYCHECK USING B_MATNR '063' '10' .  " 品目cd
+PERFORM FRM_WRITE_KEYCHECK USING B_IDNLF '074' '16' .  " 仕入先品目cd
+PERFORM FRM_WRITE_KEYCHECK USING B_MAKTX '091' '12' .  " 品目テキスト
+PERFORM FRM_WRITE_KEYCHECK USING B_DATUM '104' '04' .  " 締日
+
+ENDFORM.                    " frm_shougo_key
+*&---------------------------------------------------------------------*
+*&      Form  frm_shougo_jyoken
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_SHOUGO_JYOKEN.
+
+*- 出力用 通貨コード
+SELECT SINGLE WAERS
+FROM LFM1
+INTO W_CURRENCY
+WHERE LIFNR =  P_LIFN2
+AND EKORG IN S_EKORG .
+
+WRITE:/01  TEXT-L15 .   " 照合条件
+SKIP 1 .
+WRITE:/03  TEXT-L16 ,   " 数量
+09  TEXT-L17 ,   " 単価
+15  TEXT-L18 ,   " 税抜金額
+25  TEXT-L19 ,   " 税抜金額許容差額
+43  TEXT-L20 ,   " 消費税額
+53  TEXT-L21 ,   " 消費税額許容差額
+71  TEXT-L22 ,   " 税込金額
+81  TEXT-L23 .   " 税込金額許容差額
+ULINE .
+PERFORM FRM_WRITE_JYOKENCHECK USING B_SU_W B_SU_E B_SU_N '04' .
+PERFORM FRM_WRITE_JYOKENCHECK USING B_TA_W B_TA_E B_TA_N '10' .
+PERFORM FRM_WRITE_JYOKENCHECK USING B_ZE_W B_ZE_E B_ZE_N '18' .
+PERFORM FRM_WRITE_JYOKENMONEY USING B_ZE_N P_KNIT        '25' .
+PERFORM FRM_WRITE_JYOKENCHECK USING B_SH_W B_SH_E B_SH_N '46' .
+PERFORM FRM_WRITE_JYOKENMONEY USING B_SH_N P_KNTA        '53' .
+PERFORM FRM_WRITE_JYOKENCHECK USING B_KO_W B_KO_E B_KO_N '74' .
+PERFORM FRM_WRITE_JYOKENMONEY USING B_KO_N P_KNET        '81' .
+
+ENDFORM.                    " frm_shougo_jyoken
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_jyokencheck
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_JYOKENCHECK USING P_W P_E P_N P_BEAM .
+
+CASE 'X' .
+WHEN P_W .
+WRITE AT P_BEAM  TEXT-L24 .
+WHEN P_E .
+WRITE AT P_BEAM  TEXT-L25 .
+WHEN P_N .
+WRITE AT P_BEAM  TEXT-L14 .
+ENDCASE .
+
+ENDFORM.                    " frm_write_jyokencheck
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_jyokenmoney
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_JYOKENMONEY USING P_N P_MONEY P_BEAM .
+
+IF P_N <> 'X' .
+WRITE AT P_BEAM(16)  P_MONEY  CURRENCY W_CURRENCY .
+ELSE  .
+WRITE AT P_BEAM(16)  0        CURRENCY W_CURRENCY .
+ENDIF .
+
+ENDFORM.                    " frm_write_jyokenmoney
+*&---------------------------------------------------------------------*
+*&      Form  frm_sentaku_jyoken
+*&---------------------------------------------------------------------*
+*       選択条件
+*----------------------------------------------------------------------*
+FORM FRM_SENTAKU_JYOKEN.
+
+WRITE:/01  TEXT-L26 .   " 選択条件
+SKIP 1.
+WRITE:/11  TEXT-L27 ,   " 項目名
+39  TEXT-L28 ,   " 選択タイプ
+55  TEXT-L29 ,   " Ｉ/E
+64  TEXT-L30 ,   " オプション
+82  TEXT-L31 .   " 入力値(From～To)
+ULINE .
+*- パラメータ値の取得
+PERFORM FRM_GET_PARAMETER .
+
+ENDFORM.                    " frm_sentaku_jyoken
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_parameter
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_GET_PARAMETER.
+
+DATA : W_L_REPID    LIKE RSVAR-REPORT .    " ﾌﾟﾛｸﾞﾗﾑID
+
+*- PGID
+W_L_REPID = SY-REPID .
+*- 選択画面の内容の取得
+CALL FUNCTION 'RS_REFRESH_FROM_SELECTOPTIONS'
+EXPORTING
+CURR_REPORT     = W_L_REPID
+TABLES
+SELECTION_TABLE = I_PRAMETER
+EXCEPTIONS
+NOT_FOUND       = 1
+NO_REPORT       = 2
+OTHERS          = 3 .
+IF SY-SUBRC <> 0 .
+MESSAGE S632 .
+STOP .
+ENDIF .
+
+IF NOT I_PRAMETER[] IS INITIAL .
+READ TEXTPOOL SY-REPID LANGUAGE SY-LANGU INTO I_TEXTPOOL .
+PERFORM FRM_PRINT_ITEM : USING 'P_LIFN2'  ,  "
+USING 'P_BUKRS'  ,  "
+USING 'S_ZFBDT'  ,  "
+USING 'S_WERKS'  ,  "
+USING 'S_EKORG'  ,  "
+USING 'S_EKGRP'  ,  "
+USING 'S_GSBER'  ,  "
+USING 'S_KEKKBN' .  "
+ENDIF.
+
+ENDFORM.                    " frm_get_parameter
+*----------------------------------------------------------------------*
+*   FORM PRINT_SEL_ITEM
+*----------------------------------------------------------------------*
+*       選択項目の表示
+*----------------------------------------------------------------------*
+*   -> P_SELNAME: PARAMETERS/SELECT-OPTIONS名
+*----------------------------------------------------------------------*
+FORM FRM_PRINT_ITEM  USING P_SELNAME .
+
+DATA : W_ENTRY     LIKE TEXTPOOL-ENTRY ,  "
+W_L_SUBRC   LIKE SY-SUBRC       .  " ﾘﾀｰﾝｺｰﾄﾞ の確保
+
+CLEAR W_ENTRY.
+*- パラメータ項目と取得データの項目が同じ場合のみ実行
+LOOP AT I_PRAMETER WHERE SELNAME = P_SELNAME .
+READ TABLE I_TEXTPOOL WITH KEY ID  = 'S'
+KEY = I_PRAMETER-SELNAME .
+W_L_SUBRC = SY-SUBRC .
+IF W_ENTRY = SPACE .
+IF W_L_SUBRC = 0 .
+W_ENTRY = I_TEXTPOOL-ENTRY(30) .
+ELSE .
+W_ENTRY = I_PRAMETER-SELNAME .
+ENDIF .
+WRITE:/03 W_ENTRY         ,  " 項目
+43 I_PRAMETER-KIND ,  " 選択タイプ
+56 I_PRAMETER-SIGN .  " ID: I/E (値を含む/含まない)
+ELSE.
+WRITE:/56 I_PRAMETER-SIGN .    " ID: I/E (値を含む/含まない)
+ENDIF .
+WRITE:  68 I_PRAMETER-OPTION .   " 選択オプション (EQ/BT/CP/...)
+*-- 日付項目の場合 yyyy/mm/dd の形式にて表示<low>
+IF P_SELNAME+2(5) <> 'ZFBDT' .
+WRITE:  79 I_PRAMETER-LOW .    " 選択値(LOW)
+ELSE .
+WRITE:  79 I_PRAMETER-LOW USING EDIT MASK '____/__/__' .
+ENDIF .
+*-- <high> が 初期値以外の場合
+IF NOT I_PRAMETER-HIGH IS INITIAL .
+WRITE: 89  TEXT-L33 .   " '～'
+*---- 日付項目の場合 yyyy/mm/dd の形式にて表示<low>
+IF P_SELNAME+2(5) <> 'ZFBDT'.
+WRITE:  91 I_PRAMETER-HIGH .
+ELSE.
+WRITE:  91 I_PRAMETER-HIGH USING EDIT MASK '____/__/__' .
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_kensu
+*&---------------------------------------------------------------------*
+*       件数表示
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_KENSU.
+
+WRITE:/03  TEXT-L34 ,   " 照合件数
+15  TEXT-L35 ,   " アンマッチ件数
+33  TEXT-L36 ,   " 未計上件数
+47  TEXT-L37 .   " 未請求件数
+ULINE .
+WRITE:/03(8) W_CNT_4       ,   " 照合件数
+18(8) W_CNT_3       ,   " アンマッチ件数
+34(8) W_CNT_2       ,   " 未計上件数
+48(8) W_CNT_1       .   " 未検収件数
+
+ENDFORM.                    " frm_write_kensu
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_errlist
+*&---------------------------------------------------------------------*
+*       エラーリスト
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_ERRLIST.
+
+WRITE:/001      TEXT-L38          ,   " エラーリスト
+/003(08)  TEXT-L03          ,   " プラント
+013(08)  TEXT-L04          ,   " 購買組織
+023(12)  TEXT-L05          ,   " 購買グループ
+037(10)  TEXT-L06          ,   " 会社コード
+049(08)  TEXT-L07          ,   " 事業領域
+059(15)  TEXT-L08 CENTERED ,   " 発注番号
+074(18)  TEXT-LA1 CENTERED ,   " 品目コード
+094(35)  TEXT-LA2 CENTERED ,   " 仕入先品目コード
+131(40)  TEXT-LA3 CENTERED ,   " 品目テキスト
+173(10)  TEXT-L12 CENTERED ,   " 締日
+185(14)  TEXT-L39 CENTERED .   " ステータス
+ULINE .
+SORT I_ERR BY KEY01 KEY02 KEY03 KEY04 KEY05
+KEY06 KEY07 KEY08 KEY09 KEY10 FLG SORT .
+LOOP AT I_ERR .
+MOVE-CORRESPONDING I_ERR TO ST_ERR .
+AT NEW KEY10 .
+NEW-LINE .
+PERFORM FRM_WRITE_MEISAI                       " プラント
+USING B_WERKS ST_ERR-WERKS '003' '08' 'X' .
+PERFORM FRM_WRITE_MEISAI                       " 購買組織
+USING B_EKORG ST_ERR-EKORG '013' '08' 'X' .
+PERFORM FRM_WRITE_MEISAI                       " 購買グループ
+USING B_EKGRP ST_ERR-EKGRP '023' '10' 'X' .
+PERFORM FRM_WRITE_MEISAI                       " 会社コード
+USING B_BUKRS ST_ERR-BUKRS '037' '10' 'X' .
+PERFORM FRM_WRITE_MEISAI                       " 事業領域
+USING B_GSBER ST_ERR-GSBER '049' '08' 'X' .
+PERFORM FRM_WRITE_MEISAI                       " 発注番号
+USING B_EBELN ST_ERR-EBELN '059' '15' 'X' .
+PERFORM FRM_WRITE_MEISAI                       " 品目コード
+USING B_MATNR ST_ERR-MATNR '074' '18' ''  .
+PERFORM FRM_WRITE_MEISAI                       " 仕入先品目コード
+USING B_IDNLF ST_ERR-IDNLF '094' '35' ''  .
+PERFORM FRM_WRITE_MEISAI                       " 品目テキスト
+USING B_MAKTX ST_ERR-MAKTX '131' '40' ''  .
+PERFORM FRM_WRITE_MEISAI                       " 締日
+USING B_DATUM ST_ERR-ZFBDT '173' '10' ''  .
+PERFORM FRM_WRITE_MEISAI                       " ステータス
+USING 'X'     ST_ERR-ERR   '185' '20' ''  .
+ENDAT .
+ENDLOOP .
+
+ENDFORM.                    " frm_write_errlist
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_meisai
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM FRM_WRITE_MEISAI
+USING P_CHECK P_MEISAI P_BEAM P_LENGTH P_CENTERED .
+
+IF     P_CHECK = 'X' AND P_CENTERED = 'X'        .
+WRITE AT P_BEAM(P_LENGTH)    P_MEISAI CENTERED .
+ELSEIF P_CHECK = 'X' AND P_CENTERED = SPACE      .
+WRITE AT P_BEAM(P_LENGTH)    P_MEISAI          .
+ENDIF .
+
+ENDFORM.                    " frm_write_meisai
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_tanka
+*&---------------------------------------------------------------------*
+*       単価チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_TANKA .
+
+IF B_TA_N <> 'X' .
+IF B_TA_W = 'X' AND B_TA_E = SPACE .
+W_CONDITIONS = C_FLG_WAR .
+W_CONSTANTS  = C_TANKA   .
+ELSE .
+W_CONDITIONS = C_FLG_ERR .
+W_CONSTANTS  = C_TANKA_E .
+ENDIF .
+PERFORM FRM_ITEM_CHECK
+USING    I_YK210_TOL-KNUNTPRC " 数量{請求データ}
+I_YK230_TOL-KNUNTPRC " 数量{仕入データ}
+W_CONDITIONS         " 照合条件
+W_CONSTANTS          " エラー理由
+'1'                  " ソート
+CHANGING W_TANKA           .  " 単価整合フラグ
+ENDIF .
+
+ENDFORM.                    " frm_check_tanka
+*&---------------------------------------------------------------------*
+*&      Form  GET_NUMBER 2003/05/06 ADD
+*&---------------------------------------------------------------------*
+*       初期番号取得
+*----------------------------------------------------------------------*
+FORM GET_NUMBER USING    P_W_NO.
+DATA W_INTERVAL LIKE NRIV.
+CLEAR P_W_NO.
+CALL FUNCTION 'NUMBER_GET_INFO'
+EXPORTING
+NR_RANGE_NR              = '10'
+OBJECT                   = 'YKPRCNO'
+*      TOYEAR                   =
+IMPORTING
+INTERVAL                 = W_INTERVAL
+EXCEPTIONS
+INTERVAL_NOT_FOUND       = 1
+OBJECT_NOT_FOUND         = 2
+OTHERS                   = 3.
+IF SY-SUBRC <> 0.
+MESSAGE S400 WITH 'E:処理番号範囲が定義されていません'.
+EXIT.
+ELSE.
+P_W_NO =  W_INTERVAL-NRLEVEL+10(10).
+ENDIF.
+
+ENDFORM.                    " GET_NUMBER
+*&---------------------------------------------------------------------*
+*&      Form  TABLE_CHK 2003/05/06 ADD
+*&---------------------------------------------------------------------*
+*       テーブル内容チェック
+*----------------------------------------------------------------------*
+FORM TABLE_CHK.
+DATA:W_SAGAKU LIKE YK260-P_KNIT,
+W_PRCNO(10)   TYPE P,
+W_PRCNO_n(10) TYPE N,       "2003/05/28 ADD
+W_E_FLG,
+W_SUBRC LIKE SY-SUBRC.     "2003/05/28 ADD
+SORT I_YK210_SUM BY PRCNO.
+SORT I_YK230_SUM BY PRCNO.
+W_PRCNO = W_INIT_NO.
+DO.
+CLEAR W_SUBRC.              "2003/05/28 ADD
+W_PRCNO_n = W_PRCNO.         "2003/05/28 ADD
+IF W_PRCNO <= W_END_NO.
+CLEAR:I_YK230_SUM,I_YK210_SUM.
+READ TABLE I_YK210_SUM WITH KEY PRCNO = W_PRCNO_n.
+*2003/05/28 ADD START
+W_SUBRC = SY-SUBRC.
+*2003/05/28 ADD END
+READ TABLE I_YK230_SUM WITH KEY PRCNO = W_PRCNO_n.
+*2003/05/28 ADD START 両方読込めなければ次の処理番号へ処理を飛ばす
+IF SY-SUBRC <> 0 AND W_SUBRC <> 0.
+W_PRCNO = W_PRCNO + 1.
+CONTINUE.
+ENDIF.
+*2003/05/28 ADD END
+W_SAGAKU = ABS( I_YK210_SUM-KNITXAMT - I_YK230_SUM-PIDAMT ) .
+*      IF W_SAGAKU < 0.
+*        W_SAGAKU = W_SAGAKU * -1.
+*      ENDIF.
+IF W_SAGAKU > P_KNIT.
+W_E_FLG = 'X'.
+ROLLBACK WORK.
+MESSAGE E400 WITH
+'更新処理に障害がありました。システム管理者へ連絡して下さい'.
+STOP.
+ENDIF.
+W_PRCNO = W_PRCNO + 1.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+IF W_E_FLG <> 'X'.
+COMMIT WORK.
+ENDIF.
+
+
+ENDFORM.                    " TABLE_CHK

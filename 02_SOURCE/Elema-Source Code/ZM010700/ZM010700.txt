@@ -1,0 +1,2686 @@
+**********************************************************************
+*
+* [プログラム名]
+*   ZM010700        入庫荷札
+*
+* [処理概要]
+*   入庫荷札をＳＶＦサーバへ出力
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/01/30   PSD T.SAITOH      新規開発
+*  2002/02/15   PSD T.SAITOH      出力枚数対応
+*  2002/03/05   PSD T.SAITOH      取消伝票ロジック変更
+*  2002/03/19   PSD T.SAITOH      単位変換ロジック修正
+*  2002/03/29   PSD T.SAITOH      READ_TEXTのパラメータを修正
+*  2002/03/29   PSD T.SAITOH      仕様変更：MSEG-SGTXTがあれば優先設定
+*  2002/04/23   PSD T.SAITOH      仕様変更：品目マスタから取得せず
+*                                 購買伝票から取得する
+*  2002/05/10   PSD T.SAITOH      存在チェックメッセージ変更
+*  2002/05/10   PSD T.SAITOH      NASTゼロ件時のメッセージ変更
+*  2002/05/27   PSD K.ARAI        数量カンマ編集の修正
+*  2002/05/28   PSD K.ARAI        パフォーマンス対応
+*  2002/05/30   PSD K.ARAI        出荷先名取得方法変更
+*                                 社内用→荷札納品書備考変更
+*  2002/06/20   PSD T.SAITOH      再移送
+*  2002/07/10   PSD T.SAITOH      購買組織、販売組織関連対応
+*  2002/07/24   PSD T.SAITOH      チェック場所移動
+*  2002/08/06   PSD T.SAITOH      ロックユーザーＩＤ取得
+*  2002/08/10   PSD T.SAITOH
+*                個別購買も在庫品も共通化するためここでは削除：仕様変更
+*  2002/08/10   PSD T.SAITOH      入力ヘルプ得意先を仕入先に修正
+*  2002/08/27   PSD T.SAITOH      発注伝票番号、発注伝票明細の追加
+*  2003/04/25   NDSC S.IWAKI      パフォーマンス対応
+*  2005/02/08   DMC M.SEIWA       登録者を絞込条件に追加
+*  2008/05/29   DMC               1.S_KUNNRの選択ﾃｷｽﾄを「得意先」に変更
+*                                 2.S_USNAMを「登録者」にする
+*                                 3.選択画面に仕入先コードを追加
+*                                 4.仕入先存在チェック追加
+*                                 5.MSEG抽出の際にEMLIF IN S_LIFNR
+*                                   の条件を追加
+*                                 6.EKKO抽出の際にEMLIF IN S_LIFNR
+*                                   の条件を追加
+*  2009/09/16   SOL T.HAYASHI     1.仕入先勘定コードを追加
+*                                 2.ファイル出力内容のソート基準変更
+*& 2012/08/21   ISID              ES-UP
+*  2014/09/01   ISID11            コードページUTF-8の改修
+*  2015/01/23   ISID11            コードページの再修正
+*  2016/02/26   ISID18            ロット対応、バーコード対応追加
+**********************************************************************
+REPORT  ZM010700
+LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+*---------------------------------------------------------------------
+* TYPES & DATA
+*---------------------------------------------------------------------
+TYPE-POOLS SLIS.
+*---APPEND START PSD T.SAITOH 2002/08/10 ---------------------------*
+* 検索ヘルプを仕入先に変更
+TABLES: LFA1,
+MKPF. "2005/02/08 ADD
+*---APPEND END   PSD T.SAITOH 2002/08/10 ---------------------------*
+
+*--- メッセージステータスデータ型
+TYPES: BEGIN OF TYP_NAST,
+KAPPL      TYPE NAST-KAPPL,        " アプリケーション
+OBJKY      TYPE NAST-OBJKY,        " 対象キー
+KSCHL      TYPE NAST-KSCHL,        " メッセージタイプ
+LDEST      TYPE NAST-LDEST,        " 出力デバイス
+ERDAT      TYPE NAST-ERDAT,        " 登録日
+ERUHR      TYPE NAST-ERUHR,        " 登録時間
+DATVR      TYPE NAST-DATVR,        " 処理日
+UHRVR      TYPE NAST-UHRVR,        " 処理時間
+VSTAT      TYPE NAST-VSTAT,        " 出力処理ステータス
+END   OF TYP_NAST.
+
+DATA: GT_NAST TYPE TABLE OF TYP_NAST,   "メッセージステータス内部ＴＢＬ
+GF_NAST TYPE TYP_NAST,            "メッセージステータス構造
+GT_RENEW_NAST TYPE TABLE OF TYP_NAST,"メッセージステータス更新用
+GF_RENEW_NAST TYPE TYP_NAST,         "メッセージステータス更新用
+GT_LOCK_NAST  TYPE TABLE OF TYP_NAST,"ロック対象判断情報内部TBL
+GF_LOCK_NAST  TYPE TYP_NAST.         "ロック対象判断情報構造
+*--- プラント型
+TYPES: BEGIN OF TYP_T001W,
+WERKS TYPE T001W-WERKS,
+NAME1 TYPE T001W-NAME1,
+END OF TYP_T001W.
+* MODIFY PSD K.ARAI 2002/05/28
+DATA: GT_T001W TYPE HASHED TABLE  OF  TYP_T001W
+WITH   UNIQUE KEY WERKS,
+"プラント内部ＴＢＬ
+*DATA: GT_T001W TYPE TABLE OF TYP_T001W,"プラント内部ＴＢＬ
+* MODIFY END
+GF_T001W TYPE TYP_T001W.         "プラント構造
+
+*--- 得意先型
+TYPES: BEGIN OF TYP_KNA1,
+KUNNR TYPE KNA1-KUNNR,
+*---MODIFY START PSD T.SAITOH 2002/05/30 ---------------------------*
+*  NAME2 TYPE KNA1-NAME2,
+NAME2 TYPE ADRC-NAME2,
+*---MODIFY END   PSD T.SAITOH 2002/05/30 ---------------------------*
+END OF TYP_KNA1.
+* MODIFY PSD K.ARAI 2002/05/28
+DATA: GT_KNA1 TYPE HASHED TABLE OF TYP_KNA1
+WITH   UNIQUE KEY KUNNR,
+"得意先内部ＴＢＬ
+*DATA: GT_KNA1 TYPE TABLE OF TYP_KNA1,"得意先内部ＴＢＬ
+* MODIFY END
+GF_KNA1 TYPE TYP_KNA1.         "得意先構造
+
+*--- 入出庫伝票型
+TYPES: BEGIN OF TYP_MSEG,
+MBLNR  TYPE MSEG-MBLNR, "入出庫伝票番号
+MJAHR  TYPE MSEG-MJAHR, "入出庫伝票年度
+ZEILE  TYPE MSEG-ZEILE, "入出庫伝票明細
+MATNR  TYPE MSEG-MATNR, "品目コード
+WERKS  TYPE MSEG-WERKS, "プラント
+LGORT  TYPE MSEG-LGORT, "保管場所
+KDAUF  TYPE MSEG-KDAUF, "受注伝票番号
+KDPOS  TYPE MSEG-KDPOS, "受注明細
+EBELN  TYPE MSEG-EBELN, "購買発注番号
+EBELP  TYPE MSEG-EBELP, "購買発注明細
+BWART  TYPE MSEG-BWART, "移動タイプ
+ERFMG  TYPE MSEG-ERFMG, "数量(入力単位での数量)
+ERFME  TYPE MSEG-ERFME, "入力単位
+SJAHR  TYPE MSEG-SJAHR, "取消入出庫伝票年度
+SMBLN  TYPE MSEG-SMBLN, "取消入出庫伝票番号
+SMBLP  TYPE MSEG-SMBLP, "取消入出庫伝票明細
+BUDAT  TYPE MKPF-BLDAT, "入出庫日
+*---APPEND START PSD T.SAITOH 2002/03/29 ---------------------------*
+SGTXT  TYPE MSEG-SGTXT, "明細テキスト（社内用備考）
+*---APPEND END   PSD T.SAITOH 2002/03/29 ---------------------------*
+***** 2016/2/26 ISID18 INS START *****
+CHARG  TYPE MSEG-CHARG,  "ロット番号
+***** 2016/2/26 ISID18 INS END *****
+END OF TYP_MSEG.
+
+*---2003/04/25 UPDATE START S.IWAKI(NDSC)
+*DATA: GT_MSEG TYPE TABLE OF TYP_MSEG,"入出庫伝票内部ＴＢＬ
+DATA: GT_MSEG TYPE HASHED TABLE OF TYP_MSEG "入出庫伝票内部ＴＢＬ
+WITH UNIQUE KEY MBLNR MJAHR ZEILE,
+*---2003/04/25 UPDATE END   S.IWAKI(NDSC)
+GF_MSEG TYPE TYP_MSEG.         "入出庫伝票構造
+
+*--- 品目テキスト型
+TYPES: BEGIN OF TYP_MAKT,
+MAKTX TYPE MAKT-MAKTX,"品目テキスト
+END   OF TYP_MAKT.
+DATA:GT_MAKT TYPE TABLE OF TYP_MAKT,"品目テキスト内部ＴＢＬ
+GF_MAKT TYPE TYP_MAKT.         "品目テキスト構造
+
+*--- 品目マスタ型
+TYPES: BEGIN OF TYP_MARD,
+LGPBE TYPE MARD-LGPBE,"棚番
+MTART TYPE MARA-MTART,"品目タイプ
+END   OF TYP_MARD.
+DATA:GT_MARD TYPE TABLE OF TYP_MARD,"品目マスタ内部ＴＢＬ
+GF_MARD TYPE TYP_MARD.         "品目マスタ構造
+
+*--- 販売伝票ヘッダ型
+TYPES: BEGIN OF TYP_VBAK,
+KUNNR TYPE VBAK-KUNNR, "受注先
+VKORG TYPE VBAK-VKORG, "販売組織
+VTWEG TYPE VBAK-VTWEG, "流通チャンネル
+BSTNK TYPE VBAK-BSTNK, "得意先発注番号
+*---APPEND START PSD T.SAITOH 2002/07/10 ---------------------------*
+SPART TYPE VBAK-SPART, "製品部門
+*---APPEND END   PSD T.SAITOH 2002/07/10 ---------------------------*
+END OF TYP_VBAK.
+DATA:GT_VBAK TYPE TABLE OF TYP_VBAK,"販売伝票Ｈ内部ＴＢＬ
+GF_VBAK TYPE TYP_VBAK.         "販売伝票Ｈ構造
+
+*--- ファイル出力前データヘッダ格納型
+TYPES: BEGIN OF TYP_FILELISTH,
+REPID      TYPE SYST-REPID, "プログラム名
+UNAME      TYPE SYST-UNAME, "ユーザログオン名
+UZEIT      TYPE SYST-UZEIT, "日付と時刻
+EXTNS(4)   TYPE C,          "拡張子
+APITS(7)   TYPE C,          "APIタグ(開始)
+APIFC(14)  TYPE C,          "API関数(文書名)
+DBLT1      TYPE C,          "ダブルクオート
+TITLS      TYPE SYST-TITLE, "帳票名
+BRCKTR(1)  TYPE C,          "右括弧 (
+USRID      TYPE SYST-UNAME, "ユーザＩＤ
+BRCKTL(1)  TYPE C,          "左括弧 )
+DBLT2      TYPE C,          "ダブルクオート
+APITE(5)   TYPE C,          "APIタグ(終了)
+TLINE(300) TYPE C,          "タイトル行
+END OF TYP_FILELISTH.
+
+DATA: GT_FILELISTH TYPE TABLE OF TYP_FILELISTH,"ファイル出力前内部TBL
+GF_FILELISTH TYPE          TYP_FILELISTH."ファイル出力前構造
+
+TYPES: BEGIN OF TYP_FILELISTD,
+PAPROSNAME TYPE TSP03D-PAPROSNAME,"デバイス
+TITLF(8)   TYPE C,          "帳票名
+DATUM      TYPE SYST-DATUM, "出力日
+MBLNR(20)  TYPE C,          "入出庫伝票+明細+年度
+*---MODIFY START PSD T.SAITOH 2002/05/30 ---------------------------*
+*       NAME2      TYPE KNA1-NAME2, "出荷先名
+NAME2      TYPE ADRC-NAME2, "出荷先名
+*---MODIFY END   PSD T.SAITOH 2002/05/30 ---------------------------*
+REOUT      TYPE C,          "再発行区分
+LTGCF(3)   TYPE C,          "出庫区分
+BSTNK      TYPE VBAK-BSTNK, "注文番号
+KDAUF      TYPE MSEG-KDAUF, "受注番号
+KDMAT      TYPE KNMT-KDMAT, "図版
+MATNR      TYPE MSEG-MATNR, "ＣＤ
+MAKTX      TYPE MAKT-MAKTX, "商品名
+EDATU      TYPE VBEP-EDATU, "納期
+TEXTC(132) TYPE C,          "社内用備考
+ERFMG(24)  TYPE C,          "数量
+*---MODIFY START PSD T.SAITOH 2002/03/19 単位変換対応----------------*
+*       ZIEME      TYPE VBAP-ZIEME, "単位
+ZIEME(3)   TYPE C,          "単位
+*---MODIFY END   PSD T.SAITOH 2002/03/19 ---------------------------*
+LGPBE      TYPE MARD-LGPBE, "棚番
+STKCF      TYPE C,          "在庫品区分
+NAME1      TYPE T001W-NAME1,"営業所名
+*---APPEND START PSD T.SAITOH 2002/08/27 ---------------------------*
+*      項目追加：発注伝票番号／発注明細番号
+EBELN(10)  TYPE C,          "発注伝票番号
+EBELP(5)   TYPE C,          "発注明細番号
+*---APPEND END   PSD T.SAITOH 2002/08/27 ---------------------------*
+*---APPEND START SOL T.HAYASHI 2009/09/17 --------------------------*
+*項目追加：仕入先勘定コード
+LIFNR TYPE EKKO-LIFNR,
+*---APPEND END SOL T.HAYASHI 2009/09/17 --------------------------*
+***** 2016/2/26 ISID18 INS START *****
+*ロット対応用項目追加
+HSDAT TYPE HSDAT,       "製造日付
+VFDAT TYPE VFDAT,       "有効期間期限日
+LWEDT TYPE LWEDT,       "前回入庫日付
+HSDAT_CHAR TYPE CHAR8,       "製造日付
+VFDAT_CHAR TYPE CHAR8,       "有効期間期限日
+LWEDT_CHAR TYPE CHAR8,       "前回入庫日付
+CHARG TYPE CHARG_D,   "ロット番号
+LICHA TYPE LICHN,          "仕入先ロット
+VENDORLOT TYPE CHAR30,  "仕入先ロット（長）
+VENDORMEMO TYPE CHAR30,  "仕入先メモ
+CUSTOMMEMO TYPE CHAR30, "得意先メモ
+***** 2016/2/26 ISID18 INS END *****
+END OF TYP_FILELISTD.
+
+DATA: GT_FILELISTD TYPE TABLE OF TYP_FILELISTD,"ファイル出力前内部TBL
+GF_FILELISTD TYPE          TYP_FILELISTD."ファイル出力前構造
+
+*---APPEND START PSD T.SAITOH 2002/03/19 単位変換対応----------------*
+DATA: GW_ZIEME   TYPE VBAP-ZIEME.  "単位
+*---APPEND END   PSD T.SAITOH 2002/03/19 ---------------------------*
+
+*--- スプール：デバイス名（長）データ型
+TYPES: BEGIN OF TYP_TSP03L,
+LNAME  TYPE TSP03L-LNAME,       "デバイス名（長）
+PADEST TYPE TSP03L-PADEST,      "出力デバイスの略称
+END   OF TYP_TSP03L.
+* MODIFY PSD K.ARAI 2002/05/28
+DATA: GT_TSP03L TYPE HASHED TABLE  OF TYP_TSP03L
+WITH   UNIQUE KEY LNAME,
+*DATA: GT_TSP03L TYPE TABLE OF TYP_TSP03L,
+"スプールデバイス内部ＴＢＬ
+* MODIFY END
+GF_TSP03L TYPE TYP_TSP03L.         "スプールデバイス構造
+
+*--- ファイルデータ型
+TYPES: BEGIN OF TYP_FILE,
+* Mod ES-UP 2012/10/30 -->
+*         DATA(300)  TYPE C,
+DATA  TYPE STRING,
+* Mod ES-UP 2012/10/30 <--
+END   OF TYP_FILE.
+
+DATA: GT_FILE TYPE TABLE OF TYP_FILE,"ファイルデータ型内部ＴＢＬ
+GF_FILE TYPE TYP_FILE.         "ファイルデータ型構造
+
+*---
+DATA: G_REPID                 TYPE SY-REPID,        " プログラムＩＤ
+G_DATA                  TYPE SY-DATUM,        " システム日付
+G_FILENAME(62)          TYPE C,               " ファイル名
+G_FILEOPENNAME(62)      TYPE C.               " ファイルＯＰＥＮ名
+DATA:G_TMP_SY_SUBRC LIKE SY-SUBRC."SY-SUBRCの保存
+
+*--- カウンタ定義
+DATA: CNT_DATA(10)             TYPE N,     " データ件数
+CNT_ERR(10)              TYPE N.     " データ件数
+
+*--- フラグ定義
+DATA: FLG_ERR(1)               TYPE C,     " データ件数
+FLG_MSEG_DEL             TYPE C,     " 取消入出庫伝票フラグ
+FLG_EXIT_DEV             TYPE C.     " デバイス名取得不能フラグ
+DATA: G_KNTTP TYPE EKPO-KNTTP.             " 勘定設定カテゴリ
+DATA: P_FILE(60)               TYPE C.     " ファイルパス
+
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+DATA: GT_SEQG3 LIKE TABLE OF SEQG3 WITH HEADER LINE,
+GF_SEQG3 LIKE SEQG3.
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+
+***** 2016/2/26 ISID18 INS START *****
+*  ロット関連取得用構造定義
+TYPES:
+BEGIN OF TYP_MCHA,
+CHARG TYPE MCHA-CHARG,        "ロット番号
+VFDAT TYPE MCHA-VFDAT,         "有効期限
+LICHA TYPE MCHA-LICHA,          "仕入先ロット
+LWEDT TYPE MCHA-LWEDT,        "前回入庫日付
+HSDAT TYPE MCHA-HSDAT,        "製造日付
+END OF TYP_MCHA.
+***** 2016/2/26 ISID18 INS END *****
+
+*--------------------------------------------------------------------
+* 定数宣言
+*--------------------------------------------------------------------
+CONSTANTS: CNS_NAST(4)    TYPE C VALUE 'NAST',
+CNS_NAST_J(20) TYPE C VALUE 'メッセージステータス',
+CNS_VBEP(4)    TYPE C VALUE 'VBEP',
+CNS_VBAK(4)    TYPE C VALUE 'VBAK',
+*           CNS_VBAK_J(14) TYPE C VALUE '販売伝票ヘッダ',
+CNS_MAKT(4)    TYPE C VALUE 'MAKT',
+CNS_EKPO(4)    TYPE C VALUE 'EKPO',
+CNS_MARA(4)    TYPE C VALUE 'MARA',
+CNS_EKET(4)    TYPE C VALUE 'EKET',
+CNS_LIPS(9)    TYPE C VALUE 'LIKP LIPS',
+CNS_VBAP(9)    TYPE C VALUE 'VBAK VBAP',
+CNS_MARD(9)    TYPE C VALUE 'MARD MARA',
+CNS_KNMT(4)    TYPE C VALUE 'KNMT',
+CNS_VBKD(4)    TYPE C VALUE 'VBKD',
+CNS_KNA1(4)    TYPE C VALUE 'KNA1',
+CNS_T001W(5)   TYPE C VALUE 'T001W',
+CNS_LIKP(4)    TYPE C VALUE 'LIKP',
+CNS_TSP03L(6)  TYPE C VALUE 'TSP03L',
+CNS_T685T(5)   TYPE C VALUE 'T685T',
+CNS_J(1)       TYPE C VALUE 'J',
+CNS_X(1)       TYPE C VALUE 'X',
+CNS_NSHT(8)    TYPE C VALUE '出力枚数',
+CNS_PUT(8)     TYPE C VALUE '通常出力',
+CNS_RPUT(8)    TYPE C VALUE '再出力',
+CNS_09(1)      TYPE X VALUE '09',
+CNS_T001W_J(8) TYPE C VALUE 'プラント',
+CNS_KNA1_J(12)   TYPE C VALUE '得意先マスタ',
+*---ADD START DMC 2008/05/29 ---------------------------*
+CNS_LFA1_J(12)   TYPE C VALUE '仕入先マスタ',
+*---ADD END   DMC 2008/05/29 ---------------------------*
+CNS_KDAUF_J(12)  TYPE C VALUE '受注伝票番号',
+CNS_VBAK_J(12)   TYPE C VALUE '販売伝票',
+CNS_EBELN_J(12)  TYPE C VALUE '発注伝票番号',
+CNS_EKKO_J(12)   TYPE C VALUE '購買伝票',
+CNS_TSP03L_J(12) TYPE C VALUE '出力デバイス',
+CNS_MSEG(4) TYPE C VALUE 'MSEG',
+CNS_TXT(4)  TYPE C VALUE '.txt',
+CNS_PGM_TITLE(8)  TYPE C VALUE '入庫荷札',
+CNS_STOCK_J(4)    TYPE C VALUE '在庫',
+CNS_GETDATA_J(14) TYPE C VALUE '【データ取得】',
+CNS_NODATA_J(32) TYPE C VALUE 'の対象データがありませんでした。',
+CNS_SLIP_J(8)     TYPE C VALUE '伝票番号',
+CNS_NODATAB_J(20) TYPE C VALUE '取得できませんでした',
+CNS_NO_J(2)       TYPE C VALUE 'の',
+CNS_KDAUF_EBELN_J(26) TYPE C VALUE '受注伝票番号か発注伝票番号'
+*          CNS_*(1)       TYPE C VALUE '*'
+.
+**** START DEL 2014/09/01 ISID11 ****
+** Mod ES-UP 2012/08/21 -->
+**CONSTANTS: CNSX_TAB     TYPE X VALUE '09'."TABコード
+*CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+** Mod ES-UP 2012/08/21 <--
+**** END DEL 2014/09/01 ISID11 ****
+
+*---APPEND START PSD T.SAITOH 2002/07/10 ---------------------------*
+* 販売伝票ヘッダの販売組織／流通チャネル／製品部門で該当なしの場合
+* 対象外とするための変数追加
+DATA: G_VBAK_RETURN LIKE SY-SUBRC."VBAK読込時のリターンコード
+* 購買伝票ヘッダの購買組織で該当なしの場合
+* 対象外とするための変数追加
+DATA: G_EKKO_RETURN LIKE SY-SUBRC."EKKO読込時のリターンコード
+*---APPEND END   PSD T.SAITOH 2002/07/10 ---------------------------*
+*--------------------------------------------------------------------
+* 選択画面定義
+*--------------------------------------------------------------------
+*---APPEND START PSD T.SAITOH 2002/07/10 ---------------------------*
+* 組織対応
+* 購買組織
+PARAMETERS: PR_EKORG TYPE T024E-EKORG MEMORY ID EKO OBLIGATORY.
+* 販売組織・流通チャネル・製品部門
+PARAMETERS: PR_VKORG TYPE VBAK-VKORG MEMORY ID VKO OBLIGATORY,
+PR_VTWEG TYPE VBAK-VTWEG MEMORY ID VTW OBLIGATORY,
+PR_SPART TYPE VBAK-SPART MEMORY ID SPA OBLIGATORY.
+*---APPEND END   PSD T.SAITOH 2002/07/10 ---------------------------*
+*--- プラント
+SELECT-OPTIONS: S_WERKS FOR GF_MSEG-WERKS OBLIGATORY.
+*--- 入出庫日
+SELECT-OPTIONS: S_BUDAT FOR GF_MSEG-BUDAT.
+*--- 得意先
+*---MODIFY START PSD T.SAITOH 2002/08/10 ---------------------------*
+*SELECT-OPTIONS: S_KUNNR FOR GF_KNA1-KUNNR.
+SELECT-OPTIONS: S_KUNNR FOR LFA1-LIFNR.
+*---MODIFY END   PSD T.SAITOH 2002/08/10 ---------------------------*
+*---ADD START DMC 2008/05/29 ---------------------------*
+*--- 仕入先
+SELECT-OPTIONS: S_LIFNR FOR LFA1-LIFNR.
+*---ADD END   DMC 2008/05/29 ---------------------------*
+*--- 出力枚数
+PARAMETERS: PR_NMOUT(2) TYPE N DEFAULT '1'.
+*--- 通常出力
+PARAMETERS: PR_OUTNR RADIOBUTTON GROUP RDOG.
+*--- 再出力
+PARAMETERS: PR_REOUT RADIOBUTTON GROUP RDOG.
+*--- 受注伝票番号
+SELECT-OPTIONS: S_KDAUF FOR GF_MSEG-KDAUF.
+*--- 発注伝票番号
+SELECT-OPTIONS: S_EBELN FOR GF_MSEG-EBELN.
+
+*---登録者
+SELECT-OPTIONS: S_USNAM FOR MKPF-USNAM.  "2005/02/09　ADD
+
+
+*--- プリンタ／トレイ
+PARAMETERS: P_PRNTR TYPE TSP03L-LNAME.
+*--- ファイルパス
+*PARAMETERS: P_FILE(20) TYPE C NO-DISPLAY.
+***** 2016/2/26 ISID18 INS START *****
+*--- ロット有り
+PARAMETERS: CB_LOT TYPE CHAR1 AS CHECKBOX.
+*--- バーコード有り
+PARAMETERS: CB_BARCD TYPE CHAR1 AS CHECKBOX.
+***** 2016/2/26 ISID18 INS END *****
+
+*--------------------------------------------------------------------
+* INITIALIZATION
+*--------------------------------------------------------------------
+INITIALIZATION .
+*  GET PARAMETER ID 'ZSVF' FIELD P_FILE.
+G_REPID = SY-REPID.
+PERFORM FRM_SELECT_TSP03L.
+*---------------------------------------------------------------------
+* AT SELECTION-SCREEN
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN.
+*---プログラムID設定
+G_REPID = SY-REPID.
+*---入力パラメータチェック
+*---ファイル作成先ディレクトリチェック
+PERFORM FRM_CHECK_DIR.
+*---プリント枚数チェック
+PERFORM FRM_CHECK_PRINT.
+*---不正な入力
+PERFORM FRM_CHECK_INPUT.
+*  CASE SY-UCOMM.
+*   実行ボタン押下時
+*    WHEN 'ONLI'.
+PERFORM FRM_CHECK_SHEETS.
+*    WHEN OTHERS.
+*  ENDCASE.
+*---デバイス名存在チェック
+PERFORM FRM_CHECK_TSP03L.
+*---DELETE START PSD T.SAITOH 2002/07/24 ---------------------------*
+**---プラント存在チェック
+*  PERFORM FRM_CHECK_WERKS.
+**---仕入先存在チェック（受注先＝得意先のこと）
+*  PERFORM FRM_CHECK_KUNNR.
+**---受注伝票存在チェック
+*  PERFORM FRM_CHECK_VBAK.
+**---発注伝票存在チェック
+*  PERFORM FRM_CHECK_EKKO.
+*---DELETE END   PSD T.SAITOH 2002/07/24 ---------------------------*
+
+*---------------------------------------------------------------------
+* START-OF-SELECTION
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+
+*---APPEND START PSD T.SAITOH 2002/07/24 ---------------------------*
+*---プラント存在チェック
+PERFORM FRM_CHECK_WERKS.
+*---仕入先存在チェック（受注先＝得意先のこと）
+PERFORM FRM_CHECK_KUNNR.
+*---ADD START DMC 2008/05/29 ---------------------------*
+* 仕入先の存在チェックを行なう
+PERFORM FRM_CHECK_LIFNR.
+*---ADD END   DMC 2008/05/29 ---------------------------*
+*---受注伝票存在チェック
+PERFORM FRM_CHECK_VBAK.
+*---発注伝票存在チェック
+PERFORM FRM_CHECK_EKKO.
+*---APPEND END   PSD T.SAITOH 2002/07/24 ---------------------------*
+
+PERFORM FRM_SELECT_NAST.  "メッセージステータス読込
+PERFORM FRM_SELECT_TSP03L."全スプールデバイス読込
+PERFORM FRM_SELECT_MSEG.  "入出庫伝票読込
+PERFORM FRM_DATA_SET.     "データをセットする
+PERFORM FRM_FILELIST_SET. "ファイルリストを設定する
+PERFORM FRM_FILENAME_MAKE."ファイル名を設定する
+
+*  PERFORM FRM_NOW_TEST."テスト中
+
+PERFORM FRM_RENEW_NAST.    "メッセージステータスを更新する
+PERFORM FRM_SEND_FILE.     "ファイルをサーバへ転送
+PERFORM FRM_GOOD_END.      "正常終了
+
+END-OF-SELECTION.
+PERFORM FRM_DEQUEUE_EZNAST."テーブルロック解除処理
+
+* PERFORM CHECK PROCESS --------------------------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_SHEETS
+*&------------------------------------------------------------------*
+*       「再出力」がチェックされているときの伝票番号チェック
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_SHEETS.
+*     再出力時で伝票番号が未入力はエラー
+IF     PR_REOUT = CNS_X
+AND S_KDAUF IS INITIAL
+AND S_EBELN IS INITIAL.
+MESSAGE E006(Z1) WITH CNS_KDAUF_EBELN_J.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_SHEETS
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_INPUT
+*&------------------------------------------------------------------*
+*       実行時、伝票番号を両方入力したときのチェック
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_INPUT.
+*     伝票番号を両方に入力した場合はエラー
+IF     NOT ( S_KDAUF IS INITIAL )
+AND NOT ( S_EBELN IS INITIAL ).
+MESSAGE E605(Z1) WITH CNS_KDAUF_J
+CNS_EBELN_J.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_INPUT
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_WERKS
+*&------------------------------------------------------------------*
+*       プラントコードの存在チェックを行なう
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_WERKS.
+
+SELECT WERKS
+NAME1
+FROM T001W
+INTO CORRESPONDING FIELDS OF TABLE GT_T001W
+WHERE WERKS IN S_WERKS.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE E600(Z1) WITH CNS_T001W_J.
+STOP.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'T001W' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CHECK_WERKS
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_KUNNR
+*&------------------------------------------------------------------*
+*       得意先の存在チェックを行なう
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_KUNNR.
+
+SELECT KUNNR
+NAME2
+FROM KNA1
+INTO CORRESPONDING FIELDS OF TABLE GT_KNA1
+WHERE KUNNR IN S_KUNNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE E600(Z1) WITH CNS_KNA1_J.
+STOP.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'KNA1' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CHECK_KUNNR
+*---ADD START DMC 2008/05/29 ---------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_LIFNR
+*&------------------------------------------------------------------*
+*       仕入先の存在チェックを行なう
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_LIFNR.
+DATA: L_ITAB_LIFNR TYPE TABLE OF LFA1-LIFNR.
+SELECT LIFNR
+FROM LFA1                      "仕入先マスタ
+INTO TABLE L_ITAB_LIFNR
+WHERE LIFNR IN S_LIFNR.        "仕入先
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE E600(Z1) WITH CNS_LFA1_J.
+STOP.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'LFA1' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CHECK_LIFNR
+*---ADD END   DMC 2008/05/29 ---------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_VBAK
+*&------------------------------------------------------------------*
+*       販売伝票（＝受注伝票番号）存在チェック
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_VBAK.
+
+DATA L_VBELN TYPE VBAK-VBELN.
+*--- 受注伝票番号存在チェック
+SELECT SINGLE VBELN
+INTO (L_VBELN)
+FROM VBAK
+WHERE VBELN IN S_KDAUF.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+MESSAGE E613(Z1) WITH CNS_KDAUF_J
+CNS_VBAK_J.
+STOP.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+'VBAK'
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CHECK_VBAK
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_EKKO
+*&------------------------------------------------------------------*
+*       購買伝票（＝発注伝票番号）存在チェック
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_EKKO.
+
+DATA L_EBELN TYPE EKKO-EBELN.
+*--- 発注伝票番号存在チェック
+SELECT SINGLE EBELN
+INTO (L_EBELN)
+FROM EKKO
+WHERE EBELN IN S_EBELN
+*---ADD START DMC 2008/05/29 ---------------------------*
+AND LIFNR IN S_LIFNR.    "仕入先勘定コード
+*---ADD END   DMC 2008/05/29 ---------------------------*
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+MESSAGE E613(Z1) WITH CNS_EBELN_J
+CNS_EKKO_J.
+STOP.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+'EKKO'
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CHECK_EKKO
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_TSP03L
+*&------------------------------------------------------------------*
+*       スプールデバイス存在チェック
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_TSP03L.
+*--- スプール名がブランクのときはチェックを行なわない。
+IF P_PRNTR <> SPACE.
+* MODIFY PSD K.ARAI 2002/05/28
+READ TABLE GT_TSP03L INTO GF_TSP03L WITH TABLE KEY
+LNAME = P_PRNTR.
+*    READ TABLE GT_TSP03L INTO GF_TSP03L WITH KEY
+*                                        LNAME = P_PRNTR.
+* MODIFY END
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+CNT_ERR = CNT_ERR + 1.
+*---MODIFY START PSD T.SAITOH 2002/05/10 ---------------------------*
+*        MESSAGE E614(Z1) WITH CNS_TSP03L_J.
+MESSAGE E614(Z1) WITH TEXT-032.
+*---MODIFY END   PSD T.SAITOH 2002/05/10 ---------------------------*
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_TSP03L
+SY-SUBRC.
+ENDCASE.
+
+ENDIF.
+ENDFORM.                    " FRM_TSP03L_GET
+* PERFORM READ   PROCESS ------------------------------------------*
+*&-----------------------------------------------------------------*
+*&      Form  FRM_READ_TSP03L
+*&------------------------------------------------------------------*
+*       スプールデバイス内部ＴＢＬ読込処理
+*-------------------------------------------------------------------*
+* --> P_PADEST:スプール 出力デバイスの略称
+* <-- PF_TSP03L:スプール 出力デバイスの略称、スプール デバイス名 (長)
+*-------------------------------------------------------------------*
+FORM FRM_READ_TSP03L USING    P_PADEST
+CHANGING PF_TSP03L LIKE GF_TSP03L.
+
+READ TABLE GT_TSP03L INTO GF_TSP03L WITH KEY
+PADEST = P_PADEST.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+FLG_EXIT_DEV = CNS_X.
+CNT_ERR = CNT_ERR + 1.
+PERFORM FRM_NODATA_MESSAGE USING GF_NAST-OBJKY
+CNS_TSP03L_J.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_TSP03L
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_READ_TSP03L
+*&-----------------------------------------------------------------*
+*&      Form  FRM_READ_TSP03L_R
+*&------------------------------------------------------------------*
+*       スプールデバイス内部ＴＢＬ読込処理
+*-------------------------------------------------------------------*
+* --> P_LNAME  :スプール 出力デバイス名（長）
+* <-- PF_TSP03L:スプール 出力デバイスの略称、スプール デバイス名 (長)
+*-------------------------------------------------------------------*
+FORM FRM_READ_TSP03L_R USING    P_LNAME
+CHANGING PF_TSP03L LIKE GF_TSP03L.
+* MODIFY PSD K.ARAI 2002/05/28
+READ TABLE GT_TSP03L INTO GF_TSP03L WITH TABLE KEY
+LNAME = P_LNAME.
+*  READ TABLE GT_TSP03L INTO GF_TSP03L WITH KEY
+*                                      LNAME = P_LNAME.
+* MODIFY END
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+FLG_EXIT_DEV = CNS_X.
+CNT_ERR = CNT_ERR + 1.
+PERFORM FRM_NODATA_MESSAGE USING GF_NAST-OBJKY
+CNS_TSP03L_J.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_TSP03L
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_READ_TSP03L_R
+
+* PERFORM INIT   PROCESS --------------------------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_ENQUEUE_EZNAST
+*&------------------------------------------------------------------*
+*       ＮＡＳＴロック処理
+*-------------------------------------------------------------------*
+FORM FRM_ENQUEUE_EZNAST.
+
+APPEND GF_NAST TO GT_LOCK_NAST. "NASTロック判断情報用に格納
+
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+DATA:L_UNAME LIKE SY-UNAME."ユーザーＩＤ
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+
+CALL FUNCTION 'ENQUEUE_EZNAST'
+EXPORTING
+MODE_NAST    = 'E'  " 排他制御
+MANDT        = SY-MANDT  " クライアント番号
+OBJKY        = GF_NAST-OBJKY  "オブジェクトキー
+ERDAT        = GF_NAST-ERDAT  "登録日
+ERUHR        = GF_NAST-ERUHR  "登録時間
+KAPPL        = 'ME'  " アプリケーション
+KSCHL        = 'WE01'  " メッセージタイプ
+SPRAS        = 'J'  " メッセージ言語
+EXCEPTIONS
+FOREIGN_LOCK = 1
+OTHERS       = 2.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 1.
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+*     ユーザーＩＤを取得
+PERFORM FRM_ENQ_CHECK USING L_UNAME.
+*     エラーメッセージ：XXXX が処理中です
+MESSAGE S023(Z1) WITH L_UNAME. "
+ROLLBACK WORK. " ロールバック
+**---MODIFY START PSD T.SAITOH 2002/05/10 ---------------------------*
+**      MESSAGE S004(Z1) WITH CNS_NAST.
+*      MESSAGE S023(Z1).
+**---MODIFY END   PSD T.SAITOH 2002/05/10 ---------------------------*
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+STOP.
+WHEN OTHERS.
+MESSAGE A502(Z1) WITH 'ENQUEUE_EZNAST'
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " ENQUEUE_EZNAST
+
+*---APPEND START PSD T.SAITOH 2002/08/06 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ENQ_CHECK
+*&---------------------------------------------------------------------*
+*       ロックユーザーＩＤ取得
+*----------------------------------------------------------------------*
+FORM FRM_ENQ_CHECK USING P_UNAME.
+
+DATA:L_GARG TYPE SEQG3-GARG."キー
+
+* ロックキーの設定
+
+CONCATENATE SY-MANDT
+'ME'
+GF_NAST-OBJKY
+'*'
+'WE01'
+'J'
+'*'
+GF_NAST-ERDAT
+GF_NAST-ERUHR
+INTO L_GARG.
+
+* ロック情報を取得する
+
+CALL FUNCTION 'ENQUEUE_READ'
+EXPORTING
+GCLIENT       = SY-MANDT
+GNAME         = 'NAST'
+GARG          = L_GARG
+GUNAME        = SPACE
+*  IMPORTING
+*   NUMBER        =
+*   SUBRC         =
+TABLES
+ENQ           = GT_SEQG3
+.
+LOOP AT GT_SEQG3 INTO GF_SEQG3.
+P_UNAME = GF_SEQG3-GUNAME. " ユーザＩＤを設定
+IF GF_SEQG3-GUNAME <> SPACE.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    "FRM_ENQ_CHECK
+*---APPEND END   PSD T.SAITOH 2002/08/06 ---------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_DEQUEUE_EZNAST
+*&------------------------------------------------------------------*
+*       ＮＡＳＴロック解除処理
+*-------------------------------------------------------------------*
+FORM FRM_DEQUEUE_EZNAST.
+
+LOOP AT GT_LOCK_NAST INTO GF_LOCK_NAST.
+CALL FUNCTION 'DEQUEUE_EZNAST'
+EXPORTING
+MODE_NAST = 'E'  " 排他制御
+MANDT     = SY-MANDT  " クライアント番号
+OBJKY     = GF_LOCK_NAST-OBJKY  "オブジェクトキー
+ERDAT     = GF_LOCK_NAST-ERDAT  "登録日
+ERUHR     = GF_LOCK_NAST-ERUHR  "登録時間
+KAPPL     = 'ME'  " アプリケーション
+KSCHL     = 'WE01'  " メッセージタイプ
+SPRAS     = 'J'  " メッセージ言語
+EXCEPTIONS
+OTHERS    = 1.
+IF SY-SUBRC <> 0.
+MESSAGE A502(Z1) WITH 'DEQUEUE_EZNAST'
+SY-SUBRC.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " DEQUEUE_EZNAST
+*&------------------------------------------------------------------*
+*&      Form  FRM_READ_TEXT
+*&------------------------------------------------------------------*
+*       社内用備考
+*-------------------------------------------------------------------*
+*      -->P_EBELN   購買伝票
+*      -->P_EBELP   購買伝票明細
+*      <--P_TDLINE  社内用備考
+*-------------------------------------------------------------------*
+FORM FRM_READ_TEXT USING    P_VBELN
+P_POSNR
+CHANGING P_TDLINE.
+DATA: LT_TLINE    TYPE TABLE OF TLINE,
+LF_TLINE    TYPE TLINE,
+L_VBELN     LIKE THEAD-TDNAME.
+
+CONCATENATE P_VBELN
+P_POSNR
+INTO L_VBELN.
+*   L_VBELN = P_VBELN.
+
+*--- 汎用モジュール『READ_TEXT』
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+*---MODIFY START PSD T.SAITOH 2002/03/29 READ_TEXTパラメータ修正-----*
+*            ID        = 'F02'
+ID        = 'F03'
+*---MODIFY END   PSD T.SAITOH 2002/03/29 ---------------------------*
+LANGUAGE  = 'J'
+NAME      = L_VBELN
+OBJECT    = 'EKPO'
+TABLES
+LINES     = LT_TLINE
+EXCEPTIONS
+NOT_FOUND = 4
+OTHERS    = 8.
+CASE SY-SUBRC.
+WHEN 0.
+READ TABLE LT_TLINE INTO LF_TLINE INDEX 1.
+P_TDLINE = LF_TLINE-TDLINE+0(40).
+WHEN 8.
+MESSAGE E001(Z1) WITH TEXT-024
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_READ_TEXT
+
+* PERFORM SELECT PROCESS -------------------------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_NAST
+*&------------------------------------------------------------------*
+*       テーブル読込①：NAST：メッセージステータス
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_NAST.
+** NASTテーブルロック処理
+*  PERFORM FRM_ENQUEUE_EZNAST.
+
+CASE CNS_X.
+* 再出力
+WHEN PR_REOUT.
+SELECT KAPPL OBJKY KSCHL LDEST
+ERDAT ERUHR DATVR UHRVR VSTAT
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST
+FROM NAST
+WHERE KAPPL = 'ME'
+AND KSCHL = 'WE01'
+AND SPRAS = CNS_J
+AND VSTAT = '1'.
+*     SY-SUBRCの確保
+G_TMP_SY_SUBRC = SY-SUBRC.
+*     new record select
+IF SY-SUBRC = 0.
+PERFORM FRM_EXTR_NEWREC_NAST.
+ENDIF.
+* 通常出力
+WHEN PR_OUTNR.
+SELECT KAPPL OBJKY KSCHL LDEST
+ERDAT ERUHR DATVR UHRVR VSTAT
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST
+FROM NAST
+WHERE KAPPL = 'ME'
+AND KSCHL = 'WE01'
+AND SPRAS = CNS_J
+AND VSTAT = '0'.
+WHEN OTHERS.
+ENDCASE.
+*--- エラー処理
+* SY-SUBRCの確保
+G_TMP_SY_SUBRC = SY-SUBRC.
+CASE G_TMP_SY_SUBRC.
+WHEN 0.
+*--- 日付判定処理
+*      PERFORM FRM_DATE_SET.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+CNT_ERR = CNT_ERR + 1.
+PERFORM FRM_NODATA_MESSAGE_NAST USING CNS_NAST_J.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_NAST
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_NAST
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_TSP03L
+*&------------------------------------------------------------------*
+*       テーブル読込②：TSP03L：全スプールデバイス名
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_TSP03L.
+*--- スプール：デバイス名（長）情報取得
+SELECT LNAME PADEST
+FROM TSP03L INTO TABLE GT_TSP03L.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_TSP03L_J.
+*      MESSAGE S600(Z1) WITH CNS_TSP03L_J.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_TSP03L
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_TSP03L_GET
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MSEG
+*&------------------------------------------------------------------*
+*       テーブル読込③：MSEG_MKPF：入出庫伝票
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_MSEG.
+*---
+SELECT A~MBLNR  "入出庫伝票
+A~MJAHR  "伝票年度
+A~ZEILE  "入出庫伝票明細
+A~MATNR  "品目コード
+A~WERKS  "プラント
+A~LGORT  "保管場所
+A~KDAUF  "受注伝票番号
+A~KDPOS  "受注明細
+A~EBELN  "購買発注
+A~EBELP  "購買発注明細
+A~BWART  "移動タイプ
+A~ERFMG  "数量
+A~ERFME  "単位
+A~SJAHR  "取消入庫年度
+A~SMBLN  "取消入庫伝票
+A~SMBLP  "取消入庫伝票明細
+*---APPEND START PSD T.SAITOH 2002/03/29 ---------------------------*
+A~SGTXT  "明細テキスト（社内用備考）
+*---APPEND END   PSD T.SAITOH 2002/03/29 ---------------------------*
+***** 2016/2/26 ISID18 INS START *****
+A~CHARG  "ロット番号
+***** 2016/2/26 ISID18 INS END *****
+INTO CORRESPONDING FIELDS OF TABLE GT_MSEG
+FROM MSEG AS A INNER JOIN MKPF AS B
+ON  A~MBLNR = B~MBLNR
+AND A~MJAHR = B~MJAHR
+*         FOR ALL ENTRIES IN GT_NAST
+WHERE A~WERKS IN S_WERKS
+AND B~BUDAT IN S_BUDAT
+*        AND   A~MBLNR = GT_NAST-OBJKY+0(10)
+*        AND   A~MJAHR = GT_NAST-OBJKY+10(4)
+*        AND   A~ZEILE = GT_NAST-OBJKY+14(4)
+AND ( A~BWART = '101'
+OR A~BWART = '102'
+* Add 2003.07.31 >>>
+OR A~BWART = '161'
+* Add 2003.07.31 >>>
+OR A~BWART = '501'
+OR A~BWART = '502' )
+* ADD　2005.02.08 >>
+AND B~USNAM IN S_USNAM  "登録者
+* ADD　2005.02.08 <<
+*---ADD START DMC 2008/05/29 ---------------------------*
+AND A~LIFNR IN S_LIFNR.    "仕入先勘定コード
+*---ADD END   DMC 2008/05/29 ---------------------------*
+
+
+
+
+.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_MSEG
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_MSEG
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MAKT
+*&------------------------------------------------------------------*
+*       テーブル読込④：MAKT：品目テキスト
+*-------------------------------------------------------------------*
+* -->P_MATNR : 品目コード
+* <--P_MAKTX : 品目テキスト
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_MAKT USING VALUE(P_MATNR) CHANGING VALUE(P_MAKTX).
+*---
+SELECT SINGLE
+MAKTX  "品目テキスト
+INTO (P_MAKTX)
+FROM MAKT
+WHERE MATNR = P_MATNR
+AND SPRAS = 'J'.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_MAKT
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_MAKT
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_T001W
+*&------------------------------------------------------------------*
+*       テーブル読込⑤：T001W：プラント
+*-------------------------------------------------------------------*
+* --> P_WERKS:プラントコード
+* <-- P_NAME1:プラント名
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_T001W USING VALUE(P_WERKS) CHANGING P_NAME1.
+*---
+SELECT SINGLE
+NAME1  "プラント名
+INTO (P_NAME1)
+FROM T001W
+WHERE WERKS = P_WERKS.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_T001W
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_T001W
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MARD
+*&------------------------------------------------------------------*
+*       テーブル読込⑥：MARD:品目マスタ（プラント）保管場所データ
+*                      MARA:一般品目データ
+*-------------------------------------------------------------------*
+* --> PF_MSEG:品目コード、プラント、保管場所
+* <-- GF_MARD:棚番、品目タイプ
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_MARD USING    PF_MSEG LIKE GF_MSEG
+CHANGING PF_MARD LIKE GF_MARD.
+
+SELECT SINGLE
+A~LGPBE "棚番
+B~MTART "品目タイプ
+INTO CORRESPONDING FIELDS OF PF_MARD
+FROM MARD AS A INNER JOIN MARA AS B
+ON A~MATNR = B~MATNR
+WHERE A~MATNR = PF_MSEG-MATNR
+AND A~WERKS = PF_MSEG-WERKS
+AND A~LGORT = PF_MSEG-LGORT
+AND ( B~MTART = 'Z000'
+OR B~MTART = 'HAWA' ).
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_MARD
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_MARD
+*&------------------------------------------------------------------*
+*       テーブル読込⑦：VBKD：販売伝票ビジネスデータ
+*-------------------------------------------------------------------*
+* --> PF_MSEG:販売伝票番号、販売伝票明細番号
+* <-- P_BSTKD:得意先発注番号
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_VBKD USING PF_MSEG LIKE GF_MSEG
+CHANGING P_BSTKD.
+*---
+SELECT SINGLE
+BSTKD "得意先発注番号
+INTO (P_BSTKD)
+FROM VBKD
+WHERE VBELN = PF_MSEG-KDAUF
+AND   POSNR = PF_MSEG-KDPOS.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_VBKD
+SY-SUBRC.
+ENDCASE.
+ENDFORM.                    "FRM_SELECT_VBKD
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_VBAK
+*&------------------------------------------------------------------*
+*       テーブル読込⑧：VBAK：販売伝票ヘッダ
+*-------------------------------------------------------------------*
+* --> P_KDAUF:販売伝票番号
+* <-- GF_VBAK:販売伝票-受注先、販売組織、流通チャンネル
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_VBAK USING VALUE(P_KDAUF)
+CHANGING PF_VBAK LIKE GF_VBAK.
+*---
+SELECT SINGLE
+KUNNR "受注先
+VKORG "販売組織
+VTWEG "流通チャンネル
+BSTNK "得意先発注番号
+*---APPEND START PSD T.SAITOH 2002/07/10 ---------------------------*
+SPART "製品部門
+*---APPEND END   PSD T.SAITOH 2002/07/10 ---------------------------*
+INTO CORRESPONDING FIELDS OF PF_VBAK
+FROM VBAK
+WHERE VBELN = P_KDAUF
+AND   KUNNR IN S_KUNNR.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+*---APPEND START PSD T.SAITOH 2002/07/10 ---------------------------*
+IF       PF_VBAK-VKORG = PR_VKORG    "販売組織
+AND   PF_VBAK-VTWEG = PR_VTWEG    "流通チャネル
+AND   PF_VBAK-SPART = PR_SPART  . "製品部門
+*        販売組織／流通チャネル／製品部門が存在
+G_VBAK_RETURN = 0.
+ELSE.
+*        伝票があるが該当しない場合対象外
+G_VBAK_RETURN = 4.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/07/10 ---------------------------*
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_VBAK_J.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_VBAK
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_VBAK
+*&------------------------------------------------------------------*
+*       テーブル読込⑨：KNA1：得意先マスタ一般データ
+*-------------------------------------------------------------------*
+* --> P_KUNNR:得意先コード
+* <-- P_NAME2:得意先名
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_KNA1 USING VALUE(P_KUNNR) CHANGING P_NAME2.
+* APPEND PSD K.ARAI 2002/05/30
+DATA : L_ADRNR LIKE KNA1-ADRNR.
+DATA : BEGIN OF LT_ADRC OCCURS 0,
+ADDRNUMBER LIKE ADRC-ADDRNUMBER,
+DATE_FROM  LIKE ADRC-DATE_FROM,
+NATION     LIKE ADRC-NATION,
+NAME2      LIKE ADRC-NAME2,
+END OF LT_ADRC.
+
+FIELD-SYMBOLS <FS> LIKE LT_ADRC.
+* APPEND END
+
+*---
+* MODIFY PSD K.ARAI 2002/05/30
+SELECT SINGLE
+ADRNR "得意先名
+INTO (L_ADRNR)
+*         NAME2 "得意先名
+*         INTO (P_NAME2)
+* MODIFY END
+FROM KNA1
+WHERE KUNNR = P_KUNNR.
+
+* APPEND PSD K.ARAI 2002/05/30
+SELECT ADDRNUMBER
+DATE_FROM
+NATION
+NAME2
+INTO CORRESPONDING FIELDS OF TABLE LT_ADRC
+FROM ADRC
+WHERE
+ADDRNUMBER = L_ADRNR .
+
+SORT LT_ADRC BY DATE_FROM.
+
+LOOP AT LT_ADRC ASSIGNING <FS>.
+P_NAME2 = <FS>-NAME2.
+EXIT.
+ENDLOOP.
+* APPEND END
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_KNA1
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_KNA1
+*&------------------------------------------------------------------*
+*       テーブル読込⑩：KNMT：得意先／品目情報レコードデータテーブル
+*-------------------------------------------------------------------*
+* --> PF_VBAK:得意先コード、販売組織、流通チャネル
+* --> PF_MSEG:品目コード
+* <-- P_KDMAT:得意先品目コード
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_KNMT USING    PF_VBAK LIKE GF_VBAK
+PF_MSEG LIKE GF_MSEG
+CHANGING P_KDMAT.
+*---
+SELECT SINGLE
+KDMAT
+INTO (P_KDMAT)
+FROM KNMT
+WHERE KUNNR = PF_VBAK-KUNNR
+AND VKORG = PF_VBAK-VKORG
+AND VTWEG = PF_VBAK-VTWEG
+AND MATNR = PF_MSEG-MATNR.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_KNMT
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_KNMT
+*&------------------------------------------------------------------*
+*       テーブル読込⑪：VBEP：販売伝票納入日程行
+*-------------------------------------------------------------------*
+* --> PF_MSEG:販売伝票番号
+* <-- P_EDATU:出荷日付
+*-------------------------------------------------------------------*
+* 備考：個別購買品の時のみ取得
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_VBEP USING    PF_MSEG LIKE GF_MSEG
+CHANGING P_EDATU.
+*---
+SELECT SINGLE
+EDATU
+INTO (P_EDATU)
+FROM VBEP
+WHERE VBELN = PF_MSEG-KDAUF
+AND POSNR = 00010
+AND ETENR = 0001.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_VBEP
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_VBEP
+*&------------------------------------------------------------------*
+*       テーブル読込⑫：EKPO：購買伝票明細
+*-------------------------------------------------------------------*
+* --> PF_MSEG:販売伝票番号
+* <-- P_KNTTP:勘定設定カテゴリ
+* <-- P_MAKTX:テキスト（商品名）
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_EKPO USING    PF_MSEG LIKE GF_MSEG
+CHANGING P_KNTTP
+P_MAKTX
+*---APPEND START SOL T.HAYASHI 2009/09/17 --------------------------*
+P_LIFNR.
+*---APPEND END SOL T.HAYASHI 2009/09/17 ----------------------------*
+*---
+SELECT SINGLE
+EKPO~KNTTP
+*---APPEND START PSD T.SAITOH 2002/04/23 ---------------------------*
+* 仕様変更：品目マスタから取得せず購買伝票から取得する
+EKPO~TXZ01
+*---APPEND END   PSD T.SAITOH 2002/04/23 ---------------------------*
+*---APPEND START SOL T.HAYASHI 2009/09/17 --------------------------*
+*仕入先勘定コードも取得する
+EKKO~LIFNR
+*---APPEND END SOL T.HAYASHI 2009/09/17 ----------------------------*
+*---MODIFY START SOL T.HAYASHI 2009/09/17 --------------------------*
+INTO (P_KNTTP,P_MAKTX, P_LIFNR)
+**---MODIFY START PSD T.SAITOH 2002/04/23 ---------------------------*
+** 仕様変更：品目マスタから取得せず購買伝票から取得する
+**         INTO (P_KNTTP)
+*         INTO (P_KNTTP,P_MAKTX)
+**---MODIFY END   PSD T.SAITOH 2002/04/23 ---------------------------*
+*---MODIFY END SOL T.HAYASHI 2009/09/17 -----------------------------*
+*---MODIFY START SOL T.HAYASHI 2009/09/17 --------------------------*
+FROM EKPO INNER JOIN EKKO
+ON EKPO~EBELN = EKKO~EBELN
+WHERE EKPO~EBELN = PF_MSEG-EBELN
+AND EKPO~EBELP = PF_MSEG-EBELP
+AND EKPO~LOEKZ = SPACE.
+*         FROM EKPO
+*         WHERE EBELN = PF_MSEG-EBELN
+*           AND EBELP = PF_MSEG-EBELP
+*           AND LOEKZ = SPACE.
+*---MODIFY END SOL T.HAYASHI 2009/09/17 -----------------------------*
+
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_EKPO
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_EKPO
+*&------------------------------------------------------------------*
+*       テーブル読込⑬：EKET：分納契約納入日程行
+*-------------------------------------------------------------------*
+* --> PF_MSEG:販売伝票番号
+* <-- P_EINDT:納入期日
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_EKET USING    PF_MSEG LIKE GF_MSEG
+CHANGING P_EINDT.
+*---
+SELECT SINGLE
+EINDT
+INTO (P_EINDT)
+FROM EKET
+WHERE EBELN = PF_MSEG-EBELN
+AND EBELP = PF_MSEG-EBELP
+AND ETENR = 0001.
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_MSEG.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_EKET
+SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    "FRM_SELECT_EKET
+*&------------------------------------------------------------------*
+*&      Form  FRM_SELECT_VBAP
+*&------------------------------------------------------------------*
+*       テーブル読込⑭：VBAP：販売伝票明細
+*-------------------------------------------------------------------*
+* --> PF_MSEG:販売伝票
+* <-- P_ZIEME:数量単位
+*-------------------------------------------------------------------*
+FORM FRM_SELECT_VBAP USING    PF_MSEG LIKE GF_MSEG
+CHANGING P_ZIEME.
+*---
+SELECT SINGLE
+ZIEME "数量単位
+INTO (P_ZIEME)
+FROM VBAP
+WHERE VBELN = PF_MSEG-KDAUF
+AND POSNR = PF_MSEG-KDPOS.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+*--- エラーメッセージ出力処理
+*      CNT_ERR = CNT_ERR + 1.
+*      PERFORM FRM_NODATA_MESSAGE USING CNS_VBAK_J.
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_VBAP
+SY-SUBRC.
+ENDCASE.
+ENDFORM.                    "FRM_SELECT_VBAP
+
+* PERFORM RESULT-MESSAGE-LIST ASSOCIATES ---------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_NODATA_MESSAGE
+*&------------------------------------------------------------------*
+*       エラーメッセージ出力処理（対象データなし）:FOR NAST
+*-------------------------------------------------------------------*
+*      -->P_TEXT  TABLE NAME
+*-------------------------------------------------------------------*
+FORM FRM_NODATA_MESSAGE_NAST USING  P_TEXT.
+IF CNT_ERR = 1.
+WRITE / CNS_GETDATA_J.
+ENDIF.
+WRITE: / P_TEXT,
+CNS_NODATA_J.
+STOP.
+ENDFORM.                    " FRM_NODATA_MESSAGE
+*&------------------------------------------------------------------*
+*&      Form  FRM_NODATA_MESSAGE
+*&------------------------------------------------------------------*
+*       エラーメッセージ出力処理（対象データなし）:FOR ETC
+*       「伝票番号ＸＸＸＸのＸＸを取得できませんでした。」
+*-------------------------------------------------------------------*
+*      -->P_SLIP_NUM 伝票番号 XXXX・・・
+*      -->P_TEXT     XX
+*-------------------------------------------------------------------*
+FORM FRM_NODATA_MESSAGE USING  P_SLIP_NUM  P_TEXT.
+IF CNT_ERR = 1.
+WRITE / CNS_GETDATA_J.
+ENDIF.
+WRITE: / CNS_SLIP_J,P_SLIP_NUM,CNS_NO_J,P_TEXT,
+CNS_NODATAB_J.
+ENDFORM.                    " FRM_NODATA_MESSAGE
+
+* PERFORM MAIN PROCESS ---------------------------------------------*
+*&------------------------------------------------------------------*
+*&      Form  FRM_EXTR_NEWREC_NAST
+*&------------------------------------------------------------------*
+*       再出力時、最新のレコード以外を除外する。
+*-------------------------------------------------------------------*
+FORM FRM_EXTR_NEWREC_NAST.
+DATA:LF_NAST TYPE TYP_NAST,          "NAST:ローカル構造
+LT_NAST TYPE TABLE OF TYP_NAST, "NAST:ローカル内部ＴＢＬ
+LT_DMY_NAST TYPE TYP_NAST.      "NAST:ローカルダミー構造
+DATA:L_CNT_NASTREC(14) TYPE N.       "NAST:取得レコード
+
+SORT GT_NAST ASCENDING BY KAPPL             "アプリケーションキー
+OBJKY             "オブジェクトキー
+DATVR DESCENDING  "処理日
+UHRVR DESCENDING. "処理時間
+* 最新レコードをローカル内部ＴＢＬへ・・・
+LOOP AT GT_NAST INTO GF_NAST.
+LF_NAST = GF_NAST.
+AT NEW OBJKY.
+SELECT SINGLE
+VSTAT
+INTO CORRESPONDING FIELDS OF LT_DMY_NAST
+FROM NAST
+WHERE KAPPL = 'ME'
+AND KSCHL = 'WE01'
+AND SPRAS = CNS_J
+AND OBJKY = LF_NAST-OBJKY
+AND VSTAT = '0'."未出力があったら対象外とする
+CASE SY-SUBRC.
+WHEN 0."対象外となる場合
+CONTINUE.
+WHEN 4."対象となる場合
+APPEND LF_NAST TO LT_NAST.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH G_REPID
+CNS_NAST
+SY-SUBRC.
+ENDCASE.
+ENDAT.
+ENDLOOP.
+* 最新レコードのみを残し元の内部ＴＢＬに再格納(上書き)する。
+GT_NAST = LT_NAST.
+*
+DESCRIBE TABLE GT_NAST LINES L_CNT_NASTREC.
+IF L_CNT_NASTREC = 0.
+G_TMP_SY_SUBRC = 4.
+ENDIF.
+
+ENDFORM.                    " FRM_EXTR_NEWREC_NAST
+*&------------------------------------------------------------------*
+*&      Form  FRM_DATA_SET
+*&------------------------------------------------------------------*
+*       入出庫伝票内部ＴＢＬから対象データの抽出を行なう
+*-------------------------------------------------------------------*
+FORM FRM_DATA_SET.
+*  DATA:LT_MSEG TYPE TABLE OF TYP_MSEG,
+*       LF_MSEG TYPE TYP_MSEG.
+*  DATA:LT_NAST TYPE TABLE OF TYP_NAST,
+*       LF_NAST TYPE TYP_NAST.
+
+* 区分：ファイル名の設定------------------------------*
+PERFORM FRM_FILENAME_SET  CHANGING GF_FILELISTH.
+* 区分：ヘッダの設定----------------------------------*
+PERFORM FRM_HEADER_SET    CHANGING GF_FILELISTH.
+* 区分：タイトル行------------------------------------*
+PERFORM FRM_TITLELINE_SET CHANGING GF_FILELISTH.
+
+*  LOOP AT GT_NAST INTO GF_NAST.
+*    LOOP AT GT_MSEG INTO GF_MSEG
+*                         WHERE   MBLNR = GF_NAST-OBJKY+0(10)
+*                           AND   MJAHR = GF_NAST-OBJKY+10(4)
+*                           AND   ZEILE = GF_NAST-OBJKY+14(4)
+*   .
+*      IF     GF_MSEG-KDAUF IN S_KDAUF
+*        AND  GF_MSEG-EBELN IN S_EBELN.
+*        APPEND GF_MSEG TO LT_MSEG.
+*        APPEND GF_NAST TO LT_NAST.
+*      ENDIF.
+*    ENDLOOP.
+*  ENDLOOP.
+*
+*  GT_MSEG = LT_MSEG.
+*  GT_NAST = LT_NAST.
+
+LOOP AT GT_NAST INTO GF_NAST.
+*   受注伝票か発注伝票と紐付くオブジェクトキーを処理する
+*---2003/04//25 UPDATE START S.IWAKI(NDSC)
+*    LOOP AT GT_MSEG INTO GF_MSEG
+*      WHERE   MBLNR = GF_NAST-OBJKY+0(10)
+*        AND   MJAHR = GF_NAST-OBJKY+10(4)
+*        AND   ZEILE = GF_NAST-OBJKY+14(4).
+READ TABLE GT_MSEG INTO GF_MSEG
+WITH TABLE KEY MBLNR = GF_NAST-OBJKY+0(10)
+MJAHR = GF_NAST-OBJKY+10(4)
+ZEILE = GF_NAST-OBJKY+14(4).
+CHECK SY-SUBRC = 0.
+*---2003/04//25 UPDATE END   S.IWAKI(NDSC)
+
+*     初期化
+CLEAR:GF_T001W,
+GF_MAKT,
+GF_MARD,
+G_KNTTP,
+GF_VBAK,
+FLG_EXIT_DEV."デバイス名取得不能フラグ
+*     移動タイプ102,502は処理しない。
+IF GF_MSEG-BWART = '102'  OR  GF_MSEG-BWART = '502'.
+CONTINUE.
+ENDIF.
+*     指定した受注または発注伝票のみを処理する。
+IF     GF_MSEG-KDAUF IN S_KDAUF
+AND  GF_MSEG-EBELN IN S_EBELN.
+
+*     初期化処理------------------------------------------*
+CLEAR: GF_FILELISTD,"ファイル出力用明細
+G_KNTTP,     "勘定設定カテゴリ
+FLG_MSEG_DEL."入出庫伝票取消フラグ
+
+*     MSEG:入出庫伝票が取消されているかチェックする
+PERFORM FRM_CHECK_BWART.
+*     入出庫伝票が取り消されていた場合対象外
+IF FLG_MSEG_DEL = CNS_X.
+CONTINUE.
+ENDIF.
+*     区分：見出し----------------------------------------*
+PERFORM FRM_HEADER2_SET.
+IF FLG_EXIT_DEV = CNS_X.
+CONTINUE.
+ENDIF.
+*     区分：明細------------------------------------------*
+PERFORM FRM_DETAIL_SET.
+*       品目タイプの対象データチェック
+IF GF_MARD-MTART = SPACE.
+CONTINUE.
+ENDIF.
+*---APPEND START PSD T.SAITOH 2002/07/10 ---------------------------*
+*       組織対応のための対応：データなしは対応外とする。(VBAK）
+*       販売組織／流通チャネル／製品部門がない場合は対象外とする
+IF G_VBAK_RETURN <> 0.
+CONTINUE.
+ENDIF.
+*　　　　購買組織がない場合は対象外とする。
+IF G_EKKO_RETURN <> 0.
+CONTINUE.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/07/10 ---------------------------*
+
+*     NASTテーブルロック処理
+PERFORM FRM_ENQUEUE_EZNAST.
+
+*     APPEND PROCESS
+*     ファイル出力前リスト内部ｔｂｌへ
+*---MODIFY START PSD T.SAITOH 2002/02/15 ---------------------------*
+DO PR_NMOUT TIMES.""複数枚対応
+APPEND GF_FILELISTD TO GT_FILELISTD.
+ENDDO.            ""複数枚対応
+*---MODIFY END   PSD T.SAITOH 2002/02/15 ---------------------------*
+*     更新用NAST内部ｔｂｌへ
+APPEND GF_NAST TO GT_RENEW_NAST.
+ENDIF.
+*---2003/04//25 DELETE START S.IWAKI(NDSC)
+*    ENDLOOP.
+*---2003/04//25 DELETE END   S.IWAKI(NDSC)
+ENDLOOP.
+ENDFORM.                    " FRM_DATA_SET
+*&------------------------------------------------------------------*
+*&      Form  FRM_FILENAME_SET
+*&------------------------------------------------------------------*
+*       区分：ファイル名の各種項目の設定を行なう
+*-------------------------------------------------------------------*
+*      <--PF_FILELIST  ファイル出力項目構造
+*-------------------------------------------------------------------*
+FORM FRM_FILENAME_SET CHANGING PF_FILELIST LIKE GF_FILELISTH.
+*---プログラム名称の設定
+PF_FILELIST-REPID = SY-REPID.
+*---ユーザログオン名の設定
+PF_FILELIST-UNAME = SY-UNAME.
+*---日付と時刻の設定
+PF_FILELIST-UZEIT = SY-UZEIT.
+*---拡張子の設定
+PF_FILELIST-EXTNS = CNS_TXT.
+
+ENDFORM.                    " FRM_FILENAME_SET
+*&------------------------------------------------------------------*
+*&      Form  FRM_HEADER_SET
+*&------------------------------------------------------------------*
+*       区分：ヘッダの各種項目の設定を行なう
+*-------------------------------------------------------------------*
+*      <--PF_FILELIST  ファイル出力項目構造
+*-------------------------------------------------------------------*
+FORM FRM_HEADER_SET CHANGING PF_FILELIST LIKE GF_FILELISTH.
+*---ＡＰＩタグ（開始）
+PF_FILELIST-APITS = '<start>'.
+*---ＡＰＩ関数（文書名）
+PF_FILELIST-APIFC = 'VrSetDocName2='.
+*---ダブルクオート
+PF_FILELIST-DBLT1 = '"'.
+*---帳票名
+PF_FILELIST-TITLS = SY-TITLE.
+*---右括弧　（
+PF_FILELIST-BRCKTR = '('.
+*---ユーザＩＤ
+PF_FILELIST-USRID  = SY-UNAME.
+*---左括弧　）
+PF_FILELIST-BRCKTL = ')'.
+*---ダブルクオート
+PF_FILELIST-DBLT2  = '"'.
+*---ＡＰＩタグ（終了）
+PF_FILELIST-APITE  = '<end>'.
+
+
+ENDFORM.                    " FRM_HEADER_SET
+*&------------------------------------------------------------------*
+*&      Form  FRM_TITLELINE_SET
+*&------------------------------------------------------------------*
+*       区分：タイトル行の項目の設定を行なう
+*-------------------------------------------------------------------*
+*      <--PF_FILELIST  ファイル出力項目構造
+*-------------------------------------------------------------------*
+FORM FRM_TITLELINE_SET CHANGING PF_FILELIST LIKE GF_FILELISTH.
+*  PF_FILELIST-TLINE = CNS_PGM_TITLE.
+* Mod ES-UP 2012/08/21 -->
+*  CONCATENATE TEXT-001 CNSX_TAB
+*              TEXT-002 CNSX_TAB
+*              TEXT-003 CNSX_TAB
+*              TEXT-004 CNSX_TAB
+*              TEXT-005 CNSX_TAB
+*              TEXT-006 CNSX_TAB
+*              TEXT-007 CNSX_TAB
+*              TEXT-008 CNSX_TAB
+*              TEXT-009 CNSX_TAB
+*              TEXT-010 CNSX_TAB
+*              TEXT-011 CNSX_TAB
+*              TEXT-012 CNSX_TAB
+*              TEXT-013 CNSX_TAB
+*              TEXT-014 CNSX_TAB
+*              TEXT-015 CNSX_TAB
+*              TEXT-016 CNSX_TAB
+*              TEXT-017 CNSX_TAB
+*              TEXT-018 CNSX_TAB
+**---MODIFY START PSD T.SAITOH 2002/08/27 ---------------------------*
+**              TEXT-019 INTO PF_FILELIST-TLINE.
+** 　　　　　　 項目追加：発注伝票番号：明細番号
+*              TEXT-019 CNSX_TAB
+*              TEXT-033 CNSX_TAB
+*              TEXT-034 INTO PF_FILELIST-TLINE.
+**---MODIFY END   PSD T.SAITOH 2002/08/27 ---------------------------*
+***** 2016/2/26 ISID18 DEL START *****
+*  CONCATENATE TEXT-001
+*              TEXT-002
+*              TEXT-003
+*              TEXT-004
+*              TEXT-005
+*              TEXT-006
+*              TEXT-007
+*              TEXT-008
+*              TEXT-009
+*              TEXT-010
+*              TEXT-011
+*              TEXT-012
+*              TEXT-013
+*              TEXT-014
+*              TEXT-015
+*              TEXT-016
+*              TEXT-017
+*              TEXT-018
+*              TEXT-019
+*              TEXT-033
+*              TEXT-034
+*         INTO PF_FILELIST-TLINE
+*         SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+** Mod ES-UP 2012/08/21 <--
+***** 2016/2/26 ISID18 DEL END *****
+***** 2016/2/26 ISID18 INS START *****
+*  チェックボックス「ロット有り」がチェックONの場合、
+*  ロットを出力する
+IF CB_LOT = ABAP_TRUE.
+CONCATENATE TEXT-001
+TEXT-002
+TEXT-003
+TEXT-004
+TEXT-005
+TEXT-006
+TEXT-007
+TEXT-008
+TEXT-009
+TEXT-010
+TEXT-011
+TEXT-012
+TEXT-013
+TEXT-014
+TEXT-015
+TEXT-016
+TEXT-017
+TEXT-018
+TEXT-019
+TEXT-033
+TEXT-034
+TEXT-035
+TEXT-036
+TEXT-037
+TEXT-038
+TEXT-039
+TEXT-040
+TEXT-041
+TEXT-042
+INTO PF_FILELIST-TLINE
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+ELSE.
+*  チェックボックス「ロット有り」がチェックOFFの場合、
+*  ロットを出力しない
+CONCATENATE TEXT-001
+TEXT-002
+TEXT-003
+TEXT-004
+TEXT-005
+TEXT-006
+TEXT-007
+TEXT-008
+TEXT-009
+TEXT-010
+TEXT-011
+TEXT-012
+TEXT-013
+TEXT-014
+TEXT-015
+TEXT-016
+TEXT-017
+TEXT-018
+TEXT-019
+TEXT-033
+TEXT-034
+INTO PF_FILELIST-TLINE
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+ENDIF.
+***** 2016/2/26 ISID18 INS END *****
+ENDFORM.                    " FRM_TITLELINE_SET
+*&------------------------------------------------------------------*
+*&      Form  FRM_HEADER2_SET
+*&------------------------------------------------------------------*
+*       区分：見出しの項目の設定を行なう
+*-------------------------------------------------------------------*
+FORM FRM_HEADER2_SET.
+*---プリンタ／トレイ
+* 選択画面で未設定時
+IF P_PRNTR = SPACE.
+PERFORM FRM_READ_TSP03L USING    GF_NAST-LDEST
+CHANGING GF_TSP03L.
+GF_FILELISTD-PAPROSNAME = GF_TSP03L-LNAME.
+ELSE.
+* 選択画面で指定時
+GF_FILELISTD-PAPROSNAME = P_PRNTR.
+*   NAST略称変更
+PERFORM FRM_READ_TSP03L_R USING    P_PRNTR
+CHANGING GF_TSP03L.
+GF_NAST-LDEST = GF_TSP03L-PADEST.
+ENDIF.
+*---帳票名
+GF_FILELISTD-TITLF = CNS_PGM_TITLE.
+*---出力日
+GF_FILELISTD-DATUM = SY-DATUM.
+*---入出庫伝票
+CONCATENATE GF_MSEG-MBLNR '-'
+GF_MSEG-ZEILE
+GF_MSEG-MJAHR
+INTO GF_FILELISTD-MBLNR.
+
+ENDFORM.                    " FRM_HEADER2_SET
+*&------------------------------------------------------------------*
+*&      Form  FRM_DETAIL_SET
+*&------------------------------------------------------------------*
+*       区分：明細の項目の設定を行なう
+*-------------------------------------------------------------------*
+FORM FRM_DETAIL_SET.
+*---DELETE START PSD T.SAITOH 2002/04/23 ---------------------------*
+* 仕様変更：品目マスタから取得せず購買伝票から取得するため削除
+**---テーブル読込０４：MAKT：品目テキスト
+*  PERFORM FRM_SELECT_MAKT USING    GF_MSEG-MATNR
+*                          CHANGING GF_FILELISTD-MAKTX.
+*---DELETE END   PSD T.SAITOH 2002/04/23 ---------------------------*
+*---テーブル読込０５：T001W：営業所名
+PERFORM FRM_SELECT_T001W USING    GF_MSEG-WERKS
+CHANGING GF_FILELISTD-NAME1.
+*---テーブル読込０６：MARD_MARA
+PERFORM FRM_SELECT_MARD USING    GF_MSEG
+CHANGING GF_MARD.
+* 棚番を設定
+GF_FILELISTD-LGPBE = GF_MARD-LGPBE.
+*---テーブル読込１２：EKPO
+*---MODIFY START PSD T.SAITOH 2002/04/23 ---------------------------*
+* 仕様変更：品目マスタから取得せず購買伝票から取得する
+*  PERFORM FRM_SELECT_EKPO USING    GF_MSEG
+*                          CHANGING G_KNTTP.
+PERFORM FRM_SELECT_EKPO USING    GF_MSEG
+CHANGING G_KNTTP
+GF_FILELISTD-MAKTX
+GF_FILELISTD-LIFNR.
+*---APPEND START PSD T.SAITOH 2002/07/10 ---------------------------*
+* フラグ初期化
+CLEAR: G_EKKO_RETURN,
+G_VBAK_RETURN.
+* 組織対応のための対応：データなしは対応外とする。（EKKO）
+* 購買組織存在チェック(購買伝票が存在する時のみ)
+IF GF_MSEG-EBELN <> SPACE.
+PERFORM FRM_EXIST_EKORG_EKKO  USING GF_MSEG-EBELN.
+*   読み込みできない場合、対象外
+IF G_EKKO_RETURN <> 0.
+EXIT.
+ENDIF.
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/07/10 ---------------------------*
+
+*---MODIFY END   PSD T.SAITOH 2002/04/23 ---------------------------*
+*---テーブル読込０８：VBAK
+*---MODIFY START PSD T.SAITOH 2002/07/10 ---------------------------*
+* 販売伝票読込（販売伝票が存在する時のみ)
+IF GF_MSEG-KDAUF <> SPACE.""<<<APPEND
+PERFORM FRM_SELECT_VBAK USING    GF_MSEG-KDAUF
+CHANGING GF_VBAK.
+*   組織対応のための対応：データなしは対応外とする。(VBAK）
+*   読み込みできない場合、対象外
+IF G_VBAK_RETURN <> 0.
+EXIT.
+ENDIF.
+ENDIF.""<<<APPEND
+*---MODIFY END   PSD T.SAITOH 2002/07/10 ---------------------------*
+*======================================================*
+IF G_KNTTP = 'M'.
+*---個別購買品のとき
+*---テーブル読込０９：KNA1
+PERFORM FRM_SELECT_KNA1 USING    GF_VBAK-KUNNR
+CHANGING GF_FILELISTD-NAME2.
+*---テーブル読込１１：VBEP：納期の設定
+PERFORM FRM_SELECT_VBEP USING    GF_MSEG
+CHANGING GF_FILELISTD-EDATU.
+
+*---テーブル読込１０：KNMT：図版の設定
+PERFORM FRM_SELECT_KNMT USING    GF_VBAK
+GF_MSEG
+CHANGING GF_FILELISTD-KDMAT.
+*---注文番号の設定（個別購買のときのみ）
+GF_FILELISTD-BSTNK = GF_VBAK-BSTNK.
+*---発注番号の設定
+GF_FILELISTD-KDAUF = GF_MSEG-KDAUF.
+*---単位の設定（個別購買品）
+*---DELETE START PSD T.SAITOH 2002/08/10 ---------------------------*
+* 個別購買も在庫品も共通化するためここでは削除：仕様変更
+**---MODIFY START PSD T.SAITOH 2002/03/19 単位変換対応----------------*
+**    PERFORM FRM_SELECT_VBAP USING    GF_MSEG
+**                            CHANGING GF_FILELISTD-ZIEME.
+*    CLEAR GW_ZIEME.
+*    PERFORM FRM_SELECT_VBAP USING    GF_MSEG
+*                            CHANGING GW_ZIEME.
+*    WRITE GW_ZIEME TO GF_FILELISTD-ZIEME.
+**---MODIFY END   PSD T.SAITOH 2002/03/19 ---------------------------*
+*---DELETE END   PSD T.SAITOH 2002/08/10 ---------------------------*
+*---出庫区分の設定
+GF_FILELISTD-LTGCF = '* *'.
+*======================================================*
+ELSE.
+*---在庫品のとき
+GF_FILELISTD-NAME2 = CNS_STOCK_J.
+*---テーブル読込１３：EKET：納期の設定
+PERFORM FRM_SELECT_EKET USING    GF_MSEG
+CHANGING GF_FILELISTD-EDATU.
+*---発注番号の設定
+GF_FILELISTD-KDAUF = GF_MSEG-EBELN.
+*---在庫品区分の設定
+GF_FILELISTD-STKCF = '*'.
+*---単位の設定（在庫品）
+*---DELETE START PSD T.SAITOH 2002/08/10 ---------------------------*
+* 個別購買も在庫品も共通化するためここでは削除：仕様変更
+**---MODIFY START PSD T.SAITOH 2002/03/19 単位変換対応----------------*
+**    GF_FILELISTD-ZIEME = GF_MSEG-ERFME.
+*    WRITE GF_MSEG-ERFME TO GF_FILELISTD-ZIEME.
+**---MODIFY END   PSD T.SAITOH 2002/03/19 ---------------------------*
+*---DELETE END   PSD T.SAITOH 2002/08/10 ---------------------------*
+ENDIF.
+*======================================================*
+
+*---APPEND START PSD T.SAITOH 2002/08/10 ---------------------------*
+* 単位の設定:個別購買も在庫品も共通単位を用いる
+WRITE GF_MSEG-ERFME TO GF_FILELISTD-ZIEME.
+*---APPEND END   PSD T.SAITOH 2002/08/10 ---------------------------*
+
+*---再発行区分
+IF PR_REOUT = CNS_X.
+GF_FILELISTD-REOUT = 'R'.
+ENDIF.
+*----CDの設定
+GF_FILELISTD-MATNR = GF_MSEG-MATNR.
+
+*---数量の設定
+* APPEND PSD K.ARAI 2002/05/27
+MOVE GF_MSEG-ERFMG TO GF_FILELISTD-ERFMG.
+*  WRITE GF_MSEG-ERFMG TO GF_FILELISTD-ERFMG.
+* APPEND END
+IF GF_MSEG-ERFMG < 0.
+SHIFT GF_FILELISTD-ERFMG RIGHT CIRCULAR.
+ENDIF.
+CONDENSE GF_FILELISTD-ERFMG NO-GAPS.
+
+*---社内用備考
+*---APPEND START PSD T.SAITOH 2002/03/29 ---------------------------*
+* 仕様変更：明細テキストが存在する場合、社内用備考に明細テキストを優先指
+*          し、READ_TEXTから取得しない。
+CONDENSE GF_MSEG-SGTXT.
+IF GF_MSEG-SGTXT+0(1) <> SPACE.
+GF_FILELISTD-TEXTC = GF_MSEG-SGTXT.
+ELSE.
+*---APPEND END   PSD T.SAITOH 2002/03/29 ---------------------------*
+PERFORM FRM_READ_TEXT USING GF_MSEG-EBELN
+GF_MSEG-EBELP
+CHANGING GF_FILELISTD-TEXTC.
+*---APPEND START PSD T.SAITOH 2002/03/29 ---------------------------*
+* 仕様変更：明細テキストが存在する場合、社内用備考に明細テキストを優先指
+*          し、READ_TEXTから取得しない。
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/03/29 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/08/27 ---------------------------*
+*  発注伝票番号／発注明細番号　追加
+GF_FILELISTD-EBELN = GF_MSEG-EBELN.
+GF_FILELISTD-EBELP = GF_MSEG-EBELP.
+*---APPEND END   PSD T.SAITOH 2002/08/27 ---------------------------*
+
+***** 2016/2/26 ISID18 INS START *****
+*******************
+*  ロット関連項目設定
+*******************
+DATA:
+LW_MCHA TYPE TYP_MCHA,
+LV_OBJEK TYPE OBJNUM,
+LV_OBTAB TYPE TABELLE,
+LV_KLART TYPE KLASSENART,
+LV_CLASS TYPE KLASSE_D,
+LT_SNUM  TYPE STANDARD TABLE OF BAPI1003_ALLOC_VALUES_NUM,
+LT_SCHAR TYPE STANDARD TABLE OF BAPI1003_ALLOC_VALUES_CHAR,
+LT_SCURR TYPE STANDARD TABLE OF BAPI1003_ALLOC_VALUES_CURR,
+LT_RET   TYPE STANDARD TABLE OF BAPIRET2,
+LW_SCHAR_VL TYPE BAPI1003_ALLOC_VALUES_CHAR,
+LW_SCHAR_CM TYPE BAPI1003_ALLOC_VALUES_CHAR,
+LW_SCHAR_VM TYPE BAPI1003_ALLOC_VALUES_CHAR.
+
+IF GF_MSEG-CHARG IS NOT INITIAL.
+*    ロットマスタから取得
+SELECT SINGLE
+CHARG                              "ロット番号
+VFDAT                              "有効期限
+LICHA                              "仕入先ロット
+LWEDT                              "前回入庫日付
+HSDAT                              "製造日付
+FROM MCHA
+INTO LW_MCHA
+WHERE MATNR = GF_MSEG-MATNR        "品目コード
+AND WERKS = GF_MSEG-WERKS        "プラント
+AND CHARG = GF_MSEG-CHARG.       "ロット番号
+
+*    仕入先ロット（長）取得
+*    得意先メモ取得
+*    仕入れ先メモ取得
+CALL FUNCTION 'VB_BATCH_2_CLASS_OBJECT'
+EXPORTING
+I_MATNR = GF_MSEG-MATNR
+I_CHARG = GF_MSEG-CHARG
+I_WERKS = GF_MSEG-WERKS
+IMPORTING
+E_OBJEK = LV_OBJEK
+E_OBTAB = LV_OBTAB
+E_KLART = LV_KLART
+E_CLASS = LV_CLASS.
+
+CALL FUNCTION 'BAPI_OBJCL_GETDETAIL'
+EXPORTING
+OBJECTKEY       = LV_OBJEK
+OBJECTTABLE     = LV_OBTAB
+CLASSNUM        = LV_CLASS
+CLASSTYPE       = LV_KLART
+TABLES
+ALLOCVALUESNUM  = LT_SNUM
+ALLOCVALUESCHAR = LT_SCHAR
+ALLOCVALUESCURR = LT_SCURR
+RETURN          = LT_RET.
+
+READ TABLE LT_SCHAR INTO LW_SCHAR_VL
+WITH KEY CHARACT_DESCR = TEXT-040.  "仕入先ロット（長）
+
+READ TABLE LT_SCHAR INTO LW_SCHAR_VM
+WITH KEY CHARACT_DESCR = TEXT-041.  "仕入先メモ
+
+READ TABLE LT_SCHAR INTO LW_SCHAR_CM
+WITH KEY CHARACT_DESCR = TEXT-042.  "得意先メモ
+
+GF_FILELISTD-HSDAT = LW_MCHA-HSDAT.       "製造日付
+GF_FILELISTD-VFDAT = LW_MCHA-VFDAT.       "有効期間期限日
+GF_FILELISTD-LWEDT = LW_MCHA-LWEDT.       "前回入庫日付
+GF_FILELISTD-CHARG = GF_MSEG-CHARG.   "ロット番号
+GF_FILELISTD-LICHA  = LW_MCHA-LICHA.          "仕入先ロット
+GF_FILELISTD-VENDORLOT = LW_SCHAR_VL-VALUE_CHAR.  "仕入先ロット（長）
+GF_FILELISTD-VENDORMEMO = LW_SCHAR_VM-VALUE_CHAR.  "仕入先メモ
+GF_FILELISTD-CUSTOMMEMO = LW_SCHAR_CM-VALUE_CHAR. "得意先メモ
+ENDIF.
+***** 2016/2/26 ISID18 INS END *****
+
+ENDFORM.                    " FRM_DETAIL_SET
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_BWART
+*&------------------------------------------------------------------*
+*     MSEG:入庫伝票が取消されているかチェックする
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_BWART.
+DATA:LF_MSEG TYPE TYP_MSEG.
+*---MODIFY START PSD T.SAITOH 2002/03/01 ---------------------------*
+*  READ TABLE GT_MSEG INTO LF_MSEG WITH KEY
+*                                   SMBLN = GF_MSEG-MBLNR
+*                                   SJAHR = GF_MSEG-MJAHR
+*                                   SMBLP = GF_MSEG-ZEILE.
+SELECT SINGLE MBLNR FROM MSEG
+INTO (LF_MSEG-MBLNR)
+WHERE SMBLN = GF_MSEG-MBLNR
+AND SJAHR = GF_MSEG-MJAHR
+AND SMBLP = GF_MSEG-ZEILE.
+*---MODIFY END   PSD T.SAITOH 2002/03/01 ---------------------------*
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+*       削除伝票なので対象外
+FLG_MSEG_DEL = CNS_X.
+WHEN 4.         " 対象データと判断
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH G_REPID
+CNS_TSP03L
+SY-SUBRC.
+ENDCASE.
+ENDFORM.                    " FRM_CHECK_BWART
+*&------------------------------------------------------------------*
+*&      Form  frm_filelist_set
+*&------------------------------------------------------------------*
+*       ファイルリストを作成する
+*-------------------------------------------------------------------*
+FORM FRM_FILELIST_SET.
+DATA:L_CNT_FILEREC(14) TYPE N."GT_FILELISTDのレコード数
+DESCRIBE TABLE GT_FILELISTD LINES L_CNT_FILEREC.
+
+IF L_CNT_FILEREC = 0.
+CNT_ERR = CNT_ERR + 1.
+PERFORM FRM_NODATA_MESSAGE_NAST USING CNS_PGM_TITLE.
+ENDIF.
+
+* 出力用ファイルのヘッダ作成
+PERFORM FRM_MAKE_FILEH.
+* PAPROSNAME（デバイス名称でソートする）
+*---MODIFY START SOL T.HAYASHI 2009/09/17 --------------------------*
+SORT GT_FILELISTD ASCENDING BY PAPROSNAME LIFNR MBLNR.
+** Mod 2005.12.20 --->
+** SORT GT_FILELISTD ASCENDING BY PAPROSNAME .
+*  SORT GT_FILELISTD ASCENDING BY PAPROSNAME BSTNK .
+** Mod 2005.12.20 <---
+*---MODIFY END SOL T.HAYASHI 2009/09/17 ----------------------------*
+
+
+* 出力用ファイルの明細作成
+LOOP AT GT_FILELISTD INTO GF_FILELISTD.
+PERFORM FRM_MAEK_FILED.
+ENDLOOP.
+
+ENDFORM.                    " frm_filelist_set
+*&------------------------------------------------------------------*
+*&      Form  FRM_MAKE_FILEH
+*&------------------------------------------------------------------*
+*       出力用ファイルのヘッダを作成する
+*-------------------------------------------------------------------*
+FORM FRM_MAKE_FILEH.
+*   <START>
+* Mod ES-UP 2012/10/30 -->
+*  GF_FILE = GF_FILELISTH-APITS.
+GF_FILE-DATA = GF_FILELISTH-APITS.
+* Mod ES-UP 2012/10/30 <--
+APPEND GF_FILE TO GT_FILE.
+*   VrSetDocName2="入庫荷札(STTDXX)"
+CONCATENATE GF_FILELISTH-APIFC
+GF_FILELISTH-DBLT1
+GF_FILELISTH-TITLS
+GF_FILELISTH-BRCKTR
+GF_FILELISTH-USRID
+GF_FILELISTH-BRCKTL
+* Mod ES-UP 2012/10/30 -->
+*              GF_FILELISTH-DBLT2 INTO GF_FILE.
+GF_FILELISTH-DBLT2 INTO GF_FILE-DATA.
+* Mod ES-UP 2012/10/30 <--
+APPEND GF_FILE TO GT_FILE.
+*   <END>
+* Mod ES-UP 2012/10/30 -->
+*  GF_FILE = GF_FILELISTH-APITE.
+GF_FILE-DATA = GF_FILELISTH-APITE.
+* Mod ES-UP 2012/10/30 <--
+APPEND GF_FILE TO GT_FILE.
+*   明細ヘッダ
+* Mod ES-UP 2012/10/30 -->
+*  GF_FILE = GF_FILELISTH-TLINE.
+GF_FILE-DATA = GF_FILELISTH-TLINE.
+* Mod ES-UP 2012/10/30 <--
+APPEND GF_FILE TO GT_FILE.
+
+ENDFORM.                    " FRM_MAKE_FILEH
+*&------------------------------------------------------------------*
+*&      Form  FRM_MAEK_FILED
+*&------------------------------------------------------------------*
+*       出力用ファイルの明細を作成
+*-------------------------------------------------------------------*
+FORM FRM_MAEK_FILED.
+* Mod ES-UP 2012/08/21 -->
+*  CONCATENATE GF_FILELISTD-PAPROSNAME CNSX_TAB
+*              GF_FILELISTD-TITLF      CNSX_TAB
+*              GF_FILELISTD-DATUM      CNSX_TAB
+*              GF_FILELISTD-MBLNR      CNSX_TAB
+*              GF_FILELISTD-NAME2      CNSX_TAB
+*              GF_FILELISTD-REOUT      CNSX_TAB
+*              GF_FILELISTD-LTGCF      CNSX_TAB
+*              GF_FILELISTD-BSTNK      CNSX_TAB
+*              GF_FILELISTD-KDAUF      CNSX_TAB
+*              GF_FILELISTD-KDMAT      CNSX_TAB
+*              GF_FILELISTD-MATNR      CNSX_TAB
+*              GF_FILELISTD-MAKTX      CNSX_TAB
+*              GF_FILELISTD-EDATU      CNSX_TAB
+*              GF_FILELISTD-TEXTC      CNSX_TAB
+*              GF_FILELISTD-ERFMG      CNSX_TAB
+*              GF_FILELISTD-ZIEME      CNSX_TAB
+*              GF_FILELISTD-LGPBE      CNSX_TAB
+*              GF_FILELISTD-STKCF      CNSX_TAB
+**---MODIFY START PSD T.SAITOH 2002/08/27 ---------------------------*
+**              GF_FILELISTD-NAME1      INTO GF_FILE.
+*              GF_FILELISTD-NAME1      CNSX_TAB
+*              GF_FILELISTD-EBELN      CNSX_TAB      "発注伝票番号
+*              GF_FILELISTD-EBELP      INTO GF_FILE. "発注明細番号
+**---MODIFY END   PSD T.SAITOH 2002/08/27 ---------------------------*
+***** 2016/2/26 ISID18 DEL START *****
+*  CONCATENATE GF_FILELISTD-PAPROSNAME
+*              GF_FILELISTD-TITLF
+*              GF_FILELISTD-DATUM
+*              GF_FILELISTD-MBLNR
+*              GF_FILELISTD-NAME2
+*              GF_FILELISTD-REOUT
+*              GF_FILELISTD-LTGCF
+*              GF_FILELISTD-BSTNK
+*              GF_FILELISTD-KDAUF
+*              GF_FILELISTD-KDMAT
+*              GF_FILELISTD-MATNR
+*              GF_FILELISTD-MAKTX
+*              GF_FILELISTD-EDATU
+*              GF_FILELISTD-TEXTC
+*              GF_FILELISTD-ERFMG
+*              GF_FILELISTD-ZIEME
+*              GF_FILELISTD-LGPBE
+*              GF_FILELISTD-STKCF
+*              GF_FILELISTD-NAME1
+*              GF_FILELISTD-EBELN      "発注伝票番号
+*              GF_FILELISTD-EBELP      "発注明細番号
+** Mod ES-UP 2012/10/30 -->
+**         INTO GF_FILE
+*         INTO GF_FILE-DATA
+** Mod ES-UP 2012/10/30 <--
+*         SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+** Mod ES-UP 2012/08/21 <--
+***** 2016/2/26 ISID18 DEL END *****
+***** 2016/2/26 ISID18 INS START *****
+*  ゼロ出力しないように
+IF GF_FILELISTD-HSDAT IS NOT INITIAL.
+GF_FILELISTD-HSDAT_CHAR = GF_FILELISTD-HSDAT.
+ENDIF.
+IF GF_FILELISTD-VFDAT IS NOT INITIAL.
+GF_FILELISTD-VFDAT_CHAR = GF_FILELISTD-VFDAT.
+ENDIF.
+IF GF_FILELISTD-LWEDT IS NOT INITIAL.
+GF_FILELISTD-LWEDT_CHAR = GF_FILELISTD-LWEDT.
+ENDIF.
+
+*  チェックボックス「ロット有り」がチェックONの場合、
+*  ロットを出力する
+IF CB_LOT = ABAP_TRUE.
+CONCATENATE GF_FILELISTD-PAPROSNAME
+GF_FILELISTD-TITLF
+GF_FILELISTD-DATUM
+GF_FILELISTD-MBLNR
+GF_FILELISTD-NAME2
+GF_FILELISTD-REOUT
+GF_FILELISTD-LTGCF
+GF_FILELISTD-BSTNK
+GF_FILELISTD-KDAUF
+GF_FILELISTD-KDMAT
+GF_FILELISTD-MATNR
+GF_FILELISTD-MAKTX
+GF_FILELISTD-EDATU
+GF_FILELISTD-TEXTC
+GF_FILELISTD-ERFMG
+GF_FILELISTD-ZIEME
+GF_FILELISTD-LGPBE
+GF_FILELISTD-STKCF
+GF_FILELISTD-NAME1
+GF_FILELISTD-EBELN          "発注伝票番号
+GF_FILELISTD-EBELP          "発注明細番号
+GF_FILELISTD-HSDAT_CHAR      "製造日付
+GF_FILELISTD-VFDAT_CHAR       "有効期間期限日
+GF_FILELISTD-LWEDT_CHAR       "前回入庫日付
+GF_FILELISTD-CHARG       "ロット番号
+GF_FILELISTD-LICHA         "仕入先ロット
+GF_FILELISTD-VENDORLOT      "仕入先ロット（長）
+GF_FILELISTD-VENDORMEMO   "仕入先メモ
+GF_FILELISTD-CUSTOMMEMO  "得意先メモ
+INTO GF_FILE-DATA
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+ELSE.
+*  チェックボックス「ロット有り」がチェックOFFの場合、
+*  ロットを出力しない
+CONCATENATE GF_FILELISTD-PAPROSNAME
+GF_FILELISTD-TITLF
+GF_FILELISTD-DATUM
+GF_FILELISTD-MBLNR
+GF_FILELISTD-NAME2
+GF_FILELISTD-REOUT
+GF_FILELISTD-LTGCF
+GF_FILELISTD-BSTNK
+GF_FILELISTD-KDAUF
+GF_FILELISTD-KDMAT
+GF_FILELISTD-MATNR
+GF_FILELISTD-MAKTX
+GF_FILELISTD-EDATU
+GF_FILELISTD-TEXTC
+GF_FILELISTD-ERFMG
+GF_FILELISTD-ZIEME
+GF_FILELISTD-LGPBE
+GF_FILELISTD-STKCF
+GF_FILELISTD-NAME1
+GF_FILELISTD-EBELN      "発注伝票番号
+GF_FILELISTD-EBELP      "発注明細番号
+INTO GF_FILE-DATA
+SEPARATED BY CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+ENDIF.
+***** 2016/2/26 ISID18 INS END *****
+APPEND GF_FILE TO GT_FILE.
+ENDFORM.                    " FRM_MAEK_FILED
+*&------------------------------------------------------------------*
+*&      Form  FRM_RENEW_NAST
+*&------------------------------------------------------------------*
+*       メッセージステータスを更新する
+*-------------------------------------------------------------------*
+FORM FRM_RENEW_NAST.
+*--- ＮＡＳＴテーブル更新処理
+LOOP AT GT_RENEW_NAST INTO GF_RENEW_NAST.
+CASE CNS_X.
+*   「再出力」
+WHEN PR_REOUT.
+UPDATE NAST SET DATVR = SY-DATUM
+UHRVR = SY-UZEIT
+USNAM = SY-UNAME
+LDEST = GF_RENEW_NAST-LDEST
+WHERE KAPPL         = 'ME'
+AND KSCHL         = 'WE01'
+AND SPRAS         = 'J'
+AND OBJKY         = GF_RENEW_NAST-OBJKY
+AND ERDAT         = GF_RENEW_NAST-ERDAT
+AND ERUHR         = GF_RENEW_NAST-ERUHR
+AND VSTAT         = '1'.
+*   「通常出力」
+WHEN PR_OUTNR.
+UPDATE NAST SET VSTAT = '1'
+DATVR = SY-DATUM
+UHRVR = SY-UZEIT
+USNAM = SY-UNAME
+LDEST = GF_RENEW_NAST-LDEST
+WHERE KAPPL         = 'ME'
+AND KSCHL         = 'WE01'
+AND SPRAS         = 'J'
+AND OBJKY         = GF_RENEW_NAST-OBJKY
+AND ERDAT         = GF_RENEW_NAST-ERDAT
+AND ERUHR         = GF_RENEW_NAST-ERUHR
+AND VSTAT         = '0'.
+ENDCASE.
+
+CASE SY-SUBRC.
+WHEN 0.
+*        ROLLBACK WORK.
+WHEN 4.    " 対象データなし
+*--- ＤＥ更新エラー処理
+PERFORM FRM_UPDATE_ERR.
+ROLLBACK WORK.
+STOP.
+WHEN 8.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+CNS_NAST
+SY-SUBRC.
+ENDCASE.
+ENDLOOP.
+
+ENDFORM.                    " FRM_RENEW_NAST
+*&------------------------------------------------------------------*
+*&      Form  FRM_UPDATE_ERR
+*&------------------------------------------------------------------*
+*       更新エラーメッセージ
+*-------------------------------------------------------------------*
+FORM FRM_UPDATE_ERR.
+WRITE:/,TEXT-020,            "【メッセージステータス更新】
+/,TEXT-021,            "出力レコードを更新できませんでした。
+CNS_PGM_TITLE,TEXT-022,"'入庫荷札'は出力されていません。
+TEXT-023.            "システム管理者に連絡して下さい。
+
+
+ENDFORM.                    " FRM_UPDATE_ERR
+*&------------------------------------------------------------------*
+*&      Form  FRM_FILENAME_MAKE
+*&------------------------------------------------------------------*
+*       ファイル名作成
+*-------------------------------------------------------------------*
+FORM FRM_FILENAME_MAKE.
+
+**** START ADD 2015/01/23 ISID11 ****
+DATA:
+L_FILENAME TYPE  ZTEGZZM001-Z_OUTPUT_FN.
+**** 2016/02/26 ISID18 INS START ****
+DATA:
+L_IMPSUBKEY1 TYPE ZTEGZZM001-Z_CONV_SUBKEY1,
+L_IMPSUBKEY2 TYPE ZTEGZZM001-Z_CONV_SUBKEY2.
+
+L_IMPSUBKEY1 = CB_LOT.    "ロット有り
+L_IMPSUBKEY2 = CB_BARCD."バーコード有り
+**** 2016/02/26 ISID18 INS END ****
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = 'C001'
+***** 2016/2/26 ISID18 INS START *****
+IMPSUBKEY1 = L_IMPSUBKEY1    "ロット有り
+IMPSUBKEY2 = L_IMPSUBKEY2  "バーコード有り
+***** 2016/2/26 ISID18 INS END *****
+IMPORTING
+EXPFILENAME = L_FILENAME.
+**** END ADD 2015/01/23 ISID11 ****
+
+CONCATENATE
+*---プログラム名称
+**** START UPD 2015/01/23 ISID11 ****
+*  GF_FILELISTH-REPID
+L_FILENAME
+**** END UPD 2015/01/23 ISID11 ****
+*---ユーザログオン名
+GF_FILELISTH-UNAME
+*---日付と時刻
+GF_FILELISTH-UZEIT
+*---拡張子
+GF_FILELISTH-EXTNS INTO G_FILENAME.
+
+CONCATENATE P_FILE
+G_FILENAME
+INTO G_FILEOPENNAME.
+
+ENDFORM.                    " FRM_FILENAME_MAKE
+*&------------------------------------------------------------------*
+*&      Form  FRM_SEND_FILE
+*&------------------------------------------------------------------*
+*       Ｒ／３　ＡＰサーバにファイルを転送する
+*-------------------------------------------------------------------*
+FORM FRM_SEND_FILE.
+**** START DEL 2014/09/01 ISID11 ****
+** Mod ES-UP 2012/08/21 -->
+**--- ファイルＯＰＥＮ処理
+**  OPEN DATASET G_FILEOPENNAME FOR OUTPUT IN TEXT MODE.
+*  DATA L_CODEPAGE TYPE ABAP_ENCODING.
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** END DEL 2014/09/01 ISID11 ****
+
+**** START ADD 2015/01/23 ISID11 ****
+DATA:
+L_Z_OUTPUT_CP TYPE  ZTEGZZM001-Z_OUTPUT_CP,
+L_CODEPAGE TYPE ABAP_ENCODING,
+L_SAPCODEPAGE TYPE STRING,
+L_FLGUTF8  TYPE  FLAG,
+L_SUBRC    TYPE SY-SUBRC.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = 'C001'
+IMPORTING
+EXPCODEPAGE = L_Z_OUTPUT_CP
+EXPFLGUTF8  = L_FLGUTF8.
+
+IF L_FLGUTF8 IS INITIAL.
+
+L_SAPCODEPAGE = L_Z_OUTPUT_CP.
+
+IF L_SAPCODEPAGE IS NOT INITIAL.
+
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+
+ENDIF.
+
+TRY .
+OPEN DATASET G_FILEOPENNAME FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+L_SUBRC = SY-SUBRC.
+
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+
+L_SUBRC = 8.
+
+ENDTRY.
+
+ELSE.
+**** END ADD 2015/01/23 ISID11 ****
+
+OPEN DATASET G_FILEOPENNAME FOR OUTPUT
+**** START UPD 2014/09/01 ISID11 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/09/01 ISID11 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/01/23 ISID11 ****
+L_SUBRC = SY-SUBRC.
+ENDIF.
+**** END ADD 2015/01/23 ISID11 ****
+** Mod ES-UP 2012/08/21 <--
+
+**** START UPD 2015/01/23 ISID11 ****
+*  IF SY-SUBRC <> 0.
+IF L_SUBRC <> 0.
+**** END UPD 2015/01/23 ISID11 ****
+PERFORM FRM_FILE_ERR.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+
+*--- ファイル出力処理
+LOOP AT GT_FILE INTO GF_FILE.
+* Mod ES-UP 2012/10/30 -->
+*    TRANSFER GF_FILE TO G_FILEOPENNAME.
+TRANSFER GF_FILE-DATA TO G_FILEOPENNAME.
+* Mod ES-UP 2012/10/30 <--
+IF SY-SUBRC <> 0.
+PERFORM FRM_FILE_ERR.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+ENDLOOP.
+
+*--- ファイルＣＬＯＳＥ処理
+CLOSE DATASET G_FILEOPENNAME.
+IF SY-SUBRC <> 0.
+PERFORM FRM_FILE_ERR.
+ROLLBACK WORK.
+STOP.
+ENDIF.
+
+ENDFORM.                    " FRM_SEND_FILE
+*&------------------------------------------------------------------*
+*&      Form  FRM_FILE_ERR
+*&------------------------------------------------------------------*
+*       ファイルエラーメッセージ
+*-------------------------------------------------------------------*
+FORM FRM_FILE_ERR.
+
+WRITE / TEXT-024. "【ファイル作成】
+WRITE: / CNS_PGM_TITLE,TEXT-025,
+"'入庫荷札'のファイルをSVFサーバ上に作成できませんでした。
+TEXT-026.               "システム管理者に連絡して下さい。
+
+ENDFORM.                    " FRM_FILE_ERR
+*&------------------------------------------------------------------*
+*&      Form  FRM_GOOD_END
+*&------------------------------------------------------------------*
+*       正常終了
+*-------------------------------------------------------------------*
+FORM FRM_GOOD_END.
+DATA:L_CNT_FILEREC(14) TYPE N."GT_FILEのレコード数
+DATA:L_W_CNT_FILEREC TYPE P.  "0サプレイス用
+DESCRIBE TABLE GT_FILE LINES L_CNT_FILEREC.
+
+L_CNT_FILEREC = L_CNT_FILEREC - 4."ヘッダの分を引く
+L_W_CNT_FILEREC = L_CNT_FILEREC.  "0サプレイス用
+
+WRITE:/ TEXT-028,
+/,CNS_PGM_TITLE,TEXT-029,
+L_W_CNT_FILEREC,
+TEXT-030.
+
+ENDFORM.                    " FRM_GOOD_END
+*&---------------------------------------------------------------------*
+*&      Form  FRM_NOW_TEST
+*&---------------------------------------------------------------------*
+*       テスト用出力表示
+*----------------------------------------------------------------------*
+FORM FRM_NOW_TEST.
+LOOP AT GT_FILE INTO GF_FILE.
+* Mod ES-UP 2012/10/30 -->
+*    WRITE:/ GF_FILE.
+WRITE:/ GF_FILE-DATA.
+* Mod ES-UP 2012/10/30 <--
+ENDLOOP.
+
+STOP.
+
+ENDFORM.                    " FRM_NOW_TEST
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_DIR
+*&---------------------------------------------------------------------*
+*       ファイル作成先ディレクトリ設定チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_DIR.
+CLEAR:P_FILE.
+GET PARAMETER ID 'ZSVF' FIELD P_FILE.
+IF P_FILE = SPACE.
+MESSAGE E614(Z1) WITH TEXT-031. "ファイル作成先ディレクトリ
+ENDIF.
+
+ENDFORM.                    " FRM_CHECK_DIR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_PRINT
+*&---------------------------------------------------------------------*
+*       プリント枚数がブランクか０の時のエラーチェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_PRINT.
+IF PR_NMOUT = SPACE OR PR_NMOUT < 1.
+MESSAGE E006(Z1) WITH CNS_NSHT.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_PRINT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EXIST_EKORG_EKKO
+*&---------------------------------------------------------------------*
+*       購買伝票の購買組織存在チェック
+*----------------------------------------------------------------------*
+*      -->P_GF_MSEG_EBELN  購買伝票番号
+*----------------------------------------------------------------------*
+FORM FRM_EXIST_EKORG_EKKO USING    P_EBELN.
+DATA : L_EKORG TYPE EKKO-EKORG."購買組織(使用せず)
+
+SELECT SINGLE EKORG
+FROM EKKO
+INTO L_EKORG
+WHERE EBELN = P_EBELN
+AND EKORG = PR_EKORG.
+
+*--- エラー処理
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.         " 対象データなし
+WHEN OTHERS.    " システムエラー
+MESSAGE A603(Z1) WITH SY-REPID
+'EKKO'
+SY-SUBRC.
+ENDCASE.
+
+G_EKKO_RETURN = SY-SUBRC.
+
+ENDFORM.                    " FRM_EXIST_EKORG_EKKO

@@ -1,0 +1,98 @@
+REPORT zzkura95 .
+
+* 使用テーブル
+TABLES yk410. "支払予定データ
+TABLES bkpf.  "会計伝票ヘッダ
+
+* グローバル変数
+DATA i_yk410 LIKE STANDARD TABLE OF yk410 WITH HEADER LINE.
+DATA w_updcnt LIKE sy-dbcnt.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk410-bukrs DEFAULT 'C001'.
+SELECT-OPTIONS s_lifnr FOR yk410-lifnr.
+SELECT-OPTIONS s_paydoc FOR yk410-paydoc.
+SELECT-OPTIONS s_zfbdt FOR yk410-zfbdt DEFAULT '20020831'.
+SELECT-OPTIONS s_paydat FOR yk410-paydat.
+PARAMETERS p_gjahr LIKE yk410-gjahr DEFAULT '2002'.
+SELECT-OPTIONS s_belnr FOR yk410-belnr.
+PARAMETERS p_prcdat LIKE yk410-prcdat DEFAULT '20020924'.
+PARAMETERS p_fiflg LIKE yk410-fiflg DEFAULT 'X'.
+PARAMETERS p_test AS CHECKBOX DEFAULT 'X'.
+
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 検索
+SELECT        *
+FROM   yk410
+INTO   TABLE  i_yk410
+WHERE  bukrs   = p_bukrs
+AND    lifnr  IN s_lifnr
+AND    paydoc IN s_paydoc
+AND    zfbdt  IN s_zfbdt
+AND    paydat IN s_paydat
+AND    gjahr   = p_gjahr
+AND    belnr  IN s_belnr
+AND    prcdat  = p_prcdat
+AND    fiflg   = p_fiflg.
+WRITE: / '検索件数', sy-dbcnt.
+
+* チェック
+LOOP AT i_yk410.
+SELECT SINGLE * FROM  bkpf
+WHERE  bukrs  = i_yk410-bukrs
+AND    belnr  = i_yk410-belnr
+AND    gjahr  = i_yk410-gjahr.
+IF sy-subrc <> 0.
+WRITE: / i_yk410-paydoc, '会計伝票が存在しません', i_yk410-belnr.
+CONTINUE.
+ENDIF.
+IF bkpf-stblg IS INITIAL.
+WRITE: / i_yk410-paydoc,
+'会計伝票が反対仕訳されていません', i_yk410-belnr.
+CONTINUE.
+ENDIF.
+ENDLOOP.
+
+* 更新
+LOOP AT i_yk410.
+*   ロック
+CALL FUNCTION 'ENQUEUE_EY_YK410'
+EXPORTING
+bukrs          = i_yk410-bukrs
+lifnr          = i_yk410-lifnr
+paydoc         = i_yk410-paydoc
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+*   更新
+CLEAR: i_yk410-gjahr,
+i_yk410-belnr,
+i_yk410-prcdat,
+i_yk410-fiflg.
+UPDATE yk410 FROM i_yk410.
+IF sy-subrc = 0.
+ADD 1 TO w_updcnt.
+ELSE.
+WRITE: / i_yk410-paydoc, 'YK410の更新に失敗しました'.
+ENDIF.
+*   アンロック
+CALL FUNCTION 'DEQUEUE_EY_YK410'
+EXPORTING
+bukrs  = i_yk410-bukrs
+lifnr  = i_yk410-lifnr
+paydoc = i_yk410-paydoc.
+
+ENDLOOP.
+WRITE: / '更新件数', w_updcnt.
+
+* テスト実行
+IF p_test = 'X'.
+ROLLBACK WORK.
+ENDIF.

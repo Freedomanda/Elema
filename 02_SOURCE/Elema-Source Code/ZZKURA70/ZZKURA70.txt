@@ -1,0 +1,312 @@
+*----------------------------------------------------------------------*
+*  請求書一覧                                                          *
+*    機能：請求書のヘッダ情報の一覧を作成する                          *
+*          得意先コードと、締日による選択が可能                        *
+*          得意先コード、得意先カナ名、締日によるソートが選択可能      *
+*          レポートの明細を選択することにより、次の金額を変更可能      *
+*          ・前月御請求額（画面入力）                                  *
+*          ・当月御入金額（画面入力）                                  *
+*          ・当月御請求額（自動計算）                                  *
+*          ※売上関係の金額は明細との不整合が発生するために修正不可    *
+*    作成：2002/08/14 KURANO                                           *
+*    変更：                                                            *
+*                                                                      *
+*----------------------------------------------------------------------*
+REPORT zzkura70 LINE-SIZE 255
+LINE-COUNT 65.
+
+* 使用テーブル
+TABLES yk510. "一括請求書ヘッダデータ
+TABLES kna1.  "得意先マスタ: 一般データ
+TABLES knvv.  "得意先マスタ: 販売データ
+TABLES knvp.  "得意先マスタ 取引先機能
+TABLES tvkbt. "組織単位: 営業所: テキスト
+TABLES tvgrt. "組織単位: 販売グループ: テキスト
+TABLES stxh.  "STXD SAPscript テキストファイルヘッダ
+
+* グローバル変数
+TYPES  BEGIN OF st_yk510.
+INCLUDE STRUCTURE yk510.
+TYPES:   sortl LIKE kna1-sortl,
+name1 LIKE kna1-name1,
+bil(1) TYPE c,
+END OF st_yk510.
+DATA i_yk510 TYPE STANDARD TABLE OF st_yk510 WITH HEADER LINE.
+DATA w_flg(1) TYPE c.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk510-bukrs.    "会社コード
+SELECT-OPTIONS s_kunnr FOR yk510-kunnr. "得意先コード
+PARAMETERS p_vkorg LIKE yk510-vkorg.    "販売組織
+PARAMETERS p_vtweg LIKE yk510-vtweg.    "流通チャネル
+PARAMETERS p_spart LIKE yk510-spart.    "製品部門
+SELECT-OPTIONS s_zfbdt FOR yk510-zfbdt. "締日
+PARAMETERS r_btn1 RADIOBUTTON GROUP r1. "得意先コードで整列
+PARAMETERS r_btn2 RADIOBUTTON GROUP r1. "得意先カナ名で整列
+PARAMETERS r_btn3 RADIOBUTTON GROUP r1. "締日で整列
+PARAMETERS p_bil AS CHECKBOX.           "請求書出力対象のみ
+PARAMETERS p_object LIKE stxh-tdobject. "オブジェクト
+PARAMETERS p_tdid LIKE stxh-tdid.       "テキスト ID
+
+*----------------------------------------------------------------------*
+INITIALIZATION.
+GET PARAMETER ID 'BUK' FIELD p_bukrs. "会社コード
+GET PARAMETER ID 'VKO' FIELD p_vkorg. "販売組織
+GET PARAMETER ID 'VTW' FIELD p_vtweg. "流通チャネル
+GET PARAMETER ID 'SPA' FIELD p_spart. "製品部門
+p_bil = 'X'.                          "請求書出力対象のみ
+p_object = 'KNB1'.                    "得意先　会計テキスト
+p_tdid = 'ZK01'.                      "高千穂請求書
+
+START-OF-SELECTION.
+
+PERFORM f_select. "YK510の選択
+PERFORM f_write.  "レポートの作成
+
+AT LINE-SELECTION.
+PERFORM f_write2. "子コード一覧の作成
+
+AT PF5.
+PERFORM f_screen. "更新画面の表示
+
+*---------------------------------------------------------------------*
+*       FORM f_select                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_select.
+SELECT        *
+FROM   yk510
+INTO   TABLE i_yk510
+WHERE  bukrs  = p_bukrs
+AND    kunnr IN s_kunnr
+AND    vkorg  = p_vkorg
+AND    vtweg  = p_vtweg
+AND    spart  = p_spart
+AND    zfbdt IN s_zfbdt.
+MESSAGE s401(y1) WITH 'YK510を読み込みました' sy-dbcnt.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_write                                                  *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_write.
+* ローカル変数
+DATA w_yk510 LIKE yk510.
+DATA w_name1 LIKE kna1-name1.
+DATA w_sortl LIKE kna1-sortl.
+DATA w_bil(1) TYPE c.
+DATA w_tdname LIKE stxh-tdname.
+* マスタ検索
+SORT i_yk510 BY kunnr.
+LOOP AT i_yk510.
+AT NEW kunnr.
+*     得意先名称取得
+CLEAR: w_name1, w_sortl.
+SELECT SINGLE name1 sortl
+INTO   (w_name1,w_sortl)
+FROM   kna1
+WHERE  kunnr  = i_yk510-kunnr.
+*     請求書出力対象
+CLEAR: w_bil, w_tdname.
+w_tdname+0(10) = i_yk510-kunnr.
+w_tdname+10(4) = p_bukrs.
+SELECT SINGLE * FROM  stxh
+WHERE  tdobject  = p_object
+AND    tdname    = w_tdname
+AND    tdid      = p_tdid
+AND    tdspras   = sy-langu.
+IF sy-subrc = 0.
+w_bil = 'X'.
+ENDIF.
+ENDAT.
+*   更新
+i_yk510-name1 = w_name1.
+i_yk510-sortl = w_sortl.
+i_yk510-bil = w_bil.
+MODIFY i_yk510.
+ENDLOOP.
+* ソート
+IF r_btn1 = 'X'.
+SORT i_yk510 BY kunnr zfbdt.
+ELSEIF r_btn2 = 'X'.
+SORT i_yk510 BY sortl zfbdt.
+ELSEIF r_btn3 = 'X'.
+SORT i_yk510 BY zfbdt kunnr.
+ENDIF.
+* 印刷
+LOOP AT i_yk510.
+IF p_bil = 'X' AND i_yk510-bil <> 'X'.
+CONTINUE.
+ENDIF.
+*   子コードの検索
+SELECT        * FROM  knvp
+WHERE  kunn2  = i_yk510-kunnr
+AND    vkorg  = i_yk510-vkorg
+AND    vtweg  = i_yk510-vtweg
+AND    spart  = i_yk510-spart
+AND    parvw  = 'Y3'.
+ENDSELECT.
+IF sy-dbcnt = 1.
+CLEAR w_flg.
+ELSE.
+w_flg = '*'.
+ENDIF.
+*   印刷
+WRITE: / i_yk510-kunnr, w_flg, i_yk510-name1,   "得意先
+i_yk510-zfbdt,                         "締日
+i_yk510-lblamt CURRENCY i_yk510-waers, "前月請求額
+i_yk510-cicamt CURRENCY i_yk510-waers, "当月入金額
+i_yk510-cslamt CURRENCY i_yk510-waers, "当月売上額
+i_yk510-ctxamt CURRENCY i_yk510-waers, "当月税額
+i_yk510-cstamt CURRENCY i_yk510-waers, "当月税込額
+i_yk510-cblamt CURRENCY i_yk510-waers, "当月請求額
+i_yk510-waers,                         "通貨コード
+i_yk510-outdat NO-ZERO,                "出力日
+i_yk510-outtim NO-ZERO,                "出力時刻
+i_yk510-outcnt NO-ZERO,                "出力回数
+i_yk510-outusr,                        "出力ユーザ
+i_yk510-fiflg,                         "会計連絡済
+i_yk510-bil.                           "請求書出力対象
+HIDE: i_yk510-bukrs, "キー項目の格納
+i_yk510-kunnr,
+i_yk510-vkorg,
+i_yk510-vtweg,
+i_yk510-spart,
+i_yk510-zfbdt,
+i_yk510-waers,
+w_flg.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_write2                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_write2.
+IF w_flg = '*'.
+SELECT        * FROM  knvp
+WHERE  kunn2  = i_yk510-kunnr
+AND    vkorg  = i_yk510-vkorg
+AND    vtweg  = i_yk510-vtweg
+AND    spart  = i_yk510-spart
+AND    parvw  = 'Y3'.
+SELECT SINGLE * FROM  kna1
+WHERE  kunnr  = knvp-kunnr.
+SELECT SINGLE * FROM  knvv
+WHERE  kunnr  = knvp-kunnr
+AND    vkorg  = i_yk510-vkorg
+AND    vtweg  = i_yk510-vtweg
+AND    spart  = i_yk510-spart.
+SELECT SINGLE * FROM  tvkbt
+WHERE  spras  = sy-langu
+AND    vkbur  = knvv-vkbur.
+SELECT SINGLE * FROM  tvgrt
+WHERE  spras  = sy-langu
+AND    vkgrp  = knvv-vkgrp.
+WRITE: / kna1-kunnr, kna1-name1, tvkbt-bezei, tvgrt-bezei.
+ENDSELECT.
+ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_screen                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_screen.
+* 読み込み
+SELECT SINGLE * FROM  yk510
+WHERE  bukrs  = i_yk510-bukrs
+AND    kunnr  = i_yk510-kunnr
+AND    vkorg  = i_yk510-vkorg
+AND    vtweg  = i_yk510-vtweg
+AND    spart  = i_yk510-spart
+AND    zfbdt  = i_yk510-zfbdt
+AND    waers  = i_yk510-waers.
+SELECT SINGLE * FROM  kna1
+WHERE  kunnr  = i_yk510-kunnr.
+* ロック
+CALL FUNCTION 'ENQUEUE_EY_YK510'
+EXPORTING
+bukrs          = yk510-bukrs
+kunnr          = yk510-kunnr
+vkorg          = yk510-vkorg
+vtweg          = yk510-vtweg
+spart          = yk510-spart
+zfbdt          = yk510-zfbdt
+waers          = yk510-waers
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE 'S' NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+EXIT.
+ENDIF.
+* 画面
+CALL SCREEN 0100.
+* アンロック
+CALL FUNCTION 'DEQUEUE_EY_YK510'
+EXPORTING
+bukrs = yk510-bukrs
+kunnr = yk510-kunnr
+vkorg = yk510-vkorg
+vtweg = yk510-vtweg
+spart = yk510-spart
+zfbdt = yk510-zfbdt
+waers = yk510-waers.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_0100  OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE status_0100 OUTPUT.
+SET PF-STATUS 'S0100'.
+SET TITLEBAR 'T01'.
+
+ENDMODULE.                 " STATUS_0100  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  exit_0100  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE exit_0100 INPUT.
+CASE sy-ucomm.           "プログラム終了機能
+WHEN 'BACK'.
+SET SCREEN 0.
+WHEN 'EXIT'.
+SET SCREEN 0.
+WHEN 'CANS'.
+ROLLBACK WORK.
+SET SCREEN 0.
+ENDCASE.
+LEAVE SCREEN.
+ENDMODULE.                 " exit_0100  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_0100  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE user_command_0100 INPUT.
+* 計算
+yk510-cblamt = yk510-lblamt
+- yk510-cicamt
++ yk510-cstamt.
+* 更新記録
+yk510-upddat = sy-datum.
+yk510-updtim = sy-uzeit.
+yk510-updusr = sy-uname.
+* ユーザ機能
+CASE sy-ucomm.
+WHEN 'ENTR'.
+WHEN 'SAVE'.
+UPDATE yk510.
+IF sy-subrc <> 0.
+MESSAGE e400(y1) WITH 'YK510の更新に失敗しました'.
+ENDIF.
+ENDCASE.
+ENDMODULE.                 " USER_COMMAND_0100  INPUT

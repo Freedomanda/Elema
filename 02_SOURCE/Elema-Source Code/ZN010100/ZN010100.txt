@@ -1,0 +1,2804 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN010100                                                    *
+*&         支払予定作成（仕入）                                        *
+*&---------------------------------------------------------------------*
+*&  機能    指定した照合締日期間の照合金額をもとに、
+*&          支払予定データを作成する。
+*&  作成日   : 2012/02/16
+*&  作成者   : K.KAJISA(solfis)
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/03/22 H.KOMIYAMA(solfis)
+*&  変更内容 : レイアウトF4ヘルプ形式変更
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/03/27  K.KAJISA(SOLFIS)
+*&  変更内容 : インデックス対応
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/05/01  K.KAJISA(SOLFIS)
+*&  変更内容 : 振替済で総額差異なしは、対象データなしとする。
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/05/25  K.FURUYA(SOLFIS)
+*&  変更内容 : 締日相殺、全額相殺の初期計算はマスタでの仮計算とする。
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/09/03  K.FURUYA(SOLFIS)
+*&  変更内容 : 振込は2千円以上の制限廃止
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2013/11/14  K.TSUNOSE(GSL)
+*&  変更内容 : 電子記録債務対応
+*&---------------------------------------------------------------------*
+*& YYYY/MM/DD  Programar         Description
+*& 2012/10/16  ISID              ES-UP
+*&---------------------------------------------------------------------*
+REPORT ZN010100
+NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID YN01.
+
+*----------------------------------------------------------------------*
+*   構造/テーブル定義
+*----------------------------------------------------------------------*
+INCLUDE <ICON>.
+
+* 初期提案用 外部データ
+TYPES:BEGIN OF TYP_YN210,
+VRFCTON  TYPE YN210-VRFCTON, "仕入先コード
+GJAHR    TYPE YN210-GJAHR,   "会計年度
+SLPDOC   TYPE YN210-SLPDOC,  "外部番号
+DTLDOC   TYPE YN210-DTLDOC,  "外部明細番号
+KNETXAMT TYPE YN210-KNETXAMT,"税込金額
+WAERS    TYPE YN210-WAERS,   "通貨コード
+END OF TYP_YN210.
+
+* 初期提案用 支払予定（仕入）
+TYPES:BEGIN OF TYP_ZN002_NEW,
+LIFNR    TYPE ZN002-LIFNR, "仕入先コード(請求先)
+CZFBDT   TYPE ZN002-CZFBDT,"照合締日
+SEQ      TYPE ZN002-SEQ,   "SEQ
+WAERS    TYPE ZN002-WAERS, "通貨
+PWRBTR   TYPE ZN002-PWRBTR,"支払予定額
+PSTFLG   TYPE ZN002-PSTFLG,"会計振替
+PLIFNR   TYPE ZN002-PLIFNR,"振替仕入先
+*     会計振込がONのデータ用
+PSTDT    TYPE ZN002-PSTDT,   "会計振替日
+PSTTM    TYPE ZN002-PSTTM,   "会計振替時刻
+PSTUSR   TYPE ZN002-PSTUSR,  "会計振替ユーザ
+END OF TYP_ZN002_NEW.
+
+* 共用 処理対象仕入先
+TYPES:BEGIN OF TYP_MAIN_LIF,
+LIFNR          TYPE ZN002-LIFNR,   "仕入先コード(請求先)
+WAERS          TYPE YN210-WAERS,   "通貨コード
+KNETXAMT       TYPE YN210-KNETXAMT,"税込金額
+PWRBTR         TYPE YN210-KNETXAMT,"支払予定額
+PSTFLG         TYPE ZN002-PSTFLG,  "会計振替
+ERRMSG(200)    TYPE C,             "エラーテキスト
+*     会計振込がONのデータ用
+PLIFNR         TYPE ZN002-PLIFNR,  "振替仕入先
+PSTDT          TYPE ZN002-PSTDT,   "会計振替日
+PSTTM          TYPE ZN002-PSTTM,   "会計振替時刻
+PSTUSR         TYPE ZN002-PSTUSR,  "会計振替ユーザ
+END OF TYP_MAIN_LIF.
+
+* 仕入先マスタ
+TYPES:BEGIN OF TYP_LF_MASTER,
+*     LFA1
+LIFNR      TYPE LFA1-LIFNR,    "仕入先
+NAME1      TYPE LFA1-NAME1,    "名称1
+*     LFB1
+ZWELS      TYPE LFB1-ZWELS,    "支払方法
+ZTERM_B1   TYPE LFB1-ZTERM,    "支払条件
+MINDK      TYPE LFB1-MINDK,    "小数コード
+*     LFM1
+ZTERM_M1   TYPE LFM1-ZTERM,    "支払条件
+WAERS      TYPE LFM1-WAERS,    "購買発注通貨
+END OF TYP_LF_MASTER.
+
+* 一時データ
+TYPES:BEGIN OF TYP_UPDATA,
+LIFNR       TYPE ZN002-LIFNR,   "仕入先コード(請求先)
+WAERS       TYPE YN210-WAERS,   "通貨コード
+KNETXAMT    TYPE YN210-KNETXAMT,"税込金額
+ZTERM_P     TYPE ZN007-ZTERM_PZ,"条件（支払日）
+ZTERM_S     TYPE ZN007-ZTERM_SZ,"条件（サイト）
+ZLSCH       TYPE ZN007-ZLSCH_Z, "支払方法
+PLIFNR      TYPE ZN002-PLIFNR,  "振替仕入先
+END OF TYP_UPDATA.
+
+* 相殺仕入先マスタ
+TYPES:BEGIN OF TYP_KNVP,
+LIFNR      TYPE KNVP-LIFNR,    "仕入先
+END OF TYP_KNVP.
+
+* SEQ番号採取内部テーブル
+TYPES:BEGIN OF TYP_SEQ,
+LIFNR      TYPE ZN002-LIFNR,
+SEQNO      TYPE ZN002-SEQ,
+END OF TYP_SEQ.
+* カウンタ
+TYPES:BEGIN OF TYP_CNT,
+*      INPUT TYPE I,
+*      OK    TYPE I,
+ERR   TYPE I,
+END OF TYP_CNT.
+
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+* 初期提案用 外部データ
+DATA:T_YN210 TYPE STANDARD TABLE OF TYP_YN210,
+W_YN210 TYPE TYP_YN210.
+
+* 初期提案用 支払予定（仕入）
+DATA:T_ZNN02_NEW TYPE SORTED TABLE OF TYP_ZN002_NEW
+WITH UNIQUE KEY  LIFNR SEQ,
+W_ZNN02_NEW TYPE TYP_ZN002_NEW.
+
+* 処理対象仕入先
+DATA:T_MAIN_LIF       TYPE STANDARD TABLE OF TYP_MAIN_LIF,
+W_MAIN_LIF       TYPE TYP_MAIN_LIF,
+T_FURIKAE_KO     TYPE STANDARD TABLE OF TYP_MAIN_LIF,
+W_FURIKAE_KO     TYPE TYP_MAIN_LIF,
+W_FURIKAE_OYA    TYPE TYP_MAIN_LIF. "1振替仕入先の子
+
+* 共用 処理対象仕入先(Bは相殺用）
+DATA:T_LF_MASTER   TYPE HASHED TABLE OF TYP_LF_MASTER
+WITH UNIQUE KEY LIFNR,
+T_SOSAI_LIF   TYPE HASHED TABLE OF TYP_LF_MASTER
+WITH UNIQUE KEY LIFNR,
+W_LF_MASTER   TYPE TYP_LF_MASTER,
+W_SOSAI_LIF   TYPE TYP_LF_MASTER.
+
+* 共用 規定外マスタ
+DATA:T_ZN007 TYPE SORTED TABLE OF ZN007
+WITH UNIQUE KEY LIFNR WAERS SEQ,
+W_ZN007 TYPE ZN007.
+
+* 照合期間（仕入）
+DATA:T_ZN001 TYPE SORTED TABLE OF ZN001
+WITH UNIQUE KEY BUKRS LIFNR,
+W_ZN001 TYPE ZN001.
+
+* １仕入先ごとの支払方法割り当て用テーブル更新用一時データ
+DATA:T_UPDATA TYPE STANDARD TABLE OF TYP_UPDATA,
+W_UPDATA TYPE TYP_UPDATA.
+
+* テーブル更新用内部テーブル
+DATA:T_ZN002_UPD TYPE STANDARD TABLE OF ZN002,
+W_ZN002_UPD TYPE ZN002.
+
+* 相殺 再処理用テーブル
+DATA:T_ZN002_SOSAI TYPE STANDARD TABLE OF ZN002,
+W_ZN002_SOSAI TYPE ZN002.
+
+* 相殺 敗者復活テーブル
+DATA:T_ZN002_RE_DEL TYPE SORTED TABLE OF ZN002
+WITH NON-UNIQUE KEY BUKRS LIFNR CZFBDT SEQ,
+W_ZN002_RE_DEL TYPE ZN002.
+
+* 相殺 再割当済編集不要テーブル
+DATA:T_ZUMI TYPE STANDARD TABLE OF TYP_UPDATA,
+W_ZUMI TYPE TYP_UPDATA.
+
+* 相殺 削除対象処理用テーブル
+DATA:T_ZN002_DEL TYPE STANDARD TABLE OF ZN002,
+W_ZN002_DEL TYPE ZN002.
+
+* SEQ№採取用内部テーブル
+DATA:T_SEQ TYPE HASHED TABLE OF TYP_SEQ
+WITH UNIQUE KEY LIFNR,
+W_SEQ TYPE TYP_SEQ.
+
+* 相殺仕入先マスタ
+DATA:T_KNVP TYPE SORTED TABLE OF TYP_KNVP
+WITH NON-UNIQUE KEY LIFNR,
+W_KNVP TYPE TYP_KNVP.
+
+* 対象仕入先レンジ
+DATA:T_RANGE_LIF TYPE RANGE OF ZN002-LIFNR WITH HEADER LINE.
+* ロックエントリ用仕入先
+DATA:T_RANGE_ENQ TYPE RANGE OF ZN002-LIFNR WITH HEADER LINE.
+* カウンタ
+DATA:W_CNT TYPE TYP_CNT.
+
+*----------------------------------------------------------------------*
+*   変数定義
+*----------------------------------------------------------------------*
+DATA:
+W_ERR_FLG      TYPE CHAR1.  "エラーフラグ(ONなら選択画面に戻る)
+
+
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_ON(1)         TYPE C VALUE 'X',
+C_ERR(1)        TYPE C VALUE 'E',
+C_KIHON         TYPE ZN007-BASE_ZT VALUE '1',
+C_JPY           TYPE ZN007-WAERS VALUE 'JPY',
+C_ETC_9         TYPE ZN007-ZLSCH_Z VALUE '9', "その他
+*        2013/11/14 ADD START "電子記録債務の追加
+C_DEN_Q         TYPE ZN007-ZLSCH_Z VALUE 'Q', "電子記録債務
+*        2013/11/14 ADD END
+C_FAC_Z         TYPE ZN007-ZLSCH_Z VALUE 'Z', "ファクタリング
+C_FAC_K         TYPE ZN007-ZLSCH_Z VALUE 'K', "京都
+C_TE_B          TYPE ZN007-ZLSCH_Z VALUE 'B', "手型
+C_KOKUNAI_T     TYPE ZN007-ZLSCH_Z VALUE 'T', "国内振込
+C_A             TYPE ZN002-PZLSPR  VALUE 'A', "支払保留
+C_W(1)          TYPE C             VALUE 'W', "
+C_SOSAI         TYPE ZN002-PZLSCH  VALUE 'S', "支払方法 相殺
+*  C_MINDK         TYPE LFB1-MINDK    VALUE '02',"支払日相殺
+C_SOSAI_KIJITU   TYPE LFB1-MINDK  VALUE SPACE, "締日相殺
+C_SOSAI_HARAIBI  TYPE LFB1-MINDK  VALUE '01',  "払日相殺
+C_SOSAI_TOKUI    TYPE LFB1-MINDK  VALUE '02',  "得意先全額相殺
+C_SOSAI_SHIIREI  TYPE LFB1-MINDK  VALUE '03',  "仕入先全額相殺
+C_PULAS         TYPE ZN001-LIFNR VALUE '+'.
+*★★★★★★↓↓ALV一覧時にコピー↓↓★★★★★★
+*----------------------------------------------------------------------*
+*   ALV一覧表示にて必要な変数
+*----------------------------------------------------------------------*
+* ALV出力データ用
+TYPES:BEGIN OF TYP_OUTPUT,      "出力用構造
+* Mod ES-UP 2012/10/16 -->
+*      ICON      TYPE ICON,      "信号機
+ICON      TYPE ICON-id,      "信号機
+* Mod ES-UP 2012/10/16 <--
+KEKA(200) TYPE C,         "処理結果
+NAME1     TYPE LFA1-NAME1."仕入先名称
+INCLUDE STRUCTURE ZN002.  "支払予定データ
+TYPES:END   OF TYP_OUTPUT.
+
+DATA: T_OUTPUT   TYPE STANDARD TABLE OF TYP_OUTPUT,
+W_OUTPUT   TYPE  TYP_OUTPUT.
+* PGID退避用
+DATA: G_PGID     TYPE SYCPROG.
+* ALV出力用
+TYPE-POOLS SLIS.
+DATA: W_LAYOUT      TYPE SLIS_LAYOUT_ALV,     "ALV出力レイアウト
+W_FIELDCAT    TYPE SLIS_FIELDCAT_ALV,   "ALV出力項目設定
+T_FIELDCAT    TYPE SLIS_T_FIELDCAT_ALV, "ALV出力項目設定
+W_REPID       TYPE SY-REPID,            "ALV出力用：プログラムID
+W_EDISVARIANT TYPE DISVARIANT,          "ALV出力バリアント
+T_EVENT       TYPE SLIS_T_EVENT,        "イベント
+W_EVENT       LIKE LINE OF T_EVENT,
+T_HEAD        TYPE SLIS_T_LISTHEADER,   "ヘッダ
+W_HEAD        LIKE LINE OF T_HEAD,
+W_PRINT       TYPE SLIS_PRINT_ALV,
+W_SETTINGS    TYPE LVC_S_GLAY.
+
+*----------------------------------------------------------------------*
+*    選択画面
+*----------------------------------------------------------------------*
+* データ選択
+SELECTION-SCREEN:BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+PARAMETERS:P_BUK    TYPE BUKRS OBLIGATORY.         "会社コード
+PARAMETERS:P_DAY    TYPE ZNECZFBDT OBLIGATORY.      "締日
+*  PARAMETERS:P_LIF    TYPE LIFNR OBLIGATORY.         "仕入先(請求)
+SELECT-OPTIONS S_LIF FOR W_OUTPUT-LIFNR.
+SELECTION-SCREEN:END   OF BLOCK BL1.
+
+
+* ALVバリアント項目
+SELECTION-SCREEN:BEGIN OF BLOCK BL2 WITH FRAME TITLE TEXT-002.
+PARAMETERS:P_TEST   TYPE C AS CHECKBOX DEFAULT 'X'."テスト実行
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: P_SYOKI TYPE C RADIOBUTTON GROUP GR1 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 4(18) TEXT-004.         "初期提案作成
+PARAMETERS: P_SOSAI TYPE C RADIOBUTTON GROUP GR1.
+SELECTION-SCREEN COMMENT 26(18) TEXT-005.        "締日相殺後　再計算
+SELECTION-SCREEN END OF LINE.
+PARAMETERS:P_VARI   TYPE SLIS_VARI.               "レイアウト
+SELECTION-SCREEN:END   OF BLOCK BL2.
+
+* システム項目
+SELECTION-SCREEN:BEGIN OF BLOCK BL3 WITH FRAME TITLE TEXT-003.
+PARAMETERS:P_PAR    TYPE KNVP-PARVW  OBLIGATORY.  "相殺仕入先機能
+PARAMETERS:P_PHKONT TYPE SKB1-SAKNR  OBLIGATORY.  "支払仮勘定
+PARAMETERS:P_EKORG  TYPE T024E-EKORG OBLIGATORY.  "購買組織
+SELECTION-SCREEN:END   OF BLOCK BL3.
+
+*----------------------------------------------------------------------*
+*  AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+PERFORM F_DATA_CHECK.
+
+*----------------------------------------------------------------------*
+*    バリアント検索ヘルプ
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VARI.
+PERFORM VARIANT_F4_HELP  CHANGING P_VARI.
+*&---------------------------------------------------------------------*
+*&      Form  VARIANT_F4_HELP
+*&---------------------------------------------------------------------*
+*       バリアント検索ヘルプ
+*----------------------------------------------------------------------*
+*      <--P_P_VARI  検索ヘルプで選択されたバリアント名
+*----------------------------------------------------------------------*
+FORM VARIANT_F4_HELP CHANGING P_P_VARI TYPE SLIS_VARI.
+*** 2012/03/22 MOD START ***
+*  DATA:LW_VARI   TYPE SLIS_VARI.  "属性変換用
+*
+*  G_PGID = SY-REPID.
+** ALVバリアントの検索ヘルプ
+*  CALL FUNCTION 'HR_F4_FOR_ALV_VARIANT'
+*    EXPORTING
+*      CURRENT_REPORT       = G_PGID
+*    IMPORTING
+*      VARIANT              = LW_VARI.
+*
+** ヘルプ画面より選択されたバリアント名を画面項目に設定
+*  IF NOT LW_VARI IS INITIAL.
+*    P_P_VARI = LW_VARI.
+*  ENDIF.
+DATA:
+LW_DISVARIANT TYPE DISVARIANT.
+
+CLEAR:
+LW_DISVARIANT,
+P_P_VARI.
+
+LW_DISVARIANT-REPORT = SY-REPID.
+
+CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+EXPORTING
+IS_VARIANT         = LW_DISVARIANT
+I_SAVE             = 'A'
+I_DISPLAY_VIA_GRID = 'X'
+IMPORTING
+ES_VARIANT         = LW_DISVARIANT
+EXCEPTIONS
+NOT_FOUND          = 1
+PROGRAM_ERROR      = 2
+OTHERS             = 3.
+
+IF SY-SUBRC = 0.
+P_P_VARI = LW_DISVARIANT-VARIANT.
+ENDIF.
+*** 2012/03/22 MOD END   ***
+ENDFORM.                    " VARIANT_F4_HELP
+*----------------------------------------------------------------------*
+*    ALVヘッダをつける場合
+*----------------------------------------------------------------------*
+TOP-OF-PAGE.
+PERFORM HEADER_WRITE.
+
+*★★★★★★↑↑ALV一覧時にコピー↑↑★★★★★★
+*----------------------------------------------------------------------*
+*    処理部
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+* 初期処理
+PERFORM INIT_PROC.
+CHECK W_ERR_FLG IS INITIAL. "エラーの場合は即終了
+
+* データ取得部
+PERFORM MAKE_ALV_DATA.
+CHECK W_ERR_FLG IS INITIAL. "エラーの場合は即終了
+
+* テーブル更新
+PERFORM EDIT_TABLE.
+CHECK W_ERR_FLG IS INITIAL. "エラーの場合は即終了
+*★★★★★★↓↓ALV一覧時にコピー↓↓★★★★★★
+* ALVリスト出力
+PERFORM OUTPUT_ALV.
+*★★★★★★↑↑ALV一覧時にコピー↑↑★★★★★★
+
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_ALV_DATA
+*&---------------------------------------------------------------------*
+*       データ取得部
+*----------------------------------------------------------------------*
+FORM MAKE_ALV_DATA.
+* 初期提案作成
+IF P_SYOKI = C_ON.
+PERFORM GET_DATA_SYOKI.
+CHECK W_ERR_FLG IS INITIAL.
+
+PERFORM MAIN_SYOKI.
+* 締日相殺後　再計算
+ELSE.
+PERFORM GET_DATA_SOSAI.
+CHECK W_ERR_FLG IS INITIAL.
+
+PERFORM MAIN_SOSAI.
+
+ENDIF.
+
+ENDFORM.                    " MAKE_ALV_DATA
+*★★★★★★↓↓ALV一覧時にコピー↓↓★★★★★★
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       ALVリスト出力
+*----------------------------------------------------------------------*
+FORM OUTPUT_ALV.
+
+* 項目属性編集
+PERFORM ALV_SET_FIELDCAT.
+* その他編集
+PERFORM ALV_LAYOUT.
+* ALV一覧出力
+PERFORM ALV_CALL.
+
+ENDFORM.                    " OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  HEADER_WRITE
+*&---------------------------------------------------------------------*
+*       ALVヘッダ編集
+*----------------------------------------------------------------------*
+FORM HEADER_WRITE.
+DATA:LW_KEY      TYPE SLIS_LISTHEADER-KEY,
+LW_INFO     TYPE SLIS_LISTHEADER-INFO,
+LW_PAGNO(4) TYPE C.
+
+* ヘッダに出力させたい文言を設定
+* 見出し
+PERFORM SET_HEADER USING 'H' '支払予定作成（仕入）' SPACE.
+
+*--- ページ
+CLEAR: LW_INFO,
+LW_KEY,
+LW_PAGNO.
+
+LW_PAGNO = SY-PAGNO.
+CONDENSE LW_PAGNO.
+CONCATENATE 'ページ　：'
+LW_PAGNO
+INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- 処理日付
+CLEAR LW_KEY.
+CONCATENATE '処理日付：'
+SY-DATUM+0(4) '/'
+SY-DATUM+4(2) '/'
+SY-DATUM+6(2)
+INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- 処理時刻
+CLEAR LW_KEY.
+CONCATENATE '処理時刻：'
+SY-UZEIT+0(2) ':'
+SY-UZEIT+2(2) ':'
+SY-UZEIT+4(2)
+INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- ユーザID
+CLEAR LW_KEY.
+CONCATENATE 'ユーザID：' SY-UNAME INTO LW_KEY.
+PERFORM SET_HEADER USING 'S' SPACE LW_KEY.
+
+*--- 締日(選択画面の画面表示されているデータをヘッダに出力)
+CLEAR:LW_INFO,LW_KEY.
+
+WRITE P_DAY TO LW_INFO.
+CONCATENATE TEXT-006 LW_INFO INTO LW_INFO.
+PERFORM SET_HEADER USING 'S' LW_INFO '<<実行条件>>'.
+
+CLEAR:LW_INFO,LW_KEY.
+*--- 処理区分
+IF P_SYOKI = C_ON.
+CONCATENATE TEXT-007 TEXT-004 INTO LW_INFO.
+ELSE.
+CONCATENATE TEXT-007 TEXT-005 INTO LW_INFO.
+ENDIF.
+PERFORM SET_HEADER USING 'S' LW_INFO SPACE.
+CLEAR:LW_INFO.
+
+* テスト実行
+IF P_TEST = C_ON.
+LW_INFO = TEXT-008.
+PERFORM SET_HEADER USING 'S' LW_INFO SPACE.
+ENDIF.
+
+**--- 対象件数
+*  WRITE W_CNT-INPUT TO LW_WORK.
+*  CONDENSE LW_WORK NO-GAPS.
+*  CONCATENATE TEXT-009 LW_WORK INTO LW_WORK.
+*  PERFORM SET_HEADER USING 'S' LW_WORK '<<実行結果>>'.
+*  CLEAR:LW_WORK.
+
+**--- 正常件数
+*  WRITE W_CNT-OK TO LW_WORK.
+*  CONDENSE LW_WORK NO-GAPS.
+*  CONCATENATE TEXT-011 LW_WORK INTO LW_WORK.
+*  PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*  CLEAR:LW_WORK.
+*
+*--- エラー件数
+WRITE W_CNT-ERR TO LW_INFO.
+CONDENSE LW_INFO NO-GAPS.
+CONCATENATE TEXT-010 LW_INFO INTO LW_INFO.
+PERFORM SET_HEADER USING 'S' LW_INFO '<<実行結果>>'.
+CLEAR:LW_INFO,LW_KEY.
+
+* ヘッダ出力
+CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+EXPORTING
+IT_LIST_COMMENTARY       = T_HEAD.
+
+CLEAR:T_HEAD.
+
+ENDFORM.                    " HEADER_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  SET_HEADER
+*&---------------------------------------------------------------------*
+*       ヘッダ編集
+*----------------------------------------------------------------------*
+*      -->L_TYP    タイプ
+*      -->L_INFO   編集内容2
+*      -->L_KEY    編集内容1
+*----------------------------------------------------------------------*
+FORM SET_HEADER  USING     L_TYP   TYPE SLIS_LISTHEADER-TYP
+L_INFO  TYPE SLIS_LISTHEADER-INFO
+L_KEY   TYPE SLIS_LISTHEADER-KEY.
+CLEAR W_HEAD.
+W_HEAD-TYP  = L_TYP.
+W_HEAD-INFO = L_INFO.
+W_HEAD-KEY = L_KEY.
+APPEND W_HEAD TO T_HEAD.
+
+ENDFORM.                    " SET_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  ALV_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*       項目属性編集
+*----------------------------------------------------------------------*
+FORM ALV_SET_FIELDCAT.
+DATA:L_CNT TYPE I,
+L_T_FIELDCAT    TYPE SLIS_T_FIELDCAT_ALV. "ALV出力項目設定
+
+* PGID退避
+G_PGID = SY-REPID.
+
+* 項目名を編集する
+CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+EXPORTING
+*     I_PROGRAM_NAME               =
+*     I_INTERNAL_TABNAME           =
+I_STRUCTURE_NAME             = 'ZN002'
+*     I_CLIENT_NEVER_DISPLAY       = 'X'
+*     I_INCLNAME                   =
+*     I_BYPASSING_BUFFER           =
+*     I_BUFFER_ACTIVE              =
+CHANGING
+CT_FIELDCAT                  = L_T_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE       = 1
+PROGRAM_ERROR                = 2
+OTHERS                       = 3.
+IF SY-SUBRC = 0.
+L_CNT = L_CNT + 1.
+PERFORM U_FIELDCAT USING :
+'ICON' 4 'ICON' '' '' '' '' '' L_CNT.
+
+L_CNT = L_CNT + 1.
+PERFORM U_FIELDCAT USING :
+'KEKA' 200 'CHAR' '処理結果' '処理結果' '処理結果' '' '' L_CNT.
+
+L_CNT = L_CNT + 1.
+PERFORM U_FIELDCAT USING :
+'NAME1' 35 'CHAR' '名称' '名称' '名称' '' '' L_CNT.
+
+LOOP AT L_T_FIELDCAT INTO W_FIELDCAT.
+L_CNT = L_CNT + 1.
+W_FIELDCAT-COL_POS = L_CNT.
+APPEND W_FIELDCAT TO T_FIELDCAT.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " ALV_SET_FIELDCAT
+
+*&---------------------------------------------------------------------*
+*&      Form  U_FIELDCAT
+*&---------------------------------------------------------------------*
+*  -->  P_FLDNM     項目名
+*  -->  P_LEN       表示幅
+*  -->  P_TYPE      DIC上の属性
+*  -->  P_STEXT     テキスト(短
+*  -->  P_MTEXT     テキスト(中
+*  -->  P_LTEXT     テキスト(長
+*  -->  P_CFIELD    通貨コード
+*  -->  P_QFIELD    単位コード
+*---------------------------------------------------------------------*
+FORM U_FIELDCAT USING P_FLDNM    TYPE SLIS_FIELDCAT_ALV-FIELDNAME
+P_LEN      TYPE SLIS_FIELDCAT_ALV-OUTPUTLEN
+P_TYPE     TYPE SLIS_FIELDCAT_ALV-DATATYPE
+P_STEXT    TYPE SLIS_FIELDCAT_ALV-SELTEXT_S
+P_MTEXT    TYPE SLIS_FIELDCAT_ALV-SELTEXT_M
+P_LTEXT    TYPE SLIS_FIELDCAT_ALV-SELTEXT_L
+P_CFIELD   TYPE SLIS_FIELDCAT_ALV-CFIELDNAME
+P_QFIELD   TYPE SLIS_FIELDCAT_ALV-QFIELDNAME
+P_COL_POS  TYPE SY-CUCOL.
+* ローカル変数
+DATA L_FIELDCAT TYPE SLIS_FIELDCAT_ALV.
+L_FIELDCAT-COL_POS   = P_COL_POS.
+L_FIELDCAT-FIELDNAME = P_FLDNM.
+L_FIELDCAT-OUTPUTLEN = P_LEN.
+L_FIELDCAT-DATATYPE  = P_TYPE.
+L_FIELDCAT-SELTEXT_S = P_STEXT.
+L_FIELDCAT-SELTEXT_M = P_MTEXT.
+L_FIELDCAT-SELTEXT_L = P_LTEXT.
+L_FIELDCAT-CFIELDNAME = P_CFIELD.
+L_FIELDCAT-QFIELDNAME = P_QFIELD.
+APPEND L_FIELDCAT TO T_FIELDCAT.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*       その他編集
+*----------------------------------------------------------------------*
+FORM ALV_LAYOUT.
+
+* プログラムID取得
+W_REPID = SY-REPID.
+* レイアウト設定
+W_LAYOUT-COLWIDTH_OPTIMIZE    = 'X'.   "ALV コントロール: 列幅の最適化
+W_LAYOUT-DETAIL_INITIAL_LINES = 'X'.
+W_LAYOUT-ZEBRA                = 'X'.
+
+W_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+
+* バリアント
+IF NOT P_VARI IS INITIAL.
+W_EDISVARIANT-REPORT  = G_PGID.
+W_EDISVARIANT-VARIANT = P_VARI.
+ENDIF.
+
+* ALV印刷時用 設定項目
+W_PRINT-NO_PRINT_LISTINFOS = 'X'.
+
+* 印刷プレビュー設定
+W_SETTINGS-NO_COLWOPT = C_ON.  "自動最適化禁止
+
+* 処理イベントの取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE           = 0
+IMPORTING
+ET_EVENTS             = T_EVENT.
+
+* イベント時にコールされるFORM名を設定
+CLEAR W_EVENT.
+READ TABLE T_EVENT INTO W_EVENT WITH KEY NAME = 'TOP_OF_PAGE'.
+IF SY-SUBRC = 0.
+W_EVENT-FORM = 'HEADER_WRITE'.
+MODIFY T_EVENT INDEX SY-TABIX FROM W_EVENT.
+ENDIF.
+
+ENDFORM.                    " ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_CALL
+*&---------------------------------------------------------------------*
+*       ALV一覧出力
+*----------------------------------------------------------------------*
+FORM ALV_CALL.
+SORT T_OUTPUT BY LIFNR SEQ.
+
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM      = W_REPID     "プログラム名
+I_GRID_SETTINGS         = W_SETTINGS  "グリッド設定
+IS_LAYOUT               = W_LAYOUT    "レイアウト定義
+IS_PRINT                = W_PRINT
+IT_FIELDCAT             = T_FIELDCAT  "構造定義
+I_DEFAULT               = 'X'
+I_SAVE                  = 'A'
+IS_VARIANT              = W_EDISVARIANT
+IT_EVENTS               = T_EVENT
+TABLES
+T_OUTTAB                = T_OUTPUT     "出力データ
+EXCEPTIONS
+PROGRAM_ERROR           = 1
+OTHERS                  = 2.
+
+IF SY-SUBRC <> 0.
+MESSAGE S802 WITH 'REUSE_ALV_GRID_DISPLAY' SY-SUBRC.
+STOP.
+ENDIF.
+
+* 使用済み内部テーブルの開放
+FREE:T_OUTPUT.
+
+ENDFORM.                    " ALV_CALL
+*★★★★★★↑↑ALV一覧時にコピー↑↑★★★★★★
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROC
+*&---------------------------------------------------------------------*
+*       使用項目の初期化
+*----------------------------------------------------------------------*
+FORM INIT_PROC.
+DATA:L_MSGV1 TYPE SY-MSGV1.
+REFRESH:T_OUTPUT,     "ALV出力用データ
+T_YN210,      "初期提案 外部データ
+T_ZNN02_NEW,  "初期提案 既存の支払予定データ
+T_MAIN_LIF,   "処理対象 仕入先
+T_LF_MASTER,  "仕入先マスタ
+T_ZN001,      "照合期間(仕入)
+T_RANGE_LIF,  "対象仕入先レンジ
+T_UPDATA,     "支払い条件割り当て用一時内部テーブル
+T_ZN002_SOSAI,"相殺対象テーブル
+T_SOSAI_LIF,  "相殺対象仕入れ先
+T_ZUMI,       "処理済テーブル
+T_ZN002_DEL,  "相殺 削除用内部テーブル
+T_SEQ,
+T_KNVP,        "相殺仕入先マスタ
+T_ZN002_RE_DEL,"処理対象でエラーになったデータ
+T_FURIKAE_KO,  "一振替仕入先の子供たち
+T_ZN007.       "規定外マスタ
+
+CLEAR:W_ERR_FLG,W_CNT,
+W_OUTPUT,     "ALV出力用データ
+W_YN210,      "初期提案 外部データ
+W_ZNN02_NEW,  "初期提案 既存の支払予定データ
+W_MAIN_LIF,   "処理対象 仕入先
+W_LF_MASTER,  "仕入先マスタ
+W_ZN001,      "照合期間(仕入)
+W_UPDATA,     "支払い条件割り当て用一時内部テーブル
+W_ZN002_SOSAI,"相殺対象テーブル
+W_SOSAI_LIF,  "相殺対象仕入れ先
+W_ZUMI,       "処理済テーブル
+W_ZN002_DEL,  "相殺 削除用内部テーブル
+W_SEQ,
+W_ZN007.      "規定外マスタ
+
+
+* 仕入先指定無しの場合のロック処理
+IF S_LIF[] IS INITIAL.
+CALL FUNCTION 'ENQUEUE_EZN002'
+EXPORTING
+MODE_ZN002           = 'E'
+BUKRS                = P_BUK
+CZFBDT               = P_DAY
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+*     & ロックエラー & がロックしています
+L_MSGV1 = SY-MSGV1.
+MESSAGE I756 WITH TEXT-E06 L_MSGV1.
+W_ERR_FLG = C_ON.
+ENDIF.
+ENDIF.
+ENDFORM.                    " INIT_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_SYOKI
+*&---------------------------------------------------------------------*
+*       初期提案作成用データ処理
+*----------------------------------------------------------------------*
+FORM GET_DATA_SYOKI.
+*  外部データ取込
+PERFORM GET_YN210.
+CHECK W_ERR_FLG IS INITIAL.
+
+*  登録済み支払予定取得
+PERFORM GET_ZN002_SINKI.
+
+*  処理対象仕入先判定
+PERFORM CHECK_MAIN_LIF_SINKI.
+CHECK W_ERR_FLG IS INITIAL.
+
+* マスタデータの一括取得
+PERFORM GET_MASTER.
+
+
+ENDFORM.                    " GET_DATA_SYOKI
+*&---------------------------------------------------------------------*
+*&      Form  GET_YN210
+*&---------------------------------------------------------------------*
+*       外部データ取り込み
+*----------------------------------------------------------------------*
+FORM GET_YN210.
+SELECT VRFCTON
+GJAHR
+SLPDOC
+DTLDOC
+KNETXAMT
+WAERS
+FROM YN210
+INTO TABLE T_YN210
+* 2012/03/27 MOD インデックス対応 START
+*   WHERE VRFCTON IN S_LIF
+*     AND BUKRS    = P_BUK
+*     AND DELFLG   = SPACE
+*     AND CZFBDT   = P_DAY.
+WHERE  BUKRS    = P_BUK
+AND  CZFBDT   = P_DAY
+AND  VRFCTON IN S_LIF
+AND  DELFLG   = SPACE.
+* 2012/03/27 MOD インデックス対応 END
+IF T_YN210[] IS INITIAL.
+*   対象データがありません
+MESSAGE S762(YN01).
+W_ERR_FLG = C_ON.
+ENDIF.
+
+
+ENDFORM.                    " GET_YN210
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN002_SINKI
+*&---------------------------------------------------------------------*
+*       登録済み支払予定取得
+*----------------------------------------------------------------------*
+FORM GET_ZN002_SINKI.
+SELECT LIFNR  "仕入先コード(請求先))
+CZFBDT "照合締日
+SEQ    "SEQ
+WAERS  "通貨
+PWRBTR "支払予定額
+PSTFLG "会計振替
+PLIFNR "振替仕入先
+PSTDT  "会計振替日
+PSTTM  "会計振替時
+PSTUSR "会計振替ユーザ
+FROM ZN002
+INTO TABLE T_ZNN02_NEW
+WHERE BUKRS  = P_BUK
+AND CZFBDT = P_DAY
+AND LIFNR IN S_LIF.
+
+ENDFORM.                    " GET_ZN002_SINKI
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_MAIN_LIF_SINKI
+*&---------------------------------------------------------------------*
+*       処理対象仕入先の判定
+*----------------------------------------------------------------------*
+FORM CHECK_MAIN_LIF_SINKI.
+DATA:L_W_YN210 TYPE TYP_YN210.
+SORT T_YN210 BY VRFCTON.
+* 外部データをループして、仕入先集計
+LOOP AT T_YN210 INTO W_YN210.
+L_W_YN210 =  W_YN210.
+AT NEW VRFCTON.
+CLEAR W_MAIN_LIF.
+W_MAIN_LIF-LIFNR = L_W_YN210-VRFCTON."仕入先コード(請求先)
+W_MAIN_LIF-WAERS = L_W_YN210-WAERS.  "通貨コード
+ENDAT.
+
+*-- エラーチェック１
+IF W_MAIN_LIF-WAERS <> L_W_YN210-WAERS.
+*     外部データ内で、１仕入先に複数通貨が混在しています。
+W_MAIN_LIF-ERRMSG = TEXT-E01.
+ENDIF.
+
+*   外部データの税込み金額集計
+W_MAIN_LIF-KNETXAMT = W_MAIN_LIF-KNETXAMT + L_W_YN210-KNETXAMT.
+
+*  1仕入先分の集計が終わったら
+AT END OF VRFCTON.
+*     既存の支払予定をチェック
+PERFORM CHCK_KIZON_ZN002.
+* 2012/05/01 QA273 DEL START
+**     外部データの税込額と、支払予定額に差が有るか、
+**     会計振替済みのデータが仕入先のみ処理対象
+*      IF W_MAIN_LIF-KNETXAMT <> W_MAIN_LIF-PWRBTR
+*      OR W_MAIN_LIF-PSTFLG <> SPACE.
+* 2012/05/01 QA273 DEL END
+* 2012/05/01 QA273 ADD START
+* 会計振替済みでも、差額がなければ対象外
+IF  W_MAIN_LIF-KNETXAMT = W_MAIN_LIF-PWRBTR
+AND W_MAIN_LIF-PSTFLG <> SPACE.
+DELETE T_ZNN02_NEW WHERE LIFNR = W_MAIN_LIF-LIFNR.
+ENDIF.
+IF W_MAIN_LIF-KNETXAMT <> W_MAIN_LIF-PWRBTR.
+* 2012/05/01 QA273 ADD END
+*       処理対象の仕入先をロック
+PERFORM CHECK_LOCK_LIFNR USING W_MAIN_LIF-LIFNR.
+IF W_ERR_FLG IS INITIAL.
+APPEND W_MAIN_LIF TO T_MAIN_LIF.
+ELSE.
+EXIT.
+ENDIF.
+ENDIF.
+ENDAT.
+ENDLOOP.
+
+CHECK W_ERR_FLG IS INITIAL.
+
+* 会計振込みずみで、外部データなしのレコードを追加
+* 仕入先をキーに支払予定を集計
+LOOP AT T_ZNN02_NEW INTO W_ZNN02_NEW
+WHERE NOT PSTFLG IS INITIAL.
+CLEAR:W_MAIN_LIF.
+READ TABLE T_MAIN_LIF INTO W_MAIN_LIF
+WITH KEY LIFNR = W_ZNN02_NEW-LIFNR.
+IF SY-SUBRC <> 0.
+W_MAIN_LIF-LIFNR    =  W_ZNN02_NEW-LIFNR.  "仕入先コード(請求先)
+W_MAIN_LIF-WAERS    =  W_ZNN02_NEW-WAERS.  "通貨コード
+W_MAIN_LIF-KNETXAMT =  W_ZNN02_NEW-PWRBTR. "税込金額
+*      W_MAIN_LIF-PWRBTR   =  W_ZNN02_NEW-PWRBTR."支払予定額
+W_MAIN_LIF-PSTFLG   =  W_ZNN02_NEW-PSTFLG. "会計振替
+W_MAIN_LIF-ERRMSG   =  TEXT-E02.           "エラーテキスト
+W_MAIN_LIF-PLIFNR   =  W_ZNN02_NEW-PLIFNR. "振替仕入先
+
+W_MAIN_LIF-PSTDT   =  W_ZNN02_NEW-PSTDT. "振込仕入日
+W_MAIN_LIF-PSTTM   =  W_ZNN02_NEW-PSTTM. "振込仕入時
+W_MAIN_LIF-PSTUSR  =  W_ZNN02_NEW-PSTUSR. "振込仕入者
+*     処理対象の仕入先をロック
+PERFORM CHECK_LOCK_LIFNR USING W_MAIN_LIF-LIFNR.
+IF W_ERR_FLG IS INITIAL.
+APPEND W_MAIN_LIF TO T_MAIN_LIF.
+ELSE.
+EXIT.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+CHECK W_ERR_FLG IS INITIAL.
+
+IF T_MAIN_LIF[] IS INITIAL.
+*   対象データがありません
+MESSAGE S762(YN01).
+W_ERR_FLG = C_ON.
+ENDIF.
+
+* 使用済みテーブル開放
+FREE:T_YN210,T_ZNN02_NEW.
+
+ENDFORM.                    " CHECK_MAIN_LIF_SINKI
+*&---------------------------------------------------------------------*
+*&      Form  CHCK_KIZON_ZN002
+*&---------------------------------------------------------------------*
+*       初期提案処理 既存支払い予定のチェック
+*----------------------------------------------------------------------*
+FORM CHCK_KIZON_ZN002.
+
+* 仕入先をキーに支払い予定を集計
+LOOP AT T_ZNN02_NEW INTO W_ZNN02_NEW
+WHERE LIFNR = W_MAIN_LIF-LIFNR.
+
+IF NOT W_ZNN02_NEW-PSTFLG IS INITIAL.
+*     この仕入先は既に振替済みです。
+W_MAIN_LIF-ERRMSG = TEXT-E02.
+W_MAIN_LIF-PSTFLG = W_ZNN02_NEW-PSTFLG.
+W_MAIN_LIF-PLIFNR = W_ZNN02_NEW-PLIFNR.
+W_MAIN_LIF-PSTDT  = W_ZNN02_NEW-PSTDT.  "振込仕入日
+W_MAIN_LIF-PSTTM  = W_ZNN02_NEW-PSTTM.  "振込仕入時
+W_MAIN_LIF-PSTUSR = W_ZNN02_NEW-PSTUSR. "振込仕入者
+ENDIF.
+
+*   支払予定額集計
+W_MAIN_LIF-PWRBTR = W_MAIN_LIF-PWRBTR + W_ZNN02_NEW-PWRBTR.
+ENDLOOP.
+
+
+ENDFORM.                    " CHCK_KIZON_ZN002
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_LOCK_LIFNR
+*&---------------------------------------------------------------------*
+*       処理対象仕入先のロック
+*----------------------------------------------------------------------*
+FORM CHECK_LOCK_LIFNR USING P_LIFNR.
+DATA:L_MSGV1 TYPE SY-MSGV1.
+*  W_CNT-INPUT = W_CNT-INPUT + 1. "処理対象カウントアップ
+* 仕入先指定ありの場合のロック処理
+IF NOT S_LIF[] IS INITIAL.
+CALL FUNCTION 'ENQUEUE_EZN002'
+EXPORTING
+MODE_ZN002           = 'E'
+BUKRS                = P_BUK
+LIFNR                = P_LIFNR
+CZFBDT               = P_DAY
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+*     & ロックエラー & がロックしています
+L_MSGV1 = SY-MSGV1.
+MESSAGE I756 WITH TEXT-E06 L_MSGV1.
+W_ERR_FLG = C_ON.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_LOCK_LIFNR
+*&---------------------------------------------------------------------*
+*&      Form  GET_MASTER
+*&---------------------------------------------------------------------*
+*       マスタデータの取得
+*----------------------------------------------------------------------*
+FORM GET_MASTER.
+* 仕入先マスタ
+SELECT
+*     LFA1
+LFA1~LIFNR    "仕入先
+LFA1~NAME1    "名称1
+*     LFB1
+LFB1~ZWELS    "支払方法
+LFB1~ZTERM    "支払条件
+LFB1~MINDK    "小数コード
+*     LFM1
+LFM1~ZTERM    "支払条件
+LFM1~WAERS    "通貨コード
+INTO TABLE T_LF_MASTER
+FROM LFA1 INNER JOIN LFB1
+ON LFB1~LIFNR = LFA1~LIFNR
+INNER JOIN LFM1
+ON LFM1~LIFNR = LFA1~LIFNR
+WHERE LFA1~LIFNR IN S_LIF
+AND LFB1~BUKRS = P_BUK
+AND LFM1~EKORG = P_EKORG .
+
+* 規定外マスタ
+SELECT * INTO TABLE T_ZN007
+FROM ZN007
+WHERE LIFNR IN S_LIF.  "仕入先
+
+* 照合期間
+SELECT * INTO TABLE T_ZN001
+FROM ZN001
+WHERE BUKRS = P_BUK
+AND ( LIFNR IN S_LIF  "仕入先
+OR LIFNR = C_PULAS ).
+
+* 相殺仕入先マスタ
+SELECT LIFNR INTO TABLE T_KNVP
+FROM KNVP
+WHERE LIFNR IN S_LIF
+AND PARVW = P_PAR.    "取引先機能
+
+ENDFORM.                    " GET_MASTER
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_SYOKI
+*&---------------------------------------------------------------------*
+*       初期値提案 メイン処理
+*----------------------------------------------------------------------*
+FORM MAIN_SYOKI.
+DATA:L_ERRFLG(1) TYPE C.
+REFRESH:T_RANGE_LIF.
+LOOP AT T_MAIN_LIF INTO W_MAIN_LIF.
+*   初期化
+CLEAR:W_OUTPUT,
+L_ERRFLG.
+REFRESH:T_UPDATA."一仕入先毎に使う内部テーブルのクリア
+
+*   マスタ取得
+CLEAR:W_LF_MASTER.
+READ TABLE T_LF_MASTER INTO W_LF_MASTER
+WITH TABLE KEY LIFNR = W_MAIN_LIF-LIFNR.
+*   エラーチェック
+PERFORM ERR_CHECK_SYOKI  CHANGING L_ERRFLG.
+IF L_ERRFLG = C_ON.
+CONTINUE.
+ENDIF.
+
+*   規定外マスタによる支払方法判定処理
+PERFORM CHECK_ZLSCH USING W_MAIN_LIF-LIFNR
+W_MAIN_LIF-WAERS
+W_MAIN_LIF-KNETXAMT
+CHANGING L_ERRFLG.
+IF L_ERRFLG = C_ON.
+CONTINUE.
+ENDIF.
+
+*   ALVデータ、テーブル更新データ作成
+IF NOT T_UPDATA[] IS INITIAL.
+T_RANGE_LIF-SIGN   = 'I'.
+T_RANGE_LIF-OPTION = 'EQ'.
+T_RANGE_LIF-LOW    = W_MAIN_LIF-LIFNR.
+APPEND T_RANGE_LIF.
+
+PERFORM EDIT_ITAB_SINKI.
+ENDIF.
+ENDLOOP.
+
+* 使用済み内部テーブル開放
+FREE:T_MAIN_LIF,T_LF_MASTER,T_ZN001,T_UPDATA.
+ENDFORM.                    " MAIN_SYOKI
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ERR_DATA
+*&---------------------------------------------------------------------*
+*       エラーデータの内部テーブル書込
+*----------------------------------------------------------------------*
+FORM EDIT_ERR_DATA.
+W_CNT-ERR = W_CNT-ERR + 1. "エラー件数カウント
+CLEAR:W_OUTPUT.
+WRITE ICON_RED_LIGHT AS ICON TO W_OUTPUT-ICON. "赤信号
+W_OUTPUT-KEKA   = W_MAIN_LIF-ERRMSG.           "処理結果
+W_OUTPUT-NAME1  = W_LF_MASTER-NAME1.           "仕入先名称
+W_OUTPUT-MANDT  = SY-MANDT.                    " クライアント
+W_OUTPUT-BUKRS  = P_BUK.                       " 会社コード
+W_OUTPUT-LIFNR  = W_MAIN_LIF-LIFNR.            " 仕入先コード(請求先)
+W_OUTPUT-CZFBDT = P_DAY.                       " 照合締日
+*  W_OUTPUT-SEQ    =  " SEQ
+*  W_OUTPUT-PZFBDT = ," 支払予定日
+*  W_OUTPUT-PZLSCH = ," 支払方法
+*  W_OUTPUT-PZTERM = ," サイト
+W_OUTPUT-PHKONT = P_PHKONT.                   " 振替勘定
+W_OUTPUT-WAERS = W_MAIN_LIF-WAERS.            " 通貨コード
+*  W_OUTPUT-PWRBTR = W_MAIN_LIF-PWRBTR.          " 支払予定額
+*  W_OUTPUT-PADVNC = 初期値固定" 前渡済
+IF W_SOSAI_LIF-LIFNR <> W_MAIN_LIF-LIFNR.
+W_OUTPUT-PLIFNR = W_SOSAI_LIF-LIFNR.        " 振替仕入先
+ELSE.
+CLEAR W_OUTPUT-PLIFNR.
+ENDIF.
+*  W_OUTPUT-PKUNNR = 初期値固定" 相殺先
+*  W_OUTPUT-PZTERM_D = ," 仕入割引条件
+*  W_OUTPUT-PZLSPR = 初期値固定" 自動支払保留
+*  W_OUTPUT-PMEMO  = 初期値固定" 備考
+W_OUTPUT-INSDT   = SY-DATUM." 登録日
+W_OUTPUT-INSTM   = SY-UZEIT." 登録時刻
+W_OUTPUT-INSUSR  = SY-UNAME." 登録ユーザ
+W_OUTPUT-PSTFLG  = W_MAIN_LIF-PSTFLG. " 会計振替
+W_OUTPUT-PSTDT   = W_MAIN_LIF-PSTDT.  " 会計振替日
+W_OUTPUT-PSTTM   = W_MAIN_LIF-PSTTM.  " 会計振替時刻
+W_OUTPUT-PSTUSR  = W_MAIN_LIF-PSTUSR. " 会計振替ユーザ
+*  W_OUTPUT-BELNR  = 初期値固定" 会計伝票番号
+*  W_OUTPUT-GJAHR  = 初期値固定" 会計年度
+*  W_OUTPUT-BUDAT  = 初期値固定" 伝票の転記日付
+APPEND W_OUTPUT TO T_OUTPUT.
+
+ENDFORM.                    " EDIT_ERR_DATA
+*&---------------------------------------------------------------------*
+*&      Form  ERR_CHECK_SYOKI
+*&---------------------------------------------------------------------*
+*       エラーチェック
+*----------------------------------------------------------------------*
+*      <--L_ERRFLG  エラーフラグ ありならON
+*----------------------------------------------------------------------*
+FORM ERR_CHECK_SYOKI CHANGING L_ERRFLG TYPE CHAR1.
+CLEAR:L_ERRFLG .
+* まず青信号セット
+WRITE ICON_GREEN_LIGHT AS ICON TO W_OUTPUT-ICON.
+* 1．通貨混在か国内振替済
+IF NOT  W_MAIN_LIF-ERRMSG IS INITIAL.
+PERFORM EDIT_ERR_DATA.
+L_ERRFLG = C_ON.
+EXIT.
+ENDIF.
+
+*   ２．照合クローズチェック
+PERFORM CHEK_CLOSE USING W_MAIN_LIF-LIFNR
+CHANGING L_ERRFLG.
+IF L_ERRFLG = C_ON.
+EXIT.
+ENDIF.
+
+ENDFORM.                    " ERR_CHECK_SYOKI
+*&---------------------------------------------------------------------*
+*&      Form  CHEK_CLOSE
+*&---------------------------------------------------------------------*
+*       仕入先コードによる、照合締日クローズチェック
+*----------------------------------------------------------------------*
+*      -->L_LIFNR   仕入先
+*      <--L_ERRFLG  エラーフラグ
+*----------------------------------------------------------------------*
+FORM CHEK_CLOSE USING    L_LIFNR   TYPE LIFNR
+CHANGING L_ERRFLG  TYPE CHAR1.
+CLEAR:W_ZN001.
+READ TABLE T_ZN001 INTO W_ZN001
+WITH TABLE KEY BUKRS = P_BUK
+LIFNR = L_LIFNR.
+IF SY-SUBRC <> 0.
+READ TABLE T_ZN001 INTO W_ZN001
+WITH TABLE KEY BUKRS = P_BUK
+LIFNR = C_PULAS.
+ENDIF.
+
+IF   W_ZN001-EDATE < P_DAY. "照合終了日 < 照合締日
+L_ERRFLG = C_ON.
+*   照合がクローズしていません。
+W_MAIN_LIF-ERRMSG = TEXT-E04.
+PERFORM EDIT_ERR_DATA.
+ENDIF.
+ENDFORM.                    " CHEK_CLOSE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_ZLSCH
+*&---------------------------------------------------------------------*
+*       支払方法決定
+*----------------------------------------------------------------------*
+*      -->L_LIFNR     仕入先
+*      -->L_WAERS     通貨コード
+*      -->L_SUM       税込み金額合計
+*      <--L_ERRFLG    エラーフラグ
+*----------------------------------------------------------------------*
+FORM CHECK_ZLSCH USING    L_LIFNR   TYPE LIFNR
+L_WAERS   TYPE WAERS
+L_SUM     TYPE YN210-KNETXAMT
+CHANGING   L_ERRFLG  TYPE CHAR1.
+
+DATA:L_ZAN TYPE YN210-KNETXAMT.
+DATA:L_W_ZN007 TYPE ZN007.
+CLEAR:W_ZN007,L_W_ZN007,W_UPDATA.
+
+* 使用する規定外マスタの判定
+*-- 【初期値提案】
+IF P_SYOKI = C_ON.
+*   相殺仕入先でない場合
+CLEAR:W_KNVP.
+LOOP AT T_KNVP INTO W_KNVP
+WHERE LIFNR = L_LIFNR.
+EXIT.
+ENDLOOP.
+*   相殺仕入先でない場合は少数コード関係なく閾値判定
+IF W_KNVP-LIFNR <> L_LIFNR.
+LOOP AT T_ZN007 INTO L_W_ZN007
+WHERE LIFNR = L_LIFNR.
+IF L_W_ZN007-LOWAMT <=  L_SUM.
+IF W_ZN007-LOWAMT <= L_W_ZN007-LOWAMT.
+W_ZN007 = L_W_ZN007.
+ENDIF.
+ENDIF.
+ENDLOOP.
+*   相殺仕入先の場合は少数コードで分岐
+ELSE.
+CASE W_LF_MASTER-MINDK.
+*      相殺締
+WHEN C_SOSAI_KIJITU."締日相殺
+*        2012/05/25 MOD START "締日相殺は仮計算とする
+PERFORM SET_UPDATA USING L_LIFNR              "仕入先コード
+L_WAERS              "通貨コード
+L_SUM                "税込金額
+W_LF_MASTER-ZTERM_M1 "条件（支払日）
+W_LF_MASTER-ZTERM_B1 "条件（サイト）
+C_ETC_9.             "支払方法
+EXIT."決定
+*          LOOP AT T_ZN007 INTO W_ZN007
+*            WHERE LIFNR = L_LIFNR.
+*             IF W_ZN007-BASE_ZT = C_KIHON."1
+*               EXIT.
+*             ENDIF.
+*          ENDLOOP.
+*        2012/05/25 MOD END
+
+*      相殺締
+*        WHEN '01'.
+*          LOOP AT T_ZN007 INTO W_ZN007
+*            WHERE LIFNR = L_LIFNR.
+*             IF W_ZN007-BASE_ZT = C_KIHON."1
+*               EXIT.
+*             ENDIF.
+*          ENDLOOP.
+*      支払日締
+WHEN  C_SOSAI_HARAIBI.  "払日相殺.
+LOOP AT T_ZN007 INTO L_W_ZN007
+WHERE LIFNR = L_LIFNR.
+IF L_W_ZN007-LOWAMT <=  L_SUM.
+IF W_ZN007-LOWAMT <= L_W_ZN007-LOWAMT.
+W_ZN007 = L_W_ZN007.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+*      得意先全額
+WHEN C_SOSAI_TOKUI."得意先全額相殺
+*        2012/05/25 MOD START 全額相殺は仮計算とする
+PERFORM SET_UPDATA USING L_LIFNR              "仕入先コード
+L_WAERS              "通貨コード
+L_SUM                "税込金額
+W_LF_MASTER-ZTERM_M1 "条件（支払日）
+W_LF_MASTER-ZTERM_B1 "条件（サイト）
+C_ETC_9.             "支払方法
+EXIT."決定
+*          LOOP AT T_ZN007 INTO W_ZN007
+*            WHERE LIFNR = L_LIFNR.
+*             IF W_ZN007-BASE_ZT = C_KIHON."1
+*               EXIT.
+*             ENDIF.
+*          ENDLOOP.
+*        2012/05/25 MOD END
+
+*      仕入先全額
+WHEN C_SOSAI_SHIIREI."仕入先全額相殺
+*       エラーチェック
+IF W_LF_MASTER-WAERS <> L_WAERS.
+L_ERRFLG = C_ON.
+*           【初期提案】
+IF P_SYOKI = C_ON.
+*             マスタの通貨が不正です。
+W_MAIN_LIF-ERRMSG = TEXT-E05.
+PERFORM EDIT_ERR_DATA.
+EXIT.
+ENDIF.
+ENDIF.
+PERFORM SET_UPDATA USING L_LIFNR              "仕入先コード
+L_WAERS              "通貨コード
+L_SUM                "税込金額
+W_LF_MASTER-ZTERM_M1 "条件（支払日）
+W_LF_MASTER-ZTERM_B1 "条件（サイト）
+C_ETC_9.             "支払方法
+EXIT."決定
+*     その他（有り得ない）
+WHEN OTHERS.
+
+ENDCASE.
+ENDIF.
+ELSE.
+*【相殺再計算】
+CLEAR:W_KNVP.
+LOOP AT T_KNVP INTO W_KNVP
+WHERE LIFNR = L_LIFNR.
+EXIT.
+ENDLOOP.
+IF W_LF_MASTER-MINDK = C_SOSAI_SHIIREI.
+*    エラーチェック
+IF W_LF_MASTER-WAERS <> L_WAERS.
+L_ERRFLG = C_ON.
+*       マスタの通貨が不正です。
+W_FURIKAE_OYA-ERRMSG = TEXT-E05.
+PERFORM EDIT_ERR_DATA_SOSAI.
+EXIT.
+ENDIF.
+PERFORM SET_UPDATA USING L_LIFNR              "仕入先コード
+L_WAERS              "通貨コード
+L_SUM                "税込金額
+W_LF_MASTER-ZTERM_M1 "条件（支払日）
+W_LF_MASTER-ZTERM_B1 "条件（サイト）
+C_ETC_9.             "支払方法
+EXIT."決定
+ELSE.
+LOOP AT T_ZN007 INTO L_W_ZN007
+WHERE LIFNR = L_LIFNR.
+IF L_W_ZN007-LOWAMT <=  L_SUM.
+IF W_ZN007-LOWAMT <= L_W_ZN007-LOWAMT.
+W_ZN007 = L_W_ZN007.
+ENDIF.
+ENDIF.
+ENDLOOP.
+ENDIF.
+ENDIF.
+
+* 読み込んだ規定外マスタで分岐
+IF NOT W_ZN007-LIFNR IS INITIAL. "ZN007にあり
+IF W_ZN007-WAERS <> L_WAERS.
+*     【初期提案】
+IF P_SYOKI = C_ON.
+L_ERRFLG = C_ON.
+*      マスタの通貨が不正です。
+W_MAIN_LIF-ERRMSG = TEXT-E05.
+PERFORM EDIT_ERR_DATA.
+EXIT.
+*     【相殺再計算】
+ELSE.
+*       マスタの通貨が不正です。
+W_FURIKAE_OYA-ERRMSG = TEXT-E05.
+PERFORM EDIT_ERR_DATA_SOSAI.
+EXIT.
+ENDIF.
+ENDIF.
+ENDIF.
+
+CLEAR:L_ZAN.
+* %モード
+IF W_ZN007-PER1 <> 0. "1-分割（％）
+PERFORM PERSENT_MODE USING L_LIFNR
+L_WAERS
+L_SUM
+CHANGING L_ZAN.
+* 金額モード
+ELSEIF W_ZN007-PAY1 <> 0. "1-分割（金額）
+PERFORM KINGAKU_MODE USING L_LIFNR
+L_WAERS
+L_SUM
+CHANGING L_ZAN.
+ELSE.
+* 仕入先マスタモード
+IF W_ZN007-LIFNR IS INITIAL. "ZN007になし
+
+PERFORM LF_MASTER_MODE USING L_LIFNR
+L_WAERS
+L_SUM
+CHANGING  L_ERRFLG.
+IF  L_ERRFLG = C_ON."エラーあり
+EXIT.
+ENDIF.
+* 全額残モード
+ELSE. "マスタにデータがあり、金額もパーセントもない
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SUM            "税込金額
+W_ZN007-ZTERM_PZ "条件（支払日）
+W_ZN007-ZTERM_SZ "条件（サイト）
+W_ZN007-ZLSCH_Z. "支払方法
+ENDIF.
+ENDIF.
+
+* 残
+IF L_ZAN <> 0.
+PERFORM SET_UPDATA USING L_LIFNR           "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_ZAN            "税込金額
+W_ZN007-ZTERM_PZ "条件（支払日）
+W_ZN007-ZTERM_SZ "条件（サイト）
+W_ZN007-ZLSCH_Z. "支払方法
+ENDIF.
+
+ENDFORM.                    " CHECK_ZLSCH
+*&---------------------------------------------------------------------*
+*&      Form  PERSENT_MODE
+*&---------------------------------------------------------------------*
+*       ％での支払方法決定
+*----------------------------------------------------------------------*
+*      -->L_LIFNR     仕入先
+*      -->L_WAERS     通貨
+*      -->L_SUM       税込み金額合計
+*----------------------------------------------------------------------*
+FORM PERSENT_MODE USING  L_LIFNR   TYPE LIFNR
+L_WAERS   TYPE WAERS
+L_SUM     TYPE YN210-KNETXAMT
+CHANGING L_ZAN     TYPE YN210-KNETXAMT.
+
+DATA:L_SUM_ZAN TYPE YN210-KNETXAMT,
+L_SIHARAI TYPE YN210-KNETXAMT.
+L_SUM_ZAN = L_SUM.
+
+* 条件１
+CLEAR L_SIHARAI.
+L_SIHARAI = L_SUM * ( W_ZN007-PER1 / 100 ).
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P1 "条件（支払日）
+W_ZN007-ZTERM_S1 "条件（サイト）
+W_ZN007-ZLSCH_1. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+
+CHECK L_SUM_ZAN <> 0.
+
+* 条件2
+IF  W_ZN007-PER2 IS INITIAL.
+EXIT.
+ELSE.
+CLEAR L_SIHARAI.
+L_SIHARAI = L_SUM * ( W_ZN007-PER2 / 100 ).
+*    IF L_SUM_ZAN < L_SIHARAI.
+*      L_SIHARAI = L_SUM_ZAN .
+*    ENDIF.
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P2 "条件（支払日）
+W_ZN007-ZTERM_S2 "条件（サイト）
+W_ZN007-ZLSCH_2. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+ENDIF.
+CHECK L_SUM_ZAN <> 0.
+
+* 条件3
+IF  W_ZN007-PER3 IS INITIAL.
+EXIT.
+ELSE.
+CLEAR L_SIHARAI.
+L_SIHARAI = L_SUM * ( W_ZN007-PER3 / 100 ).
+*    IF L_SUM_ZAN < L_SIHARAI.
+*      L_SIHARAI = L_SUM_ZAN .
+*    ENDIF.
+
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P3 "条件（支払日）
+W_ZN007-ZTERM_S3 "条件（サイト）
+W_ZN007-ZLSCH_3. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+ENDIF.
+
+CHECK L_SUM_ZAN <> 0.
+* 条件4
+IF  W_ZN007-PER4 IS INITIAL.
+EXIT.
+ELSE.
+CLEAR L_SIHARAI.
+L_SIHARAI = L_SUM * ( W_ZN007-PER4 / 100 ).
+*    IF L_SUM_ZAN < L_SIHARAI.
+*      L_SIHARAI = L_SUM_ZAN .
+*    ENDIF.
+
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P4 "条件（支払日）
+W_ZN007-ZTERM_S4 "条件（サイト）
+W_ZN007-ZLSCH_4. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+ENDIF.
+
+ENDFORM.                    " PERSENT_MODE
+*&---------------------------------------------------------------------*
+*&      Form  SET_UPDATA
+*&---------------------------------------------------------------------*
+*       テーブル更新用一時データ作成
+*----------------------------------------------------------------------*
+*      -->L_LIFNR    仕入先
+*      -->L_WAERS    通貨
+*      -->L_SUM      支払予定額
+*      -->L_ZTERM_P  支払条件(日)
+*      -->L_ZTERM_S  支払条件(サイト)
+*      -->L_ZLSCH    支払方法
+*----------------------------------------------------------------------*
+FORM SET_UPDATA USING    L_LIFNR   TYPE LIFNR
+L_WAERS   TYPE WAERS
+L_SUM     TYPE YN210-KNETXAMT
+L_ZTERM_P TYPE ZN002-PZTERM
+L_ZTERM_S TYPE ZN002-PZTERM
+L_ZLSCH   TYPE ZN002-PZLSCH.
+CLEAR:W_UPDATA.
+W_UPDATA-LIFNR    = L_LIFNR.   "仕入先コード(請求先)
+W_UPDATA-WAERS    = L_WAERS.   "通貨コード
+W_UPDATA-KNETXAMT = L_SUM.     "税込金額
+W_UPDATA-ZTERM_P  = L_ZTERM_P. "条件（支払日）
+W_UPDATA-ZTERM_S  = L_ZTERM_S. "条件（サイト）
+W_UPDATA-ZLSCH    = L_ZLSCH.   "支払方法
+W_UPDATA-PLIFNR   = W_SOSAI_LIF-LIFNR."相殺仕入先
+APPEND W_UPDATA TO T_UPDATA.
+
+ENDFORM.                    " SET_UPDATA
+*&---------------------------------------------------------------------*
+*&      Form  KINGAKU_MODE
+*&---------------------------------------------------------------------*
+*       支払方法決定 金額モード
+*----------------------------------------------------------------------*
+*      -->L_LIFNR    仕入先
+*      -->L_WAERS    通貨
+*      -->L_SUM      支払予定額
+*----------------------------------------------------------------------*
+FORM KINGAKU_MODE USING    L_LIFNR TYPE LIFNR
+L_WAERS TYPE WAERS
+L_SUM   TYPE YN210-KNETXAMT
+CHANGING L_ZAN   TYPE YN210-KNETXAMT.
+
+DATA:L_SUM_ZAN TYPE YN210-KNETXAMT,
+L_SIHARAI TYPE YN210-KNETXAMT.
+
+L_SUM_ZAN = L_SUM.
+L_ZAN = L_SUM_ZAN.
+* 条件１
+CLEAR L_SIHARAI.
+IF L_SUM_ZAN  >= W_ZN007-PAY1. "条件金額が合計値を越える
+L_SIHARAI = W_ZN007-PAY1.
+ELSE.                          "条件金額で合計値をまかなえない
+L_SIHARAI = L_SUM_ZAN.
+ENDIF.
+
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P1 "条件（支払日）
+W_ZN007-ZTERM_S1 "条件（サイト）
+W_ZN007-ZLSCH_1. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+CHECK L_SUM_ZAN <> 0.
+
+* 条件2
+IF  W_ZN007-PAY2 IS INITIAL.
+EXIT.
+ELSE.
+CLEAR L_SIHARAI.
+IF L_SUM_ZAN  >= W_ZN007-PAY2. "条件金額が合計値を越える
+L_SIHARAI = W_ZN007-PAY2.
+ELSE.                          "条件金額で合計値をまかなえない
+L_SIHARAI = L_SUM_ZAN.
+ENDIF.
+
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P2 "条件（支払日）
+W_ZN007-ZTERM_S2 "条件（サイト）
+W_ZN007-ZLSCH_2. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+CHECK L_SUM_ZAN <> 0.
+ENDIF.
+
+* 条件3
+IF  W_ZN007-PAY3 IS INITIAL.
+EXIT.
+ELSE.
+CLEAR L_SIHARAI.
+IF L_SUM_ZAN  >= W_ZN007-PAY3. "条件金額が合計値を越える
+L_SIHARAI = W_ZN007-PAY3.
+ELSE.                          "条件金額で合計値をまかなえない
+L_SIHARAI = L_SUM_ZAN.
+ENDIF.
+
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P3 "条件（支払日）
+W_ZN007-ZTERM_S3 "条件（サイト）
+W_ZN007-ZLSCH_3. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+CHECK L_SUM_ZAN <> 0.
+ENDIF.
+
+* 条件4
+IF  W_ZN007-PAY4 IS INITIAL.
+EXIT.
+ELSE.
+CLEAR L_SIHARAI.
+IF L_SUM_ZAN  >= W_ZN007-PAY4. "条件金額が合計値を越える
+L_SIHARAI = W_ZN007-PAY4.
+ELSE.                          "条件金額で合計値をまかなえない
+L_SIHARAI = L_SUM_ZAN.
+ENDIF.
+
+PERFORM SET_UPDATA USING L_LIFNR          "仕入先コード(請求先)
+L_WAERS          "通貨コード
+L_SIHARAI        "税込金額
+W_ZN007-ZTERM_P4 "条件（支払日）
+W_ZN007-ZTERM_S4 "条件（サイト）
+W_ZN007-ZLSCH_4. "支払方法
+L_SUM_ZAN = L_SUM_ZAN -  L_SIHARAI.
+L_ZAN = L_SUM_ZAN.
+CHECK L_SUM_ZAN <> 0.
+ENDIF.
+
+ENDFORM.                    " KINGAKU_MODE
+*&---------------------------------------------------------------------*
+*&      Form  LF_MASTER_MODE
+*&---------------------------------------------------------------------*
+*       仕入先マスタからの初期提案
+*----------------------------------------------------------------------*
+*      -->L_LIFNR    仕入先
+*      -->L_WAERS    通貨
+*      -->L_SUM      支払予定額
+*----------------------------------------------------------------------*
+FORM LF_MASTER_MODE USING    L_LIFNR  TYPE LIFNR
+L_WAERS  TYPE WAERS
+L_SUM    TYPE YN210-KNETXAMT
+CHANGING  L_ERRFLG TYPE CHAR1.
+
+DATA:L_SUM_ZAN TYPE YN210-KNETXAMT,
+L_SIHARAI TYPE YN210-KNETXAMT,
+L_ZLSCH   TYPE ZN007-ZLSCH_Z.
+
+IF W_LF_MASTER-WAERS <> L_WAERS.
+L_ERRFLG = C_ON.
+*       【初期提案】
+IF P_SYOKI = C_ON.
+*     マスタの通貨が不正です。
+W_MAIN_LIF-ERRMSG = TEXT-E05.
+PERFORM EDIT_ERR_DATA.
+EXIT.
+*       【相殺再計算】
+ELSE.
+*     マスタの通貨が不正です。
+W_FURIKAE_OYA-ERRMSG = TEXT-E05.
+PERFORM EDIT_ERR_DATA_SOSAI.
+EXIT.
+ENDIF.
+
+ENDIF.
+
+* 支払方法の決定
+PERFORM EDIT_ZLSCH USING    L_WAERS
+L_SUM
+CHANGING L_ZLSCH.
+
+
+* レコード作製
+PERFORM SET_UPDATA USING L_LIFNR              "仕入先コード(請求先)
+L_WAERS              "通貨コード
+L_SUM                "税込金額
+W_LF_MASTER-ZTERM_M1 "条件（支払日）
+W_LF_MASTER-ZTERM_B1 "条件（サイト）
+L_ZLSCH.             "支払方法
+
+ENDFORM.                    " LF_MASTER_MODE
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ZLSCH
+*&---------------------------------------------------------------------*
+*       仕入れ先マスタの支払方法決定
+*----------------------------------------------------------------------*
+*      -->L_WAERS    通貨
+*      -->L_SUM      支払予定額
+*      <--L_ZLSCH    支払い方法
+*----------------------------------------------------------------------*
+FORM EDIT_ZLSCH USING L_WAERS  TYPE WAERS
+L_SUM    TYPE YN210-KNETXAMT
+CHANGING L_ZLSCH  TYPE ZN002-PZLSCH.
+
+*-- JPY以外は９
+IF L_WAERS <> C_JPY.
+
+*2012/3/16 MOD 外貨の場合も支払方法確認
+IF W_LF_MASTER-ZWELS CS C_KOKUNAI_T.
+L_ZLSCH = C_KOKUNAI_T.     "振込
+ELSEIF W_LF_MASTER-ZWELS CS C_TE_B.
+L_ZLSCH = C_TE_B.           "手形
+ELSE.
+L_ZLSCH = C_ETC_9.          "その他
+ENDIF.
+*2012/3/16 MOD
+
+EXIT.
+ENDIF.
+*        2013/11/14 ADD START "電子記録債務の追加
+*-- JPY/支払方法にQあり/1万以上
+IF W_LF_MASTER-ZWELS CS C_DEN_Q "Qが含まれつつ１万
+AND L_SUM >= 100.
+L_ZLSCH = C_DEN_Q. "電子記録債務
+EXIT.
+ENDIF.
+*        2013/11/14 ADD END
+
+*-- JPY/支払方法にZあり/20万以上
+IF W_LF_MASTER-ZWELS CS C_FAC_Z "ゼットが含まれつつ２０万
+AND L_SUM >= 2000.
+L_ZLSCH = C_FAC_Z. "ファクタリング
+EXIT.
+ENDIF.
+
+*-- JPY/支払方法にKあり/20万以上
+IF W_LF_MASTER-ZWELS CS C_FAC_K "Kが含まれつつ２０万
+AND L_SUM >= 2000.
+L_ZLSCH = C_FAC_K. "ファクタリング京都
+EXIT.
+ENDIF.
+
+*-- JPY/支払方法にBあり/20万以上
+IF W_LF_MASTER-ZWELS CS C_TE_B "Bが含まれつつ２０万
+AND L_SUM >= 2000.
+L_ZLSCH = C_TE_B. "手形
+EXIT.
+ENDIF.
+
+*-- JPY/支払方法にTあり/2千円以上
+IF W_LF_MASTER-ZWELS CS C_KOKUNAI_T. "Tが含まれつつ
+*  AND L_SUM >= 20. "2012/09/03 DEL 2千円対応は自動支払手数料で実施
+L_ZLSCH = C_KOKUNAI_T . "国内振込
+EXIT.
+ENDIF.
+
+*-- 最後まで決まらなかったらその他
+L_ZLSCH = C_ETC_9.   "その他
+
+ENDFORM.                    " EDIT_ZLSCH
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ITAB_SINKI
+*&---------------------------------------------------------------------*
+*       ALVデータとテーブル更新データを同時作成
+*----------------------------------------------------------------------*
+FORM EDIT_ITAB_SINKI.
+DATA:L_CNT TYPE ZN002-SEQ.
+
+CLEAR:L_CNT.
+LOOP AT T_UPDATA INTO W_UPDATA.
+CLEAR:W_OUTPUT,W_ZN002_UPD.
+L_CNT = L_CNT + 1.
+PERFORM SET_OUTPUT_ALV USING L_CNT
+W_MAIN_LIF-LIFNR
+W_MAIN_LIF-ERRMSG.
+ENDLOOP.
+
+REFRESH T_UPDATA.
+ENDFORM.                    " EDIT_ITAB_SINKI
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_TABLE
+*&---------------------------------------------------------------------*
+*       テーブル更新
+*----------------------------------------------------------------------*
+FORM EDIT_TABLE.
+CHECK P_TEST = SPACE.             "テストOFFのみ実行
+CHECK NOT T_ZN002_UPD[] IS INITIAL.  "テーブル更新データあり
+* 初期処理
+IF P_SYOKI = C_ON.
+IF NOT T_RANGE_LIF[] IS INITIAL.
+DELETE FROM ZN002 WHERE BUKRS = P_BUK
+AND LIFNR IN T_RANGE_LIF
+AND CZFBDT = P_DAY.
+IF SY-SUBRC <> 0 AND SY-SUBRC <> 4.
+ROLLBACK WORK.
+*       & 削除エラー
+MESSAGE E793 WITH TEXT-E06.
+ENDIF.
+ENDIF.
+
+* 相殺後再処理
+ELSE.
+*   IF NOT T_ZN002_DEL[] IS INITIAL.
+IF NOT T_SEQ[] IS INITIAL.
+REFRESH:T_RANGE_LIF.
+LOOP AT T_SEQ INTO W_SEQ.
+T_RANGE_LIF-SIGN   = 'I'.
+T_RANGE_LIF-OPTION = 'EQ'.
+T_RANGE_LIF-LOW    = W_SEQ-LIFNR.
+APPEND T_RANGE_LIF.
+ENDLOOP.
+DELETE FROM ZN002 WHERE BUKRS = P_BUK
+AND LIFNR IN T_RANGE_LIF
+AND CZFBDT = P_DAY.
+IF SY-SUBRC <> 0 AND SY-SUBRC <> 4.
+ROLLBACK WORK.
+*      & 削除エラー
+MESSAGE E793 WITH TEXT-E06.
+ENDIF.
+ENDIF.
+ENDIF.
+
+INSERT ZN002 FROM TABLE T_ZN002_UPD  ACCEPTING DUPLICATE KEYS.
+IF SY-SUBRC = 0.
+COMMIT WORK.
+ELSE.
+ROLLBACK WORK.
+*    & 更新エラー
+MESSAGE E758 WITH TEXT-E06.
+ENDIF.
+
+* 使用済み内部テーブルの開放
+FREE:T_ZN002_UPD,T_SEQ,T_RANGE_LIF.
+
+ENDFORM.                    " EDIT_TABLE
+*&---------------------------------------------------------------------*
+*&      Form  F_DATA_CHECK
+*&---------------------------------------------------------------------*
+*       選択画面の入力チェック
+*----------------------------------------------------------------------*
+FORM F_DATA_CHECK.
+DATA:LW_BUKRS  TYPE BUKRS.
+*   会社コード存在チェック
+SELECT SINGLE BUKRS
+INTO LW_BUKRS
+FROM T001
+WHERE BUKRS = P_BUK.
+IF SY-SUBRC <> 0.
+*-- 会社コード & はありません
+MESSAGE E750 WITH P_BUK.
+ENDIF.
+ENDFORM.                    " F_DATA_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_SOSAI
+*&---------------------------------------------------------------------*
+*       相殺データ取得
+*----------------------------------------------------------------------*
+FORM GET_DATA_SOSAI.
+
+PERFORM GET_SOUSAI_DAT3.
+CHECK W_ERR_FLG IS INITIAL.
+
+* マスタデータの一括取得
+PERFORM GET_MASTER2.
+
+
+ENDFORM.                    " GET_DATA_SOSAI
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SOUSAI_DAT2
+*&---------------------------------------------------------------------*
+*       次に、取得したデータの仕入先で全件取得して、処理。
+*----------------------------------------------------------------------*
+FORM GET_SOUSAI_DAT2.
+* 相殺 再処理用テーブル
+*DATA:L_T_ZN002 TYPE HASHED TABLE OF ZN002
+*        WITH UNIQUE KEY BUKRS LIFNR CZFBDT SEQ,
+*     L_W_ZN002 TYPE ZN002.
+
+REFRESH:T_RANGE_LIF.
+
+CHECK NOT T_ZN002_SOSAI[] IS INITIAL.
+LOOP AT T_ZN002_SOSAI INTO W_ZN002_SOSAI.
+* 処理対象データの仕入先コードを抜き出し
+AT NEW LIFNR.
+T_RANGE_LIF-SIGN   = 'I'.
+T_RANGE_LIF-OPTION = 'EQ'.
+T_RANGE_LIF-LOW = W_ZN002_SOSAI-LIFNR.
+APPEND T_RANGE_LIF.
+ENDAT.
+ENDLOOP.
+
+SELECT * APPENDING TABLE T_ZN002_SOSAI
+FROM ZN002
+WHERE BUKRS  =  P_BUK       "会社コード
+AND LIFNR  IN T_RANGE_LIF "処理対象の仕入先
+AND CZFBDT =  P_DAY.      "締日
+
+* 使用済み内部テーブルの開放
+FREE:T_RANGE_LIF.
+ENDFORM.                    " GET_SOUSAI_DAT2
+*&---------------------------------------------------------------------*
+*&      Form  GET_SOUSAI_DAT3
+*&---------------------------------------------------------------------*
+*       最後に、仕入先 ＝ 選択画面の仕入先
+*       かつ振替仕入先がブランクのデータを取得
+*----------------------------------------------------------------------*
+*       <-- T_ZN002_SOSAI 処理対象の支払予定データ
+*       <-- T_RANGE_LIF   処理対象の振替仕入先コード
+*       <-- T_RANGE_ENQ   処理対象の仕入先コード
+*----------------------------------------------------------------------*
+FORM GET_SOUSAI_DAT3.
+TYPES:BEGIN OF L_TYP_LIFN_02,
+LIFNR TYPE LFB1-LIFNR,
+END OF L_TYP_LIFN_02.
+
+DATA:L_T_LIF02 TYPE SORTED TABLE OF L_TYP_LIFN_02
+WITH UNIQUE KEY LIFNR,
+L_W_LIF02 TYPE L_TYP_LIFN_02.
+
+REFRESH:L_T_LIF02.
+CLEAR:L_W_LIF02.
+
+DATA:L_LIFNR TYPE ZN002-PLIFNR.
+REFRESH:T_ZN002_SOSAI.
+
+* 2012/03/23 ADD START 除外対象を取得
+* 相殺 再処理用テーブル
+DATA:L_T_ZN002_SOSAI TYPE STANDARD TABLE OF ZN002,
+L_W_ZN002_SOSAI TYPE ZN002.
+
+** 払日を除外
+SELECT LIFNR INTO TABLE L_T_LIF02
+FROM LFB1
+WHERE LIFNR IN S_LIF "振替仕入先
+AND BUKRS = P_BUK
+AND MINDK = C_SOSAI_HARAIBI.     "払日相殺
+
+* 相殺仕入先マスタ
+SELECT LIFNR INTO TABLE T_KNVP
+FROM KNVP
+WHERE LIFNR IN S_LIF
+AND PARVW = P_PAR.    "取引先機能
+* 2012/03/23 ADD END
+
+* 仕入先 ＝ 選択画面の仕入先
+SELECT * INTO TABLE L_T_ZN002_SOSAI
+FROM ZN002
+WHERE BUKRS  =  P_BUK         "会社コード
+AND LIFNR  IN S_LIF         "仕入先
+AND CZFBDT =  P_DAY         "締日
+AND PLIFNR =  L_LIFNR . "振替仕入先なし
+
+* 2012/03/23 ADD START 除外対象を取得
+LOOP AT L_T_ZN002_SOSAI INTO L_W_ZN002_SOSAI.
+CLEAR:W_KNVP,
+L_W_LIF02.
+READ TABLE L_T_LIF02 INTO L_W_LIF02
+WITH TABLE KEY LIFNR = L_W_ZN002_SOSAI-LIFNR.
+*   少数コード02に該当するデータは排除
+IF SY-SUBRC = 0.
+CONTINUE.
+ELSE.
+*     相殺仕入先マスタ
+LOOP AT  T_KNVP INTO W_KNVP
+WHERE LIFNR = L_W_ZN002_SOSAI-LIFNR.
+EXIT.
+ENDLOOP.
+IF W_KNVP-LIFNR <> L_W_ZN002_SOSAI-LIFNR. "相殺仕入先でない不要
+CONTINUE.
+ENDIF.
+ENDIF.
+APPEND  L_W_ZN002_SOSAI TO T_ZN002_SOSAI.
+ENDLOOP.
+REFRESH:L_T_ZN002_SOSAI.
+* 2012/03/23 ADD END
+
+* 振替仕入先＝選択画面の仕入先を取得
+SELECT * INTO TABLE L_T_ZN002_SOSAI
+FROM ZN002
+WHERE BUKRS  =  P_BUK "会社コード
+AND CZFBDT =  P_DAY "締日
+AND PLIFNR IN S_LIF "
+* 2012/05/01 ADD START
+* 仕入先未指定の場合の対応
+AND PLIFNR <> SPACE.
+*  2012/05/01 ADD END
+* 2012/03/23 ADD START 除外対象を取得
+LOOP AT L_T_ZN002_SOSAI INTO L_W_ZN002_SOSAI.
+CLEAR:W_KNVP,
+L_W_LIF02.
+READ TABLE L_T_LIF02 INTO L_W_LIF02
+WITH TABLE KEY LIFNR = L_W_ZN002_SOSAI-PLIFNR.
+*   少数コード02に該当するデータは排除
+IF SY-SUBRC = 0.
+CONTINUE.
+ELSE.
+*     相殺仕入先マスタ
+LOOP AT  T_KNVP INTO W_KNVP
+WHERE LIFNR = L_W_ZN002_SOSAI-PLIFNR.
+EXIT.
+ENDLOOP.
+IF W_KNVP-LIFNR <> L_W_ZN002_SOSAI-PLIFNR. "相殺仕入先でない不要
+CONTINUE.
+ENDIF.
+ENDIF.
+APPEND  L_W_ZN002_SOSAI TO T_ZN002_SOSAI.
+ENDLOOP.
+* 2012/03/23 ADD END
+
+* 取得したデータの仕入先で全件取得して、処理。
+PERFORM GET_SOUSAI_DAT2.
+CHECK W_ERR_FLG IS INITIAL.
+
+SORT T_ZN002_SOSAI BY BUKRS LIFNR CZFBDT SEQ.
+* 重複削除
+DELETE ADJACENT DUPLICATES FROM T_ZN002_SOSAI.
+
+IF T_ZN002_SOSAI[] IS INITIAL.
+*   対象データがありません
+MESSAGE S762(YN01).
+W_ERR_FLG = C_ON.
+ENDIF.
+
+* 今回処理対象の振替仕入先を確保
+REFRESH:T_RANGE_LIF,T_RANGE_ENQ.
+* ブランクの振替仕入先に仕入先コードをコピー
+LOOP AT T_ZN002_SOSAI INTO W_ZN002_SOSAI.
+IF W_ZN002_SOSAI-PLIFNR IS INITIAL.
+W_ZN002_SOSAI-PLIFNR = W_ZN002_SOSAI-LIFNR.
+ENDIF.
+
+IF W_ZN002_SOSAI-PLIFNR IN S_LIF.
+T_RANGE_LIF-SIGN   = 'I'.
+T_RANGE_LIF-OPTION = 'EQ'.
+T_RANGE_LIF-LOW = W_ZN002_SOSAI-PLIFNR."処理対象の振替仕入先確保
+APPEND T_RANGE_LIF.
+
+T_RANGE_ENQ-SIGN   = 'I'.
+T_RANGE_ENQ-OPTION = 'EQ'.
+T_RANGE_ENQ-LOW = W_ZN002_SOSAI-LIFNR."処理対象の仕入先確保
+APPEND T_RANGE_ENQ.
+
+IF W_ZN002_SOSAI-PLIFNR = W_ZN002_SOSAI-LIFNR. "振替コピー反映
+MODIFY  T_ZN002_SOSAI FROM W_ZN002_SOSAI
+TRANSPORTING PLIFNR
+WHERE BUKRS  = W_ZN002_SOSAI-BUKRS
+AND LIFNR  = W_ZN002_SOSAI-LIFNR
+AND CZFBDT = W_ZN002_SOSAI-CZFBDT
+AND SEQ    = W_ZN002_SOSAI-SEQ.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+IF T_RANGE_LIF[] IS INITIAL.
+*   対象データがありません
+MESSAGE S762(YN01).
+W_ERR_FLG = C_ON.
+ENDIF.
+
+SORT T_RANGE_LIF BY LOW.
+DELETE ADJACENT DUPLICATES FROM T_RANGE_LIF.
+
+SORT T_RANGE_ENQ BY LOW.
+DELETE ADJACENT DUPLICATES FROM T_RANGE_ENQ.
+
+REFRESH:L_T_LIF02.
+CLEAR:L_W_LIF02.
+
+* 2012/03/23 DEL START 対象外処理修正
+** 払日を除外
+*  SELECT LIFNR INTO TABLE L_T_LIF02
+*    FROM LFB1
+*  WHERE LIFNR IN T_RANGE_LIF "振替仕入先
+*    AND BUKRS = P_BUK
+*    AND MINDK = C_SOSAI_HARAIBI.     "払日相殺
+*
+** 相殺仕入先マスタ
+*  SELECT LIFNR INTO TABLE T_KNVP
+*    FROM KNVP
+*   WHERE LIFNR IN S_LIF
+*     AND PARVW = P_PAR.    "取引先機能
+*
+*  LOOP AT T_RANGE_LIF.
+*    CLEAR:W_KNVP,
+*          L_W_LIF02.
+*    READ TABLE L_T_LIF02 INTO L_W_LIF02
+*          WITH TABLE KEY LIFNR = T_RANGE_LIF-LOW.
+**   少数コード02に該当するデータは排除
+*    IF SY-SUBRC = 0.
+*       DELETE T_RANGE_LIF WHERE LOW    = T_RANGE_LIF-LOW.
+*    ELSE.
+**     相殺仕入先マスタ
+*      LOOP AT  T_KNVP INTO W_KNVP
+*        WHERE LIFNR = T_RANGE_LIF-LOW.
+*        EXIT.
+*      ENDLOOP.
+*      IF W_KNVP-LIFNR <> T_RANGE_LIF-LOW. "相殺仕入先でないので処理不要
+*        DELETE T_RANGE_LIF WHERE LOW    =  T_RANGE_LIF-LOW.
+*      ENDIF.
+*    ENDIF.
+*  ENDLOOP.
+* 2012/03/23 DEL END 対象外処理修正
+
+IF T_RANGE_LIF[] IS INITIAL.
+*   対象データがありません
+MESSAGE S762(YN01).
+W_ERR_FLG = C_ON.
+ENDIF.
+
+* ロック確認(取れた支払予定の仕入先全件でロックでよい）
+LOOP AT T_RANGE_ENQ.
+PERFORM CHECK_LOCK_LIFNR USING T_RANGE_ENQ-LOW.
+CHECK W_ERR_FLG IS INITIAL.
+ENDLOOP.
+
+ENDFORM.                    " GET_SOUSAI_DAT3
+*&---------------------------------------------------------------------*
+*&      Form  GET_MASTER2
+*&---------------------------------------------------------------------*
+*       マスタ取得
+*----------------------------------------------------------------------*
+FORM GET_MASTER2.
+* 仕入先マスタ
+SELECT
+*     LFA1
+LFA1~LIFNR    "仕入先
+LFA1~NAME1    "名称1
+*     LFB1
+LFB1~ZWELS    "支払方法
+LFB1~ZTERM    "支払条件
+LFB1~MINDK    "小数コード
+*     LFM1
+LFM1~ZTERM    "支払条件
+LFM1~WAERS    "通貨コード
+INTO TABLE T_SOSAI_LIF
+FROM LFA1 INNER JOIN LFB1
+ON LFB1~LIFNR = LFA1~LIFNR
+INNER JOIN LFM1
+ON LFM1~LIFNR = LFA1~LIFNR
+WHERE LFA1~LIFNR IN T_RANGE_LIF "振替仕入先
+AND LFB1~BUKRS = P_BUK
+AND LFB1~MINDK <> C_SOSAI_HARAIBI "払日相殺
+AND LFM1~EKORG = P_EKORG .
+
+* 規定外マスタ
+SELECT * INTO TABLE T_ZN007
+FROM ZN007
+WHERE LIFNR IN S_LIF.  "仕入先
+
+* 照合期間
+SELECT * INTO TABLE T_ZN001
+FROM ZN001
+WHERE BUKRS = P_BUK
+AND ( LIFNR IN S_LIF  "仕入先
+OR LIFNR = C_PULAS ).
+
+ENDFORM.                    " GET_MASTER2
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_SOSAI
+*&---------------------------------------------------------------------*
+*       メイン処理 相殺
+*----------------------------------------------------------------------*
+*       -->T_SOSAI_LIF     処理対象の振替仕入先で取得した仕入先マスタ
+*       -->T_ZN002_SOSAI   処理対象の支払予定データ
+*       <-->W_FURIKAE_OYA  1振替仕入先の集約データ
+*       <-->T_FURIKAE_KO   1振替仕入先にひもつく仕入先データ
+*       <-->T_ZN002_RE_DEL 1振替仕入先単位でエラーになったデータ
+*                          振替仕入先/仕入先単位で保持。SEQ採番用
+*       <-->T_UPDATE       １振替仕入先単位の集計値を、
+*                          規定外マスタ等で按分した結果
+*       <-->T_ZUMI         按分済みの結果（T_UPDATE全件）
+*       <-- T_SEQ          今回テーブル更新が必要な仕入先と、
+*                          １からの連番(SEQ採番用)
+*       <-- T_ZN002_UPD    今回アドオンテーブルに格納するテーブル内容
+*       <-- T_OUTPUT       今回ALVに出力する内容
+*----------------------------------------------------------------------*
+FORM MAIN_SOSAI.
+DATA:L_LIFNR     TYPE ZN002-LIFNR,
+L_ERRFLG(1) TYPE C.
+
+T_ZN002_DEL[] = T_ZN002_SOSAI[].
+
+
+* 重複削除後、振替仕入先でソート
+SORT T_ZN002_SOSAI BY PLIFNR SEQ.
+
+CLEAR:L_LIFNR.
+* 支払日相殺以外の仕入先１件ごとに処理
+LOOP AT T_SOSAI_LIF INTO W_SOSAI_LIF.
+REFRESH:T_UPDATA,
+T_FURIKAE_KO.     "１振込み仕入先にひもつく子供たち
+CLEAR:W_FURIKAE_OYA,      "１振込み仕入先の集計値
+W_FURIKAE_KO.       "１振込み仕入先にひもつく子供たち
+LOOP AT T_ZN002_SOSAI INTO W_ZN002_SOSAI.
+*     支払方法が相殺か、振替仕入先が異なるデータが対象外
+IF W_ZN002_SOSAI-PZLSCH = C_SOSAI
+OR W_ZN002_SOSAI-PLIFNR <> W_SOSAI_LIF-LIFNR.
+
+ELSE.
+*①--   1振替仕入先の全体 START
+IF W_FURIKAE_OYA IS INITIAL.
+W_FURIKAE_OYA-PLIFNR    = W_ZN002_SOSAI-PLIFNR.  "振替仕入先
+W_FURIKAE_OYA-WAERS     = W_ZN002_SOSAI-WAERS.   "通貨コード
+ENDIF.
+*       集計
+W_FURIKAE_OYA-KNETXAMT  = W_FURIKAE_OYA-KNETXAMT +
+W_ZN002_SOSAI-PWRBTR.
+
+IF W_FURIKAE_OYA-WAERS <> W_ZN002_SOSAI-WAERS.
+*         仕入先 XXXXXXXXXX にエラーがあります。
+CONCATENATE TEXT-E07 W_FURIKAE_OYA-PLIFNR TEXT-E08
+INTO W_FURIKAE_OYA-ERRMSG.
+ENDIF.
+
+IF NOT W_ZN002_SOSAI-PSTFLG IS INITIAL.
+*         仕入先 XXXXXXXXXX にエラーがあります。
+CONCATENATE TEXT-E07 W_FURIKAE_OYA-LIFNR TEXT-E08
+INTO W_FURIKAE_OYA-ERRMSG.
+ENDIF.
+*①--   1振替仕入先の全体 END
+*②--   1振替仕入先内の仕入先の処理 START
+CLEAR W_FURIKAE_KO.
+READ TABLE T_FURIKAE_KO INTO W_FURIKAE_KO
+WITH KEY LIFNR = W_ZN002_SOSAI-LIFNR.
+*       同じ仕入先で複数行
+IF SY-SUBRC = 0.
+*       初仕入先
+IF W_FURIKAE_KO-WAERS <> W_ZN002_SOSAI-WAERS.
+*            支払予定内で、１仕入先に複数通貨が混在しています。
+W_FURIKAE_KO-ERRMSG = TEXT-E09.
+ENDIF.
+IF NOT W_ZN002_SOSAI-PSTFLG IS INITIAL.
+*             この仕入先は既に振替済みです。
+W_FURIKAE_KO-ERRMSG = TEXT-E02.
+W_FURIKAE_KO-PSTFLG = W_ZN002_SOSAI-PSTFLG.
+W_FURIKAE_KO-PSTDT  = W_ZN002_SOSAI-PSTDT.  "振込仕入日
+W_FURIKAE_KO-PSTTM  = W_ZN002_SOSAI-PSTTM.  "振込仕入時
+W_FURIKAE_KO-PSTUSR = W_ZN002_SOSAI-PSTUSR. "振込仕入者
+ENDIF.
+
+*         金額集計
+W_FURIKAE_KO-KNETXAMT = W_FURIKAE_KO-KNETXAMT
++ W_ZN002_SOSAI-PWRBTR.  "支払予定額
+
+MODIFY T_FURIKAE_KO FROM W_FURIKAE_KO
+TRANSPORTING KNETXAMT  PSTFLG ERRMSG
+WHERE LIFNR  = W_ZN002_SOSAI-LIFNR.
+ELSE.
+IF NOT W_ZN002_SOSAI-PSTFLG IS INITIAL.
+*             この仕入先は既に振替済みです。
+W_FURIKAE_KO-ERRMSG = TEXT-E02.
+W_FURIKAE_KO-PSTFLG = W_ZN002_SOSAI-PSTFLG.
+W_FURIKAE_KO-PSTDT  = W_ZN002_SOSAI-PSTDT.  "振込仕入日
+W_FURIKAE_KO-PSTTM  = W_ZN002_SOSAI-PSTTM.  "振込仕入時
+W_FURIKAE_KO-PSTUSR = W_ZN002_SOSAI-PSTUSR. "振込仕入者
+ENDIF.
+W_FURIKAE_KO-LIFNR    = W_ZN002_SOSAI-LIFNR.   "仕入先
+W_FURIKAE_KO-WAERS    = W_ZN002_SOSAI-WAERS.   "通貨
+W_FURIKAE_KO-KNETXAMT = W_ZN002_SOSAI-PWRBTR.  "支払予定額
+W_FURIKAE_KO-PSTFLG   = W_ZN002_SOSAI-PSTFLG.  "会計振替
+W_FURIKAE_KO-PLIFNR   = W_ZN002_SOSAI-PLIFNR.  "振替仕入先
+APPEND W_FURIKAE_KO TO T_FURIKAE_KO.
+ENDIF.
+*②--   1振替仕入先内の仕入先の処理 END
+DELETE T_ZN002_SOSAI
+WHERE BUKRS  = W_ZN002_SOSAI-BUKRS
+AND LIFNR  = W_ZN002_SOSAI-LIFNR
+AND CZFBDT = W_ZN002_SOSAI-CZFBDT
+AND SEQ    = W_ZN002_SOSAI-SEQ."割当済は破棄
+ENDIF.
+ENDLOOP.
+*   １振替仕入先分の未処理データが取得できたら
+*    初期提案処理と同じ編集を行う。
+PERFORM EDIT_ZUMI_DATA USING L_ERRFLG.
+IF L_ERRFLG = C_ON.
+*      エラーデータは更新除外（振替仕入単位で削除)
+LOOP AT T_ZN002_DEL  INTO W_ZN002_DEL
+WHERE  PLIFNR = W_FURIKAE_OYA-PLIFNR.
+* 2012/05/01 MOD START
+*        APPEND W_ZN002_DEL  TO T_ZN002_RE_DEL.
+CLEAR:W_ZN002_RE_DEL.
+READ TABLE T_ZN002_RE_DEL INTO W_ZN002_DEL
+WITH TABLE KEY BUKRS  = W_ZN002_DEL-BUKRS
+LIFNR  = W_ZN002_DEL-LIFNR
+CZFBDT = W_ZN002_DEL-CZFBDT
+SEQ    = W_ZN002_DEL-SEQ.
+IF SY-SUBRC <> 0.
+INSERT W_ZN002_DEL  INTO TABLE T_ZN002_RE_DEL.
+ENDIF.
+* 2012/05/01 MOD END
+ENDLOOP.
+DELETE T_ZN002_DEL   WHERE  PLIFNR = W_FURIKAE_OYA-PLIFNR.
+*      DELETE T_ZN002_SOSAI WHERE  PLIFNR = W_FURIKAE_OYA-PLIFNR.
+ENDIF.
+
+ENDLOOP.
+
+* 処理対象の仕入先全件で処理が終わったら、
+* ALVとテーブル更新処理用のデータを作成
+* まず今回最後まで不要だったデータを格納。
+REFRESH:T_SEQ,T_ZN002_UPD.
+LOOP AT T_ZN002_SOSAI INTO W_ZN002_SOSAI.
+CLEAR  W_SOSAI_LIF.
+*   READ TABLE T_SOSAI_LIF INTo W_SOSAI_LIF          "処理対象仕入先
+*     WITH TABLE KEY LIFNR = W_ZN002_SOSAI-PLIFNR.
+*   IF SY-SUBRC <> 0.
+*     CONTINUE.
+*   ENDIF.
+CLEAR:W_OUTPUT,W_ZN002_UPD.
+
+*   振替仕入先 ＝ 仕入先は、振替仕入先クリア
+IF W_ZN002_SOSAI-LIFNR = W_ZN002_SOSAI-PLIFNR.
+CLEAR:W_ZN002_SOSAI-PLIFNR.
+ENDIF.
+
+MOVE-CORRESPONDING W_ZN002_SOSAI TO W_ZN002_UPD.
+
+PERFORM GET_SEQ USING W_ZN002_SOSAI-LIFNR.
+W_ZN002_UPD-SEQ = W_SEQ-SEQNO.
+APPEND W_ZN002_UPD TO T_ZN002_UPD.
+* CHK復活 2012/03/22 START
+*    READ TABLE T_SOSAI_LIF INTo W_SOSAI_LIF          "処理対象仕入先
+*      WITH TABLE KEY LIFNR = W_ZN002_SOSAI-PLIFNR.
+*    IF SY-SUBRC <> 0.
+*      CONTINUE.
+*    ENDIF.
+*CHK復活 2012/03/22 END
+
+*-- ALV用データ作成
+MOVE-CORRESPONDING W_ZN002_UPD TO W_OUTPUT.
+WRITE ICON_GREEN_LIGHT AS ICON TO W_OUTPUT-ICON. "青信号
+*    W_OUTPUT-KEKA   = W_MAIN_LIF-ERRMSG.            "処理結果
+PERFORM GET_LIF_SINGLES USING W_ZN002_SOSAI-LIFNR.
+W_OUTPUT-NAME1  = W_LF_MASTER-NAME1.             "仕入先名称
+APPEND W_OUTPUT TO T_OUTPUT.
+ENDLOOP.
+
+* 次に再割当済みデータから作成
+LOOP AT T_ZUMI INTO W_ZUMI.
+CLEAR:W_UPDATA.
+W_UPDATA = W_ZUMI.
+*   正常系
+PERFORM EDIT_ITAB_ZUMI.
+ENDLOOP.
+
+*   正常に処理された仕入先と同じ仕入先で、
+*   違う振替仕入先のエラーデータも採番
+
+PERFORM SET_RE_DEL.
+
+FREE:T_SOSAI_LIF,    "処理対象の振替仕入先で取得した仕入先マスタ
+T_ZN002_SOSAI,  "処理対象の支払予定データ
+T_FURIKAE_KO,   "1振替仕入先にひもつく仕入先データ
+T_ZN002_RE_DEL, "1振替仕入先単位でエラーになったデータ
+T_UPDATA,       "1振替仕入先単位の集計値を、
+T_ZUMI.         "按分済みの結果（T_UPDATE全件）
+
+ENDFORM.                    " MAIN_SOSAI
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ZUMI_DATA
+*&---------------------------------------------------------------------*
+*       振り分けデータ
+*----------------------------------------------------------------------*
+*       --> W_FURIKAE_OYA ←1振替先の集計データ
+*       --> T_FURIKAE_KO  ←1振替仕入先にひもつく仕入先
+*       <-- T_UPDATE      →1振替先の集計額を規定外マスタ編集した内容
+*----------------------------------------------------------------------*
+FORM EDIT_ZUMI_DATA CHANGING L_ERRFLG TYPE CHAR1.
+REFRESH:T_RANGE_LIF.
+
+CHECK NOT T_FURIKAE_KO[] IS INITIAL. "処理対象データあり
+
+* 初期化
+CLEAR:W_OUTPUT,
+L_ERRFLG.
+REFRESH:T_UPDATA."一仕入先毎に使う内部テーブルのクリア
+
+* エラーチェック
+PERFORM ERR_CHECK_SOSAI CHANGING L_ERRFLG.
+IF L_ERRFLG = C_ON.
+EXIT.
+ENDIF.
+
+* 仕入先マスタ取得
+PERFORM GET_LIF_SINGLES USING W_FURIKAE_OYA-PLIFNR."振替仕入先
+
+* 規定外マスタによる支払方法判定処理
+PERFORM CHECK_ZLSCH USING W_FURIKAE_OYA-PLIFNR
+W_FURIKAE_OYA-WAERS
+W_FURIKAE_OYA-KNETXAMT
+CHANGING L_ERRFLG.
+IF L_ERRFLG = C_ON.
+EXIT.
+ENDIF.
+
+* 割り振った結果を子供に分配
+PERFORM DESERT_TIME.
+
+ENDFORM.                    " EDIT_ZUMI_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_LIF_SINGLES
+*&---------------------------------------------------------------------*
+*       仕入先マスタ 単一読み
+*----------------------------------------------------------------------*
+FORM GET_LIF_SINGLES USING L_LIFNR TYPE LIFNR.
+CLEAR:W_LF_MASTER.
+* 仕入先マスタ
+SELECT SINGLE
+*     LFA1
+LFA1~LIFNR    "仕入先
+LFA1~NAME1    "名称1
+*     LFB1
+LFB1~ZWELS    "支払方法
+LFB1~ZTERM    "支払条件
+LFB1~MINDK    "小数コード
+*     LFM1
+LFM1~ZTERM    "支払条件
+LFM1~WAERS    "通貨コード
+INTO W_LF_MASTER
+FROM LFA1 INNER JOIN LFB1
+ON LFB1~LIFNR = LFA1~LIFNR
+INNER JOIN LFM1
+ON LFM1~LIFNR = LFA1~LIFNR
+WHERE LFA1~LIFNR = L_LIFNR
+AND LFB1~BUKRS = P_BUK
+AND LFM1~EKORG = P_EKORG .
+
+
+ENDFORM.                    " GET_LIF_SINGLES
+*&---------------------------------------------------------------------*
+*&      Form  GET_SEQ
+*&---------------------------------------------------------------------*
+*       シーケンス番号
+*----------------------------------------------------------------------*
+*      -->L_LIFNR 対象仕入れ先
+*----------------------------------------------------------------------*
+FORM GET_SEQ USING   L_LIFNR  TYPE LIFNR.
+
+CLEAR:W_SEQ.
+READ TABLE T_SEQ INTO W_SEQ
+WITH TABLE KEY LIFNR = L_LIFNR.
+
+IF SY-SUBRC = 0.
+W_SEQ-SEQNO = W_SEQ-SEQNO + 1.
+MODIFY TABLE T_SEQ FROM W_SEQ TRANSPORTING SEQNO.
+ELSE.
+W_SEQ-LIFNR = L_LIFNR.
+W_SEQ-SEQNO = 1.
+INSERT W_SEQ INTO TABLE T_SEQ.
+ENDIF.
+
+ENDFORM.                    " GET_SEQ
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ITAB_ZUMI
+*&---------------------------------------------------------------------*
+*       相殺 再割り当て済みデータからALVデータと
+*       テーブル更新データを同時作成
+*----------------------------------------------------------------------*
+FORM EDIT_ITAB_ZUMI.
+
+CLEAR:W_OUTPUT,W_ZN002_UPD.
+PERFORM GET_SEQ USING W_UPDATA-LIFNR.
+PERFORM GET_LIF_SINGLES USING W_UPDATA-LIFNR.
+
+PERFORM SET_OUTPUT_ALV USING W_SEQ-SEQNO
+W_UPDATA-LIFNR
+SPACE.
+
+
+ENDFORM.                    " EDIT_ITAB_ZUMI
+*&---------------------------------------------------------------------*
+*&      Form  SET_OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       ALVデータとテーブル更新データを同時作成
+*----------------------------------------------------------------------*
+*      -->L_SEQNO  シーケンス番号
+*      -->L_LIFNR  仕入先コード
+*      -->L_ERRMSG エラーメッセージ
+*----------------------------------------------------------------------*
+FORM SET_OUTPUT_ALV USING    L_SEQNO    TYPE ZN002-SEQ
+L_LIFNR    TYPE LIFNR
+L_ERRMSG   TYPE CHAR200.
+
+CLEAR:W_OUTPUT,W_ZN002_UPD.
+W_ZN002_UPD-MANDT  = SY-MANDT.                 " クライアント
+W_ZN002_UPD-BUKRS  = P_BUK.                    " 会社コード
+W_ZN002_UPD-LIFNR  = L_LIFNR.                  " 仕入先コード
+W_ZN002_UPD-CZFBDT = P_DAY.                    " 照合締日
+W_ZN002_UPD-SEQ    = L_SEQNO.                  " SEQ
+*   W_ZN002_UPD-PZFBDT = ," 支払予定日
+CALL FUNCTION 'YK_ZFBDT_GET_BY_ZTERM'
+EXPORTING
+I_ZTERM              = W_UPDATA-ZTERM_P
+I_DAY                = P_DAY
+IMPORTING
+E_SIHARAIBI          = W_ZN002_UPD-PZFBDT
+EXCEPTIONS
+NO_GET_T052          = 1
+NO_GOOD_GETDAY       = 2
+NO_GOOD_DAY          = 3
+OTHERS               = 4.
+IF SY-SUBRC <> 0.
+CLEAR:W_ZN002_UPD-PZFBDT.
+ENDIF.
+
+W_ZN002_UPD-PZLSCH = W_UPDATA-ZLSCH." 支払方法
+*   W_ZN002_UPD-PZTERM = ," サイト
+*   W_ZN002_UPD-PZTERM_D."仕入割引条件
+*   W_ZN002_UPD-PZLSPR = C_A. " 自動支払保留
+CASE W_ZN002_UPD-PZLSCH. "支払方法分岐
+*     ファクタリングか手形
+*        2013/11/14 MOD START "電子記録債務を条件に追加
+*      WHEN C_FAC_K OR C_FAC_Z OR C_TE_B.
+WHEN C_FAC_K OR C_FAC_Z OR C_TE_B OR C_DEN_Q.
+*        2013/11/14 MOD END
+CLEAR:W_ZN002_UPD-PZLSPR,  "自動支払保留
+W_ZN002_UPD-PZTERM_D."仕入割引条件
+W_ZN002_UPD-PZTERM = W_UPDATA-ZTERM_S."サイト
+
+*     振込み
+WHEN C_KOKUNAI_T.            "振込
+CLEAR:W_ZN002_UPD-PZLSPR,  "自動支払保留
+W_ZN002_UPD-PZTERM.
+IF W_UPDATA-ZTERM_S(1) = C_W.
+W_ZN002_UPD-PZTERM_D = W_UPDATA-ZTERM_S."仕入割引条件
+ELSE.
+CLEAR: W_ZN002_UPD-PZTERM_D.
+ENDIF.
+*     その他
+WHEN OTHERS.
+CLEAR:W_ZN002_UPD-PZTERM,  "サイト
+W_ZN002_UPD-PZTERM_D."仕入割引条件
+IF W_ZN002_UPD-PZLSCH = C_ETC_9.
+W_ZN002_UPD-PZLSPR = C_A. " 自動支払保留
+ENDIF.
+ENDCASE.
+
+W_ZN002_UPD-PHKONT = P_PHKONT.          " 振替勘定
+W_ZN002_UPD-WAERS  = W_UPDATA-WAERS.    " 通貨コード
+W_ZN002_UPD-PWRBTR = W_UPDATA-KNETXAMT. " 支払予定額
+*   W_ZN002_UPD-PADVNC = 初期値固定" 前渡済
+IF W_ZN002_UPD-LIFNR <> W_UPDATA-PLIFNR.
+W_ZN002_UPD-PLIFNR = W_UPDATA-PLIFNR.   " 振替仕入先
+ENDIF.
+*   W_ZN002_UPD-PKUNNR = 初期値固定" 相殺先
+*   W_ZN002_UPD-PMEMO  = 初期値固定" 備考
+W_ZN002_UPD-INSDT   = SY-DATUM." 登録日
+W_ZN002_UPD-INSTM   = SY-UZEIT." 登録時刻
+W_ZN002_UPD-INSUSR  = SY-UNAME." 登録ユーザ
+*   W_ZN002_UPD-PSTFLG = 初期値固定" 会計振替
+*   W_ZN002_UPD-PSTDT  = 初期値固定" 会計振替日
+*   W_ZN002_UPD-PSTTM  = 初期値固定" 会計振替時刻
+*   W_ZN002_UPD-PSTUSR = 初期値固定" 会計振替ユーザ
+*   W_ZN002_UPD-BELNR  = 初期値固定" 会計伝票番号
+*   W_ZN002_UPD-GJAHR  = 初期値固定" 会計年度
+*   W_ZN002_UPD-BUDAT  = 初期値固定" 伝票の転記日付
+APPEND W_ZN002_UPD TO T_ZN002_UPD.
+*-- ALV用データ作成
+MOVE-CORRESPONDING W_ZN002_UPD TO W_OUTPUT.
+WRITE ICON_GREEN_LIGHT AS ICON TO W_OUTPUT-ICON. "青信号
+W_OUTPUT-KEKA   = L_ERRMSG.                      "処理結果
+W_OUTPUT-NAME1  = W_LF_MASTER-NAME1.             "仕入先名称
+APPEND W_OUTPUT TO T_OUTPUT.
+
+ENDFORM.                    " SET_OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  ERR_CHECK_SOSAI
+*&---------------------------------------------------------------------*
+*       相殺用エラーチェック
+*----------------------------------------------------------------------*
+FORM ERR_CHECK_SOSAI CHANGING L_ERRFLG TYPE CHAR1.
+CLEAR:L_ERRFLG .
+
+* 1．通貨混在か国内振替済
+IF NOT  W_FURIKAE_OYA-ERRMSG IS INITIAL.
+PERFORM EDIT_ERR_DATA_SOSAI.
+L_ERRFLG = C_ON.
+EXIT.
+ENDIF.
+
+* ２．照合クローズチェック
+PERFORM CHEK_CLOSE_SOSAI  CHANGING L_ERRFLG.
+IF L_ERRFLG = C_ON.
+EXIT.
+ENDIF.
+
+ENDFORM.                    " ERR_CHECK_SOSAI
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_ERR_DATA_SOSAI
+*&---------------------------------------------------------------------*
+*       エラーデータ作成（相殺）
+*----------------------------------------------------------------------*
+FORM EDIT_ERR_DATA_SOSAI.
+CLEAR:W_MAIN_LIF.
+
+LOOP AT T_FURIKAE_KO INTO W_MAIN_LIF.
+IF W_MAIN_LIF-ERRMSG IS INITIAL.           "直接エラーでないものは
+W_MAIN_LIF-ERRMSG = W_FURIKAE_OYA-ERRMSG."親からメッセージコピー
+ENDIF.
+*   仕入先マスタ取得
+PERFORM GET_LIF_SINGLES USING W_MAIN_LIF-LIFNR.
+PERFORM EDIT_ERR_DATA.
+ENDLOOP.
+
+ENDFORM.                    " EDIT_ERR_DATA_SOSAI
+*&---------------------------------------------------------------------*
+*&      Form  CHEK_CLOSE_SOSAI
+*&---------------------------------------------------------------------*
+*       クローズチェック（相殺）
+*----------------------------------------------------------------------*
+*      <--親と子両方でチェックが必要
+*----------------------------------------------------------------------*
+FORM CHEK_CLOSE_SOSAI CHANGING L_ERRFLG TYPE CHAR1.
+DATA:L_ERR_LIF TYPE ZN002-LIFNR.
+
+* 親
+CLEAR:W_ZN001.
+READ TABLE T_ZN001 INTO W_ZN001
+WITH TABLE KEY BUKRS = P_BUK
+LIFNR = W_FURIKAE_OYA-PLIFNR."振替仕入先
+IF SY-SUBRC <> 0.
+READ TABLE T_ZN001 INTO W_ZN001
+WITH TABLE KEY BUKRS = P_BUK
+LIFNR = C_PULAS.
+ENDIF.
+
+IF   W_ZN001-EDATE < P_DAY. "照合終了日 < 照合締日
+L_ERRFLG = C_ON.
+*   子供全員、親のエラーメッセージでエラー
+*   仕入先 【振替仕入先】の照合がクローズしていません。
+CONCATENATE TEXT-E07 W_FURIKAE_OYA-PLIFNR TEXT-E10
+INTO W_FURIKAE_OYA-ERRMSG.
+PERFORM EDIT_ERR_DATA_SOSAI.
+L_ERRFLG = C_ON.
+EXIT.
+ENDIF.
+
+* 子
+CLEAR:L_ERR_LIF.
+LOOP AT T_FURIKAE_KO INTO W_MAIN_LIF.
+CLEAR:W_ZN001.
+READ TABLE T_ZN001 INTO W_ZN001
+WITH TABLE KEY BUKRS = P_BUK
+LIFNR = W_MAIN_LIF-LIFNR.
+IF SY-SUBRC <> 0.
+READ TABLE T_ZN001 INTO W_ZN001
+WITH TABLE KEY BUKRS = P_BUK
+LIFNR = C_PULAS.
+ENDIF.
+IF   W_ZN001-EDATE < P_DAY. "照合終了日 < 照合締日
+L_ERRFLG = C_ON.
+L_ERR_LIF = W_MAIN_LIF-LIFNR.
+*     照合がクローズしていません。
+W_MAIN_LIF-ERRMSG = TEXT-E04.
+PERFORM EDIT_ERR_DATA.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+* 一人でもエラーが出れば,仲間全員エラー
+IF L_ERRFLG = C_ON.
+LOOP AT T_FURIKAE_KO INTO W_MAIN_LIF.
+IF L_ERR_LIF <> W_MAIN_LIF-LIFNR.   "エラー当事者以外
+*        仕入先 XXXXXXXXXX にエラーがあります。
+CONCATENATE TEXT-E07 W_FURIKAE_OYA-PLIFNR TEXT-E08
+INTO W_MAIN_LIF-ERRMSG.
+*       仕入先マスタ取得
+PERFORM GET_LIF_SINGLES USING W_MAIN_LIF-LIFNR.
+PERFORM EDIT_ERR_DATA.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " CHEK_CLOSE_SOSAI
+*&---------------------------------------------------------------------*
+*&      Form  DESERT_TIME
+*&---------------------------------------------------------------------*
+*       子供たちに集計結果を山分け
+*----------------------------------------------------------------------*
+FORM DESERT_TIME.
+
+SORT T_FURIKAE_KO BY LIFNR.
+
+* パターン１ 集計結果がマイナスの場合
+*            子供をそのまま支払方法９で出力
+IF W_FURIKAE_OYA-KNETXAMT =< 0.
+LOOP AT T_FURIKAE_KO INTO W_FURIKAE_KO.
+CLEAR:W_ZUMI.
+W_ZUMI-LIFNR    = W_FURIKAE_KO-LIFNR.   "仕入先コード(請求先)
+W_ZUMI-WAERS    = W_FURIKAE_KO-WAERS.   "通貨コード
+W_ZUMI-KNETXAMT = W_FURIKAE_KO-KNETXAMT."税込金額
+W_ZUMI-ZTERM_P  = W_LF_MASTER-ZTERM_M1. "条件（支払日）
+W_ZUMI-ZTERM_S  = W_LF_MASTER-ZTERM_B1. "条件（サイト）
+W_ZUMI-ZLSCH    = C_ETC_9.              "支払方法
+W_ZUMI-PLIFNR   = W_FURIKAE_OYA-PLIFNR. "相殺仕入先
+APPEND W_ZUMI TO T_ZUMI.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+* パターン２ 集計結果がプラス
+*            ただしマイナスで終わってる子供が居る
+CLEAR:W_FURIKAE_KO.
+LOOP AT T_FURIKAE_KO INTO W_FURIKAE_KO
+WHERE KNETXAMT < 0.
+EXIT.
+ENDLOOP.
+
+IF W_FURIKAE_KO-KNETXAMT < 0.
+*   総額/仕入先でソート
+SORT T_FURIKAE_KO BY KNETXAMT DESCENDING  "降順
+LIFNR    ASCENDING.  "昇順
+ENDIF.
+
+* マッチング処理
+LOOP AT T_FURIKAE_KO INTO W_FURIKAE_KO.
+DO 5 TIMES."最高でも条件４種＋残額なので５回。
+CLEAR: W_UPDATA,W_ZUMI.
+READ TABLE T_UPDATA INTO W_UPDATA INDEX 1.
+IF SY-SUBRC = 0.
+*       小パターン１ 分割金額 ＞ 子供の金額
+IF  W_UPDATA-KNETXAMT >= W_FURIKAE_KO-KNETXAMT.
+*         支払方法/条件/サイトは規定外マスタ値を使う
+W_ZUMI-LIFNR      = W_FURIKAE_KO-LIFNR.   "仕入先コード
+W_ZUMI-WAERS      = W_FURIKAE_KO-WAERS.   "通貨コード
+W_ZUMI-KNETXAMT   = W_FURIKAE_KO-KNETXAMT."子供全額
+W_ZUMI-ZTERM_P    = W_UPDATA-ZTERM_P.     "条件（支払日）
+W_ZUMI-ZTERM_S    = W_UPDATA-ZTERM_S.     "条件（サイト）
+W_ZUMI-ZLSCH      = W_UPDATA-ZLSCH.       "支払方法
+W_ZUMI-PLIFNR     = W_FURIKAE_OYA-PLIFNR. "相殺仕入先
+APPEND W_ZUMI TO T_ZUMI.
+*         子供が分割金額を食いつぶして、次の子供に交代
+W_UPDATA-KNETXAMT = W_UPDATA-KNETXAMT - W_FURIKAE_KO-KNETXAMT.
+IF W_UPDATA-KNETXAMT = 0. "全額消費
+DELETE T_UPDATA INDEX 1.
+ELSE.
+MODIFY T_UPDATA FROM W_UPDATA INDEX 1.
+ENDIF.
+EXIT."この子終了
+*       小パターン２ 分割金額 < 子供の金額 (子供がまだ空腹)
+ELSEIF  W_UPDATA-KNETXAMT < W_FURIKAE_KO-KNETXAMT.
+W_ZUMI-LIFNR    = W_FURIKAE_KO-LIFNR.   "仕入先コード(請求先)
+W_ZUMI-WAERS    = W_FURIKAE_KO-WAERS.   "通貨コード
+W_ZUMI-KNETXAMT = W_UPDATA-KNETXAMT.    "規定外マスタ額のこり
+W_ZUMI-ZTERM_P  = W_UPDATA-ZTERM_P.     "条件（支払日）
+W_ZUMI-ZTERM_S  = W_UPDATA-ZTERM_S.     "条件（サイト）
+W_ZUMI-ZLSCH    = W_UPDATA-ZLSCH.       "支払方法
+W_ZUMI-PLIFNR   = W_FURIKAE_OYA-PLIFNR. "相殺仕入先
+APPEND W_ZUMI TO T_ZUMI.
+*         使った子供の金額減算
+W_FURIKAE_KO-KNETXAMT = W_FURIKAE_KO-KNETXAMT
+- W_UPDATA-KNETXAMT.
+DELETE T_UPDATA INDEX 1.
+ENDIF.
+*     小パターン３ 全ての支払い条件を食い尽くした場合
+ELSE.
+IF W_FURIKAE_KO-KNETXAMT <> 0. "まだ子供に残額がある
+CLEAR:W_ZUMI.
+W_ZUMI-LIFNR    = W_FURIKAE_KO-LIFNR.   "仕入先コード(請求先)
+W_ZUMI-WAERS    = W_FURIKAE_KO-WAERS.   "通貨コード
+W_ZUMI-KNETXAMT = W_FURIKAE_KO-KNETXAMT."税込金額
+W_ZUMI-ZTERM_P  = W_LF_MASTER-ZTERM_M1. "条件（支払日）
+W_ZUMI-ZTERM_S  = W_LF_MASTER-ZTERM_B1. "条件（サイト）
+W_ZUMI-ZLSCH    = C_ETC_9.              "支払方法 9 固定
+W_ZUMI-PLIFNR   = W_FURIKAE_OYA-PLIFNR. "相殺仕入先
+APPEND W_ZUMI TO T_ZUMI.
+ENDIF.
+EXIT.
+ENDIF.
+ENDDO.
+ENDLOOP.
+
+ENDFORM.                    " DESERT_TIME
+*&---------------------------------------------------------------------*
+*&      Form  SET_RE_DEL
+*&---------------------------------------------------------------------*
+*       同仕入先で違振替仕入先のエラーデータ
+*----------------------------------------------------------------------*
+FORM SET_RE_DEL.
+DATA:L_T_SEQ TYPE STANDARD TABLE OF TYP_SEQ,
+L_W_SEQ TYPE TYP_SEQ.
+
+L_T_SEQ[] = T_SEQ.
+
+* 今回更新対象の仕入先
+LOOP AT L_T_SEQ INTO L_W_SEQ.
+LOOP AT T_ZN002_RE_DEL INTO W_ZN002_RE_DEL
+WHERE BUKRS  = P_BUK
+AND LIFNR  = L_W_SEQ-LIFNR
+AND CZFBDT = P_DAY.
+CLEAR:W_OUTPUT,W_ZN002_UPD.
+
+*   振替仕入先 ＝ 仕入先は、振替仕入先クリア
+IF W_ZN002_RE_DEL-LIFNR = W_ZN002_RE_DEL-PLIFNR.
+CLEAR:W_ZN002_RE_DEL-PLIFNR.
+ENDIF.
+MOVE-CORRESPONDING W_ZN002_RE_DEL TO W_ZN002_UPD.
+PERFORM GET_SEQ USING W_ZN002_RE_DEL-LIFNR.
+W_ZN002_UPD-SEQ = W_SEQ-SEQNO.
+APPEND W_ZN002_UPD TO T_ZN002_UPD.
+*-- ALV用データ作成はもうエラーデータがでてるから不要
+ENDLOOP.
+
+ENDLOOP.
+
+ENDFORM.                    " SET_RE_DEL

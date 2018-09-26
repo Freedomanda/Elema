@@ -1,0 +1,254 @@
+*----------------------------------------------------------------------*
+*                                                                      *
+*----------------------------------------------------------------------*
+REPORT zzkura77 LINE-SIZE 170
+LINE-COUNT 58.
+
+* 使用テーブル
+TABLES yk210. "請求データ
+TABLES t001w. "プラント
+
+* グローバル変数
+DATA i_yk210 LIKE STANDARD TABLE OF yk210 WITH HEADER LINE.
+DATA w_werks LIKE yk210-werks.
+DATA w_name1 LIKE t001w-name1.
+DATA w_err(1) TYPE c.
+DATA w_werks2 LIKE rseg-werks.
+DATA w_name12 LIKE t001w-name1.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk210-bukrs.      "会社コード
+SELECT-OPTIONS s_bildoc FOR yk210-bildoc. "入力番号
+PARAMETERS p_lifnr LIKE yk210-lifnr.      "仕入先コード
+SELECT-OPTIONS s_werks FOR yk210-werks.   "プラント
+PARAMETERS p_zfbdt LIKE yk210-zfbdt.      "締日
+SELECT-OPTIONS s_insusr FOR yk210-insusr. "登録ユーザ
+SELECT-OPTIONS s_insdat FOR yk210-insdat. "登録日
+PARAMETERS b_sort1 RADIOBUTTON GROUP s1.  "入力番号でソート
+PARAMETERS b_sort2 RADIOBUTTON GROUP s1.  "プラントでソート
+
+*----------------------------------------------------------------------*
+INITIALIZATION.
+GET PARAMETER ID 'BUK' FIELD p_bukrs.
+GET PARAMETER ID 'LIF' FIELD p_lifnr.
+GET PARAMETER ID 'WRK' FIELD s_werks.
+
+START-OF-SELECTION.
+PERFORM f_select. "請求データ検索
+PERFORM f_write.  "レポート作成
+
+TOP-OF-PAGE.
+PERFORM f_top.
+
+AT LINE-SELECTION.
+PERFORM f_screen.
+
+*---------------------------------------------------------------------*
+*       FORM f_select                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_select.
+SELECT        *
+FROM   yk210
+INTO   TABLE  i_yk210
+WHERE  bukrs   = p_bukrs
+AND    bildoc IN s_bildoc
+AND    lifnr   = p_lifnr
+AND    werks  IN s_werks
+AND    zfbdt   = p_zfbdt
+AND    insdat IN s_insdat
+AND    insusr IN s_insusr.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_write                                                  *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_write.
+* ローカル変数
+DATA w_name1 LIKE lfa1-name1.
+* ソート
+IF b_sort1 = 'X'.
+SORT i_yk210 BY bildoc.       "入力番号でソート
+ELSEIF b_sort2 = 'X'.
+SORT i_yk210 BY werks bildoc. "プラントでソート
+ENDIF.
+* 出力
+LOOP AT i_yk210.
+*   行出力
+WRITE: / i_yk210-bildoc,
+i_yk210-ebeln, i_yk210-ebelp,
+i_yk210-werks,
+i_yk210-maktx,
+i_yk210-bildat,
+i_yk210-knquan,
+i_yk210-knuntprc,
+i_yk210-knitxamt CURRENCY i_yk210-waers,
+i_yk210-waers.
+*   行選択情報の保存
+HIDE: i_yk210-bukrs,
+i_yk210-ykyear,
+i_yk210-bildoc.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_top                                                    *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_top.
+* ローカル変数
+DATA w_name1 LIKE lfa1-name1.
+* 検索
+SELECT SINGLE name1
+INTO   w_name1
+FROM   lfa1
+WHERE  lifnr  = p_lifnr.
+* 出力
+WRITE: / p_lifnr, w_name1.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_screen                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_screen.
+* 更新対象検索
+CLEAR yk210.
+SELECT SINGLE * FROM  yk210
+WHERE  bukrs   = i_yk210-bukrs
+AND    ykyear  = i_yk210-ykyear
+AND    bildoc  = i_yk210-bildoc.
+IF sy-subrc <> 0.
+MESSAGE s401(y1) WITH '対象が見つかりません' i_yk210-bildoc.
+EXIT.
+ENDIF.
+CLEAR w_name1.
+w_werks = yk210-werks.
+SELECT SINGLE name1
+INTO   w_name1
+FROM   t001w
+WHERE  werks  = w_werks.
+* 更新対象チェック
+IF yk210-fixflg = 'X'.
+MESSAGE i401(y1) WITH '対象は確定済です' yk210-bildoc.
+ENDIF.
+IF yk210-kekkbn = '4'.
+MESSAGE s401(y1) WITH '対象は照合済です' yk210-bildoc.
+EXIT.
+ENDIF.
+* 購買明細検索
+CLEAR: w_werks2, w_name12.
+SELECT SINGLE werks
+INTO   w_werks2
+FROM   ekpo
+WHERE  ebeln  = yk210-ebeln
+AND    ebelp  = yk210-ebelp.
+SELECT SINGLE name1
+INTO   w_name12
+FROM   t001w
+WHERE  werks  = w_werks2.
+* ロック
+CALL FUNCTION 'ENQUEUE_EY_YK210'
+EXPORTING
+bukrs          = yk210-bukrs
+ykyear         = yk210-ykyear
+bildoc         = yk210-bildoc
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+IF sy-subrc <> 0.
+MESSAGE s401(y1) WITH '対象は他のユーザが使用中です' yk210-bildoc.
+EXIT.
+ENDIF.
+* 画面呼び出し
+* WRITE: / yk210-bukrs, yk210-ykyear, yk210-bildoc.
+CALL SCREEN 0100.
+* ロック解除
+CALL FUNCTION 'DEQUEUE_EY_YK210'
+EXPORTING
+bukrs  = yk210-bukrs
+ykyear = yk210-ykyear
+bildoc = yk210-bildoc.
+* 行変更
+CLEAR yk210.
+SELECT SINGLE * FROM  yk210
+WHERE  bukrs   = i_yk210-bukrs
+AND    ykyear  = i_yk210-ykyear
+AND    bildoc  = i_yk210-bildoc.
+MODIFY CURRENT LINE FIELD VALUE i_yk210-werks FROM yk210-werks.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_0100  OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE status_0100 OUTPUT.
+* ステータス設定
+SET PF-STATUS 'S0100'.
+SET TITLEBAR 'T01'.
+* 名称設定
+CLEAR t001w.
+SELECT SINGLE * FROM  t001w
+WHERE  werks  = yk210-werks.
+IF sy-subrc  = 0.
+CLEAR w_err.
+ELSE.
+w_err = 'X'.
+ENDIF.
+
+ENDMODULE.                 " STATUS_0100  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  exit_0100  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE exit_0100 INPUT.
+CASE sy-ucomm.           "プログラム終了機能
+WHEN 'BACK'.
+SET SCREEN 0.
+WHEN 'EXIT'.
+SET SCREEN 0.
+WHEN 'CANS'.
+ROLLBACK WORK.
+SET SCREEN 0.
+ENDCASE.
+LEAVE SCREEN.
+ENDMODULE.                 " exit_0100  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_0100  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE user_command_0100 INPUT.
+* 入力チェック
+CLEAR t001w.
+SELECT SINGLE * FROM  t001w
+WHERE  werks  = yk210-werks.
+IF sy-subrc <> 0.
+w_err = 'X'.
+MESSAGE s401(y1) WITH 'プラントが不正です' yk210-werks.
+EXIT.
+ELSE.
+CLEAR w_err.
+ENDIF.
+* ユーザ選択
+CASE sy-ucomm.
+*   更新
+WHEN 'SAVE'.
+yk210-upddat = sy-datum.
+yk210-updtim = sy-uzeit.
+yk210-updusr = sy-uname.
+UPDATE yk210.
+IF sy-subrc <> 0.
+MESSAGE e400(y1) WITH 'YK210の更新に失敗しました'.
+ENDIF.
+WHEN OTHERS.
+ENDCASE.
+
+ENDMODULE.                 " USER_COMMAND_0100  INPUT

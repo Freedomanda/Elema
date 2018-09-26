@@ -1,0 +1,440 @@
+*&-------------------------------------------------------------------
+*& Report  ZYTD5140
+*&-------------------------------------------------------------------
+* [プログラム名]
+*   ZYTD5140        受注残変更BDC(出荷ポイント)
+* [処理概要]
+* [改定履歴]
+*  2012/08/08   ISID              ES-UP
+*  2013/12/24   GSL               更新対象項目追加
+*                                 ・拒否理由
+*                                 ・出荷ブロック
+*                                 ・支払条件
+*&-------------------------------------------------------------------
+
+REPORT ZYTD5140
+LINE-SIZE  170 LINE-COUNT 58
+MESSAGE-ID Y1 .
+
+TABLES : VBAP .
+
+TYPES : BEGIN OF T_IN ,
+VBELN LIKE VBAP-VBELN ,
+VSTEL LIKE VBAP-VSTEL ,
+*2013/12/24 Add Start
+ZTERM type vbkd-zterm,  "支払条件（明細）
+LIFSK type vbak-lifsk,  "出荷ブロック
+ABGRU type vbap-abgru,  "拒否理由
+*2013/12/24 Add End
+END OF T_IN ,
+BEGIN OF T_DP ,
+VBELN LIKE VBAP-VBELN ,
+MAE_VSTEL LIKE VBAP-VSTEL ,
+ATO_VSTEL LIKE VBAP-VSTEL ,
+*2013/12/24 Add Start
+mae_ZTERM type vbkd-zterm,  "支払条件（明細）
+ato_ZTERM type vbkd-zterm,  "支払条件（明細）
+mae_LIFSK type vbak-lifsk,  "出荷ブロック
+ato_LIFSK type vbak-lifsk,  "出荷ブロック
+mae_ABGRU type vbap-abgru,  "拒否理由
+ato_ABGRU type vbap-abgru,  "拒否理由
+*2013/12/24 Add End
+RESULT(100) TYPE C ,
+END OF T_DP .
+
+DATA : IN_WRK TYPE T_IN ,
+IN_TAB TYPE TABLE OF T_IN ,
+R3_WRK TYPE T_IN ,
+R3_TAB TYPE TABLE OF T_IN ,
+DP_WRK TYPE T_DP ,
+DP_TAB TYPE TABLE OF T_DP ,
+BDC_TAB TYPE TABLE OF BDCDATA WITH HEADER LINE ,
+BDC_MSG TYPE TABLE OF BDCMSGCOLL WITH HEADER LINE .
+
+DATA : W_FIRST(1) TYPE C ,
+W_MODE(1) TYPE C VALUE 'N' .
+* NDSC KURI ADD カウンター追加
+DATA : W_COUNT1 TYPE I,
+W_COUNT2 TYPE I,
+W_COUNT3 TYPE I,
+W_COUNT4 TYPE I.
+
+* Mod ES-UP 2012/08/22 -->
+*CONSTANTS : W_TAB TYPE X VALUE '09' .
+constants: W_TAB type string value CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/08/22 <--
+SELECTION-SCREEN : BEGIN OF BLOCK 1 WITH FRAME TITLE TEXT-001.
+PARAMETERS : IN_FILE(128) TYPE C OBLIGATORY.
+SELECTION-SCREEN : END OF BLOCK 1.
+PARAMETERS   P_TEST AS CHECKBOX .
+
+START-OF-SELECTION .
+
+PERFORM READ_FILE .
+PERFORM DATA_GET .
+PERFORM BDC_GOGO .
+PERFORM WRITE_LIST .
+
+*---------------------------------------------------------------------*
+*       FORM Read_File                                                *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM READ_FILE .
+DATA : IN_LINE(30) TYPE C .
+MOVE 'X' TO W_FIRST .
+* Mod ES-UP 2012/08/22 -->
+*  OPEN DATASET IN_FILE FOR INPUT IN TEXT MODE .
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+DATA L_CODEPAGE TYPE CPCODEPAGE.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+OPEN DATASET IN_FILE FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+
+* Mod ES-UP 2012/08/22 <--
+IF SY-SUBRC NE  0 .
+MESSAGE I209 .
+STOP .
+ENDIF .
+DO .
+READ DATASET IN_FILE INTO IN_LINE  .
+IF SY-SUBRC NE 0 .
+EXIT .
+ENDIF .
+SPLIT IN_LINE
+AT  W_TAB
+INTO IN_WRK-VBELN
+IN_WRK-VSTEL
+*2013/12/24 Add Start
+IN_WRK-ZTERM   "支払条件（明細）
+IN_WRK-LIFSK   "出荷ブロック
+IN_WRK-ABGRU   "拒否理由
+*2013/12/24 Add End
+.
+
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = IN_WRK-VBELN
+IMPORTING
+OUTPUT = IN_WRK-VBELN.
+
+
+APPEND IN_WRK TO IN_TAB .
+CLEAR : IN_WRK , W_FIRST .
+ENDDO .
+IF W_FIRST EQ  'X' .
+MESSAGE I204 .
+STOP .
+ENDIF .
+CLOSE DATASET IN_FILE .
+* NDSC KURI ADD 2003/04/02 入力件数カウント
+CLEAR : W_COUNT1 , W_COUNT2 , W_COUNT3 , W_COUNT4.
+DESCRIBE TABLE IN_TAB LINES W_COUNT4.
+
+ENDFORM .
+*---------------------------------------------------------------------*
+*       FORM Data_Get                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM DATA_GET .
+
+*2013/12/24 Mod Start
+TYPES : BEGIN OF typ_vbkd ,
+VBELN type vbkd-vbeln,
+posnr type vbkd-posnr,
+ZTERM type vbkd-ZTERM,
+END OF typ_vbkd.
+
+data:
+lt_vbkd type standard table of typ_vbkd,
+lf_vbkd type typ_vbkd.
+
+
+*  SELECT VBELN VSTEL
+*    FROM VBAP
+*    INTO CORRESPONDING FIELDS OF TABLE R3_TAB
+*    FOR ALL ENTRIES IN IN_TAB
+*  WHERE VBELN EQ IN_TAB-VBELN
+*  .
+* 出荷ブロック/出荷ポイント/拒否理由の取得
+SELECT vbak~LIFSK
+vbap~VBELN vbap~VSTEL vbap~ABGRU
+INTO CORRESPONDING FIELDS OF TABLE R3_TAB
+from vbak inner join vbap
+on vbak~vbeln = vbap~vbeln
+FOR ALL ENTRIES IN IN_TAB
+WHERE vbap~VBELN EQ IN_TAB-VBELN
+.
+*2013/12/24 Mod End
+
+IF SY-SUBRC NE 0 .
+MESSAGE I008 .
+STOP .
+ENDIF .
+*2013/12/24 Add Start
+* 支払条件の取得
+SELECT vbeln posnr
+zterm
+FROM vbkd
+INTO CORRESPONDING FIELDS OF TABLE lt_vbkd
+FOR ALL ENTRIES IN R3_TAB
+WHERE VBELN EQ R3_TAB-VBELN
+.
+
+loop at r3_tab into R3_WRK.
+read table lt_vbkd into lf_vbkd
+with key vbeln = r3_wrk-vbeln
+posnr = '000010'.
+if sy-subrc = 0.
+r3_wrk-zterm = lf_vbkd-zterm.
+else.
+read table lt_vbkd into lf_vbkd
+with key vbeln = r3_wrk-vbeln
+posnr = '000000'.
+r3_wrk-zterm = lf_vbkd-zterm.
+endif.
+modify r3_tab from R3_WRK.
+clear lf_vbkd.
+endloop.
+*2013/12/24 Add End
+ENDFORM .
+*---------------------------------------------------------------------*
+*       FORM BDC_GoGo                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM BDC_GOGO .
+DATA : W_FNAM LIKE BDCDATA-FNAM ,
+W_FNAM2 LIKE BDCDATA-FNAM ,
+NAST_COUNT(2) TYPE N .
+
+SORT : IN_TAB BY VBELN  ,
+R3_TAB BY VBELN  .
+LOOP AT IN_TAB INTO IN_WRK .
+MOVE : IN_WRK-VBELN TO DP_WRK-VBELN .
+READ TABLE R3_TAB INTO R3_WRK WITH KEY VBELN = IN_WRK-VBELN .
+IF SY-SUBRC NE 0 .
+* Ｒ/３に処理対象データが存在しない場合
+MOVE '対象データがありません' TO DP_WRK-RESULT .
+ELSE .
+* Ｒ/３に処理対象データが存在した場合
+MOVE : R3_WRK-VSTEL TO DP_WRK-MAE_VSTEL ,
+IN_WRK-VSTEL TO DP_WRK-ATO_VSTEL .
+*2013/12/24 Add Start
+move : R3_WRK-zterm TO DP_WRK-MAE_zterm ,
+IN_WRK-zterm TO DP_WRK-ATO_zterm ,
+R3_WRK-lifsk TO DP_WRK-MAE_lifsk ,
+IN_WRK-lifsk TO DP_WRK-ATO_lifsk ,
+R3_WRK-abgru TO DP_WRK-MAE_abgru ,
+IN_WRK-abgru TO DP_WRK-ATO_abgru .
+
+if DP_WRK-mae_lifsk = space.
+DP_WRK-mae_lifsk = ''''''.
+endif.
+
+if DP_WRK-ATO_lifsk = space.
+DP_WRK-ATO_lifsk = ''''''.
+endif.
+
+if DP_WRK-mae_abgru = space.
+DP_WRK-mae_abgru = ''''''.
+endif.
+
+if DP_WRK-ATO_abgru = space.
+DP_WRK-ATO_abgru = ''''''.
+endif.
+*2013/12/24 Add End
+CONCATENATE :DP_WRK-MAE_VSTEL
+'→'
+DP_WRK-ATO_VSTEL
+*2013/12/24 Add Start
+DP_WRK-MAE_zterm
+'→'
+DP_WRK-ATO_zterm
+DP_WRK-MAE_lifsk
+'→'
+DP_WRK-ATO_lifsk
+DP_WRK-MAE_abgru
+'→'
+DP_WRK-ATO_abgru
+*2013/12/24 Add End
+INTO  DP_WRK-RESULT
+SEPARATED BY ' '  .
+*2013/12/24 Mod Start
+if  DP_WRK-ATO_abgru = space
+or  DP_WRK-ATO_abgru = '/'
+and DP_WRK-MAE_abgru = space.
+else.
+DP_WRK-ATO_lifsk = '/'.
+endif.
+
+*      PERFORM SET_BDC USING : 'SAPMV45A' '0102' 'X' ,
+*                              'BDC_CURSOR' 'VBAK-VBELN' '' ,
+*                              'BDC_OKCODE' '/00' '' ,
+*                              'VBAK-VBELN' IN_WRK-VBELN '' ,
+*                              'SAPMV45A' '4001' 'X' ,
+*                              'BDC_CURSOR' 'VBAP-POSNR(01)' '' ,
+*                              'RV45A-VBAP_SELKZ(01)' 'X' '' ,
+*                              'BDC_OKCODE' '=PDE2' '' ,
+*                              'SAPMV45A ' '4003' 'X' ,
+*                              'BDC_CURSOR' 'VBAP-VSTEL' '' ,
+*                              'BDC_OKCODE' '=SICH' '' ,
+*                              'VBAP-VSTEL' IN_WRK-VSTEL '' .
+
+* 受注伝票変更（第一画面）
+* 【受注伝票番号指定】
+PERFORM SET_BDC USING :
+'SAPMV45A' '0102' 'X' ,
+'VBAK-VBELN' IN_WRK-VBELN '' ,
+'BDC_OKCODE' '/00' '' .
+* 受注伝票変更（概要）
+* 【拒否理由変更】
+if IN_WRK-abgru <> '/'.
+PERFORM SET_BDC USING :
+'SAPMV45A' '4001' 'X' ,
+'VBAP-ABGRU(01)' IN_WRK-abgru '' .
+endif.
+* 【出荷ブロック変更】
+if IN_WRK-lifsk <> '/'.
+PERFORM SET_BDC USING :
+'SAPMV45A' '4001' 'X' ,
+'BDC_OKCODE' '=T\01' '' ,
+'SAPMV45A' '4001' 'X' ,
+'VBAK-LIFSK' IN_WRK-lifsk '' .
+endif.
+* 受注伝票変更（明細データ）
+PERFORM SET_BDC USING :
+'SAPMV45A' '4001' 'X' ,
+'BDC_CURSOR' 'VBAP-POSNR(01)' '' ,
+'RV45A-VBAP_SELKZ(01)' 'X' '' ,
+'BDC_OKCODE' '=PDE2' '' .
+* 【出荷ポイント変更】
+if IN_WRK-VSTEL <> '/'.
+PERFORM SET_BDC USING :
+'SAPMV45A ' '4003' 'X' ,
+'VBAP-VSTEL' IN_WRK-VSTEL '' .
+endif.
+* 【支払条件変更】
+if IN_WRK-zterm <> '/'.
+PERFORM SET_BDC USING :
+'SAPMV45A ' '4003' 'X' ,
+'BDC_OKCODE' '=T\04' '' ,
+'SAPMV45A ' '4003' 'X' ,
+'VBKD-ZTERM' IN_WRK-zterm '' .
+endif.
+
+PERFORM SET_BDC USING :
+'BDC_OKCODE' '=SICH' '' .
+*2013/12/24 Mod End
+IF P_TEST NE 'X' .
+PERFORM CALL_TRAN USING 'VA02' .
+ENDIF .
+ENDIF .
+APPEND DP_WRK TO DP_TAB .
+CLEAR :  DP_WRK , R3_WRK , IN_WRK  , W_FNAM , W_FNAM2 .
+ENDLOOP .
+ENDFORM .
+
+*---------------------------------------------------------------------*
+*       FORM Write_List                                               *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM WRITE_LIST .
+LOOP AT DP_TAB INTO DP_WRK .
+WRITE AT : /01 DP_WRK-VBELN ,
+18 DP_WRK-RESULT .
+CLEAR : DP_WRK .
+ENDLOOP .
+
+* NDSC KURI ADD 処理結果出力
+SKIP.
+WRITE  : /01 'ファイル読込件数' , 20 W_COUNT4,
+/01 'BDC実行件数' , 20 W_COUNT1,
+/01 'BDC変更件数' , 20 W_COUNT2,
+/01 'BDCエラー件数' , 20 W_COUNT3.
+MESSAGE S401 WITH '変更対象データ件数' W_COUNT4.
+MESSAGE S401 WITH 'BDC実行件数' W_COUNT1.
+MESSAGE S401 WITH 'BDC変更件数' W_COUNT2.
+MESSAGE S401 WITH 'BDCエラー件数' W_COUNT3.
+
+ENDFORM .
+*---------------------------------------------------------------------*
+*       FORM Set_BDC                                                  *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  P_DAT                                                         *
+*  -->  P_VAL                                                         *
+*  -->  P_FLG                                                         *
+*---------------------------------------------------------------------*
+FORM SET_BDC USING P_DAT P_VAL P_FLG .
+MOVE : P_FLG TO BDC_TAB-DYNBEGIN .
+IF P_FLG EQ 'X' .
+MOVE : P_DAT TO BDC_TAB-PROGRAM ,
+P_VAL TO BDC_TAB-DYNPRO .
+ELSE .
+MOVE : P_DAT TO BDC_TAB-FNAM ,
+P_VAL TO BDC_TAB-FVAL .
+ENDIF .
+APPEND : BDC_TAB .
+CLEAR : BDC_TAB .
+ENDFORM .
+*---------------------------------------------------------------------*
+*       FORM Call_Tran                                                *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  P_TRCD                                                        *
+*---------------------------------------------------------------------*
+FORM CALL_TRAN USING P_TRCD .
+DATA : W_MSG LIKE MESSAGE ,
+W_MSGNO LIKE SY-MSGNO .
+
+CALL TRANSACTION P_TRCD
+USING   BDC_TAB
+MODE    W_MODE
+MESSAGES INTO    BDC_MSG.
+* NDSC KURI ADD 処理結果カウンター追加
+ADD 1 TO W_COUNT1.    " BDC 実行カウント
+IF SY-SUBRC = 0.
+ADD 1 TO W_COUNT2. " ＯＫカウント
+ELSE.
+ADD 1 TO W_COUNT3. " エラーカウント
+WRITE : '受注伝票' , IN_WRK-VBELN .
+LOOP AT BDC_MSG .
+MOVE : BDC_MSG-MSGNR TO W_MSGNO .
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID = BDC_MSG-MSGID
+MSGNO = W_MSGNO
+MSGTY = BDC_MSG-MSGTYP
+MSGV1 = BDC_MSG-MSGV1
+MSGV2 = BDC_MSG-MSGV2
+MSGV3 = BDC_MSG-MSGV3
+MSGV4 = BDC_MSG-MSGV4
+*         MSGV5 = BDC_MSG-MSGV5
+IMPORTING
+*         ERROR =
+MESSG = W_MSG
+*         MSGLN =
+.
+MESSAGE ID BDC_MSG-MSGID
+TYPE 'S'
+NUMBER W_MSGNO
+WITH BDC_MSG-MSGV1
+BDC_MSG-MSGV2
+BDC_MSG-MSGV3
+BDC_MSG-MSGV4.
+*      WRITE W_MSG-MSGTX.
+* MESSAGE 出力方法変更
+*      MOVE W_MSG-MSGTX TO DP_WRK-RESULT .
+WRITE W_MSG-MSGTX.
+ENDLOOP .
+ENDIF.
+
+REFRESH : BDC_TAB , BDC_MSG .
+
+ENDFORM .

@@ -1,0 +1,530 @@
+*&---------------------------------------------------------------------*
+*& Report  YF021100                                                    *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+*&                                                                     *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+
+REPORT  yf021100 MESSAGE-ID y1
+NO STANDARD PAGE HEADING.
+
+*********************************************************************
+*ﾌﾟﾛｸﾞﾗﾑID：YF021100                                                *
+*ﾌﾟﾛｸﾞﾗﾑ名：受取手形データ取込                                       *
+*処理種別 ：ﾊﾞｯﾁ(ABAP/4)                                            *
+*処理概要：
+*　FIにて計上された受取手形データを､Add-Onテーブルへ取り込む。
+*　取込対象のデータは､パラメータにて指定された日付を登録日付に持つデータ
+*。　
+*-------------------------------------------------------------------*
+*    作成日   ：2004/06/28                                           *
+*    作成者   ：中嶋                                                 *
+*  変更履歴   ：2008/01/22 ARII                                      *
+*  変更内容   ：STOP命令置き換え                                     *
+*********************************************************************
+
+*********************************************************************
+*宣言
+*********************************************************************
+TABLES :
+bsid,
+ZTGT01.
+
+
+DATA: BEGIN OF wa_bsid,
+bukrs LIKE bsid-bukrs,"会社コード
+kunnr LIKE bsid-kunnr,"得意先コード
+umskz LIKE bsid-umskz,"特殊仕訳フラグ
+gjahr LIKE bsid-gjahr,"会計年度
+belnr LIKE bsid-belnr,"会計伝票番号
+buzei LIKE bsid-buzei,"伝票明細番号
+budat LIKE bsid-budat,"転記日付
+END OF wa_bsid.
+
+DATA: it_bsid LIKE TABLE OF wa_bsid. "BSID項目取得用内部テーブル
+
+
+DATA: BEGIN OF wa_bsad,
+bukrs LIKE bsad-bukrs,"会社コード
+gjahr LIKE bsad-gjahr,"会計年度
+belnr LIKE bsad-belnr,"会計伝票番号
+buzei LIKE bsad-buzei,"伝票明細番号
+END OF wa_bsad.
+
+DATA: it_bsad LIKE TABLE OF wa_bsad.     "BSAD項目取得用内部テーブル
+
+
+DATA: BEGIN OF wa_dbl,
+bukrs LIKE bsad-bukrs,"会社コード
+kunnr LIKE bsad-kunnr,"得意先コード
+gjahr LIKE bsad-gjahr,"会計年度
+belnr LIKE bsad-belnr,"会計伝票番号
+buzei LIKE bsad-buzei,"伝票明細番号
+END OF wa_dbl.
+
+DATA: it_dbl LIKE TABLE OF wa_dbl.
+"重複データチェック用内部テーブル
+
+
+DATA: BEGIN OF wa_data,
+bukrs LIKE bsad-bukrs,"会社コード
+gjahr LIKE bsad-gjahr,"会計年度
+belnr LIKE bsad-belnr,"会計伝票番号
+buzei LIKE bsad-buzei,"伝票明細番号
+trday LIKE ZTGT01-trday,"取消日付
+END OF wa_data.
+
+DATA: it_data LIKE TABLE OF wa_data.   "反対仕訳チェック用内部テーブル
+
+DATA: wa_ZTGT01 LIKE ZTGT01.
+DATA: it_ZTGT01 LIKE TABLE OF ZTGT01.    "受取手形明細用内部テーブル
+
+DATA: w_year LIKE bsid-gjahr.         "会計年度取得項目
+DATA: wk_stblg LIKE bkpf-stblg.       "反対仕訳伝票番号取得項目
+DATA: wk_stjah LIKE bkpf-stjah.
+
+DATA: del_cnt TYPE i.                 "重複カウント
+DATA: ins_cnt TYPE i.                 "追加カウント
+DATA: mod_cnt TYPE i.                 "修正カウント
+
+
+
+*********************************************************************
+*入力画面定義
+*********************************************************************
+
+PARAMETERS:
+pr_bukrs LIKE bsid-bukrs OBLIGATORY.     "会社コード
+SELECT-OPTIONS:
+pr_kunnr FOR bsid-kunnr,                    "得意先コード
+pr_umskz FOR bsid-umskz NO INTERVALS OBLIGATORY.       "特殊仕訳コード
+PARAMETERS:
+pr_cpudt LIKE bsid-cpudt OBLIGATORY.     "伝票登録日付
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(20) text-001. "未決済データ取込のみ
+PARAMETERS pa_check AS CHECKBOX.
+SELECTION-SCREEN END OF LINE.
+
+*********************************************************************
+*本処理
+*********************************************************************
+START-OF-SELECTION.
+
+*  PERFORM enqueue_ZTGT01.       "ZTGT01のロック
+
+PERFORM get_bsid.            "未決済テーブルデータ取得
+
+PERFORM double_entry_check.   "重複データチェック
+
+PERFORM seek_cancel_entry.    "仕訳計上済み反対仕訳データチェック
+
+PERFORM renew_ZTGT01.                                      "ZTGT01更新
+
+*  PERFORM dequeue_ZTGT01.        "ZTGT01のロック解除
+
+PERFORM write.                "結果出力
+
+*********************************************************************
+
+
+*&---------------------------------------------------------------------*
+*&      Form  get_bsid
+*&---------------------------------------------------------------------*
+*       未決済テーブル(BSID)よりデータの取得
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_bsid .
+
+IF pa_check = ' '.    "チェック無し
+
+*    CALL FUNCTION 'BAPI_COMPANYCODE_GET_PERIOD'   "会計年度の取得
+*      EXPORTING
+*        companycodeid       = pr_bukrs
+*        posting_date        = pr_cpudt
+*      IMPORTING
+*        fiscal_year         = w_year.
+*
+*    IF sy-subrc <> 0.
+*      MESSAGE s001 WITH 'BAPI_COMPANYCODE_GET_PERIOD' sy-subrc.
+*      LEAVE.
+*    ENDIF.
+
+SELECT bukrs kunnr umskz gjahr belnr buzei budat
+INTO TABLE it_bsid
+FROM bsid
+WHERE bukrs = pr_bukrs"会社コード
+AND kunnr IN pr_kunnr"得意先コード
+AND umskz IN pr_umskz"特殊仕訳コード
+*     AND gjahr = w_year"上記汎用モジュールで取得した会計年度
+AND cpudt = pr_cpudt"伝票登録日付
+AND shkzg = 'S'."貸借フラグ
+
+ELSE.    "チェック有り
+
+SELECT bukrs kunnr umskz gjahr belnr buzei budat
+INTO TABLE it_bsid
+FROM bsid
+WHERE bukrs = pr_bukrs"会社コード
+AND kunnr IN pr_kunnr"得意先コード
+AND umskz IN pr_umskz"特殊仕訳コード
+AND shkzg = 'S'."貸借フラグ
+
+IF sy-subrc <> 0.
+MESSAGE s012 WITH text-007.
+* 20080118 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*    STOP
+* 20080118 <<<
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " get_bsid
+
+*&---------------------------------------------------------------------*
+*&      Form  double_entry_check
+*&---------------------------------------------------------------------*
+*       重複データのチェックと一覧作成
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM double_entry_check .
+
+CLEAR wa_bsid.
+
+LOOP AT it_bsid INTO wa_bsid.
+
+SELECT SINGLE *
+FROM ZTGT01
+INTO wa_ZTGT01
+WHERE bukrs = wa_bsid-bukrs"会社コード
+AND gjahr = wa_bsid-gjahr"会計年度
+AND belnr = wa_bsid-belnr"会計伝票番号
+AND buzei = wa_bsid-buzei."伝票明細番号
+
+IF sy-subrc = 0.
+
+wa_dbl-bukrs = wa_ZTGT01-bukrs."会社コード
+wa_dbl-kunnr = wa_ZTGT01-kunnr."得意先コード
+wa_dbl-gjahr = wa_ZTGT01-gjahr."会計年度
+wa_dbl-belnr = wa_ZTGT01-belnr."会計伝票番号
+wa_dbl-buzei = wa_ZTGT01-buzei."伝票明細番号
+
+
+APPEND wa_dbl TO it_dbl.
+
+DELETE it_bsid.    "内部テーブルより削除
+
+del_cnt = del_cnt + 1.       "重複データのカウント
+
+ENDIF.
+
+CLEAR : wa_bsid.
+CLEAR : wa_ZTGT01.
+
+ENDLOOP.
+
+ENDFORM.                    " double_entry_check
+
+*&---------------------------------------------------------------------*
+*&      Form  seek_cancel_entry
+*&---------------------------------------------------------------------*
+*       仕訳計上済み反対仕訳データチェック
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM seek_cancel_entry .
+
+IF pa_check = ' '. "チェックなし
+
+SELECT bukrs gjahr belnr buzei
+FROM bsad
+INTO TABLE it_bsad
+WHERE bukrs = pr_bukrs"会社コード
+AND kunnr IN pr_kunnr"得意先コード
+AND umskz IN pr_umskz"特殊仕訳コード
+AND zfbdt >= pr_cpudt."伝票登録日付
+
+
+IF sy-subrc = 0.
+
+CLEAR wa_bsad.
+CLEAR wa_ZTGT01.
+
+LOOP AT it_bsad INTO wa_bsad.
+
+SELECT SINGLE bukrs gjahr belnr buzei
+FROM ZTGT01
+INTO CORRESPONDING FIELDS OF wa_ZTGT01
+WHERE bukrs = wa_bsad-bukrs"会社コード
+AND gjahr = wa_bsad-gjahr"会計年度
+AND belnr = wa_bsad-belnr"会計伝票番号
+AND buzei = wa_bsad-buzei"伝票明細番号
+AND fiflg = 'X'"仕訳計上済みフラグ
+AND deflg = ' '."取消フラグ
+
+
+IF sy-subrc = 0.
+APPEND wa_ZTGT01 TO it_ZTGT01.
+ENDIF.
+
+CLEAR wa_bsad.
+CLEAR wa_ZTGT01.
+
+ENDLOOP.
+
+
+CLEAR wa_ZTGT01.
+
+LOOP AT it_ZTGT01 INTO wa_ZTGT01.
+
+SELECT SINGLE stblg stjah
+FROM bkpf
+INTO (wk_stblg ,wk_stjah)
+WHERE bukrs = wa_ZTGT01-bukrs"会社コード
+AND belnr = wa_ZTGT01-belnr "会計伝票番号
+AND gjahr = wa_ZTGT01-gjahr "会計年度
+AND stblg <> ' '.          "反対仕訳伝票番号
+
+
+IF sy-subrc = 0.
+
+SELECT SINGLE budat "取消日付の取得
+FROM bkpf
+INTO wa_data-trday
+WHERE bukrs = wa_ZTGT01-bukrs
+AND belnr = wk_stblg"反対仕訳伝票番号
+AND gjahr = wk_stjah."会計年度
+
+wa_data-bukrs = wa_ZTGT01-bukrs."会社コード
+wa_data-gjahr = wa_ZTGT01-gjahr."会計年度
+wa_data-belnr = wa_ZTGT01-belnr."会計伝票番号
+wa_data-buzei = wa_ZTGT01-buzei."伝票明細番号
+
+APPEND wa_data TO it_data.
+
+ENDIF.
+
+CLEAR wa_ZTGT01.
+CLEAR wa_data.
+CLEAR: wk_stblg,
+wk_stjah.
+ENDLOOP.
+ENDIF.
+
+ENDIF.
+
+ENDFORM.                    " seek_cancel_entry
+
+*&---------------------------------------------------------------------*
+*&      Form  renew_ZTGT01
+*&---------------------------------------------------------------------*
+*       テーブル更新
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM renew_ZTGT01 .
+CLEAR:
+ins_cnt,
+mod_cnt.
+
+
+*追加
+
+LOOP AT it_bsid INTO wa_bsid.
+
+wa_ZTGT01-bukrs = wa_bsid-bukrs."会社コード
+wa_ZTGT01-kunnr = wa_bsid-kunnr."得意先コード
+wa_ZTGT01-umskz = wa_bsid-umskz."特殊仕訳コード
+wa_ZTGT01-gjahr = wa_bsid-gjahr."会計年度
+wa_ZTGT01-belnr = wa_bsid-belnr."会計伝票番号
+wa_ZTGT01-buzei = wa_bsid-buzei."伝票明細番号
+wa_ZTGT01-budat = wa_bsid-budat."転記日付
+wa_ZTGT01-instim = sy-uzeit."システム時間
+wa_ZTGT01-insday = sy-datum."システム日付
+wa_ZTGT01-insusr = sy-uname."ユーザ名
+
+
+INSERT INTO ZTGT01 VALUES wa_ZTGT01.
+
+IF sy-subrc <> 0.
+MESSAGE s672 WITH text-005.
+ROLLBACK WORK.
+PERFORM dequeue_ZTGT01.
+* 20080118 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*      STOP
+* 20080118 <<<
+ELSE.
+ins_cnt = ins_cnt + 1.      "追加データカウント
+ENDIF.
+
+CLEAR wa_bsid.
+CLEAR wa_ZTGT01.
+
+ENDLOOP.
+
+
+*更新
+CLEAR wa_data.
+
+LOOP AT it_data INTO wa_data.
+
+UPDATE ZTGT01
+SET trday = wa_data-trday"取消日付
+deflg = 'X'"取消フラグを立てる
+updtim = sy-uzeit"システム時間
+updday = sy-datum"システム日付
+updusr = sy-uname"ユーザ名
+WHERE bukrs = wa_data-bukrs
+AND gjahr = wa_data-gjahr
+AND belnr = wa_data-belnr
+AND buzei = wa_data-buzei.
+
+
+IF sy-subrc <> 0.
+MESSAGE s634 WITH text-005.
+ROLLBACK WORK.
+PERFORM dequeue_ZTGT01.
+* 20080118 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*    STOP
+* 20080118 <<<
+ELSE.
+mod_cnt = mod_cnt + 1.          "更新データカウント
+ENDIF.
+
+CLEAR wa_data.
+
+ENDLOOP.
+
+ENDFORM.                    " renew_ZTGT01
+
+
+*&---------------------------------------------------------------------*
+*&      Form  write
+*&---------------------------------------------------------------------*
+*       結果出力
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM write .
+
+*ヘッダの表示
+WRITE:
+/ text-002,    "重複データ一覧
+/ text-008,    "会社コード
+14 text-009,   "得意先コード
+28 text-010,   "会計年度
+41 text-011,   "伝票番号
+53 text-012.   "明細番号
+
+ULINE AT /(60).
+
+
+*重複データの表示
+
+CLEAR wa_dbl.
+
+LOOP AT it_dbl INTO wa_dbl.
+WRITE:
+/3 wa_dbl-bukrs,"会社コード
+15 wa_dbl-kunnr,"得意先コード
+30 wa_dbl-gjahr,"会計年度
+40 wa_dbl-belnr,"会計伝票番号
+55 wa_dbl-buzei."伝票明細番号
+CLEAR wa_dbl.
+ENDLOOP.
+
+
+*カウント表示
+
+WRITE :
+/ text-006 , 20 del_cnt, "重複レコード数
+/ text-003, 20 ins_cnt,  "新規追加レコード数
+/ text-004, 20 mod_cnt.  "変更レコード数
+
+
+ENDFORM.                    " write
+
+
+
+
+*&---------------------------------------------------------------------*
+*&      Form  enqueue_ZTGT01
+*&---------------------------------------------------------------------*
+*       ロック処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM enqueue_ZTGT01.
+
+*テーブルのロック
+CALL FUNCTION 'ENQUEUE_EY_ZTGT01'
+EXPORTING
+mode_ZTGT01           = 'E'
+mandt                = sy-mandt
+**   BUKRS                =
+**   GJAHR                =
+**   BELNR                =
+**   BUZEI                =
+**   X_BUKRS              = ' '
+**   X_GJAHR              = ' '
+**   X_BELNR              = ' '
+**   X_BUZEI              = ' '
+**   _SCOPE               = '2'
+**   _WAIT                = ' '
+**   _COLLECT             = ' '
+EXCEPTIONS
+foreign_lock         = 1
+system_failure       = 2
+OTHERS               = 3
+.
+IF sy-subrc <> 0.
+MESSAGE s661 WITH text-005.
+* 20080118 STOP命令置き換え >>>
+LEAVE LIST-PROCESSING.
+*    STOP
+* 20080118 <<<
+ENDIF.
+
+ENDFORM.                    " enqueue_ZTGT01
+
+*&---------------------------------------------------------------------*
+*&      Form  dequeue_ZTGT01
+*&---------------------------------------------------------------------*
+*       ロック解除
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM dequeue_ZTGT01.
+
+*ロック解除
+CALL FUNCTION 'DEQUEUE_EY_ZTGT01'
+EXPORTING
+mode_ZTGT01       = 'E'
+mandt            = sy-mandt
+*   BUKRS            =
+*   GJAHR            =
+*   BELNR            =
+*   BUZEI            =
+*   X_BUKRS          = ' '
+*   X_GJAHR          = ' '
+*   X_BELNR          = ' '
+*   X_BUZEI          = ' '
+*   _SCOPE           = '3'
+*   _SYNCHRON        = ' '
+*   _COLLECT         = ' '
+.
+
+ENDFORM.                    " dequeue_ZTGT01

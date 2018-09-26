@@ -1,0 +1,424 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZM012300                                                    *
+*&         出荷済み未出荷データテーブル更新処理                        *
+*&---------------------------------------------------------------------*
+*&  機能     :出荷済み未出庫データをアドオンテーブルに格納する。
+*&  作成日   :
+*&  作成者   :
+*&  変更履歴 :
+*     2012/02/21
+*       預託品引渡(KB)、預託品出庫(KE)の数量を分けてデータ更新
+*     2014/08/19
+*       グローバル化対応  ISID･喩
+*     2016/03/25
+*        対象データない場合データ削除するように改修  ISID18
+*     2016/08/31
+*        出荷済未出庫の全数量が0の場合、該当データを
+*        出荷済み未出庫数量管理テーブルに更新しないようにする
+*&---------------------------------------------------------------------*
+REPORT ZM012300 MESSAGE-ID Z1 .
+
+TABLES : LIKP ,
+LIPS ,
+ZS0020 ,
+VBUP .
+
+* 2012/02/21 ADD START
+TYPES:
+BEGIN OF TYP_LIPS,
+MATNR TYPE LIPS-MATNR,    "品目コード
+WERKS TYPE LIPS-WERKS,    "プラント
+LFIMG TYPE LIPS-LFIMG,    "出荷数量
+VRKME TYPE LIPS-VRKME,    "販売単位
+VGBEL TYPE LIPS-VGBEL,    "参照伝票
+END OF TYP_LIPS,
+BEGIN OF TYP_VBAK,
+VBELN TYPE VBAK-VBELN,
+AUART TYPE VBAK-AUART,
+END OF TYP_VBAK,
+BEGIN OF TYP_MARA,
+MATNR TYPE MARA-MATNR,
+MEINS TYPE MARA-MEINS,
+END OF TYP_MARA.
+* 2012/02/21 ADD END
+**** START ADD 2014/08/19 ISID13 ****
+TYPES:
+BEGIN OF TYP_WERKS,
+WERKS TYPE T001W-WERKS,
+END OF TYP_WERKS.
+**** END ADD 2014/08/19 ISID13 ****
+
+DATA : T_ZS0020 TYPE TABLE OF ZS0020 ,
+* 2012/02/21 DEL START
+*       U_ZS0020 TYPE TABLE OF ZS0020 ,
+* 2012/02/21 DEL END
+W_ZS0020 TYPE ZS0020 ,
+* 2012/02/21 ADD START
+T_LIPS  TYPE TABLE OF TYP_LIPS,
+W_LIPS  TYPE TYP_LIPS,
+T_VBAK  TYPE TABLE OF TYP_VBAK,
+W_VBAK  TYPE TYP_VBAK,
+T_MARA  TYPE TABLE OF TYP_MARA,
+W_MARA  TYPE TYP_MARA,
+* 2012/02/21 ADD END
+W_COUNT  TYPE I .
+**** START ADD 2014/08/19 ISID13 ****
+DATA: RD_WERKS TYPE RANGE_T_WERKS.
+**** END ADD 2014/08/19 ISID13 ****
+
+**** START ADD 2014/08/19 ISID13 ****
+CONSTANTS: CNS_MSGTP_E TYPE CHAR1 VALUE 'E',
+CNS_BUK     TYPE TPARA-PARAMID VALUE 'BUK'.
+**** END ADD 2014/08/19 ISID13 ****
+
+**** START ADD 2014/08/19 ISID13 ****
+PARAMETERS: P_BUKRS TYPE T001-BUKRS OBLIGATORY.
+**** END ADD 2014/08/19 ISID13 ****
+SELECT-OPTIONS : S_WERKS FOR LIPS-WERKS ,
+S_LFART FOR LIKP-LFART .
+
+**** START ADD 2014/08/19 ISID13 ****
+INITIALIZATION.
+PERFORM FRM_INIT.
+
+AT SELECTION-SCREEN.
+* CHECK PROCESS
+PERFORM CHK_PRC.
+**** END ADD 2014/08/19 ISID13 ****
+
+START-OF-SELECTION .
+
+PERFORM INIT_SEC .
+PERFORM DATA_GET .
+PERFORM DATA_SUM .
+PERFORM DATA_SET .
+DESCRIBE TABLE T_ZS0020 LINES W_COUNT .
+MESSAGE S618 WITH W_COUNT .
+
+* 初期処理
+FORM INIT_SEC .
+REFRESH : T_ZS0020 .
+CLEAR : W_ZS0020 .
+ENDFORM .                    "INIT_SEC
+
+* データ取得
+FORM DATA_GET .
+* 2012/02/21 MOD START
+*  SELECT P~MATNR SUM( P~LFIMG ) P~VRKME P~WERKS
+*    FROM LIKP AS K
+*   INNER JOIN LIPS AS P
+*     ON  K~VBELN EQ P~VBELN
+*   INNER JOIN VBUP AS U
+*     ON  U~VBELN EQ K~VBELN
+*    AND  U~POSNR EQ P~POSNR
+*    INTO (W_ZS0020-MATNR ,
+*          W_ZS0020-LFIMG ,
+*          W_ZS0020-VRKME ,
+*          W_ZS0020-WERKS)
+*   WHERE P~WERKS IN S_WERKS
+*    AND  K~LFART IN S_LFART
+*    AND  U~WBSTA NE 'C'
+*   GROUP BY P~MATNR P~WERKS P~VRKME
+*   .
+*    APPEND W_ZS0020 TO T_ZS0020 .
+*    CLEAR : W_ZS0020 .
+*  ENDSELECT .
+
+* 出荷データ取得
+PERFORM GET_LIPS.
+
+* 受注伝票タイプ取得
+PERFORM GET_VBAK.
+
+* 基本数量単位取得
+PERFORM GET_MARA.
+
+* 2012/02/21 MOD END
+ENDFORM .                    "DATA_GET
+
+* 数量を基本単位数量に変換し集計
+FORM DATA_SUM .
+* 2012/02/21 MOD START
+*  DATA:  LW_MEINS LIKE MARA-MEINS .
+*  CLEAR: W_ZS0020.
+*
+*  LOOP AT T_ZS0020 INTO W_ZS0020 .
+*
+** 品目マスタの販売単位を取得
+*    SELECT SINGLE MEINS
+*      FROM MARA
+*      INTO LW_MEINS
+*     WHERE MATNR = W_ZS0020-MATNR .
+*
+** 数量変換処理
+*    IF W_ZS0020-VRKME <> LW_MEINS .
+*      CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+*           EXPORTING
+*                I_MATNR              = W_ZS0020-MATNR
+*                I_IN_ME              = W_ZS0020-VRKME
+*                I_OUT_ME             = LW_MEINS
+*                I_MENGE              = W_ZS0020-LFIMG
+*           IMPORTING
+*                E_MENGE              = W_ZS0020-LFIMG
+*           EXCEPTIONS
+*                ERROR_IN_APPLICATION = 1
+*                ERROR                = 2
+*                OTHERS               = 3.
+*
+*      W_ZS0020-VRKME = LW_MEINS .
+*    ENDIF.
+*    COLLECT W_ZS0020 INTO U_ZS0020 .
+*    CLEAR:  W_ZS0020 .
+*  ENDLOOP .
+
+DATA:
+L_LFIMG    TYPE LIPS-LFIMG,
+L_LFIMG_KB TYPE LIPS-LFIMG,
+L_LFIMG_KE TYPE LIPS-LFIMG,
+L_MEINS    TYPE MARA-MEINS.
+
+SORT T_LIPS BY MATNR WERKS.
+
+LOOP AT T_LIPS INTO W_LIPS.
+CLEAR:
+W_MARA,
+W_VBAK.
+
+AT NEW MATNR.
+CLEAR L_MEINS.
+
+*     基本数量単位取得
+READ TABLE T_MARA INTO W_MARA
+WITH KEY MATNR = W_LIPS-MATNR
+BINARY SEARCH.
+
+L_MEINS = W_MARA-MEINS.
+ENDAT.
+
+AT NEW WERKS.
+CLEAR:
+L_LFIMG,
+L_LFIMG_KB,
+L_LFIMG_KE.
+ENDAT.
+
+*   数量変換処理
+IF W_LIPS-VRKME <> L_MEINS .
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR              = W_LIPS-MATNR
+I_IN_ME              = W_LIPS-VRKME
+I_OUT_ME             = L_MEINS
+I_MENGE              = W_LIPS-LFIMG
+IMPORTING
+E_MENGE              = W_LIPS-LFIMG
+EXCEPTIONS
+ERROR_IN_APPLICATION = 1
+ERROR                = 2
+OTHERS               = 3.
+ENDIF.
+
+*   合計
+READ TABLE T_VBAK INTO W_VBAK
+WITH KEY VBELN = W_LIPS-VGBEL
+BINARY SEARCH.
+
+CASE W_VBAK-AUART.
+*     預託品引渡
+WHEN 'KB'.
+ADD W_LIPS-LFIMG TO L_LFIMG_KB.
+*     預託品出庫
+WHEN 'KE'.
+ADD W_LIPS-LFIMG TO L_LFIMG_KE.
+WHEN OTHERS.
+ADD W_LIPS-LFIMG TO L_LFIMG.
+ENDCASE.
+
+AT END OF WERKS.
+CLEAR W_ZS0020.
+
+W_ZS0020-MATNR    = W_LIPS-MATNR.
+W_ZS0020-WERKS    = W_LIPS-WERKS.
+W_ZS0020-LFIMG    = L_LFIMG.
+W_ZS0020-LFIMG_KB = L_LFIMG_KB.
+W_ZS0020-LFIMG_KE = L_LFIMG_KE.
+W_ZS0020-VRKME    = L_MEINS.
+APPEND W_ZS0020 TO T_ZS0020.
+ENDAT.
+
+ENDLOOP.
+
+* 2012/02/21 MOD END
+ENDFORM.                    "DATA_SUM
+
+* データ更新
+FORM DATA_SET .
+*2009/03/26 MOD_START
+*  DELETE FROM ZS0020 CLIENT SPECIFIED WHERE MANDT EQ SY-MANDT  .
+DELETE FROM ZS0020 CLIENT SPECIFIED WHERE MANDT EQ SY-MANDT
+**** START UPD 2014/08/19 ISID13 ****
+*                                        AND WERKS IN S_WERKS .
+AND WERKS IN RD_WERKS .
+**** END UPD 2014/08/19 ISID13 ****
+***** 2016/8/31 ISID18 INS START *****
+*  全数量 = 0データを除外する
+DELETE T_ZS0020 WHERE LFIMG = 0
+AND LFIMG_KB = 0
+AND LFIMG_KE = 0.
+***** 2016/8/31 ISID18 INS END *****
+*2009/03/26 MOD_END
+* 2012/02/21 MOD START
+*  INSERT ZS0020 FROM TABLE U_ZS0020 .
+INSERT ZS0020 FROM TABLE T_ZS0020.
+* 2012/02/21 MOD END
+ENDFORM .                    "DATA_SET
+* 2012/02/21 ADD START
+*&---------------------------------------------------------------------*
+*&      Form  GET_LIPS
+*&---------------------------------------------------------------------*
+*       出荷データ取得
+*----------------------------------------------------------------------*
+FORM GET_LIPS.
+
+SELECT LIPS~MATNR
+LIPS~WERKS
+LIPS~LFIMG
+LIPS~VRKME
+LIPS~VGBEL
+INTO TABLE T_LIPS
+FROM LIKP
+INNER JOIN LIPS
+ON  LIKP~VBELN = LIPS~VBELN
+INNER JOIN VBUP
+ON  LIKP~VBELN = VBUP~VBELN
+AND  LIPS~POSNR = VBUP~POSNR
+WHERE
+**** START UPD 2014/08/19 ISID13 ****
+*         LIPS~WERKS IN S_WERKS
+LIPS~WERKS IN RD_WERKS
+**** END UPD 2014/08/19 ISID13 ****
+AND  LIKP~LFART IN S_LFART
+AND  VBUP~WBSTA <> 'C'.
+
+IF SY-SUBRC <> 0.
+***** 2016/3/25 ISID18 INS START *****
+DELETE FROM ZS0020 CLIENT SPECIFIED WHERE MANDT EQ SY-MANDT
+AND WERKS IN RD_WERKS .
+***** 2016/3/25 ISID18 INS START *****
+MESSAGE S008(Z1).
+STOP.
+ENDIF.
+
+ENDFORM.                    " GET_LIPS
+*&---------------------------------------------------------------------*
+*&      Form  GET_VBAK
+*&---------------------------------------------------------------------*
+*       受注伝票タイプ取得
+*----------------------------------------------------------------------*
+FORM GET_VBAK.
+
+CHECK NOT T_LIPS IS INITIAL.
+
+SELECT VBELN
+AUART
+INTO TABLE T_VBAK
+FROM VBAK
+FOR ALL ENTRIES IN T_LIPS
+WHERE VBELN = T_LIPS-VGBEL.
+
+IF SY-SUBRC = 0.
+SORT T_VBAK BY VBELN.
+DELETE ADJACENT DUPLICATES FROM T_VBAK
+COMPARING VBELN.
+ENDIF.
+
+ENDFORM.                    " GET_VBAK
+*&---------------------------------------------------------------------*
+*&      Form  GET_MARA
+*&---------------------------------------------------------------------*
+*       基本巣量単位取得
+*----------------------------------------------------------------------*
+FORM GET_MARA.
+
+CHECK NOT T_LIPS IS INITIAL.
+
+SELECT MATNR
+MEINS
+INTO TABLE T_MARA
+FROM MARA
+FOR ALL ENTRIES IN T_LIPS
+WHERE MATNR = T_LIPS-MATNR.
+
+IF SY-SUBRC = 0.
+SORT T_MARA BY MATNR.
+DELETE ADJACENT DUPLICATES FROM T_MARA
+COMPARING MATNR.
+ENDIF.
+
+ENDFORM.                    " GET_MARA
+* 2012/02/21 ADD END
+**** START ADD 2014/08/19 ISID13 ****
+*&---------------------------------------------------------------------*
+*&      Form  CHK_PRC
+*&---------------------------------------------------------------------*
+*       CHECK PROCESS
+*----------------------------------------------------------------------*
+FORM CHK_PRC .
+DATA:
+LW_BUKRS       TYPE T001-BUKRS,
+LW_RANGE_WERKS TYPE RANGE_T_WERKS.
+
+* ０－１．COMPANY EXIST CHECK
+SELECT SINGLE BUKRS
+INTO LW_BUKRS
+FROM T001
+WHERE BUKRS = P_BUKRS.
+
+IF SY-SUBRC <> 0.
+MESSAGE E016(Z3) WITH P_BUKRS.
+ENDIF.
+
+* ０－２．AUTHORITY-CHECK OF COMPANY
+AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+ID 'BUKRS' FIELD P_BUKRS
+ID 'ACTVT' FIELD '03'.
+
+IF SY-SUBRC <> 0.
+MESSAGE E015(Z3) WITH P_BUKRS.
+ENDIF.
+
+CLEAR:
+RD_WERKS,
+LW_RANGE_WERKS.
+LW_RANGE_WERKS = S_WERKS[].
+CALL FUNCTION 'ZEG_ZZ_WERKS_CHK'
+EXPORTING
+IMPBUKRS           = P_BUKRS
+*     IMPWERKS           =
+IMPRNGWERKS        = LW_RANGE_WERKS
+IMPORTING
+EXPWERKS           = RD_WERKS
+*     EXPTABRET          =
+EXCEPTIONS
+WERKS_NOT_EXIST    = 1
+WERKS_NO_AUTHORITY = 2
+WERKS_BUKRS_ERROR  = 3
+OTHERS             = 4.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE CNS_MSGTP_E NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " CHK_PRC
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_INIT
+*----------------------------------------------------------------------*
+FORM FRM_INIT .
+GET PARAMETER ID CNS_BUK FIELD P_BUKRS.
+ENDFORM.                    " FRM_INIT
+**** END ADD 2014/08/19 ISID13 ****
+*Selection text・
+*P_BUKRS:        Company Code
+*S_LFART:        Document Type
+*S_WERKS:        Plant

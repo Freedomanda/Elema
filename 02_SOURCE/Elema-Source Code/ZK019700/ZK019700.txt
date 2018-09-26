@@ -1,0 +1,446 @@
+*---------------------------------------------------------------------*
+*  請求データ移行                                                     *
+*    機能：YK210と同じフォーマットのデータを入力し、YK210とYK220に    *
+*          データを登録する                                           *
+*          入力ファイルはローカルからアップロードするか、サーバから   *
+*          読み込むか選択できる                                       *
+*          登録せずに、チェックのみ行うことも可能                     *
+*    作成：2002/07/01 KURANO                                          *
+*    修正：2002/09/07 KURANO                                          *
+*                                                                     *
+*---------------------------------------------------------------------*
+REPORT zk019700 .
+
+* 使用テーブル
+TABLES t001.  "会社コード
+TABLES t001w. "プラント/支店
+TABLES t024e. "購買組織
+TABLES t024.  "購買グループ
+TABLES tgsb.  "事業領域
+TABLES lfa1.  "仕入先マスタ (一般セクション)
+TABLES lfm1.  "仕入先マスタ購買組織データ
+TABLES wyt3.  "取引先機能
+TABLES mara.  "一般品目データ
+TABLES eina.  "購買情報: 一般データ
+TABLES yk210. "請求データ
+TABLES yk220. "請求合計データ
+
+* グローバル変数
+DATA i_yk210 LIKE STANDARD TABLE OF yk210 WITH HEADER LINE.
+DATA i_yk220 LIKE STANDARD TABLE OF yk220 WITH HEADER LINE.
+DATA w_err TYPE xfeld. "エラーフラグ
+TYPES: BEGIN OF st_in1,
+mandt       LIKE yk210-mandt,       "クライアント
+bukrs       LIKE yk210-bukrs,       "会社コード
+ykyear      LIKE yk210-ykyear,      "暦年
+bildoc      LIKE yk210-bildoc,      "入力番号
+prcflg      LIKE yk210-prcflg,      "入力区分
+fixflg      LIKE yk210-fixflg,      "確定フラグ
+corflg      LIKE yk210-corflg,      "訂正区分
+delflg      LIKE yk210-delflg,      "削除区分
+outflg      LIKE yk210-outflg,      "チェックリスト出力フラグ
+kekkbn      LIKE yk210-kekkbn,      "照合結果区分
+lifnr       LIKE yk210-lifnr,       "仕入先コード
+lifn2       LIKE yk210-lifn2,       "請求先
+werks       LIKE yk210-werks,       "プラント
+ekorg       LIKE yk210-ekorg,       "購買組織
+ekgrp       LIKE yk210-ekgrp,       "購買グループ
+gsber       LIKE yk210-gsber,       "事業領域
+ebeln       LIKE yk210-ebeln,       "購買伝票番号
+ebelp       LIKE yk210-ebelp,       "購買伝票の明細番号
+maktx       LIKE yk210-maktx,       "品目テキスト
+matnr       LIKE yk210-matnr,       "品目コード
+idnlf       LIKE yk210-idnlf,       "仕入先の品目コード
+zfbdt       LIKE yk210-zfbdt,       "締日
+bildat      LIKE yk210-bildat,      "請求日
+shpdat      LIKE yk210-shpdat,      "出荷日
+knquan(15)  TYPE c,                 "数量
+knunit      LIKE yk210-knunit,      "単位
+knuntprc(22) TYPE c,                "単価
+knitxamt(21) TYPE c,                "税抜金額
+kntaxamt(21) TYPE c,                "消費税額
+knetxamt(21) TYPE c,                "税込金額
+waers       LIKE yk210-waers,       "通貨コード
+sgtxt       LIKE yk210-sgtxt,       "明細テキスト
+zfbdt2      LIKE yk210-zfbdt2,      "照合締日
+prcdat      LIKE yk210-prcdat,      "処理日
+prcno       LIKE yk210-prcno,       "処理番号
+insdat      LIKE yk210-insdat,      "登録日
+instim      LIKE yk210-instim,      "登録時刻
+insusr      LIKE yk210-insusr,      "登録ユーザ
+upddat      LIKE yk210-upddat,      "変更日
+updtim      LIKE yk210-updtim,      "変更時刻
+updusr      LIKE yk210-updusr,      "変更ユーザ
+relykyear   LIKE yk210-relykyear,   "暦年
+relbildoc   LIKE yk210-relbildoc,   "入力番号
+oldknquan(15) TYPE c,               "数量
+oldknuntprc(22) TYPE c,             "単価
+oldknitxamt(21) TYPE c,             "税抜金額
+oldkntaxamt(21) TYPE c,             "消費税額
+oldknetxamt(21) TYPE c,             "税込金額
+werkst      LIKE yk210-werkst,      "取引プラント
+rrflg       LIKE yk210-rrflg,       "値引・返品区分
+paydoc      LIKE yk210-paydoc,      "支払予定番号
+END OF st_in1.
+DATA i_in1 TYPE STANDARD TABLE OF st_in1 WITH HEADER LINE.
+
+* 選択画面
+PARAMETERS p_file LIKE rlgrap-filename. "入力ファイル名
+PARAMETERS p_local RADIOBUTTON GROUP radi. "端末よりアップロード
+PARAMETERS p_server RADIOBUTTON GROUP radi. "サーバのファイルを使用
+PARAMETERS p_check AS CHECKBOX. "チェックのみ
+PARAMETERS p_fil1 AS CHECKBOX. "購買グループエラーを無視
+PARAMETERS p_fil2 AS CHECKBOX. "品目エラーを無視
+
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+PERFORM f_file_read. "ファイルの読み込み
+PERFORM f_file_check. "ファイルのチェック
+PERFORM f_make_yk220. "請求合計データの作成
+IF p_check = space AND w_err = space.
+PERFORM f_insert_yk210. "請求データ登録
+PERFORM f_insert_yk220. "請求合計データ登録
+ENDIF.
+
+*---------------------------------------------------------------------*
+*       FORM f_file_read                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_file_read.
+* ローカル変数
+DATA w_dec LIKE tcurx-currdec.
+*
+IF p_local = 'X'.
+*** 端末よりアップロード
+CALL FUNCTION 'UPLOAD'
+EXPORTING
+filename                = p_file
+TABLES
+data_tab                = i_in1
+EXCEPTIONS
+conversion_error        = 1
+invalid_table_width     = 2
+invalid_type            = 3
+no_batch                = 4
+unknown_error           = 5
+gui_refuse_filetransfer = 6
+OTHERS                  = 7.
+IF sy-subrc <> 0.
+WRITE: / '汎用モジュール：UPLOAD  SY-SUBRC=', sy-subrc.
+STOP.
+ENDIF.
+ELSEIF p_server = 'X'.
+*** ファイルを開く
+OPEN DATASET p_file FOR INPUT IN TEXT MODE.
+IF sy-subrc <> 0.
+WRITE: / 'ファイルOPEN：', p_file, 'SY-SUBRC=', sy-subrc.
+STOP.
+ENDIF.
+*** レコード読込
+DO.
+READ DATASET p_file INTO i_in1.
+IF sy-subrc <> 0.
+EXIT.
+ELSE.
+APPEND i_in1.
+ENDIF.
+ENDDO.
+*** ファイルを閉じる
+CLOSE DATASET p_file.
+ENDIF.
+
+* 入力ファイルの調整
+SORT i_in1 BY waers. "通貨コードで整列
+LOOP AT i_in1.
+AT NEW waers.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+i_currency         = i_in1-waers
+IMPORTING
+e_decimals         = w_dec
+EXCEPTIONS
+i_currency_initial = 1
+OTHERS             = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+ENDAT.
+MOVE-CORRESPONDING i_in1 TO i_yk210.
+i_yk210-knitxamt = i_in1-knitxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk210-kntaxamt = i_in1-kntaxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk210-knetxamt = i_in1-knetxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk210-oldknitxamt = i_in1-oldknitxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk210-oldkntaxamt = i_in1-oldkntaxamt * ( 10 ** ( w_dec - 2 ) ).
+i_yk210-oldknetxamt = i_in1-oldknetxamt * ( 10 ** ( w_dec - 2 ) ).
+APPEND i_yk210.
+ENDLOOP.
+SORT i_yk210 BY bukrs ykyear bildoc. "入力番号で整列
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_file_check                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_file_check.
+* ローカル変数
+DATA w_bukrs LIKE yk210-bukrs.
+DATA w_ykyear LIKE yk210-ykyear.
+DATA w_bildoc LIKE yk210-bildoc.
+DATA w_dbcnt LIKE sy-dbcnt.
+DATA w_waers LIKE knvv-waers.
+*
+SORT i_yk210 BY bukrs ykyear bildoc.
+LOOP AT i_yk210.
+*** キー重複チェック
+IF i_yk210-bukrs  = w_bukrs  AND
+i_yk210-ykyear = w_ykyear AND
+i_yk210-bildoc = w_bildoc.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear,
+i_yk210-bildoc, 'キー重複'.
+ELSE.
+SELECT SINGLE *
+FROM   yk210
+WHERE  bukrs  = i_yk210-bukrs
+AND    ykyear = i_yk210-ykyear
+AND    bildoc = i_yk210-bildoc.
+IF sy-dbcnt > 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear,
+i_yk210-bildoc, 'キー重複'.
+ENDIF.
+ENDIF.
+*** 暦年/締日
+IF i_yk210-zfbdt = space OR i_yk210-zfbdt = 0.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_LFM1'
+EXPORTING
+i_cord         = i_yk210-lifnr
+i_ekorg        = i_yk210-ekorg
+i_day          = i_yk210-bildat
+IMPORTING
+e_zfbdt        = i_yk210-zfbdt
+EXCEPTIONS
+no_get_t052    = 1
+no_good_getday = 2
+no_get_zterm   = 3
+OTHERS         = 4.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+i_yk210-ykyear = i_yk210-zfbdt+0(4).
+ENDIF.
+IF i_yk210-ykyear <> i_yk210-zfbdt+0(4).
+i_yk210-ykyear = i_yk210-zfbdt+0(4).
+ENDIF.
+*** 仕入先マスタ
+SELECT SINGLE *
+FROM   lfa1
+WHERE  lifnr  = i_yk210-lifnr.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'仕入先コード', i_yk210-lifnr, 'は未登録です'.
+ENDIF.
+IF i_yk210-lifn2 IS INITIAL.
+SELECT SINGLE lifn2
+INTO   i_yk210-lifn2
+FROM   wyt3
+WHERE  lifnr  = i_yk210-lifnr
+AND    ekorg  = i_yk210-ekorg
+AND    parvw  = 'Y2'.
+IF sy-subrc <> 0.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'仕入先コード', i_yk210-lifnr,
+'に対する請求先が未登録です'.
+ENDIF.
+ENDIF.
+SELECT SINGLE *
+FROM   lfa1
+WHERE  lifnr  = i_yk210-lifn2.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'請求先コード', i_yk210-lifn2, 'は未登録です'.
+ENDIF.
+*** 購買組織
+SELECT SINGLE *
+FROM   t024e
+WHERE  ekorg  = i_yk210-ekorg.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'購買組織', i_yk210-ekorg, 'は未登録です'.
+ENDIF.
+*** プラント
+SELECT SINGLE *
+FROM   t001w
+WHERE  werks  = i_yk210-werks.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'プラント', i_yk210-werks, 'は未登録です'.
+ENDIF.
+*** 購買グループ
+IF p_fil1 <> 'X'.
+SELECT SINGLE *
+FROM   t024
+WHERE  ekgrp  = i_yk210-ekgrp.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'購買グループ', i_yk210-ekgrp, 'は未登録です'.
+ENDIF.
+ENDIF.
+*** 会社コード
+SELECT SINGLE *
+FROM   t001
+WHERE  bukrs  = i_yk210-bukrs.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'会社コード', i_yk210-bukrs, 'は未登録です'.
+ENDIF.
+*** 事業領域
+SELECT SINGLE *
+FROM   tgsb
+WHERE  gsber  = i_yk210-gsber.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'事業領域', i_yk210-gsber, 'は未登録です'.
+ENDIF.
+*** 品目コード
+SELECT SINGLE *
+FROM   mara
+WHERE  matnr  = i_yk210-matnr.
+IF sy-subrc <> 0.
+IF p_fil2 <> 'X'.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'品目コード', i_yk210-matnr, 'は未登録です'.
+ENDIF.
+ENDIF.
+*** 仕入先品目コード
+SELECT SINGLE *
+FROM   eina
+WHERE  matnr  = i_yk210-matnr
+AND    lifnr  = i_yk210-lifnr
+AND    idnlf  = i_yk210-idnlf.
+IF sy-subrc <> 0.
+IF p_fil2 <> 'X'.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'仕入先品目コード', i_yk210-idnlf, 'は未登録です'.
+ENDIF.
+ENDIF.
+*** 税抜金額
+IF i_yk210-knitxamt IS INITIAL.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'税抜金額が未入力です'.
+ENDIF.
+*** 通貨コード
+SELECT SINGLE waers FROM  lfm1
+INTO   w_waers
+WHERE  lifnr  = i_yk210-lifnr
+AND    ekorg  = i_yk210-ekorg.
+IF sy-subrc <> 0.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'仕入先コード', i_yk210-lifnr, i_yk210-ekorg,
+'は未登録です'.
+ELSEIF w_waers <> i_yk210-waers.
+w_err = 'X'.
+WRITE: / i_yk210-bukrs, i_yk210-ykyear, i_yk210-bildoc,
+'通貨コード', i_yk210-waers,
+'は仕入先の通貨と異なります'.
+ENDIF.
+*** キー情報を保存
+w_bukrs  = i_yk210-bukrs.
+w_ykyear = i_yk210-ykyear.
+w_bildoc = i_yk210-bildoc.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_make_yk220                                             *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_make_yk220.
+* ローカル変数
+DATA w_dbcnt LIKE sy-dbcnt.
+DATA w_knitxamt LIKE yk220-knitxamt.
+DATA w_kntaxamt LIKE yk220-kntaxamt.
+DATA w_knetxamt LIKE yk220-knetxamt.
+DATA w_yk220 LIKE STANDARD TABLE OF yk220 WITH HEADER LINE.
+* データ作成
+SORT i_yk210 BY bukrs ykyear lifnr lifn2 werks ekorg ekgrp
+gsber zfbdt.
+LOOP AT i_yk210.
+MOVE-CORRESPONDING i_yk210 TO w_yk220.
+APPEND w_yk220.
+ENDLOOP.
+LOOP AT w_yk220.
+MOVE-CORRESPONDING w_yk220 TO i_yk220.
+ADD w_yk220-knitxamt TO w_knitxamt.
+ADD w_yk220-kntaxamt TO w_kntaxamt.
+ADD w_yk220-knetxamt TO w_knetxamt.
+AT END OF zfbdt.
+i_yk220-knitxamt = w_knitxamt.
+i_yk220-kntaxamt = w_kntaxamt.
+i_yk220-knetxamt = w_knetxamt.
+APPEND i_yk220.
+CLEAR: w_knitxamt, w_kntaxamt, w_knetxamt.
+ENDAT.
+ENDLOOP.
+* 重複チェック
+LOOP AT i_yk220.
+SELECT SINGLE *
+FROM   yk220
+WHERE  bukrs   = i_yk220-bukrs
+AND    ykyear  = i_yk220-ykyear
+AND    lifnr   = i_yk220-lifnr
+AND    lifn2   = i_yk220-lifn2
+AND    werks   = i_yk220-werks
+AND    ekorg   = i_yk220-ekorg
+AND    ekgrp   = i_yk220-ekgrp
+AND    gsber   = i_yk220-gsber
+AND    zfbdt   = i_yk220-zfbdt.
+IF sy-dbcnt > 0.
+w_err = 'X'.
+WRITE: / '請求合計重複',
+i_yk220-bukrs,
+i_yk220-ykyear,
+i_yk220-lifnr,
+i_yk220-lifn2,
+i_yk220-werks,
+i_yk220-ekorg,
+i_yk220-ekgrp,
+i_yk220-gsber,
+i_yk220-zfbdt.
+ENDIF.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_insert_yk210                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_insert_yk210.
+INSERT yk210 FROM TABLE i_yk210.
+WRITE: / '請求データ　　：', sy-dbcnt.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_insert_yk220                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM f_insert_yk220.
+INSERT yk220 FROM TABLE i_yk220.
+WRITE: / '請求合計データ：', sy-dbcnt.
+ENDFORM.

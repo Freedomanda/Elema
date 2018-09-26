@@ -1,0 +1,2560 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN011600                                                    *
+*&         入金マニュアル消込（売上）                                  *
+*&---------------------------------------------------------------------*
+*&  機能     : 入金予定と、売掛金増減仕訳の引当を行い、
+*&             入金予定に紐付く売掛金明細の消込を行う。
+*&  作成日   : 2012/02/2
+*&  作成者   : S.TAKIKAWA(solfis)
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/03/27 K.KAJISA(SOLFIS)                             *
+*&  変更内容 : インデックス対応                                        *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/04/11 K.FURUYA(SOLFIS)                             *
+*&  変更内容 : 取消チェック内容修正                                    *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/05/30 K.FURUYA(SOLFIS)                             *
+*&  変更内容 : 入力チェック時のカーソル移動追加                        *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/06/15 H.YAMASHITA(SOLFIS)                          *
+*&  変更内容 : SAP標準に準拠し、伝票日付へのシステム日付初期表示を     *
+*&             停止。バリアントにて対応。                              *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/06/22 K.FURUYA(SOLFIS)                             *
+*&  変更内容 : 取消用判別をSAPメモリへエクスポート                     *
+*&---------------------------------------------------------------------*
+REPORT ZN011600
+NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID YN01.
+
+*----------------------------------------------------------------------*
+*  　消込処理共通インクルード
+*----------------------------------------------------------------------*
+INCLUDE :ZN090200.
+*----------------------------------------------------------------------*
+*   構造/テーブル定義
+*----------------------------------------------------------------------*
+* 選択画面用
+TYPES:BEGIN OF TYP_DISPLAY,
+KUNNR       TYPE KNA1-KUNNR,    "得意先
+IZFBDT      TYPE BSID-BUDAT,    "入金予定日
+KINGAKU(7)  TYPE P DECIMALS 2,  "金額
+END   OF TYP_DISPLAY.
+* ZN005データ取得用
+TYPES:BEGIN OF TYP_ZN005_GET,
+IZFBDT      TYPE ZNEIZFBDT,    "入金予定日
+IWRBTR      TYPE ZNEIWRBTR,    "入金予定額
+KUNNR       TYPE YNKUNNR,      "得意先コード
+IMEMO       TYPE ZNEMEMO,      "備考
+CZFBDT      TYPE ZNECZFBDT,    "照合締日
+SEQ         TYPE ZNESEQ,       "ＳＥＱ
+WAERS       TYPE WAERS,        "通貨コード
+END   OF TYP_ZN005_GET.
+* BSIDデータ取得用
+TYPES:BEGIN OF TYP_BSID_GET,
+BUDAT       TYPE BUDAT,        "入金日
+DMBTR       TYPE DMBTR,        "国内通貨額
+WRBTR       TYPE WRBTR,        "伝票通貨額
+KUNNR       TYPE KUNNR,        "得意先コード
+BELNR       TYPE BELNR_D,      "会計伝票番号
+SGTXT       TYPE SGTXT,        "明細テキスト
+BUZEI       TYPE BUZEI,        "会計伝票内の明細番号
+WAERS       TYPE WAERS,        "伝票通貨コード
+SHKZG       TYPE SHKZG,        "借方/貸方フラグ
+GJAHR      TYPE GJAHR,         "会計年度
+END   OF TYP_BSID_GET.
+* 画面9000:入金予定データテーブルコントロール用
+TYPES:BEGIN OF TYP_YOTEI,
+CEL       TYPE CHAR1,          "行選択ボタン
+IZFBDT    TYPE ZNEIZFBDT,      "入金予定日
+IWRBTR    TYPE ZNEIWRBTR,      "入金金額
+KUNNR     TYPE YNKUNNR,        "得意先(支払人)
+IMEMO     TYPE ZNEMEMO,        "備考
+CZFBDT    TYPE ZNECZFBDT,      "照合締日
+SEQ       TYPE ZNESEQ,         "SEQ【非表示】
+END   OF TYP_YOTEI,
+*    テーブルデータ型
+T_TYP_YOTEI   TYPE STANDARD TABLE OF TYP_YOTEI.
+
+* 画面9000:LISTBOX用
+TYPES:BEGIN OF TYP_SHKZG_LIST,
+SHKZG       TYPE SHKZG,        "借方/貸方フラグ
+SHKZG_NAME  TYPE VAL_TEXT,     "固定値の内容説明
+END   OF TYP_SHKZG_LIST,
+T_TYP_SHKZG_LIST  TYPE STANDARD TABLE OF TYP_SHKZG_LIST.
+* 勘定コード入力チェック用
+TYPES:BEGIN OF TYP_SKA1,
+SAKNR       TYPE SAKNR,        "G/L 勘定コード
+MWSKZ       TYPE MWSKZ,        "税カテゴリ
+XMWNO       TYPE XMWNO,        "税コード必須フラグ
+END   OF TYP_SKA1.
+
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+DATA:
+* 入金予定データ取得用
+T_ZN005        TYPE STANDARD TABLE OF TYP_ZN005_GET,
+W_ZN005        TYPE TYP_ZN005_GET,
+* 入金データ取得用
+T_BSID         TYPE STANDARD TABLE OF TYP_BSID_GET,
+* 画面9000:テーブルコントロール
+* 入金予定データ
+T_YOTEI        TYPE T_TYP_YOTEI,
+W_YOTEI        TYPE TYP_YOTEI,
+* 貸借リストボックス
+T_SHKZG_LIST  TYPE T_TYP_SHKZG_LIST, "画面9000:LISTBOX
+W_SHKZG_LIST  TYPE TYP_SHKZG_LIST,
+* 勘定コードチェック用
+T_SKA1        TYPE SORTED TABLE OF TYP_SKA1
+WITH UNIQUE KEY SAKNR,
+* 選択画面用
+W_DISPLAY      TYPE TYP_DISPLAY,
+* レンジテーブル
+T_IWRBTR_R     TYPE RANGE OF ZNEIWRBTR,
+T_DMBTR_R      TYPE RANGE OF DMBTR.
+* 2012/04/11 ADD START
+* 相殺取消の支払予定取得分
+DATA:
+T_TARGET_ZN002 TYPE STANDARD TABLE OF ZN002,
+T_YOTEI_P      TYPE STANDARD TABLE OF ZN002.
+* 2012/04/11 ADD END
+
+*----------------------------------------------------------------------*
+*   変数定義
+*----------------------------------------------------------------------*
+DATA:
+W_KTOPL          TYPE KTOPL,             "勘定コード表
+W_KOKRS          TYPE KOKRS,             "管理領域
+W_SAVE_ERR       TYPE CHAR1,             "保存時チェックエラーフラグ
+W_ANSWER         TYPE CHAR1,             "POPUP 回答
+W_CURRDEC        TYPE CURRDEC,           "小数桁数
+W_IBUDAT         TYPE ZNEIBUDAT,         "取消対象の会計伝票の転記日付
+W_CANC_KBN       TYPE CHAR1,             "取消BDCパターン区分
+* 画面9000用項目
+G_YOTEI_SUM      TYPE YNETXAMT,          "入金予定合計
+G_NYUKIN_SUM     TYPE YNETXAMT,          "入金合計
+G_SAGAKU         TYPE YNETXAMT,          "差額
+*
+G_DEFFERENCE     TYPE YNETXAMT,          "差額
+G_ADJUST         TYPE YNETXAMT,          "調整
+G_TOTAL          TYPE YNETXAMT.          "合計
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_TAXJP      TYPE T005-KALSM VALUE 'TAXJP',
+C_MKOAR_D    TYPE MKOAR      VALUE 'D',    "勘定タイプ：得意先
+* 2012/04/11 ADD START
+C_SOSAI      TYPE C          VALUE 'S',    "相殺
+* 2012/04/11 ADD END
+* POPUP押しボタン
+C_ANSWER_OK  TYPE CHAR1 VALUE '1',
+C_ANSWER_NG  TYPE CHAR1 VALUE '2'.
+
+*----------------------------------------------------------------------*
+*   テーブル定義
+*----------------------------------------------------------------------*
+TABLES:BSID.
+TABLES:SSCRFIELDS.
+*----------------------------------------------------------------------*
+*   選択画面
+*----------------------------------------------------------------------*
+*--- 入金予定データ選択
+SELECTION-SCREEN:BEGIN OF BLOCK BL2 WITH FRAME TITLE TEXT-002.
+SELECT-OPTIONS:P_KUNNR   FOR W_DISPLAY-KUNNR       "得意先コード
+NO INTERVALS.
+SELECT-OPTIONS:P_IZFBDT  FOR W_DISPLAY-IZFBDT.     "入金予定日
+SELECT-OPTIONS:P_AMO_ZN  FOR W_DISPLAY-KINGAKU.    "金額
+SELECTION-SCREEN:END   OF BLOCK BL2.
+
+*--- 入金データ選択
+SELECTION-SCREEN  :BEGIN OF BLOCK BL3 WITH FRAME TITLE TEXT-003.
+SELECT-OPTIONS:P_KUN_BS FOR BSID-KUNNR             "得意先コード
+NO INTERVALS.
+SELECT-OPTIONS:P_BEL_BS FOR BSID-BELNR             "会計伝票番号
+NO INTERVALS.
+SELECT-OPTIONS:P_SGTXT  FOR BSID-SGTXT             "明細テキスト
+NO INTERVALS
+LOWER CASE.
+SELECT-OPTIONS  :P_DAY_BS   FOR BSID-AUGDT.        "入金日
+SELECT-OPTIONS  :P_AMO_BS   FOR W_DISPLAY-KINGAKU. "金額
+SELECTION-SCREEN  :END   OF BLOCK BL3.
+
+*--- 処理オプション
+SELECTION-SCREEN:BEGIN OF BLOCK BL1 WITH FRAME TITLE TEXT-001.
+PARAMETERS    :P_BUKRS   TYPE BUKRS OBLIGATORY      "会社コード
+MEMORY ID BUK.
+* 【消込】
+SELECTION-SCREEN:BEGIN OF LINE,
+POSITION 1.
+PARAMETERS    :P_OFF     RADIOBUTTON GROUP GR1.
+SELECTION-SCREEN:COMMENT 5(4) TEXT-007 FOR FIELD P_OFF.
+SELECTION-SCREEN:END   OF LINE.
+PARAMETERS    :P_BLART   TYPE T003-BLART.           "伝票タイプ
+PARAMETERS    :P_BLDAT   TYPE BLDAT.                "伝票日付
+PARAMETERS    :P_BUDAT   TYPE BUDAT.                "転記日付
+PARAMETERS    :P_TXT     TYPE CHAR20                "伝票ヘッダTXT
+LOWER CASE.
+PARAMETERS    :P_WAERS   TYPE TCURC-WAERS.          "通貨コード
+* 【取消】
+SELECTION-SCREEN:BEGIN OF LINE,
+POSITION 1.
+PARAMETERS    :P_CHANC   RADIOBUTTON GROUP GR1.
+SELECTION-SCREEN:COMMENT 5(4) TEXT-008 FOR FIELD P_CHANC.
+SELECTION-SCREEN:END   OF LINE.
+PARAMETERS    :P_AUG_C   TYPE AUGBL.                "決済伝票
+PARAMETERS    :P_GJA_C   TYPE GJAHR.                "会計年度
+PARAMETERS    :P_BUD_C   TYPE BUDAT.                "転記日付
+SELECTION-SCREEN:END   OF BLOCK BL1.
+
+*--- システム項目
+SELECTION-SCREEN:BEGIN OF BLOCK BL6 WITH FRAME TITLE TEXT-006.
+PARAMETERS:P_VKO    TYPE VKORG OBLIGATORY.         "販売組織
+PARAMETERS:P_VTW    TYPE VTWEG OBLIGATORY.         "流通チャネル
+PARAMETERS:P_SPA    TYPE SPART OBLIGATORY.         "製品部門
+SELECT-OPTIONS     :P_BLA_IN FOR BSID-BLART.       "入金伝票タイプ
+*-雑収入勘定
+PARAMETERS:P_HKONTA  TYPE BSAK-HKONT OBLIGATORY
+MATCHCODE OBJECT SAKO.
+PARAMETERS:P_MWSKZA  TYPE T007A-MWSKZ OBLIGATORY.
+*-雑損失勘定
+PARAMETERS:P_HKONTB  TYPE BSAK-HKONT OBLIGATORY
+MATCHCODE OBJECT SAKO.
+PARAMETERS:P_MWSKZB  TYPE T007A-MWSKZ OBLIGATORY.
+*-原価センタ
+PARAMETERS:P_KOSTL   TYPE BSAK-KOSTL OBLIGATORY
+MATCHCODE OBJECT KOST.
+SELECTION-SCREEN:END   OF BLOCK BL6.
+
+SELECTION-SCREEN FUNCTION KEY 1.
+TYPE-POOLS:SSCR.
+
+*----------------------------------------------------------------------*
+*  INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+*---選択画面初期値設定
+PERFORM INIT_DATA_INPUT.
+*---選択画面の複数入力ボタン制御
+PERFORM BUTTON_CONTROL.
+*---押しボタン追加
+PERFORM BUTTON_ADD.
+*----------------------------------------------------------------------*
+*  AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+
+* 値コピーボタンが押下された場合
+IF SSCRFIELDS-UCOMM  = 'FC01'.
+P_KUN_BS[] = P_KUNNR[].
+P_DAY_BS[] = P_IZFBDT[].
+P_AMO_BS[] = P_AMO_ZN[].
+EXIT.
+ENDIF.
+* 複数入力ボタンが押下された場合はチェックしない
+CHECK SY-UCOMM+0(1) <> '%'.
+*---入力値チェック
+PERFORM F_DATA_CHECK.
+*---【消込】ラジオボタンがONの場合の必須チェック
+IF P_OFF = C_ON.
+*   処理オプション入力値チェック
+PERFORM F_OFF_CHECK.
+*   入金予定データ入力値チェック
+PERFORM F_YOTEI_CHECK.
+*   入金データ入力値チェック
+PERFORM F_NYUKIN_CHECK.
+ENDIF.
+*---【取消】ラジオボタンがONの場合の必須チェック
+IF P_CHANC = C_ON.
+*   処理オプションの入力値チェック
+PERFORM F_CHANC_CHECK.
+ENDIF.
+
+* 共通インクルード用
+W_HKONTA = P_HKONTA.     "雑収勘定
+W_HKONTB = P_HKONTB.     "雑損勘定
+W_MWSKZA = P_MWSKZA.     "雑収税コード
+W_MWSKZB = P_MWSKZB.     "雑損税コード
+W_KOSTL  = P_KOSTL.      "原価センタ(雑損/雑収用)
+W_BLART  = P_BLART.      "伝票タイプ
+W_BLDAT  = P_BLDAT.      "伝票日付
+W_BUDAT  = P_BUDAT.      "転記日付
+W_TXT    = P_TXT.        "伝票ヘッダTXT
+*----------------------------------------------------------------------*
+* START-OF-SELECTION.
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 初期処理
+PERFORM INT_SEC.
+
+*-----【消込】
+IF P_OFF = C_ON.
+*   入金予定データ取得
+PERFORM GET_ZN005.
+*   入金予定データ編集
+PERFORM EDIT_YOTEI.
+*   入金予定データと外部データの金額チェック
+PERFORM ZN005_YN110_CHECK.
+CHECK W_ERR_FLG IS INITIAL.
+*   ZN005ロック
+PERFORM DATA_LOCK.
+CHECK W_ERR_FLG IS INITIAL.
+*   入金/売掛金データ取得
+PERFORM GET_BSID.
+*   入金データ編集
+PERFORM EDIT_BSID.
+*   対象データ無し
+IF  T_YOTEI[]  IS INITIAL
+AND T_NYUKIN[] IS INITIAL.
+MESSAGE S762(YN01).
+EXIT.
+ENDIF.
+*   画面設定
+PERFORM SET_DATA_9000.
+*   次画面へ
+CALL SCREEN 9000.
+*   ZN005ロック解除
+PERFORM DATA_UNLOCK.
+
+*-----【取消】
+ELSE.
+*   取り消し対象データ取得
+PERFORM CANC_DATA_GET.
+CHECK NOT T_TARGET_ZN005[] IS INITIAL.
+*   ZN005ロック
+PERFORM DATA_LOCK.
+* 2012/04/11 ADD START "支払予定ロック
+*   ZN002ロック
+PERFORM DATA_LOCK_P.
+* 2012/04/11 ADD END
+CHECK W_ERR_FLG IS INITIAL.
+* 2012/06/22 ADD START
+* メモリーへPGID退避
+EXPORT SY-REPID
+TO MEMORY
+ID 'ZN01XXXX'.
+* 2012/06/22 ADD END
+*   ＢＤＣ
+CASE W_CANC_KBN.
+WHEN '1'.
+PERFORM CALL_BDC_FBRA.
+PERFORM CALL_BDC_FB08.
+WHEN '2'.
+PERFORM CALL_BDC_FB08.
+WHEN '3'.
+PERFORM CALL_BDC_FBRA.
+WHEN OTHERS.
+ENDCASE.
+
+*   データ更新
+* 2012/03/19 MOD START
+*    PERFORM UPDATE_ZN005 USING SPACE.
+PERFORM UPDATE_ZN005 USING SPACE P_AUG_C P_BUKRS.
+* 2012/03/19 MOD END
+* 2012/04/11 ADD START "支払予定更新
+PERFORM UPDATE_ZN002.
+* 2012/04/11 ADD END
+
+*   ZN005ロック解除
+PERFORM DATA_UNLOCK.
+ENDIF.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_DATA_INPUT
+*&---------------------------------------------------------------------*
+*       選択画面初期値設定
+*----------------------------------------------------------------------*
+FORM INIT_DATA_INPUT.
+
+*** 2012/06/15 DEL START ***
+** 伝票日付 "バリアントで対応
+*  P_BLDAT = SY-DATUM.
+*** 2012/06/15 DEL END ***
+
+* 入金予定日
+P_IZFBDT-SIGN   = 'I'.
+P_IZFBDT-OPTION = 'BT'.
+P_IZFBDT-LOW    = SY-DATUM - 5.
+P_IZFBDT-HIGH   = SY-DATUM + 5.
+APPEND P_IZFBDT.
+
+* 入金日
+P_DAY_BS-SIGN   = 'I'.
+P_DAY_BS-OPTION = 'BT'.
+P_DAY_BS-LOW    = SY-DATUM - 5.
+P_DAY_BS-HIGH   = SY-DATUM + 5.
+APPEND P_DAY_BS.
+
+ENDFORM.                    " INIT_DATA_INPUT
+*&---------------------------------------------------------------------*
+*&      Form  BUTTON_CONTROL
+*&---------------------------------------------------------------------*
+*       選択画面の複数ボタン制御
+*----------------------------------------------------------------------*
+FORM BUTTON_CONTROL.
+DATA:L_WA_RES        TYPE SSCR_RESTRICT,
+L_WA_OPT_LIST   TYPE SSCR_OPT_LIST,
+L_WA_ASS        TYPE SSCR_ASS.
+
+* 単一指定のみ可能
+L_WA_OPT_LIST-NAME       = 'JUST_EQ'.
+L_WA_OPT_LIST-OPTIONS-EQ = 'X'.
+APPEND L_WA_OPT_LIST TO L_WA_RES-OPT_LIST_TAB.
+
+L_WA_ASS-KIND    = 'S'.
+L_WA_ASS-SG_MAIN = 'I'.
+L_WA_ASS-OP_MAIN = 'JUST_EQ'.
+
+* 入金予定データ選択 - 得意先コード
+L_WA_ASS-NAME    = 'P_KUNNR'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 入金データ選択 - 会計伝票番号
+L_WA_ASS-NAME    = 'P_BEL_BS'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 入金データ選択 - 得意先コード
+L_WA_ASS-NAME    = 'P_KUN_BS'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+
+* 単一指定と*入力可能
+L_WA_OPT_LIST-NAME       = 'JUST_EQ2'.
+L_WA_OPT_LIST-OPTIONS-EQ = 'X'.
+L_WA_OPT_LIST-OPTIONS-CP = 'X'.
+APPEND L_WA_OPT_LIST TO L_WA_RES-OPT_LIST_TAB.
+
+L_WA_ASS-KIND    = 'S'.
+L_WA_ASS-SG_MAIN = 'I'.
+L_WA_ASS-OP_MAIN = 'JUST_EQ2'.
+
+* 入金データ選択 - 明細テキスト
+L_WA_ASS-NAME    = 'P_SGTXT'.
+APPEND L_WA_ASS TO L_WA_RES-ASS_TAB.
+* 実行
+CALL FUNCTION 'SELECT_OPTIONS_RESTRICT'
+EXPORTING
+RESTRICTION = L_WA_RES.
+
+ENDFORM.                    " BUTTON_CONTROL
+*&---------------------------------------------------------------------*
+*&      Form  BUTTON_ADD
+*&---------------------------------------------------------------------*
+*       ボタン追加
+*----------------------------------------------------------------------*
+FORM BUTTON_ADD.
+* ボタンのテキスト設定
+MOVE '選択条件コピー' TO SSCRFIELDS-FUNCTXT_01.
+
+ENDFORM.                    " BUTTON_ADD
+*&---------------------------------------------------------------------*
+*&      Form  F_DATA_CHECK
+*&---------------------------------------------------------------------*
+*       選択画面入力チェック
+*----------------------------------------------------------------------*
+FORM F_DATA_CHECK.
+DATA:LW_SUBRC   TYPE SYSUBRC.
+
+* 会社コード入力値チェック
+SELECT SINGLE KTOPL
+INTO W_KTOPL
+FROM T001
+WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC <> 0.
+MESSAGE E750(YN01) WITH P_BUKRS.
+ENDIF.
+*
+SELECT KOKRS
+INTO W_KOKRS
+FROM TKA02
+UP TO 1 ROWS
+WHERE BUKRS = P_BUKRS.
+ENDSELECT.
+
+* 雑収入勘定
+PERFORM CHECK_SKA1 USING P_HKONTA LW_SUBRC.
+IF LW_SUBRC <> 0.
+*   & が、存在しません
+MESSAGE E814(YN01)  WITH TEXT-E12. "雑収入勘定
+ENDIF.
+* 税コード(雑収入勘定)
+PERFORM CHECK_T007A USING P_MWSKZA LW_SUBRC.
+IF LW_SUBRC <> 0.
+*   & が、存在しません
+MESSAGE E814(YN01)  WITH TEXT-E13. "税コード(雑収入勘定)
+ENDIF.
+* 雑損失勘定
+PERFORM CHECK_SKA1 USING P_HKONTB LW_SUBRC.
+IF LW_SUBRC <> 0.
+*   & が、存在しません
+MESSAGE E814(YN01)  WITH TEXT-E14. "雑損失勘定
+ENDIF.
+* 税コード(雑損失勘定)
+PERFORM CHECK_T007A USING P_MWSKZB LW_SUBRC.
+IF LW_SUBRC <> 0.
+*   & が、存在しません
+MESSAGE E814(YN01)  WITH TEXT-E15. "税コード(雑損失勘定)
+ENDIF.
+* 原価センタ
+IF P_OFF = C_ON.
+G_BUDAT = P_BUDAT.
+ELSE.
+G_BUDAT = P_BUD_C.
+ENDIF.
+PERFORM CHECK_CSKS   USING P_KOSTL
+CHANGING LW_SUBRC.
+CLEAR:G_BUDAT.
+IF SY-SUBRC <> 0.
+*   & が、存在しません
+MESSAGE E814(YN01)  WITH TEXT-E16. "原価センタ
+ENDIF.
+
+ENDFORM.                    " F_DATA_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_T007A
+*&---------------------------------------------------------------------*
+FORM CHECK_T007A USING P_MWSKZ P_SUBRC.
+*
+SELECT SINGLE COUNT(*)
+FROM T007A
+WHERE KALSM = C_TAXJP
+AND MWSKZ = P_MWSKZ.
+P_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " CHECK_T007A
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_SKA1
+*&---------------------------------------------------------------------*
+FORM CHECK_SKA1 USING  P_HKONT P_SUBRC.
+*
+SELECT SINGLE COUNT(*)
+FROM SKA1
+WHERE KTOPL = W_KTOPL
+AND SAKNR = P_HKONT.
+P_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " CHECK_SKA1
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_CSKS
+*&---------------------------------------------------------------------*
+FORM CHECK_CSKS USING    P_KOSTL
+CHANGING P_SUBRC.
+CHECK NOT G_BUDAT IS INITIAL.
+SELECT SINGLE COUNT(*)
+FROM CSKS
+WHERE KOKRS  = W_KOKRS
+AND KOSTL  = P_KOSTL
+AND DATBI >= G_BUDAT
+AND DATAB <= G_BUDAT.
+
+P_SUBRC = SY-SUBRC.
+
+ENDFORM.                    " CHECK_CSKS
+*&---------------------------------------------------------------------*
+*&      Form  F_OFF_CHECK
+*&---------------------------------------------------------------------*
+*       【消込】処理の処理オプション項目-選択画面入力値チェック
+*----------------------------------------------------------------------*
+FORM F_OFF_CHECK.
+
+* 伝票タイプの必須チェック
+IF P_BLART IS INITIAL.
+SET CURSOR FIELD 'P_BLART'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E01.
+ENDIF.
+* 伝票日付の必須チェック
+IF P_BLDAT IS INITIAL.
+SET CURSOR FIELD 'P_BLDAT'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E02.
+ENDIF.
+* 転記日付の必須チェック
+IF P_BUDAT IS INITIAL.
+SET CURSOR FIELD 'P_BUDAT'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E03.
+ENDIF.
+* 伝票ヘッダTXTの必須チェック
+IF P_TXT   IS INITIAL.
+SET CURSOR FIELD 'P_TXT'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E04.
+ENDIF.
+* 通貨コードの必須チェック
+IF P_WAERS IS INITIAL.
+SET CURSOR FIELD 'P_WAERS'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E05.
+ENDIF.
+
+* 会計期間のチェック
+PERFORM CHECK_OPEN_PERIOD    USING P_BUDAT
+CHANGING W_YEAR
+W_PERIOD.
+ENDFORM.                    " F_OFF_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_OPEN_PERIOD
+*&---------------------------------------------------------------------*
+*       会計期間オープンチェック
+*----------------------------------------------------------------------*
+*      -->P_DATE     日付
+*----------------------------------------------------------------------*
+FORM CHECK_OPEN_PERIOD USING    P_DATE   TYPE ANY
+CHANGING P_YEAR   TYPE GJAHR
+P_PERIOD TYPE MONAT.
+DATA:LW_DATE   TYPE BUDAT,    "チェックする日付
+LW_MONAT  TYPE FRPER.    "会計期間(属性変更)
+
+* 属性変更
+LW_DATE = P_DATE.
+* 日付の会計年度を取得
+CALL FUNCTION 'BAPI_COMPANYCODE_GET_PERIOD'
+EXPORTING
+COMPANYCODEID       = P_BUKRS
+POSTING_DATE        = LW_DATE
+IMPORTING
+FISCAL_YEAR         = P_YEAR
+FISCAL_PERIOD       = P_PERIOD.
+LW_MONAT = P_PERIOD.
+
+* 会計期間がオープンされているかチェック
+CALL FUNCTION 'FI_PERIOD_CHECK'
+EXPORTING
+I_BUKRS                = P_BUKRS
+I_GJAHR                = P_YEAR
+I_KOART                = C_MKOAR_D
+I_MONAT                = LW_MONAT
+EXCEPTIONS
+ERROR_PERIOD           = 1
+ERROR_PERIOD_ACC       = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+MESSAGE E201(F5) WITH  P_YEAR LW_MONAT SPACE SPACE.
+ENDIF.
+
+ENDFORM.                    " CHECK_OPEN_PERIOD
+*&---------------------------------------------------------------------*
+*&      Form  F_YOTEI_CHECK
+*&---------------------------------------------------------------------*
+*       【消込】処理の入金予定項目-選択画面入値力チェック
+*----------------------------------------------------------------------*
+FORM F_YOTEI_CHECK.
+DATA:LT_WAERS    TYPE STANDARD TABLE OF WAERS,
+LW_WAERS    LIKE LINE OF LT_WAERS,
+LW_CNT      TYPE I,
+LW_ERR_FLG  TYPE CHAR1,     "エラーフラグ
+LW_IWRBTR_R LIKE LINE OF T_IWRBTR_R.
+
+* 得意先コードの必須チェック
+IF P_KUNNR[] IS INITIAL.
+SET CURSOR FIELD 'P_KUNNR-LOW'. "2012/05/30 ADD
+MESSAGE E930(YN01) WITH TEXT-E06 TEXT-E21 SPACE SPACE.
+ENDIF.
+* 入金予定日付の必須チェック
+IF P_IZFBDT[] IS INITIAL.
+SET CURSOR FIELD 'P_IZFBDT-LOW'. "2012/05/30 ADD
+MESSAGE E930(YN01) WITH TEXT-E20 TEXT-E21 SPACE SPACE.
+ENDIF.
+
+* 得意先コードと通貨コードの入力値チェック
+SELECT WAERS
+INTO TABLE LT_WAERS
+FROM KNVV
+WHERE KUNNR IN P_KUNNR
+AND VKORG =  P_VKO
+AND VTWEG =  P_VTW
+AND SPART =  P_SPA.
+
+* 複数通貨コードが取得される場合はエラー
+SORT LT_WAERS.
+DELETE ADJACENT DUPLICATES FROM LT_WAERS COMPARING ALL FIELDS.
+DESCRIBE TABLE LT_WAERS LINES LW_CNT.
+IF LW_CNT > 1.
+MESSAGE E931(YN01) WITH TEXT-E06.
+ENDIF.
+READ TABLE LT_WAERS INTO LW_WAERS INDEX 1.
+* KNVVの通貨コードと選択画面の通貨コードが異なり
+* 入力値が'JPY'以外はエラー
+IF  LW_WAERS <> P_WAERS
+AND P_WAERS  <> C_WAERS_JP.
+MESSAGE E815(YN01) WITH TEXT-E05.
+ENDIF.
+
+* 通貨コードの小数点以下の桁数を取得
+SELECT SINGLE CURRDEC
+INTO W_CURRDEC
+FROM TCURX
+WHERE CURRKEY = P_WAERS.
+* DBに無い場合は2桁
+IF W_CURRDEC IS INITIAL.
+W_CURRDEC = 2.
+ENDIF.
+
+* 金額の入力値チェック
+CLEAR:T_IWRBTR_R.
+LOOP AT P_AMO_ZN.
+*   LOW値のチェック
+PERFORM KINGAKU_CHECK USING P_AMO_ZN-LOW
+CHANGING LW_ERR_FLG
+LW_IWRBTR_R-LOW.
+IF LW_ERR_FLG = C_ON.
+MESSAGE E932(YN01) WITH TEXT-E18 TEXT-E21 SPACE SPACE.
+EXIT.
+ENDIF.
+*   HIGH値のチェック
+PERFORM KINGAKU_CHECK USING P_AMO_ZN-HIGH
+CHANGING LW_ERR_FLG
+LW_IWRBTR_R-HIGH.
+IF LW_ERR_FLG = C_ON.
+MESSAGE E932(YN01) WITH TEXT-E18 TEXT-E21 SPACE SPACE.
+EXIT.
+ENDIF.
+*   チェックokの場合は金額項目レンジテーブルに格納
+LW_IWRBTR_R-SIGN   = P_AMO_ZN-SIGN.
+LW_IWRBTR_R-OPTION = P_AMO_ZN-OPTION.
+APPEND LW_IWRBTR_R TO T_IWRBTR_R.
+CLEAR:LW_IWRBTR_R.
+ENDLOOP.
+
+ENDFORM.                    " F_YOTEI_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  KINGAKU_CHECK
+*&---------------------------------------------------------------------*
+*       選択画面入力金額の入力値チェック
+*----------------------------------------------------------------------*
+*      -->P_AMO_ZN      金額レンジテーブル１レコード
+*      <--P_ERR_FLG     エラーフラグ
+*----------------------------------------------------------------------*
+FORM KINGAKU_CHECK USING    P_AMO_ZN   TYPE ANY
+CHANGING P_ERR_FLG  TYPE CHAR1
+P_AMO_ZN_JPY TYPE ANY.
+DATA:LW_DECIMAL(11)  TYPE P DECIMALS 2,
+LW_AMO_JPY(11)  TYPE P,
+LW_AMO_EX       TYPE BAPICURR_D.
+
+
+CHECK NOT P_AMO_ZN IS INITIAL.
+
+IF P_WAERS = C_WAERS_JP.
+LW_AMO_JPY = P_AMO_ZN * 100.
+LW_AMO_JPY = LW_AMO_JPY / 100.
+LW_DECIMAL = P_AMO_ZN - LW_AMO_JPY.
+IF LW_DECIMAL <> 0.
+P_ERR_FLG = C_ON.
+EXIT.
+ENDIF.
+
+LW_AMO_EX = P_AMO_ZN.
+*   日本円の内部換算
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_INTERNAL'
+EXPORTING
+CURRENCY                   = C_WAERS_JP
+AMOUNT_EXTERNAL            = LW_AMO_EX
+MAX_NUMBER_OF_DIGITS       = 11
+IMPORTING
+AMOUNT_INTERNAL            = P_AMO_ZN_JPY.
+ELSE.
+P_AMO_ZN_JPY = P_AMO_ZN.
+ENDIF.
+
+ENDFORM.                    " KINGAKU_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F_NYUKIN_CHECK
+*&---------------------------------------------------------------------*
+*       【消込】処理の入金項目-選択画面入力値チェック
+*----------------------------------------------------------------------*
+FORM F_NYUKIN_CHECK.
+DATA:LW_ERR_FLG  TYPE CHAR1,     "エラーフラグ
+LW_DMBTR_R  LIKE LINE OF T_DMBTR_R.
+
+* 得意先コード
+IF  P_KUN_BS[] IS INITIAL
+AND P_BEL_BS[] IS INITIAL.
+SET CURSOR FIELD 'P_KUN_BS-LOW'. "2012/05/30 ADD
+MESSAGE E930(YN01) WITH TEXT-E09 TEXT-E22 SPACE SPACE.
+ENDIF.
+* 入金日
+IF P_DAY_BS[] IS INITIAL.
+SET CURSOR FIELD 'P_DAY_BS-LOW'. "2012/05/30 ADD
+MESSAGE E930(YN01) WITH TEXT-E07 TEXT-E22 SPACE SPACE.
+ENDIF.
+
+* 金額の入力値チェック
+CLEAR:T_DMBTR_R.
+LOOP AT P_AMO_BS.
+*   LOW値のチェック
+PERFORM KINGAKU_CHECK   USING P_AMO_BS-LOW
+CHANGING LW_ERR_FLG
+LW_DMBTR_R-LOW.
+IF LW_ERR_FLG = C_ON.
+MESSAGE E932(YN01) WITH TEXT-E18 TEXT-E22 SPACE SPACE.
+EXIT.
+ENDIF.
+*   HIGH値のチェック
+PERFORM KINGAKU_CHECK   USING P_AMO_BS-HIGH
+CHANGING LW_ERR_FLG
+LW_DMBTR_R-HIGH.
+IF LW_ERR_FLG = C_ON.
+MESSAGE E932(YN01) WITH TEXT-E18 TEXT-E22 SPACE SPACE.
+EXIT.
+ENDIF.
+*   チェックokの場合は金額項目レンジテーブルに格納
+LW_DMBTR_R-SIGN   = P_AMO_BS-SIGN.
+LW_DMBTR_R-OPTION = P_AMO_BS-OPTION.
+APPEND LW_DMBTR_R TO T_DMBTR_R.
+CLEAR:LW_DMBTR_R.
+ENDLOOP.
+
+ENDFORM.                    " F_NYUKIN_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F_CHANC_CHECK
+*&---------------------------------------------------------------------*
+*       【取消】処理の処理オプション項目-選択画面入力値チェック
+*----------------------------------------------------------------------*
+FORM F_CHANC_CHECK.
+DATA:LW_PERIOD    TYPE MONAT.
+
+* 決済伝票
+IF P_AUG_C IS INITIAL.
+SET CURSOR FIELD 'P_AUG_C'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E10.
+ENDIF.
+* 会計年度
+IF P_GJA_C IS INITIAL.
+SET CURSOR FIELD 'P_GJA_C'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E11.
+ENDIF.
+* 転記日付
+IF P_BUD_C IS INITIAL.
+SET CURSOR FIELD 'P_BUD_C'. "2012/05/30 ADD
+MESSAGE E901(YN01) WITH TEXT-E03.
+ENDIF.
+* 会計期間のオープンチェック
+PERFORM CHECK_OPEN_PERIOD    USING P_BUD_C
+CHANGING W_YEAR
+LW_PERIOD.
+
+ENDFORM.                    " F_CHANC_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  INT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INT_SEC.
+
+CLEAR:T_ZN005, W_ZN005, T_BSID, T_YOTEI, W_YOTEI, T_NYUKIN, W_NYUKIN,
+T_SHKZG_LIST, W_SHKZG_LIST, T_SKA1, T_TARGET_ZN005,
+
+W_ERR_FLG, W_SAVE_ERR, G_BUKRS, G_BUDAT, G_WAERS,
+G_YOTEI_SUM, G_NYUKIN_SUM, G_SAGAKU,
+G_SAKNR_1, G_WRBTR_1, G_SHKZG_1, G_MWSKZ_1, G_KOSTL_1,
+G_SAKNR_2, G_WRBTR_2, G_SHKZG_2, G_MWSKZ_2, G_KOSTL_2,
+G_SAKNR_3, G_WRBTR_3, G_SHKZG_3, G_MWSKZ_3, G_KOSTL_3,
+G_SAKNR_4, G_WRBTR_4, G_SHKZG_4, G_MWSKZ_4, G_KOSTL_4,
+G_DEFFERENCE, G_ADJUST, G_TOTAL.
+
+* 2012/04/11 ADD START
+CLEAR:T_TARGET_ZN002, T_YOTEI_P.
+* 2012/04/11 ADD END
+
+ENDFORM.                    " INT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN005
+*&---------------------------------------------------------------------*
+*       入金予定データの取得
+*----------------------------------------------------------------------*
+FORM GET_ZN005.
+
+SELECT IZFBDT      "入金予定日
+IWRBTR      "入金予定額
+KUNNR       "得意先コード(支払人)
+IMEMO       "備考
+CZFBDT      "照合締日
+SEQ         "ＳＥＱ
+WAERS       "通貨コード
+INTO TABLE T_ZN005
+FROM ZN005
+WHERE BUKRS  =  P_BUKRS
+AND KUNNR  IN P_KUNNR
+AND IZFBDT IN P_IZFBDT
+AND AUFLG  =  SPACE.
+
+IF SY-SUBRC = 0.
+SORT T_ZN005.
+ENDIF.
+
+ENDFORM.                    " GET_ZN005
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_YOTEI
+*&---------------------------------------------------------------------*
+*       入金予定データ編集
+*----------------------------------------------------------------------*
+FORM EDIT_YOTEI.
+DATA:LW_ZN005       TYPE TYP_ZN005_GET,  "ZN005データ構造
+LW_EXCH_AMOUNT(10) TYPE P DECIMALS 3. "レート換算後
+
+LOOP AT T_ZN005 INTO LW_ZN005.
+CLEAR:W_YOTEI.
+W_YOTEI-IZFBDT =  LW_ZN005-IZFBDT.     "入金予定日
+W_YOTEI-KUNNR  =  LW_ZN005-KUNNR.      "得意先(支払人)
+W_YOTEI-IMEMO  =  LW_ZN005-IMEMO.      "備考
+W_YOTEI-CZFBDT =  LW_ZN005-CZFBDT.     "照合締日
+W_YOTEI-SEQ    =  LW_ZN005-SEQ.        "SEQ【非表示】
+
+*   金額をレート換算する
+IF P_WAERS = LW_ZN005-WAERS.
+W_YOTEI-IWRBTR =  LW_ZN005-IWRBTR.     "入金金額
+ELSE.
+PERFORM GET_EXCH_RATE    USING LW_ZN005-WAERS   "変換前通貨
+LW_ZN005-IWRBTR  "変換前金額
+P_WAERS          "変換後通貨
+CHANGING LW_EXCH_AMOUNT.
+*                                     W_ERR_FLG.
+*     正常にレートが取得できた場合
+W_YOTEI-IWRBTR = LW_EXCH_AMOUNT.
+ENDIF.
+
+*   選択画面の金額に条件に合致している場合、出力対象
+IF W_YOTEI-IWRBTR IN T_IWRBTR_R.
+APPEND W_YOTEI TO T_YOTEI.
+ENDIF.
+
+ENDLOOP.
+
+ENDFORM.                    " EDIT_YOTEI
+*&---------------------------------------------------------------------*
+*&      Form  ZN005_YN110_CHECK
+*&---------------------------------------------------------------------*
+*       入金予定データと外部データの金額チェック
+*----------------------------------------------------------------------*
+FORM ZN005_YN110_CHECK.
+DATA:LT_YOTEI   TYPE T_TYP_YOTEI,    "入金予定データ
+LW_YOTEI   TYPE TYP_YOTEI,
+LT_ZN005   TYPE T_TYP_ZN005,    "入金予定:全
+LW_ZN005   TYPE ZN005,
+LT_YN110   TYPE T_TYP_YN110,    "外部データ:全
+LW_YN110   TYPE YN110,
+LW_SUM_ZN005 TYPE YNETXAMT,     "入金予定金額合算
+LW_SUM_YN110 TYPE YNETXAMT.     "外部データ金額合算
+
+CHECK NOT T_YOTEI[] IS INITIAL.
+* 得意先と照合締日の重複削除
+LT_YOTEI[] = T_YOTEI[].
+SORT LT_YOTEI BY KUNNR CZFBDT.
+DELETE ADJACENT DUPLICATES FROM LT_YOTEI COMPARING KUNNR CZFBDT.
+
+* 入金予定全データ
+SELECT *
+INTO TABLE LT_ZN005
+FROM ZN005
+FOR ALL ENTRIES IN LT_YOTEI
+* 2012/03/27 MOD インデックス対応 START
+*  WHERE BUKRS   = P_BUKRS
+*    AND KUNNR   = LT_YOTEI-KUNNR
+*    AND CZFBDT  = LT_YOTEI-CZFBDT.
+WHERE  BUKRS   = P_BUKRS
+AND  CZFBDT  = LT_YOTEI-CZFBDT
+AND  KUNNR   = LT_YOTEI-KUNNR.
+* 2012/03/27 MOD インデックス対応 END
+* 外部全データ
+SELECT *
+INTO TABLE LT_YN110
+FROM YN110
+FOR ALL ENTRIES IN LT_YOTEI
+WHERE VRFCTON = LT_YOTEI-KUNNR
+AND BUKRS   = P_BUKRS
+AND CZFBDT  = LT_YOTEI-CZFBDT.
+
+* 金額合算
+LOOP AT LT_YOTEI INTO LW_YOTEI.
+CLEAR:LW_SUM_ZN005, LW_SUM_YN110.
+*   入金予定データ金額合算
+LOOP AT LT_ZN005 INTO LW_ZN005
+WHERE KUNNR  = LW_YOTEI-KUNNR
+AND CZFBDT = LW_YOTEI-CZFBDT.
+LW_SUM_ZN005 = LW_SUM_ZN005 + LW_ZN005-IWRBTR.
+ENDLOOP.
+*   外部データ金額合算
+LOOP AT LT_YN110 INTO LW_YN110
+WHERE VRFCTON = LW_YOTEI-KUNNR
+AND CZFBDT  = LW_YOTEI-CZFBDT.
+LW_SUM_YN110 = LW_SUM_YN110 + LW_YN110-KNETXAMT.
+ENDLOOP.
+*   金額不一致の場合はエラー
+IF LW_SUM_ZN005 <> LW_SUM_YN110.
+MESSAGE I933(YN01) WITH LW_YOTEI-KUNNR LW_YOTEI-CZFBDT.
+W_ERR_FLG = C_ON.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+FREE:LT_ZN005, LT_YN110.
+ENDFORM.                    " ZN005_YN110_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  DATA_LOCK
+*&---------------------------------------------------------------------*
+*       ロック処理
+*----------------------------------------------------------------------*
+FORM DATA_LOCK.
+DATA:LT_YOTEI    TYPE T_TYP_YOTEI,
+LW_YOTEI    TYPE TYP_YOTEI,
+LW_MESSAGE  TYPE SYMSGV.
+
+LT_YOTEI[] = T_YOTEI[].
+SORT LT_YOTEI BY KUNNR CZFBDT.
+DELETE ADJACENT DUPLICATES FROM LT_YOTEI COMPARING KUNNR CZFBDT.
+
+LOOP AT LT_YOTEI INTO LW_YOTEI.
+CALL FUNCTION 'ENQUEUE_EZN005'
+EXPORTING
+MODE_ZN005           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = P_BUKRS
+KUNNR                = LW_YOTEI-KUNNR
+CZFBDT               = LW_YOTEI-CZFBDT
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+
+*   ロックエラーが発生している場合
+IF SY-SUBRC <> 0.
+LW_MESSAGE = SY-MSGV1.
+MESSAGE I756(YN01) WITH 'ZN005' LW_MESSAGE.
+W_ERR_FLG = C_ON.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " DATA_LOCK
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSID
+*&---------------------------------------------------------------------*
+*       入金/売掛金データの取得
+*----------------------------------------------------------------------*
+FORM GET_BSID.
+DATA:LW_AUGDT_INIT  TYPE AUGDT.
+
+SELECT BUDAT      "入金日
+DMBTR      "国内通貨額
+WRBTR      "伝票通貨額
+KUNNR      "得意先コード
+BELNR      "会計伝票番号
+SGTXT      "明細テキスト
+BUZEI      "会計伝票内の明細番号
+WAERS      "通貨コード
+SHKZG      "貸借フラグ
+GJAHR      "会計年度
+INTO TABLE T_BSID
+FROM BSID
+WHERE BUKRS = P_BUKRS
+AND KUNNR IN P_KUN_BS
+AND UMSKS = SPACE
+AND UMSKZ = SPACE
+AND AUGDT = LW_AUGDT_INIT
+AND AUGBL = SPACE
+AND BELNR IN P_BEL_BS
+AND BUDAT IN P_DAY_BS
+AND BLART IN P_BLA_IN
+AND SGTXT IN P_SGTXT.
+
+ENDFORM.                    " GET_BSID
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_BSID
+*&---------------------------------------------------------------------*
+*       入金データ編集
+*----------------------------------------------------------------------*
+FORM EDIT_BSID.
+DATA:LW_BSID       TYPE TYP_BSID_GET,    "BSIDデータ構造
+LW_EXCH_AMOUNT(10) TYPE P DECIMALS 3.
+
+LOOP AT T_BSID INTO LW_BSID.
+CLEAR:W_NYUKIN.
+W_NYUKIN-DAY     = LW_BSID-BUDAT.   "入金日
+W_NYUKIN-KUNNR   = LW_BSID-KUNNR.   "得意先コード
+W_NYUKIN-BELNR   = LW_BSID-BELNR.   "会計伝票番号
+W_NYUKIN-SGTXT   = LW_BSID-SGTXT.   "明細テキスト
+W_NYUKIN-GJAHR   = LW_BSID-GJAHR.   "会計年度
+W_NYUKIN-BUZEI   = LW_BSID-BUZEI.   "明細番号
+
+*   伝票通貨と画面通貨コードが一致する場合
+IF P_WAERS = LW_BSID-WAERS.
+W_NYUKIN-KINGAKU =  LW_BSID-WRBTR.  "伝票通貨額
+*   伝票通貨と画面通貨コードが異なる場合
+ELSE.
+PERFORM GET_EXCH_RATE      USING LW_BSID-WAERS
+LW_BSID-WRBTR  "伝票通貨
+P_WAERS
+CHANGING LW_EXCH_AMOUNT.
+*     正常にレートが取得できた場合
+W_NYUKIN-KINGAKU = LW_EXCH_AMOUNT.
+ENDIF.
+
+*   貸借フラグで金額符号設定
+IF LW_BSID-SHKZG = 'S'.    "借方の場合
+W_NYUKIN-KINGAKU = W_NYUKIN-KINGAKU * -1.
+ENDIF.
+
+*   選択画面の金額に条件に合致している場合、出力対象
+IF W_NYUKIN-KINGAKU IN T_DMBTR_R.
+APPEND W_NYUKIN TO T_NYUKIN.
+ENDIF.
+
+ENDLOOP.
+
+ENDFORM.                    " EDIT_BSID
+*&---------------------------------------------------------------------*
+*&      Form  SET_DATA_9000
+*&---------------------------------------------------------------------*
+*       画面9000値設定
+*----------------------------------------------------------------------*
+FORM SET_DATA_9000.
+
+* ヘッダ項目
+G_BUKRS = P_BUKRS.
+G_BUDAT = P_BUDAT.
+G_WAERS = P_WAERS.
+* 差額 = 入金予定計　－　入金計
+G_DEFFERENCE = G_YOTEI_SUM - G_NYUKIN_SUM.
+* 調整
+G_ADJUST = 0.
+* 合計 = 差額-調整
+G_TOTAL = G_DEFFERENCE - G_ADJUST.
+
+ENDFORM.                    " SET_DATA_9000
+*&---------------------------------------------------------------------*
+*&      画面9000:テーブルコントロール制御
+*&---------------------------------------------------------------------*
+* DECLARATION OF TABLECONTROL 'TCL_YOTEI' ITSELF
+CONTROLS: TCL_YOTEI TYPE TABLEVIEW USING SCREEN 9000.
+
+* LINES OF TABLECONTROL 'TCL_YOTEI'
+DATA:     G_TCL_YOTEI_LINES  LIKE SY-LOOPC.
+
+DATA:     OK_CODE LIKE SY-UCOMM.
+
+* OUTPUT MODULE FOR TABLECONTROL 'TCL_YOTEI':
+* GET LINES OF TABLECONTROL
+MODULE TCL_YOTEI_GET_LINES OUTPUT.
+G_TCL_YOTEI_LINES = SY-LOOPC.
+ENDMODULE.
+
+* INPUT MODULE FOR TABLECONTROL 'TCL_YOTEI': MARK TABLE
+MODULE TCL_YOTEI_MARK INPUT.
+MODIFY T_YOTEI
+FROM W_YOTEI
+INDEX TCL_YOTEI-CURRENT_LINE
+TRANSPORTING CEL.
+ENDMODULE.
+
+* INPUT MODULE FOR TABLECONTROL 'TCL_YOTEI': PROCESS USER COMMAND
+MODULE TCL_YOTEI_USER_COMMAND INPUT.
+PERFORM USER_OK_TC USING    'TCL_YOTEI'
+'T_YOTEI'
+'CEL'
+CHANGING OK_CODE.
+ENDMODULE.
+
+*----------------------------------------------------------------------*
+*   INCLUDE TABLECONTROL_FORMS                                         *
+*----------------------------------------------------------------------*
+
+*&---------------------------------------------------------------------*
+*&      Form  USER_OK_TC                                               *
+*&---------------------------------------------------------------------*
+FORM USER_OK_TC USING    P_TC_NAME TYPE DYNFNAM
+P_TABLE_NAME
+P_MARK_NAME
+CHANGING P_OK      LIKE SY-UCOMM.
+
+*-BEGIN OF LOCAL DATA--------------------------------------------------*
+DATA: L_OK              TYPE SY-UCOMM,
+L_OFFSET          TYPE I.
+*-END OF LOCAL DATA----------------------------------------------------*
+
+* Table control specific operations                                    *
+*   evaluate TC name and operations                                    *
+SEARCH P_OK FOR P_TC_NAME.
+IF SY-SUBRC <> 0.
+EXIT.
+ENDIF.
+L_OFFSET = STRLEN( P_TC_NAME ) + 1.
+L_OK = P_OK+L_OFFSET.
+* execute general and TC specific operations                           *
+CASE L_OK.
+WHEN 'INSR'.                      "insert row
+PERFORM FCODE_INSERT_ROW USING    P_TC_NAME
+P_TABLE_NAME.
+CLEAR P_OK.
+
+WHEN 'DELE'.                      "delete row
+PERFORM FCODE_DELETE_ROW USING    P_TC_NAME
+P_TABLE_NAME
+P_MARK_NAME.
+CLEAR P_OK.
+
+WHEN 'P--' OR                     "top of list
+'P-'  OR                     "previous page
+'P+'  OR                     "next page
+'P++'.                       "bottom of list
+PERFORM COMPUTE_SCROLLING_IN_TC USING P_TC_NAME
+L_OK.
+CLEAR P_OK.
+*     WHEN 'L--'.                       "total left
+*       PERFORM FCODE_TOTAL_LEFT USING P_TC_NAME.
+*
+*     WHEN 'L-'.                        "column left
+*       PERFORM FCODE_COLUMN_LEFT USING P_TC_NAME.
+*
+*     WHEN 'R+'.                        "column right
+*       PERFORM FCODE_COLUMN_RIGHT USING P_TC_NAME.
+*
+*     WHEN 'R++'.                       "total right
+*       PERFORM FCODE_TOTAL_RIGHT USING P_TC_NAME.
+*
+WHEN 'MARK'.                      "mark all filled lines
+PERFORM FCODE_TC_MARK_LINES USING P_TC_NAME
+P_TABLE_NAME
+P_MARK_NAME   .
+CLEAR P_OK.
+
+WHEN 'DMRK'.                      "demark all filled lines
+PERFORM FCODE_TC_DEMARK_LINES USING P_TC_NAME
+P_TABLE_NAME
+P_MARK_NAME .
+CLEAR P_OK.
+
+*     WHEN 'SASCEND'   OR
+*          'SDESCEND'.                  "sort column
+*       PERFORM FCODE_SORT_TC USING P_TC_NAME
+*                                   l_ok.
+
+ENDCASE.
+
+ENDFORM.                              " USER_OK_TC
+*&---------------------------------------------------------------------*
+*&      Form  FCODE_INSERT_ROW                                         *
+*&---------------------------------------------------------------------*
+FORM FCODE_INSERT_ROW
+USING    P_TC_NAME           TYPE DYNFNAM
+P_TABLE_NAME             .
+
+*-BEGIN OF LOCAL DATA--------------------------------------------------*
+DATA L_LINES_NAME       LIKE FELD-NAME.
+DATA L_SELLINE          LIKE SY-STEPL.
+DATA L_LASTLINE         TYPE I.
+DATA L_LINE             TYPE I.
+DATA L_TABLE_NAME       LIKE FELD-NAME.
+FIELD-SYMBOLS <TC>                 TYPE CXTAB_CONTROL.
+FIELD-SYMBOLS <TABLE>              TYPE STANDARD TABLE.
+FIELD-SYMBOLS <LINES>              TYPE I.
+*-END OF LOCAL DATA----------------------------------------------------*
+
+ASSIGN (P_TC_NAME) TO <TC>.
+
+* get the table, which belongs to the tc                               *
+CONCATENATE P_TABLE_NAME '[]' INTO L_TABLE_NAME. "table body
+ASSIGN (L_TABLE_NAME) TO <TABLE>.                "not headerline
+
+* get looplines of TableControl
+CONCATENATE 'G_' P_TC_NAME '_LINES' INTO L_LINES_NAME.
+ASSIGN (L_LINES_NAME) TO <LINES>.
+
+* get current line
+GET CURSOR LINE L_SELLINE.
+IF SY-SUBRC <> 0.                   " append line to table
+L_SELLINE = <TC>-LINES + 1.
+*   set top line and new cursor line                                   *
+IF L_SELLINE > <LINES>.
+<TC>-TOP_LINE = L_SELLINE - <LINES> + 1 .
+L_LINE = 1.
+ELSE.
+<TC>-TOP_LINE = 1.
+L_LINE = L_SELLINE.
+ENDIF.
+ELSE.                               " insert line into table
+L_SELLINE = <TC>-TOP_LINE + L_SELLINE - 1.
+*   set top line and new cursor line                                   *
+L_LASTLINE = L_SELLINE + <LINES> - 1.
+IF L_LASTLINE <= <TC>-LINES.
+<TC>-TOP_LINE = L_SELLINE.
+L_LINE = 1.
+ELSEIF <LINES> > <TC>-LINES.
+<TC>-TOP_LINE = 1.
+L_LINE = L_SELLINE.
+ELSE.
+<TC>-TOP_LINE = <TC>-LINES - <LINES> + 2 .
+L_LINE = L_SELLINE - <TC>-TOP_LINE + 1.
+ENDIF.
+ENDIF.
+* insert initial line
+INSERT INITIAL LINE INTO <TABLE> INDEX L_SELLINE.
+<TC>-LINES = <TC>-LINES + 1.
+* set cursor
+SET CURSOR LINE L_LINE.
+
+ENDFORM.                              " FCODE_INSERT_ROW
+*&---------------------------------------------------------------------*
+*&      Form  FCODE_DELETE_ROW                                         *
+*&---------------------------------------------------------------------*
+FORM FCODE_DELETE_ROW
+USING    P_TC_NAME           TYPE DYNFNAM
+P_TABLE_NAME
+P_MARK_NAME   .
+
+*-BEGIN OF LOCAL DATA--------------------------------------------------*
+DATA L_TABLE_NAME       LIKE FELD-NAME.
+
+FIELD-SYMBOLS <TC>         TYPE CXTAB_CONTROL.
+FIELD-SYMBOLS <TABLE>      TYPE STANDARD TABLE.
+FIELD-SYMBOLS <WA>.
+FIELD-SYMBOLS <MARK_FIELD>.
+*-END OF LOCAL DATA----------------------------------------------------*
+
+ASSIGN (P_TC_NAME) TO <TC>.
+
+* get the table, which belongs to the tc                               *
+CONCATENATE P_TABLE_NAME '[]' INTO L_TABLE_NAME. "table body
+ASSIGN (L_TABLE_NAME) TO <TABLE>.                "not headerline
+
+* delete marked lines                                                  *
+DESCRIBE TABLE <TABLE> LINES <TC>-LINES.
+
+LOOP AT <TABLE> ASSIGNING <WA>.
+
+*   access to the component 'FLAG' of the table header                 *
+ASSIGN COMPONENT P_MARK_NAME OF STRUCTURE <WA> TO <MARK_FIELD>.
+
+IF <MARK_FIELD> = 'X'.
+DELETE <TABLE> INDEX SYST-TABIX.
+IF SY-SUBRC = 0.
+<TC>-LINES = <TC>-LINES - 1.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                              " FCODE_DELETE_ROW
+
+*&---------------------------------------------------------------------*
+*&      Form  COMPUTE_SCROLLING_IN_TC
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_TC_NAME  name of tablecontrol
+*      -->P_OK       ok code
+*----------------------------------------------------------------------*
+FORM COMPUTE_SCROLLING_IN_TC USING    P_TC_NAME
+P_OK.
+*-BEGIN OF LOCAL DATA--------------------------------------------------*
+DATA L_TC_NEW_TOP_LINE     TYPE I.
+DATA L_TC_NAME             LIKE FELD-NAME.
+DATA L_TC_LINES_NAME       LIKE FELD-NAME.
+DATA L_TC_FIELD_NAME       LIKE FELD-NAME.
+
+FIELD-SYMBOLS <TC>         TYPE CXTAB_CONTROL.
+FIELD-SYMBOLS <LINES>      TYPE I.
+*-END OF LOCAL DATA----------------------------------------------------*
+
+ASSIGN (P_TC_NAME) TO <TC>.
+* get looplines of TableControl
+CONCATENATE 'G_' P_TC_NAME '_LINES' INTO L_TC_LINES_NAME.
+ASSIGN (L_TC_LINES_NAME) TO <LINES>.
+
+
+* is no line filled?                                                   *
+IF <TC>-LINES = 0.
+*   yes, ...                                                           *
+L_TC_NEW_TOP_LINE = 1.
+ELSE.
+*   no, ...                                                            *
+CALL FUNCTION 'SCROLLING_IN_TABLE'
+EXPORTING
+ENTRY_ACT             = <TC>-TOP_LINE
+ENTRY_FROM            = 1
+ENTRY_TO              = <TC>-LINES
+LAST_PAGE_FULL        = 'X'
+LOOPS                 = <LINES>
+OK_CODE               = P_OK
+OVERLAPPING           = 'X'
+IMPORTING
+ENTRY_NEW             = L_TC_NEW_TOP_LINE
+EXCEPTIONS
+NO_ENTRY_OR_PAGE_ACT  = 01
+NO_ENTRY_TO           = 02
+NO_OK_CODE_OR_PAGE_GO = 03
+OTHERS                = 99.
+ENDIF.
+
+* get actual tc and column                                             *
+GET CURSOR FIELD L_TC_FIELD_NAME
+AREA  L_TC_NAME.
+
+IF SYST-SUBRC = 0.
+IF L_TC_NAME = P_TC_NAME.
+*     set actual column                                                *
+SET CURSOR FIELD L_TC_FIELD_NAME LINE 1.
+ENDIF.
+ENDIF.
+
+* set the new top line                                                 *
+<TC>-TOP_LINE = L_TC_NEW_TOP_LINE.
+
+
+ENDFORM.                              " COMPUTE_SCROLLING_IN_TC
+*&---------------------------------------------------------------------*
+*&      Form  FCODE_TC_MARK_LINES
+*&---------------------------------------------------------------------*
+*       marks all TableControl lines
+*----------------------------------------------------------------------*
+*      -->P_TC_NAME  name of tablecontrol
+*----------------------------------------------------------------------*
+FORM FCODE_TC_MARK_LINES USING P_TC_NAME
+P_TABLE_NAME
+P_MARK_NAME.
+*-BEGIN OF LOCAL DATA--------------------------------------------------*
+DATA L_TABLE_NAME       LIKE FELD-NAME.
+
+FIELD-SYMBOLS <TC>         TYPE CXTAB_CONTROL.
+FIELD-SYMBOLS <TABLE>      TYPE STANDARD TABLE.
+FIELD-SYMBOLS <WA>.
+FIELD-SYMBOLS <MARK_FIELD>.
+*-END OF LOCAL DATA----------------------------------------------------*
+
+ASSIGN (P_TC_NAME) TO <TC>.
+
+* get the table, which belongs to the tc                               *
+CONCATENATE P_TABLE_NAME '[]' INTO L_TABLE_NAME. "table body
+ASSIGN (L_TABLE_NAME) TO <TABLE>.                "not headerline
+
+* mark all filled lines                                                *
+LOOP AT <TABLE> ASSIGNING <WA>.
+
+*   access to the component 'FLAG' of the table header                 *
+ASSIGN COMPONENT P_MARK_NAME OF STRUCTURE <WA> TO <MARK_FIELD>.
+
+<MARK_FIELD> = 'X'.
+ENDLOOP.
+ENDFORM.                                          "fcode_tc_mark_lines
+*&---------------------------------------------------------------------*
+*&      Form  FCODE_TC_DEMARK_LINES
+*&---------------------------------------------------------------------*
+*       demarks all TableControl lines
+*----------------------------------------------------------------------*
+*      -->P_TC_NAME  name of tablecontrol
+*----------------------------------------------------------------------*
+FORM FCODE_TC_DEMARK_LINES USING P_TC_NAME
+P_TABLE_NAME
+P_MARK_NAME .
+*-BEGIN OF LOCAL DATA--------------------------------------------------*
+DATA L_TABLE_NAME       LIKE FELD-NAME.
+
+FIELD-SYMBOLS <TC>         TYPE CXTAB_CONTROL.
+FIELD-SYMBOLS <TABLE>      TYPE STANDARD TABLE.
+FIELD-SYMBOLS <WA>.
+FIELD-SYMBOLS <MARK_FIELD>.
+*-END OF LOCAL DATA----------------------------------------------------*
+
+ASSIGN (P_TC_NAME) TO <TC>.
+
+* get the table, which belongs to the tc                               *
+CONCATENATE P_TABLE_NAME '[]' INTO L_TABLE_NAME. "table body
+ASSIGN (L_TABLE_NAME) TO <TABLE>.                "not headerline
+
+* demark all filled lines                                              *
+LOOP AT <TABLE> ASSIGNING <WA>.
+
+*   access to the component 'FLAG' of the table header                 *
+ASSIGN COMPONENT P_MARK_NAME OF STRUCTURE <WA> TO <MARK_FIELD>.
+
+<MARK_FIELD> = SPACE.
+ENDLOOP.
+ENDFORM.                                          "fcode_tc_mark_lines
+
+* DECLARATION OF TABLECONTROL 'TCL_NYUKIN' ITSELF
+CONTROLS: TCL_NYUKIN TYPE TABLEVIEW USING SCREEN 9000.
+
+* LINES OF TABLECONTROL 'TCL_NYUKIN'
+DATA:     G_TCL_NYUKIN_LINES  LIKE SY-LOOPC.
+
+* OUTPUT MODULE FOR TABLECONTROL 'TCL_NYUKIN':
+* GET LINES OF TABLECONTROL
+MODULE TCL_NYUKIN_GET_LINES OUTPUT.
+G_TCL_NYUKIN_LINES = SY-LOOPC.
+ENDMODULE.
+
+* INPUT MODULE FOR TABLECONTROL 'TCL_NYUKIN': MARK TABLE
+MODULE TCL_NYUKIN_MARK INPUT.
+MODIFY T_NYUKIN
+FROM W_NYUKIN
+INDEX TCL_NYUKIN-CURRENT_LINE
+TRANSPORTING CEL.
+ENDMODULE.
+
+* INPUT MODULE FOR TABLECONTROL 'TCL_NYUKIN': PROCESS USER COMMAND
+MODULE TCL_NYUKIN_USER_COMMAND INPUT.
+PERFORM USER_OK_TC USING    'TCL_NYUKIN'
+'T_NYUKIN'
+'CEL'
+CHANGING OK_CODE.
+ENDMODULE.
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_9000  OUTPUT
+*&---------------------------------------------------------------------*
+*       画面9000【PBO】
+*----------------------------------------------------------------------*
+MODULE STATUS_9000 OUTPUT.
+
+SET PF-STATUS 'S_9000'.
+SET TITLEBAR  'T_9000'.
+
+ENDMODULE.                 " STATUS_9000  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  EXIT_COMMAND_9000  INPUT
+*&---------------------------------------------------------------------*
+*       EXITコマンド
+*----------------------------------------------------------------------*
+MODULE EXIT_COMMAND_9000 INPUT.
+
+CASE OK_CODE.
+*----- 前画面/キャンセルボタン押下時
+WHEN 'BACK'
+OR 'CANC'.
+*     終了確認のポップアップ表示
+PERFORM CALL_POPUP    USING TEXT-009   "MESSAGE
+SPACE      "POPUP TITLE
+CHANGING W_ANSWER.
+*     "はい"の場合はロック解除し、前画面に戻る
+IF W_ANSWER = C_ANSWER_OK.
+LEAVE TO SCREEN 0.
+ENDIF.
+*----- 中止ボタン押下時
+WHEN 'EXIT'.
+*     終了確認のポップアップ表示
+PERFORM CALL_POPUP    USING TEXT-009   "MESSAGE
+SPACE      "POPUP TITLE
+CHANGING W_ANSWER.
+*     "はい"の場合はロック解除し、ＰＧ終了
+IF W_ANSWER = C_ANSWER_OK.
+PERFORM DATA_UNLOCK.  "ロック解除
+LEAVE PROGRAM.        "PG終了
+ENDIF.
+ENDCASE.
+
+ENDMODULE.                 " EXIT_COMMAND_9000  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  CALL_POPUP
+*&---------------------------------------------------------------------*
+*       ポップアップ表示
+*----------------------------------------------------------------------*
+*      -->P_TEXT_001      MESSAGE
+*      -->P_TEXT_002      POPUP TEXT
+*      <--P_LW_ANSWER     回答
+*----------------------------------------------------------------------*
+FORM CALL_POPUP USING     P_TEXT_001   TYPE ANY
+P_TEXT_002   TYPE ANY
+CHANGING  P_ANSWER     TYPE CHAR1.
+CLEAR:P_ANSWER.
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+*     TITLEBAR                    = P_TEXT_002
+TEXT_QUESTION               = P_TEXT_001
+DEFAULT_BUTTON              = C_ANSWER_NG
+DISPLAY_CANCEL_BUTTON       = SPACE
+IMPORTING
+ANSWER                      = P_ANSWER
+EXCEPTIONS
+TEXT_NOT_FOUND              = 1
+OTHERS                      = 2.
+
+IF SY-SUBRC <> 0.
+CLEAR:P_ANSWER.
+ENDIF.
+
+ENDFORM.                    " CALL_POPUP
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_9000  INPUT
+*&---------------------------------------------------------------------*
+*       ユーザコマンド
+*----------------------------------------------------------------------*
+MODULE USER_COMMAND_9000 INPUT.
+DATA:LW_OK_CODE   TYPE SYUCOMM.
+
+LW_OK_CODE = OK_CODE.
+CLEAR:OK_CODE.
+
+IF LW_OK_CODE = 'SAVE'.
+*   保存前チェック
+PERFORM SAVE_CHECK.
+*   消込対象の入金予定データ取得処理
+PERFORM GET_TARGET_ZN005.
+*   消込処理
+PERFORM CLEAR_DOCUMENT.
+*   選択画面に戻る
+LEAVE TO SCREEN 0.
+ENDIF.
+
+ENDMODULE.                 " USER_COMMAND_9000  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  MWSKZ_HELP_1  INPUT
+*&---------------------------------------------------------------------*
+*       税コード検索ヘルプ
+*----------------------------------------------------------------------*
+MODULE MWSKZ_HELP_1 INPUT.
+PERFORM CALL_F4_MWSKZ CHANGING G_MWSKZ_1.
+ENDMODULE.                 " MWSKZ_HELP_1  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  MWSKZ_HELP_2  INPUT
+*&---------------------------------------------------------------------*
+*       税コード検索ヘルプ
+*----------------------------------------------------------------------*
+MODULE MWSKZ_HELP_2 INPUT.
+PERFORM CALL_F4_MWSKZ CHANGING G_MWSKZ_2.
+ENDMODULE.                 " MWSKZ_HELP_2  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  MWSKZ_HELP_3  INPUT
+*&---------------------------------------------------------------------*
+*       税コード検索ヘルプ
+*----------------------------------------------------------------------*
+MODULE MWSKZ_HELP_3 INPUT.
+PERFORM CALL_F4_MWSKZ CHANGING G_MWSKZ_3.
+ENDMODULE.                 " MWSKZ_HELP_3  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  MWSKZ_HELP_4  INPUT
+*&---------------------------------------------------------------------*
+*       税コード検索ヘルプ
+*----------------------------------------------------------------------*
+MODULE MWSKZ_HELP_4 INPUT.
+PERFORM CALL_F4_MWSKZ CHANGING G_MWSKZ_4.
+ENDMODULE.                 " MWSKZ_HELP_4  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  CALL_F4_MWSKZ
+*&---------------------------------------------------------------------*
+*       税コード検索ヘルプ
+*----------------------------------------------------------------------*
+*      <--P_G_MWSKZ     画面項目
+*----------------------------------------------------------------------*
+FORM CALL_F4_MWSKZ CHANGING P_G_MWSKZ.
+
+DATA:LW_MWSKZ   TYPE MWSKZ.
+CALL FUNCTION 'FI_F4_MWSKZ'
+EXPORTING
+I_KALSM       = 'TAXJP'
+I_STBUK       = P_BUKRS
+*     I_XSHOW       = ' '
+I_LSTML       = SPACE
+*     I_CONCT       =
+I_GENER       = 0
+*     I_GLVOR       =
+IMPORTING
+E_MWSKZ       = LW_MWSKZ.
+P_G_MWSKZ = LW_MWSKZ.
+
+ENDFORM.                    " CALL_F4_MWSKZ
+*&---------------------------------------------------------------------*
+*&      Module  SHKZG_HELP_1  INPUT
+*&---------------------------------------------------------------------*
+*       貸借リストボックス表示
+*----------------------------------------------------------------------*
+MODULE SHKZG_HELP_1 INPUT.
+PERFORM CALL_F4_SHKZG CHANGING G_SHKZG_1.
+ENDMODULE.                 " SHKZG_HELP_1  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  SHKZG_HELP_2  INPUT
+*&---------------------------------------------------------------------*
+*       貸借リストボックス表示
+*----------------------------------------------------------------------*
+MODULE SHKZG_HELP_2 INPUT.
+PERFORM CALL_F4_SHKZG CHANGING G_SHKZG_2.
+ENDMODULE.                 " SHKZG_HELP_2  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  SHKZG_HELP_3  INPUT
+*&---------------------------------------------------------------------*
+*       貸借リストボックス表示
+*----------------------------------------------------------------------*
+MODULE SHKZG_HELP_3 INPUT.
+PERFORM CALL_F4_SHKZG CHANGING G_SHKZG_3.
+ENDMODULE.                 " SHKZG_HELP_3  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  SHKZG_HELP_4  INPUT
+*&---------------------------------------------------------------------*
+*       貸借リストボックス表示
+*----------------------------------------------------------------------*
+MODULE SHKZG_HELP_4 INPUT.
+PERFORM CALL_F4_SHKZG CHANGING G_SHKZG_4.
+ENDMODULE.                 " SHKZG_HELP_4  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  CALL_F4_SHKZG
+*&---------------------------------------------------------------------*
+*       貸借検索ヘルプ
+*----------------------------------------------------------------------*
+*      <--P_G_SHKZG     画面項目
+*----------------------------------------------------------------------*
+FORM CALL_F4_SHKZG CHANGING P_G_SHKZG.
+DATA:LT_VAL    TYPE STANDARD TABLE OF DDSHRETVAL,
+LW_VAL    TYPE DDSHRETVAL.
+
+IF T_SHKZG_LIST[] IS INITIAL.
+SELECT DOMVALUE_L
+DDTEXT
+INTO TABLE T_SHKZG_LIST
+FROM DD07T
+WHERE DOMNAME = 'SHKZG'
+AND DDLANGUAGE = SY-LANGU.
+ENDIF.
+
+CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+EXPORTING
+RETFIELD               = 'SHKZG'
+VALUE_ORG              = 'S'
+TABLES
+VALUE_TAB              = T_SHKZG_LIST
+RETURN_TAB             = LT_VAL
+EXCEPTIONS
+PARAMETER_ERROR        = 1
+NO_VALUES_FOUND        = 2
+OTHERS                 = 3.
+
+READ TABLE LT_VAL INTO LW_VAL INDEX 1.
+P_G_SHKZG = LW_VAL-FIELDVAL.
+
+ENDFORM.                    " CALL_F4_SHKZG
+*&---------------------------------------------------------------------*
+*&      Module  SAKNR_INPUT_CHECK1  INPUT
+*&---------------------------------------------------------------------*
+*       差額転記データ入力チェック 1行目
+*----------------------------------------------------------------------*
+MODULE SAKNR_INPUT_CHECK1 INPUT.
+
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_1
+G_WRBTR_1
+G_SHKZG_1
+G_MWSKZ_1
+G_KOSTL_1.
+
+ENDMODULE.                 " SAKNR_INPUT_CHECK1  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  SAKNR_INPUT_CHECK2  INPUT
+*&---------------------------------------------------------------------*
+*       差額転記データ入力チェック 2行目
+*----------------------------------------------------------------------*
+MODULE SAKNR_INPUT_CHECK2 INPUT.
+
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_2
+G_WRBTR_2
+G_SHKZG_2
+G_MWSKZ_2
+G_KOSTL_2.
+
+ENDMODULE.                 " SAKNR_INPUT_CHECK2  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  SAKNR_INPUT_CHECK3  INPUT
+*&---------------------------------------------------------------------*
+*       差額転記データ入力チェック 3行目
+*----------------------------------------------------------------------*
+MODULE SAKNR_INPUT_CHECK3 INPUT.
+
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_3
+G_WRBTR_3
+G_SHKZG_3
+G_MWSKZ_3
+G_KOSTL_3.
+
+ENDMODULE.                 " SAKNR_INPUT_CHECK3  INPUT
+*&---------------------------------------------------------------------*
+*&      Module  SAKNR_INPUT_CHECK4  INPUT
+*&---------------------------------------------------------------------*
+*       差額転記データ入力チェック 4行目
+*----------------------------------------------------------------------*
+MODULE SAKNR_INPUT_CHECK4 INPUT.
+
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_4
+G_WRBTR_4
+G_SHKZG_4
+G_MWSKZ_4
+G_KOSTL_4.
+
+ENDMODULE.                 " SAKNR_INPUT_CHECK4  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  SAKNR_INPUT_CHECK
+*&---------------------------------------------------------------------*
+*       差額転記データ入力チェック
+*----------------------------------------------------------------------*
+*      -->P_SAKNR  勘定コード
+*      -->P_WRBTR  金額
+*      -->P_SHKZG  貸借
+*      -->P_MWSKZ  税コード
+*      -->P_KOSTL  原価センタ
+*----------------------------------------------------------------------*
+FORM SAKNR_INPUT_CHECK USING    P_SAKNR  TYPE SAKNR
+P_WRBTR  TYPE WRBTR
+P_SHKZG  TYPE SHKZG
+P_MWSKZ  TYPE MWSKZ
+P_KOSTL  TYPE KOSTL.
+DATA:LW_SKA1      TYPE TYP_SKA1,
+LW_ERR_FLG   TYPE CHAR1,     "エラーフラグ
+LW_MESSAGE   TYPE CHAR50,    "エラーメッセージ編集
+LW_SUBRC     TYPE SY-SUBRC.
+
+* すべての項目が初期値の場合は処理対象外
+IF  P_SAKNR IS INITIAL
+AND P_WRBTR IS INITIAL
+AND P_SHKZG IS INITIAL
+AND P_MWSKZ IS INITIAL
+AND P_KOSTL IS INITIAL.
+EXIT.
+ENDIF.
+
+* 必須チェック
+IF P_SAKNR IS INITIAL.
+MESSAGE E901(YN01) WITH TEXT-E17.
+ENDIF.
+IF P_WRBTR IS INITIAL.
+MESSAGE E901(YN01) WITH TEXT-E18.
+ENDIF.
+IF P_SHKZG IS INITIAL.
+MESSAGE E901(YN01) WITH TEXT-E19.
+ENDIF.
+IF P_KOSTL IS INITIAL.
+MESSAGE E901(YN01) WITH TEXT-E16.
+ENDIF.
+
+* 勘定コードマスタチェック
+PERFORM GET_CSKB    USING P_SAKNR
+CHANGING LW_ERR_FLG.
+IF LW_ERR_FLG = C_ON.
+MESSAGE E934(YN01) WITH  TEXT-E23 P_SAKNR.
+ENDIF.
+
+* 勘定コードマスタデータ取得
+PERFORM GET_SKA1     USING P_SAKNR
+CHANGING LW_SKA1.
+
+* 勘定コードと税コードの組み合わせチェック
+* 税カテゴリが初期値の場合は税コード入力不可
+IF LW_SKA1-MWSKZ IS INITIAL.
+IF NOT P_MWSKZ IS INITIAL.
+CONCATENATE TEXT-E23 P_MWSKZ TEXT-E24
+INTO LW_MESSAGE.
+MESSAGE E934(YN01) WITH LW_MESSAGE TEXT-E25.
+ENDIF.
+
+* 税カテゴリに入力がある場合
+ELSE.
+*   税コード必須なしフラグがOFFの場合は税コード必須
+IF LW_SKA1-XMWNO IS INITIAL.
+IF P_MWSKZ IS INITIAL.
+MESSAGE E901(YN01) WITH '税コード'.
+ENDIF.
+ENDIF.
+ENDIF.
+
+* 税カテゴリと税コードの組み合わせチェック
+IF NOT P_MWSKZ IS INITIAL.
+CASE LW_SKA1-MWSKZ.
+WHEN '+'.
+IF P_MWSKZ+0(1) <> 'A'.
+MESSAGE E999(YN01) WITH '税コードはA*を入力してください'.
+ENDIF.
+WHEN '-'.
+IF P_MWSKZ+0(1) <> 'V'.
+MESSAGE E999(YN01) WITH '税コードはV*を入力してください'.
+ENDIF.
+WHEN '*'.
+"すべてｏｋ
+WHEN OTHERS.
+IF LW_SKA1-MWSKZ <> P_MWSKZ.
+MESSAGE E999(YN01) WITH '税コードは'
+LW_SKA1-MWSKZ
+'を入力してください'.
+ENDIF.
+ENDCASE.
+ENDIF.
+
+* 原価センタのチェック
+PERFORM CHECK_CSKS USING P_KOSTL
+CHANGING LW_SUBRC.
+IF LW_SUBRC <> 0.
+WRITE P_BUDAT TO LW_MESSAGE.
+MESSAGE E222(KI) WITH P_BUKRS
+P_KOSTL
+LW_MESSAGE.
+
+ENDIF.
+ENDFORM.                    " SAKNR_INPUT_CHECK
+*&---------------------------------------------------------------------*
+*&      Module  KINGAKU_SUM  INPUT
+*&---------------------------------------------------------------------*
+*       金額合計
+*----------------------------------------------------------------------*
+MODULE KINGAKU_SUM INPUT.
+
+PERFORM KINGAKU_SUM.
+
+ENDMODULE.                 " KINGAKU_SUM  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  KINGAKU_SUM
+*&---------------------------------------------------------------------*
+*       金額合計
+*----------------------------------------------------------------------*
+FORM KINGAKU_SUM.
+DATA:LW_YOTEI  TYPE TYP_YOTEI,
+LW_NYUKIN TYPE TYP_NYUKIN.
+
+CLEAR:G_DEFFERENCE, G_ADJUST, G_TOTAL,
+G_YOTEI_SUM, G_NYUKIN_SUM.
+
+* 入金予定データの行選択データの金額合算
+LOOP AT T_YOTEI INTO LW_YOTEI
+WHERE CEL = C_ON.
+G_YOTEI_SUM = G_YOTEI_SUM + LW_YOTEI-IWRBTR .
+ENDLOOP.
+* 入金データの行選択データの金額合算
+LOOP AT T_NYUKIN INTO LW_NYUKIN
+WHERE CEL = C_ON.
+G_NYUKIN_SUM = G_NYUKIN_SUM + LW_NYUKIN-KINGAKU.
+ENDLOOP.
+
+* 差額
+G_DEFFERENCE = G_YOTEI_SUM - G_NYUKIN_SUM.
+* 調整
+IF G_WRBTR_1 <> 0.
+PERFORM KINGAKU_SUM_ADJUST USING G_SHKZG_1
+G_WRBTR_1.
+ENDIF.
+IF G_WRBTR_2 <> 0.
+PERFORM KINGAKU_SUM_ADJUST USING G_SHKZG_2
+G_WRBTR_2.
+ENDIF.
+IF G_WRBTR_3 <> 0.
+PERFORM KINGAKU_SUM_ADJUST USING G_SHKZG_3
+G_WRBTR_3.
+ENDIF.
+IF G_WRBTR_4 <> 0.
+PERFORM KINGAKU_SUM_ADJUST USING G_SHKZG_4
+G_WRBTR_4.
+ENDIF.
+* 合計
+G_TOTAL = G_DEFFERENCE + G_ADJUST.
+
+ENDFORM.                    " KINGAKU_SUM
+*&---------------------------------------------------------------------*
+*&      Form  KINGAKU_SUM_ADJUST
+*&---------------------------------------------------------------------*
+*       調整金額合算
+*----------------------------------------------------------------------*
+*      -->P_SHKZG     貸借フラグ(S=借方 H=貸方)
+*      -->P_WRBTR     金額
+*----------------------------------------------------------------------*
+FORM KINGAKU_SUM_ADJUST USING    P_SHKZG  TYPE SHKZG
+P_WRBTR  TYPE WRBTR.
+IF P_SHKZG = 'H'.
+G_ADJUST     = G_ADJUST + P_WRBTR.
+ELSE.
+G_ADJUST     = G_ADJUST + ( P_WRBTR * -1 ).
+ENDIF.
+
+ENDFORM.                    " KINGAKU_SUM_ADJUST
+*&---------------------------------------------------------------------*
+*&      Form  GET_SKA1
+*&---------------------------------------------------------------------*
+*       勘定マスタデータ取得
+*----------------------------------------------------------------------*
+*      -->P_SKANR      勘定コード
+*      <--P_SKA1       勘定マスタ取得データ構造
+*----------------------------------------------------------------------*
+FORM GET_SKA1 USING    P_SAKNR   TYPE SAKNR
+CHANGING P_SKA1    TYPE TYP_SKA1.
+
+READ TABLE T_SKA1 INTO P_SKA1
+WITH TABLE KEY SAKNR = P_SAKNR.
+IF SY-SUBRC <> 0.
+SELECT SINGLE
+SAKNR
+MWSKZ
+XMWNO
+INTO P_SKA1
+FROM SKB1
+WHERE SAKNR = P_SAKNR
+AND BUKRS = G_BUKRS.
+IF SY-SUBRC = 0.
+INSERT P_SKA1 INTO TABLE T_SKA1.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " GET_SKA1
+*&---------------------------------------------------------------------*
+*&      Form  SAVE_CHECK
+*&---------------------------------------------------------------------*
+*       保存前チェック
+*----------------------------------------------------------------------*
+FORM SAVE_CHECK.
+
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_1
+G_WRBTR_1
+G_SHKZG_1
+G_MWSKZ_1
+G_KOSTL_1.
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_2
+G_WRBTR_2
+G_SHKZG_2
+G_MWSKZ_2
+G_KOSTL_2.
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_3
+G_WRBTR_3
+G_SHKZG_3
+G_MWSKZ_3
+G_KOSTL_3.
+* 差額転記データ入力チェック
+PERFORM SAKNR_INPUT_CHECK USING G_SAKNR_4
+G_WRBTR_4
+G_SHKZG_4
+G_MWSKZ_4
+G_KOSTL_4.
+* テーブルコントロール選択データチェック
+READ TABLE T_YOTEI TRANSPORTING NO FIELDS
+WITH KEY CEL = C_ON.
+IF SY-SUBRC <> 0.
+READ TABLE T_NYUKIN TRANSPORTING NO FIELDS
+WITH KEY CEL = C_ON.
+IF SY-SUBRC <> 0.
+MESSAGE E999(YN01) WITH
+'入金予定または入金を選択してください'.
+ENDIF.
+ENDIF.
+
+* 合計再計算
+PERFORM KINGAKU_SUM.
+
+* 合計金額チェック
+IF G_TOTAL <> 0.
+MESSAGE E999(YN01) WITH
+'調整後差額があるため、決済することができません'.
+ENDIF.
+
+ENDFORM.                    " SAVE_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  GET_TARGET_ZN005
+*&---------------------------------------------------------------------*
+*       消込対象の入金予定データ取得
+*----------------------------------------------------------------------*
+FORM GET_TARGET_ZN005.
+DATA:LT_YOTEI   TYPE T_TYP_YOTEI.
+
+CLEAR:T_TARGET_ZN005.
+
+* 行選択したデータのみを抽出
+LT_YOTEI[] = T_YOTEI[].
+DELETE LT_YOTEI WHERE CEL = SPACE.
+CHECK NOT LT_YOTEI IS INITIAL.
+
+* 行選択されたデータのZN005を取得
+SELECT *
+INTO TABLE T_TARGET_ZN005
+FROM ZN005
+FOR ALL ENTRIES IN LT_YOTEI
+WHERE BUKRS  = G_BUKRS
+AND KUNNR  = LT_YOTEI-KUNNR
+AND CZFBDT = LT_YOTEI-CZFBDT
+AND SEQ    = LT_YOTEI-SEQ.
+
+IF SY-SUBRC = 0.
+SORT T_TARGET_ZN005.
+ENDIF.
+
+ENDFORM.                    " GET_TARGET_ZN005
+*&---------------------------------------------------------------------*
+*&      Form  CANC_DATA_GET
+*&---------------------------------------------------------------------*
+*       取り消しデータ取得
+*----------------------------------------------------------------------*
+FORM CANC_DATA_GET.
+DATA:LW_ZN005     TYPE ZN005,
+LT_ZN005_ALL TYPE STANDARD TABLE OF ZN005,
+LW_YOTEI     TYPE TYP_YOTEI,
+LW_RC_BSEG   TYPE SY-SUBRC,
+LW_RC_BSAD   TYPE SY-SUBRC,
+LW_BELNR     TYPE BELNR_D.       "伝票チェック
+* 2012/04/11 ADD START
+DATA:LW_SOSAI     TYPE C.
+CLEAR:LW_SOSAI.
+* 2012/04/11 ADD END
+
+CLEAR:T_TARGET_ZN005, T_YOTEI, W_CANC_KBN, W_IBUDAT.
+
+SELECT *
+INTO TABLE T_TARGET_ZN005
+FROM ZN005
+WHERE IBELNER = P_AUG_C   "決済伝票番号
+AND IGJAHR  = P_GJA_C.  "決済会計年度
+
+IF SY-SUBRC = 0.
+SORT T_TARGET_ZN005.
+*   ロック用にデータをコピー
+LOOP AT T_TARGET_ZN005 INTO LW_ZN005.
+* 2012/04/11 ADD START "相殺の取消
+IF LW_ZN005-IZLSCH = C_SOSAI.
+LW_SOSAI = C_ON.
+ENDIF.
+* 2012/04/11 ADD END
+W_IBUDAT = LW_ZN005-IBUDAT.            "チェック用に退避
+LW_YOTEI-KUNNR = LW_ZN005-KUNNR.       "得意先(支払人)
+LW_YOTEI-CZFBDT = LW_ZN005-CZFBDT.     "照合締日
+APPEND LW_YOTEI TO T_YOTEI.
+ENDLOOP.
+SORT T_YOTEI.
+DELETE ADJACENT DUPLICATES FROM T_YOTEI
+COMPARING KUNNR CZFBDT.
+ELSE.
+MESSAGE S762(YN01).
+EXIT.
+ENDIF.
+
+* 決済番号が最後かどうかチェック
+* 2012/04/11 MOD START "得意先/照合締日ごとに最終であることをチェック
+CLEAR:LW_YOTEI.
+LOOP AT T_YOTEI INTO LW_YOTEI.
+
+CLEAR:LT_ZN005_ALL.
+SELECT *
+INTO TABLE LT_ZN005_ALL
+FROM ZN005
+WHERE KUNNR  = LW_YOTEI-KUNNR
+AND CZFBDT = LW_YOTEI-CZFBDT
+AND AUFLG  <> SPACE.
+
+IF SY-SUBRC = 0.
+SORT LT_ZN005_ALL BY IGJAHR DESCENDING IBELNER DESCENDING.
+
+READ TABLE LT_ZN005_ALL INTO LW_ZN005 INDEX 1.
+
+IF  LW_ZN005-IGJAHR = P_GJA_C      "決済年度
+AND LW_ZN005-IBELNER = P_AUG_C.    "決済伝票
+*   決済伝票番号が他に新しいものがある場合はエラー
+ELSE.
+MESSAGE I805(YN01) WITH LW_ZN005-IGJAHR LW_ZN005-IBELNER.
+CLEAR:T_TARGET_ZN005.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+ENDLOOP.
+*  SELECT *
+*    INTO TABLE LT_ZN005_ALL
+*    FROM ZN005
+*         FOR ALL ENTRIES IN T_YOTEI
+*   WHERE KUNNR  = T_YOTEI-KUNNR
+*     AND CZFBDT = T_YOTEI-CZFBDT.
+* 決済伝票番号を最新のデータを一番上にソート
+*  SORT LT_ZN005_ALL BY IGJAHR  DESCENDING
+*                       IBELNER DESCENDING.
+*  READ TABLE LT_ZN005_ALL INTO LW_ZN005 INDEX 1.
+*  IF  LW_ZN005-IGJAHR = P_GJA_C      "決済年度
+*  AND LW_ZN005-IBELNER = P_AUG_C.    "決済伝票
+* 決済伝票番号が他に新しいものがある場合はエラー
+*  ELSE.
+*    MESSAGE I805(YN01) WITH LW_ZN005-IGJAHR LW_ZN005-IBELNER.
+*    CLEAR:T_TARGET_ZN005.
+*    EXIT.
+*  ENDIF.
+* 2012/04/11 MOD END
+
+* 2012/04/11 ADD START "相殺の場合は支払予定も合わせて取得
+IF LW_SOSAI = C_ON.
+PERFORM GET_ZN002_DEL.
+ENDIF.
+* 2012/04/11 ADD END
+
+* 決済明細のチェック1
+* BSEGを検索
+SELECT BELNR
+INTO LW_BELNR
+FROM BSEG
+UP TO 1 ROWS
+WHERE BUKRS = P_BUKRS    "会社コード
+AND GJAHR = P_GJA_C    "会計年度
+AND BELNR = P_AUG_C    "会計伝票番号
+AND GJAHR = P_GJA_C.   "会計年度
+ENDSELECT.
+
+LW_RC_BSEG = SY-SUBRC.
+
+* 決済明細のチェック2
+SELECT BELNR
+INTO LW_BELNR
+FROM BSAD
+UP TO 1 ROWS
+WHERE BUKRS = P_BUKRS   "会社コード
+AND AUGDT = W_IBUDAT  "決済日付
+AND AUGBL = P_AUG_C.  "決済伝票番号
+ENDSELECT.
+IF SY-SUBRC = 0.
+LW_RC_BSAD = SY-SUBRC.
+ELSE.
+SELECT BELNR
+INTO LW_BELNR
+FROM BSAD
+UP TO 1 ROWS
+WHERE BUKRS = P_BUKRS   "会社コード
+AND AUGDT > W_IBUDAT  "決済日付
+AND AUGBL = P_AUG_C.  "決済伝票番号
+ENDSELECT.
+LW_RC_BSAD = SY-SUBRC.
+ENDIF.
+* BSEG-BSADともに存在する場合は区分１
+IF  LW_RC_BSEG = 0
+AND LW_RC_BSAD = 0.
+W_CANC_KBN = '1'.
+* BSEGは存在するがBSADは存在しない場合は区分２
+ELSEIF LW_RC_BSEG = 0
+AND    LW_RC_BSAD <> 0.
+W_CANC_KBN = '2'.
+* BSEGが存在しない場合は区分３
+ELSEIF LW_RC_BSEG <> 0
+AND    LW_RC_BSAD =  0.
+W_CANC_KBN = '3'.
+ELSE.
+MESSAGE E754(YN01) WITH TEXT-E10.
+ENDIF.
+
+ENDFORM.                    " CANC_DATA_GET
+*&---------------------------------------------------------------------*
+*&      Form  DATA_UNLOCK
+*&---------------------------------------------------------------------*
+*       ロック解除
+*----------------------------------------------------------------------*
+FORM DATA_UNLOCK.
+DATA:LT_YOTEI    TYPE T_TYP_YOTEI,
+LW_YOTEI    TYPE TYP_YOTEI.
+
+LT_YOTEI[] = T_YOTEI[].
+SORT LT_YOTEI BY KUNNR CZFBDT.
+DELETE ADJACENT DUPLICATES FROM LT_YOTEI COMPARING KUNNR CZFBDT.
+
+LOOP AT LT_YOTEI INTO LW_YOTEI.
+CALL FUNCTION 'DEQUEUE_EZN005'
+EXPORTING
+MODE_ZN005           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = P_BUKRS
+KUNNR                = LW_YOTEI-KUNNR
+CZFBDT               = LW_YOTEI-CZFBDT.
+ENDLOOP.
+
+ENDFORM.                    " DATA_UNLOCK
+*&---------------------------------------------------------------------*
+*&      Form  GET_CSKB
+*&---------------------------------------------------------------------*
+*       勘定コードのマスタ存在チェック
+*----------------------------------------------------------------------*
+*      -->P_SAKNR       チェック対象の勘定コード
+*      <--P_ERR_FLG     エラーフラグ
+*----------------------------------------------------------------------*
+FORM GET_CSKB USING    P_SAKNR     TYPE SAKNR
+CHANGING P_ERR_FLG   TYPE CHAR1.
+DATA:LW_KSTAR   TYPE KSTAR.   "原価要素(勘定コード)
+
+SELECT SINGLE KSTAR
+INTO LW_KSTAR
+FROM CSKB
+WHERE KOKRS = W_KOKRS
+AND KSTAR = P_SAKNR
+AND DATBI >= P_BUDAT
+AND DATAB <= P_BUDAT
+AND KATYP = '01'.
+
+IF SY-SUBRC <> 0.
+P_ERR_FLG = C_ON.
+ENDIF.
+
+ENDFORM.                    " GET_CSKB
+*&---------------------------------------------------------------------*
+*&      Form  CALL_BDC_FBRA
+*&---------------------------------------------------------------------*
+*       取消ＢＤＣ実行
+*----------------------------------------------------------------------*
+FORM CALL_BDC_FBRA.
+DATA:LT_BDC   TYPE T_TYP_BDC,
+LW_OPTION   TYPE CTU_PARAMS,
+LT_RETURN   TYPE STANDARD TABLE OF BDCMSGCOLL,
+LW_RETURN   TYPE BDCMSGCOLL,
+LW_STGRD     TYPE STGRD.
+* 反対仕訳理由の設定
+IF W_IBUDAT = P_BUD_C.
+LW_STGRD = '01'.
+ELSE.
+LW_STGRD = '02'.
+ENDIF.
+
+* 第一画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05R'
+'0100'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "決済伝票
+'RF05R-AUGBL'
+P_AUG_C
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "会社コード
+'RF05R-BUKRS'
+P_BUKRS
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "会計年度
+'RF05R-GJAHR'
+P_GJA_C
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "OK-CODE
+'BDC_OKCODE'
+'=RAGL'        "保存ボタン押下
+CHANGING LT_BDC.
+
+LW_OPTION-DISMODE = 'N'.
+LW_OPTION-UPDMODE = 'S'.
+* 実行
+CALL TRANSACTION 'FBRA'  USING LT_BDC
+OPTIONS FROM LW_OPTION
+MESSAGES INTO LT_RETURN.
+* 正常終了メッセージを検索
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGID = 'F5'
+MSGNR = '539'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'A'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'E'.
+
+ENDIF.
+IF LW_RETURN-MSGID IS INITIAL.
+MESSAGE E999(YN01) WITH '取消エラーが発生しました'.
+ELSE.
+MESSAGE ID     LW_RETURN-MSGID
+TYPE   'E'
+NUMBER LW_RETURN-MSGNR
+WITH   LW_RETURN-MSGV1
+LW_RETURN-MSGV2
+LW_RETURN-MSGV3
+LW_RETURN-MSGV4.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CALL_BDC_FBRA
+*&---------------------------------------------------------------------*
+*&      Form  CALL_BDC_FB08
+*&---------------------------------------------------------------------*
+*       取消処理
+*----------------------------------------------------------------------*
+FORM CALL_BDC_FB08.
+DATA:LW_STGRD     TYPE STGRD,
+LT_BDC       TYPE T_TYP_BDC,
+LW_OPTION   TYPE CTU_PARAMS,
+LT_RETURN   TYPE STANDARD TABLE OF BDCMSGCOLL,
+LW_RETURN   TYPE BDCMSGCOLL.
+
+* 反対仕訳理由の設定
+IF W_IBUDAT = P_BUD_C.
+LW_STGRD = '01'.
+ELSE.
+LW_STGRD = '02'.
+ENDIF.
+
+* 第一画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0105'
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "OK-CODE
+'BDC_OKCODE'
+'=BU'          "保存
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "伝票番号
+'RF05A-BELNS'
+P_AUG_C
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "会社コード
+'BKPF-BUKRS'
+P_BUKRS
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "会計年度
+'RF05A-GJAHS'
+W_YEAR
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "反対仕訳理由
+'UF05A-STGRD'
+LW_STGRD
+CHANGING LT_BDC.
+PERFORM BDC_RECORD     USING SPACE          "転記日付
+'BSIS-BUDAT'
+P_BUD_C
+CHANGING LT_BDC.
+LW_OPTION-DISMODE = 'N'.
+LW_OPTION-UPDMODE = 'S'.
+*  LW_OPTION-NOBINPT = C_ON. "2012/06/05 DEL
+* 実行
+CALL TRANSACTION 'FB08'  USING LT_BDC
+OPTIONS FROM LW_OPTION
+MESSAGES INTO LT_RETURN.
+* 正常終了メッセージを検索
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGID = 'F5'
+MSGNR = '312'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'A'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'E'.
+
+ENDIF.
+IF LW_RETURN-MSGID IS INITIAL.
+MESSAGE E999(YN01) WITH '取消エラーが発生しました'.
+ELSE.
+MESSAGE ID     LW_RETURN-MSGID
+TYPE   'E'
+NUMBER LW_RETURN-MSGNR
+WITH   LW_RETURN-MSGV1
+LW_RETURN-MSGV2
+LW_RETURN-MSGV3
+LW_RETURN-MSGV4.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CALL_BDC_FB08
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN002_DEL
+*&---------------------------------------------------------------------*
+*       取消対象支払予定取得
+*----------------------------------------------------------------------*
+FORM GET_ZN002_DEL.
+DATA:LW_ZN002     TYPE ZN002,
+LT_ZN002_ALL TYPE STANDARD TABLE OF ZN002,
+LW_YOTEI_P   TYPE ZN002.
+
+SELECT *
+INTO TABLE T_TARGET_ZN002
+FROM ZN002
+WHERE PZLSCH  = C_SOSAI   "支払方法が相殺
+AND BELNR   = P_AUG_C   "決済伝票番号
+AND GJAHR   = P_GJA_C.  "決済会計年度
+
+IF SY-SUBRC = 0.
+SORT T_TARGET_ZN002.
+*   ロック用にデータをコピー
+LOOP AT T_TARGET_ZN002 INTO LW_ZN002.
+CLEAR:LW_YOTEI_P.
+LW_YOTEI_P-LIFNR = LW_ZN002-LIFNR.       "得意先(支払人)
+LW_YOTEI_P-CZFBDT = LW_ZN002-CZFBDT.     "照合締日
+APPEND LW_YOTEI_P TO T_YOTEI_P.
+ENDLOOP.
+SORT T_YOTEI_P.
+DELETE ADJACENT DUPLICATES FROM T_YOTEI_P
+COMPARING LIFNR CZFBDT.
+ELSE.
+*
+ENDIF.
+
+* 決済番号が最後かどうかチェック
+* 仕入先/照合締日ごとに最終であることをチェック
+CLEAR:LW_YOTEI_P.
+LOOP AT T_YOTEI_P INTO LW_YOTEI_P.
+
+CLEAR:LT_ZN002_ALL.
+SELECT *
+INTO TABLE LT_ZN002_ALL
+FROM ZN002
+WHERE LIFNR  = LW_YOTEI_P-LIFNR
+AND CZFBDT = LW_YOTEI_P-CZFBDT
+AND PSTFLG  <> SPACE.
+
+IF SY-SUBRC = 0.
+SORT LT_ZN002_ALL BY GJAHR DESCENDING BELNR DESCENDING.
+
+READ TABLE LT_ZN002_ALL INTO LW_ZN002 INDEX 1.
+
+IF  LW_ZN002-GJAHR = P_GJA_C      "決済年度
+AND LW_ZN002-BELNR = P_AUG_C.    "決済伝票
+*   決済伝票番号が他に新しいものがある場合はエラー
+ELSE.
+MESSAGE I805(YN01) WITH '支払' LW_ZN002-GJAHR LW_ZN002-BELNR.
+CLEAR:T_TARGET_ZN002.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " GET_ZN002_DEL
+*&---------------------------------------------------------------------*
+*&      Form  DATA_LOCK_P
+*&---------------------------------------------------------------------*
+*       支払予定テーブルロック
+*----------------------------------------------------------------------*
+FORM DATA_LOCK_P.
+
+DATA:LT_YOTEI_P    TYPE TABLE OF ZN002,
+LW_YOTEI_P    TYPE ZN002,
+LW_MESSAGE    TYPE SYMSGV.
+
+CHECK NOT ( T_YOTEI_P[] IS INITIAL ).
+
+LT_YOTEI_P[] = T_YOTEI_P[].
+SORT LT_YOTEI_P BY LIFNR CZFBDT.
+DELETE ADJACENT DUPLICATES FROM LT_YOTEI_P COMPARING LIFNR CZFBDT.
+
+LOOP AT LT_YOTEI_P INTO LW_YOTEI_P.
+CALL FUNCTION 'ENQUEUE_EZN002'
+EXPORTING
+MODE_ZN002           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = P_BUKRS
+LIFNR                = LW_YOTEI_P-LIFNR
+CZFBDT               = LW_YOTEI_P-CZFBDT
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+
+*   ロックエラーが発生している場合
+IF SY-SUBRC <> 0.
+LW_MESSAGE = SY-MSGV1.
+MESSAGE I756(YN01) WITH 'ZN002' LW_MESSAGE.
+W_ERR_FLG = C_ON.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " DATA_LOCK_P
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZN002
+*&---------------------------------------------------------------------*
+*       取消支払予定更新
+*----------------------------------------------------------------------*
+FORM UPDATE_ZN002.
+
+DATA:LT_ZN002   TYPE TABLE OF ZN002,   "更新データ
+LW_ZN002   TYPE ZN002.
+
+CHECK ( NOT T_TARGET_ZN002[] IS INITIAL ).
+LOOP AT T_TARGET_ZN002 INTO LW_ZN002.
+*     対象データの決済情報をクリア
+CLEAR: LW_ZN002-PSTFLG.     "入金消込
+CLEAR: LW_ZN002-PSTDT.      "入金消込日
+CLEAR: LW_ZN002-PSTTM.      "入金消込時刻
+CLEAR: LW_ZN002-PSTUSR.     "入金消込ユーザ
+CLEAR: LW_ZN002-BELNR.      "決済伝票番号
+CLEAR: LW_ZN002-GJAHR.      "決済会計年度
+CLEAR: LW_ZN002-BUDAT.      "決済転記日
+APPEND LW_ZN002 TO LT_ZN002.
+ENDLOOP.
+
+* データ更新
+UPDATE ZN002 FROM TABLE LT_ZN002.
+IF SY-SUBRC = 0.
+COMMIT WORK AND WAIT.
+ELSE.
+ROLLBACK WORK.
+MESSAGE E758(YN01) WITH 'ZN002'.
+ENDIF.
+
+ENDFORM.                    " UPDATE_ZN002

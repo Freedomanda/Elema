@@ -1,0 +1,650 @@
+*&------------------------------------------------------------------*
+*&  Report ZS012900.                                                *
+*&------------------------------------------------------------------*
+*& 機能 : エンドユーザ価格BDC　　　                                 *
+*& 作成者 : 関根千鶴　　　　　                                      *
+*& 作成日 : 2007/07/06      　　　　                                *
+*& 変更履歴 : 2012/08/31 ISID  　　                                 *
+*& 変更内容 : ES-UP   　　　　　　　　　　　　                      *
+*&------------------------------------------------------------------*
+REPORT ZS012900 MESSAGE-ID Z1.
+
+*&データ型宣言-------------------------------------------------------*
+*ファイル名型変換用データ型定義
+TYPES TYP_FILEP TYPE STRING.
+
+*アップロード/ダウンロードファイル読込用データ型定義
+TYPES TYP_UPLOAD(400) TYPE C.
+
+*選択画面用データ型定義
+TYPES : BEGIN OF TYP_WAERS,
+WAERS TYPE TCURC-WAERS, "通貨コード
+END   OF TYP_WAERS.
+
+*読込ファイル用データ型定義(c型）
+TYPES : BEGIN OF TYP_FILE_C,
+ZZZKUNZE(10) TYPE C, "エンドユーザ
+ZZZKDMAT(35) TYPE C, "得意先品目コード
+KBETR(12)    TYPE C, "エンドユーザ価格
+KONWA(3)     TYPE C, "通貨単位
+KPEIN(5)     TYPE C, "価格単位数量
+KMEIN(3)     TYPE C, "数量単位
+DATAB(8)     TYPE C, "有効開始日
+DATBI(8)     TYPE C, "有効終了日
+E_FLAG       TYPE C, "エラーフラグ
+E_MES(200)   TYPE C, "エラーメッセージ
+END   OF TYP_FILE_C.
+
+*読込ファイル用データ型定義(変換後）
+TYPES : BEGIN OF TYP_FILE,
+ZZZKUNZE     TYPE KOMG-ZZZKUNZE, "エンドユーザ
+ZZZKDMAT     TYPE KOMG-ZZZKDMAT, "得意先品目コード
+KBETR(12)    TYPE C,             "エンドユーザ価格
+KONWA        TYPE KONP-KONWA,    "通貨単位
+KPEIN(5)     TYPE N,             "価格単位数量
+KMEIN        TYPE KONP-KMEIN,    "数量単位
+DATAB        TYPE RV13A-DATAB,   "有効開始日
+DATBI        TYPE RV13A-DATBI,   "有効終了日
+E_FLAG(2)       TYPE C,             "エラーフラグ
+E_MES(200)   TYPE C,            "エラーメッセージ
+END   OF TYP_FILE.
+
+*&データオブジェクト宣言---------------------------------------------*
+*読込ファイル型変換用データオブジェクト
+DATA WK_FILEP TYPE TYP_FILEP.
+
+*アップロードファイル読込用データオブジェクト
+DATA WK_UPLOAD TYPE TYP_UPLOAD.
+
+*ダウンロードファイルヘッダ行作成用データオブジェクト
+DATA WK_DOWNLOAD_H TYPE TYP_UPLOAD.
+
+*選択画面用データオブジェクト
+DATA WK_WAERS TYPE TYP_WAERS. "通貨コード
+
+*通貨コード存在チェック用データオブジェクト
+DATA WK_WAERS_C TYPE TYP_WAERS.
+
+*読込ファイル用データオブジェクト(c型）
+DATA WA_FILE_C TYPE TYP_FILE_C.
+
+*読込ファイル用データオブジェクト(変換後）
+DATA WA_FILE TYPE TYP_FILE.
+
+*読込全件数カウント用データオブジェクト
+DATA ALL_CO TYPE I.
+
+*エラー発生件数カウント用データオブジェクト
+DATA ERROR_CO TYPE I.
+
+*登録件数カウント用データオブジェクト
+DATA REGI_CO TYPE I.
+
+*データダウンロード用定数
+CONSTANTS CO_TXT(4)      TYPE C VALUE '.TXT'.
+DATA      WK_RESTXT(26)  TYPE C VALUE '_RESULT_'.
+
+*エラーメッセージ保存用データオブジェクト
+DATA ERROR_MES(256) TYPE C.
+DATA ERROR_MESS TYPE STRING.
+DATA LENGE TYPE I.
+
+*BDCエラー読み取り用データオブジェクト
+DATA MES_NO LIKE SY-MSGNO.
+DATA MESA1 LIKE SY-MSGV1.
+DATA MESA2 LIKE SY-MSGV2.
+DATA MESA3 LIKE SY-MSGV3.
+DATA MESA4 LIKE SY-MSGV4.
+DATA DIV_MES(256) TYPE C.
+
+*&定数宣言-----------------------------------------------------------*
+
+
+* Mod ES-UP 2012/08/31 -->
+*CONSTANTS CO_TAB TYPE X VALUE '09'.  "タブ
+CONSTANTS: CO_TAB TYPE STRING VALUE CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB,
+CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Mod ES-UP 2012/08/31 <--
+
+CONSTANTS CO_X TYPE C VALUE 'X'.     "エラーフラグ用
+CONSTANTS DIV_POS TYPE I VALUE '200'."エラー変換切り取り位置
+
+*&テーブル宣言-------------------------------------------------------*
+*アップロードファイル読込用内部テーブル
+DATA IT_UPLOAD LIKE STANDARD TABLE OF WK_UPLOAD.
+
+*アップロードファイル用内部テーブル
+DATA IT_DOWNLOAD LIKE STANDARD TABLE OF WK_UPLOAD.
+
+*読込ファイル用内部テーブル(変換後）
+DATA IT_FILE TYPE STANDARD TABLE OF TYP_FILE.
+
+*バッチインプット用内部テーブル
+DATA BEGIN OF IT_BDCDATA OCCURS 0.  "ヘッダ付内部テーブル
+INCLUDE STRUCTURE BDCDATA.
+DATA END OF IT_BDCDATA.
+
+*入力通貨コード格納内部テーブル
+DATA IT_WAERS TYPE STANDARD TABLE OF TYP_WAERS.
+
+*&-------------------------------------------------------------------*
+* 選択画面
+*&-------------------------------------------------------------------*
+*検索ヘルプでファイル名取得
+PARAMETERS P_PATH(128) TYPE C.
+*通貨コード入力項目
+SELECT-OPTIONS SO_WAERS
+FOR WK_WAERS-WAERS NO INTERVALS.
+
+*セレクトオプション用構造データオブジェクト
+DATA WA_WAERS LIKE LINE OF SO_WAERS.
+
+*&-------------------------------------------------------------------*
+* AT SELECTION-SCREEN
+*&-------------------------------------------------------------------*
+*検索ヘルプ(ファイル名取得）
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_PATH.
+
+CALL FUNCTION 'F4_FILENAME'
+* EXPORTING
+*   PROGRAM_NAME        = SYST-CPROG
+*   DYNPRO_NUMBER       = SYST-DYNNR
+*   FIELD_NAME          = ' '
+IMPORTING
+FILE_NAME           = P_PATH.
+
+*入力ファイル、通貨コードの入力値チェック
+AT SELECTION-SCREEN.
+IF P_PATH IS INITIAL.
+MESSAGE E006 WITH '入力ファイルパス'.
+ELSEIF SO_WAERS IS INITIAL.
+MESSAGE E006 WITH '通貨コード'.
+ELSE.
+*入力通貨コードの存在チェック
+LOOP AT SO_WAERS INTO WA_WAERS.
+SELECT SINGLE WAERS FROM TCURC
+INTO WK_WAERS_C
+WHERE WAERS EQ WA_WAERS-LOW.
+IF SY-SUBRC <> 0.
+MESSAGE E641 WITH WA_WAERS-LOW. "通貨コードXXは存在しません
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+*&-------------------------------------------------------------------*
+* START-OF-SELECTION
+*&-------------------------------------------------------------------*
+START-OF-SELECTION.
+
+*入力通貨コードを内部テーブルへ格納
+PERFORM PACK_SO_WAERS.
+
+*ファイルのアップロード→バッチインプット
+PERFORM GET_INPUT_DATA.
+
+*読込ファイルデータ保持内部テーブルを昇順ソート
+PERFORM SORT_TABLE.
+
+*ファイルのダウンロード
+PERFORM OUT_INPUT_DATA.
+
+*実行結果レコード数を算出
+PERFORM CALC_RESULT.
+
+
+*&---------------------------------------------------------------------*
+*&  一覧画面生成
+*&---------------------------------------------------------------------*
+WRITE :/10(8)  TEXT-000,35(16) ALL_CO ,53(2)'件',"処理件数
+/10(20) TEXT-001,35(16) REGI_CO,53(2)'件',"正常終了レコード件数
+/10(18) TEXT-002,35(16) ERROR_CO,53(2)'件'."エラーレコード件数
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_INPUT_DATA
+*&---------------------------------------------------------------------*
+*&      ファイルのアップロード
+*&---------------------------------------------------------------------*
+FORM GET_INPUT_DATA.
+* Add ES-UP 2012/10/05 -->
+data L_CODEPAGE TYPE ABAP_ENCODING.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+* Add ES-UP 2012/10/05 <--
+*入力ファイルの形式チェック
+*タブ区切りかどうか確認
+
+
+*入力ファイルパスをstring型に変換
+WK_FILEP = P_PATH.
+
+*ファイル読込（GUI_UPLOAD呼び出し）
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                      = WK_FILEP
+FILETYPE                      = 'ASC'
+* Add ES-UP 2012/10/05 -->
+CODEPAGE                = L_CODEPAGE
+* Add ES-UP 2012/10/05 <--
+*   HAS_FIELD_SEPARATOR           = ' '
+*   HEADER_LENGTH                 = 0
+*   READ_BY_LINE                  = 'X'
+* IMPORTING
+*   FILELENGTH                    =
+*   HEADER                        =
+TABLES
+DATA_TAB                      = IT_UPLOAD
+EXCEPTIONS
+FILE_OPEN_ERROR               = 1
+FILE_READ_ERROR               = 2
+NO_BATCH                      = 3
+GUI_REFUSE_FILETRANSFER       = 4
+INVALID_TYPE                  = 5
+NO_AUTHORITY                  = 6
+UNKNOWN_ERROR                 = 7
+BAD_DATA_FORMAT               = 8
+HEADER_NOT_ALLOWED            = 9
+SEPARATOR_NOT_ALLOWED         = 10
+HEADER_TOO_LONG               = 11
+UNKNOWN_DP_ERROR              = 12
+ACCESS_DENIED                 = 13
+DP_OUT_OF_MEMORY              = 14
+DISK_FULL                     = 15
+DP_TIMEOUT                    = 16
+OTHERS                        = 17
+.
+
+IF SY-SUBRC <> 0.
+MESSAGE E400
+WITH '入力ファイルのアップロードでエラーが発生しました'.
+ENDIF.
+
+*読み込んだファイルがTAB区切りかチェック
+READ TABLE IT_UPLOAD INTO WK_UPLOAD INDEX 1.
+SEARCH WK_UPLOAD FOR CO_TAB.
+IF SY-SUBRC <> 0.
+MESSAGE E400 WITH '入力ファイル形式がTAB区切テキストではありません'.
+ENDIF.
+
+*読み込んだファイル内容が空の場合
+IF IT_UPLOAD IS INITIAL.
+MESSAGE E621.
+ENDIF.
+
+*ダウンロードファイルのヘッダ行データ取得
+READ TABLE IT_UPLOAD INTO WK_DOWNLOAD_H INDEX 1.
+
+*読み込んだファイル内容をタブを取り除いて型変換
+LOOP AT IT_UPLOAD INTO WK_UPLOAD FROM 2.
+SPLIT WK_UPLOAD AT CO_TAB
+INTO WA_FILE_C-ZZZKUNZE "エンドユーザ
+WA_FILE_C-ZZZKDMAT "得意先品目コード
+WA_FILE_C-KBETR    "エンドユーザ価格
+WA_FILE_C-KONWA    "通貨単位
+WA_FILE_C-KPEIN    "価格単位数量
+WA_FILE_C-KMEIN    "数量単位
+WA_FILE_C-DATAB    "有効開始日
+WA_FILE_C-DATBI.   "有効終了日
+
+ALL_CO           = ALL_CO + 1.         "総読込件数カウント
+WA_FILE-ZZZKUNZE = WA_FILE_C-ZZZKUNZE. "エンドユーザ
+WA_FILE-ZZZKDMAT = WA_FILE_C-ZZZKDMAT. "得意先品目コード
+WA_FILE-KBETR    = WA_FILE_C-KBETR.    "エンドユーザ価格
+WA_FILE-KONWA    = WA_FILE_C-KONWA.    "通貨単位
+WA_FILE-KPEIN    = WA_FILE_C-KPEIN.    "価格単位数量
+WA_FILE-KMEIN    = WA_FILE_C-KMEIN.    "数量単位
+WA_FILE-DATAB    = WA_FILE_C-DATAB.    "有効開始日
+WA_FILE-DATBI    = WA_FILE_C-DATBI.    "有効終了日
+
+*読込ファイルの通貨コードが入力通貨コードに含まれているか確認
+CLEAR WK_WAERS_C.
+READ TABLE IT_WAERS INTO WK_WAERS_C
+WITH TABLE KEY WAERS = WA_FILE-KONWA.
+
+*含まれていない場合はエラー処理
+*ダウンロード用内部テーブルへ格納
+IF SY-SUBRC <> 0.
+WA_FILE-E_FLAG = CO_X.
+WA_FILE-E_MES = '不適切な通貨コード'.
+
+CONCATENATE WK_UPLOAD WA_FILE-E_FLAG WA_FILE-E_MES
+INTO WK_UPLOAD SEPARATED BY CO_TAB.
+APPEND WK_UPLOAD TO IT_DOWNLOAD.
+
+*含まれていた場合はバッチインプット実行
+*ダウンロード用内部テーブルへ格納
+ELSE.
+PERFORM SET_BDC_DATA.
+IF WA_FILE-E_FLAG = CO_X.
+CONCATENATE WK_UPLOAD WA_FILE-E_FLAG WA_FILE-E_MES
+INTO WK_UPLOAD SEPARATED BY CO_TAB.
+ENDIF.
+APPEND WK_UPLOAD TO IT_DOWNLOAD.
+ENDIF.
+
+*    APPEND WA_FILE TO IT_FILE.
+CLEAR WA_FILE-E_FLAG.
+CLEAR WA_FILE-E_MES.
+ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------
+*
+*&      Form  SET_BDC_DATA
+*&---------------------------------------------------------------------
+*
+*&      IT_BDCDATA にデータをセット
+*&---------------------------------------------------------------------
+
+FORM SET_BDC_DATA.
+
+* ヘッダデータ設定
+PERFORM DYNPRO USING: 'X' 'SAPMV13A'     '0100',
+' ' 'BDC_CURSOR'   'RV13A-KSCHL',
+' ' 'BDC_OKCODE'   '/00',
+' ' 'RV13A-KSCHL'  'zpze',         "条件タイプ
+
+'X' 'SAPMV13A'     '1902',
+' ' 'BDC_CURSOR'   'RV13A-DATBI(01)',
+' ' 'BDC_OKCODE'   '=SICH',
+' ' 'KOMG-VKORGAU' '1000', "販売組織
+' ' 'KOMG-VTWEG'   '10', "流通チャネル
+' ' 'KOMG-SPART'   '10', "製品部門
+' ' 'KOMG-ZZZKUNZE' WA_FILE-ZZZKUNZE,"ｴﾝﾄﾞﾕｰｻﾞ
+' ' 'KOMG-ZZZKDMAT(1)' WA_FILE-ZZZKDMAT,
+"得意先品目ｺｰﾄﾞ
+' ' 'KONP-KBETR(1)' WA_FILE-KBETR,"ｴﾝﾄﾞﾕｰｻﾞ価格
+' ' 'KONP-KONWA(1)' WA_FILE-KONWA, "通貨単位
+' ' 'KONP-KPEIN(1)' WA_FILE-KPEIN,"価格単位数量
+' ' 'KONP-KMEIN(1)' WA_FILE-KMEIN, "数量単位
+' ' 'RV13A-DATAB(1)' WA_FILE-DATAB, "有効開始日
+' ' 'RV13A-DATBI(1)' WA_FILE-DATBI. "有効終了日
+* バッチインプット実行
+PERFORM EXE_BDC.
+
+ENDFORM.                    " SET_BDC_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  DYNPRO
+*&---------------------------------------------------------------------*
+*       IT_BDCDATAへデータ追加
+*----------------------------------------------------------------------*
+FORM DYNPRO USING DYNBEGIN
+NAME
+VALUE.
+
+* ローカル構造データ型オブジェクト宣言
+DATA LWA_BDCDATA TYPE BDCDATA.
+
+IF DYNBEGIN = CO_X.
+"初期化
+CLEAR IT_BDCDATA.
+"ヘッダ行にデータを格納
+IT_BDCDATA-PROGRAM  = NAME.
+IT_BDCDATA-DYNPRO   = VALUE.
+IT_BDCDATA-DYNBEGIN = CO_X . "X
+"内部テーブル部分にデータを格納
+APPEND IT_BDCDATA.
+ELSE.
+"初期化
+CLEAR IT_BDCDATA.
+"ヘッダ行にデータを格納
+IT_BDCDATA-FNAM = NAME.
+IT_BDCDATA-FVAL = VALUE.
+"内部テーブル部分にデータを格納
+APPEND IT_BDCDATA.
+ENDIF.
+ENDFORM.                    " DYNPRO
+
+*&---------------------------------------------------------------------*
+*&      Form  EXE_BDC
+*&---------------------------------------------------------------------*
+*       バッチインプット実行
+*----------------------------------------------------------------------*
+FORM EXE_BDC.
+* ローカル内部テーブルデータ型オブジェクト宣言
+DATA LIT_BDCMSGCOLL TYPE TABLE OF BDCMSGCOLL WITH KEY MSGTYP.
+DATA WA_BDC_MODE TYPE C VALUE 'N'.
+CONSTANTS CO_BDC_UPDATE TYPE C VALUE 'S'.
+CONSTANTS CO_MSG_TYP TYPE C VALUE 'E'.
+
+"トランザクションコード「VK11」を実行
+CALL TRANSACTION 'VK11'
+USING  IT_BDCDATA
+MODE   WA_BDC_MODE   "N
+UPDATE CO_BDC_UPDATE "S
+MESSAGES INTO LIT_BDCMSGCOLL.
+DATA WA_BDCMSGCOLL LIKE LINE OF LIT_BDCMSGCOLL.
+"エラーメッセージ捕捉
+READ TABLE LIT_BDCMSGCOLL  INTO WA_BDCMSGCOLL
+WITH KEY MSGTYP = CO_MSG_TYP. "E
+IF SY-SUBRC IS INITIAL.
+
+MES_NO = WA_BDCMSGCOLL-MSGNR.
+MESA1 = WA_BDCMSGCOLL-MSGV1.
+MESA2 = WA_BDCMSGCOLL-MSGV2.
+MESA3 = WA_BDCMSGCOLL-MSGV3.
+MESA4 = WA_BDCMSGCOLL-MSGV4.
+
+*START CULI_GET_MESSAGEエラー取得汎用モジュール
+CALL FUNCTION 'CULI_GET_MESSAGE'
+EXPORTING
+MSG_TYPE       = WA_BDCMSGCOLL-MSGTYP
+MSG_ID         = WA_BDCMSGCOLL-MSGID
+MSG_NO         = MES_NO
+MSG_ARG1       = MESA1
+MSG_ARG2       = MESA2
+MSG_ARG3       = MESA3
+MSG_ARG4       = MESA4
+LANGUAGE       = SY-LANGU
+IMPORTING
+RAW_MESSAGE    = ERROR_MES
+EXCEPTIONS
+MSG_NOT_FOUND  = 1
+INTERNAL_ERROR = 2
+OTHERS         = 3.
+IF SY-SUBRC <> 0.
+MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+*END CULI_GET_MESSAGEエラー取得汎用モジュール
+* Mod ES-UP 2012/08/22 -->
+WA_FILE-E_MES = ERROR_MES.
+*    ERROR_MESS = ERROR_MES.
+*    LENGE =  STRLEN( ERROR_MESS ).
+*
+**メッセージ文字数が200以下だった場合は、そのまま型変換実行。
+*    IF LENGE <= 200.
+*      WA_FILE-E_MES = ERROR_MES.
+**メッセージ文字数が201以上だった場合は、汎用モジュールを使用して
+**サイズ変更後、型変換実行。
+*    ELSE.
+*      CALL FUNCTION 'STRING_SPLIT_AT_POSITION'
+*        EXPORTING
+*          STRING                  = ERROR_MES
+*          POS                     = DIV_POS
+**   LANGU                   = SY-LANGU
+*   IMPORTING
+*     STRING1                 = WA_FILE-E_MES
+*     STRING2                 = DIV_MES
+**   POS_NEW                 =
+*   EXCEPTIONS
+*     STRING1_TOO_SMALL       = 1
+*     STRING2_TOO_SMALL       = 2
+*     POS_NOT_VALID           = 3
+*     OTHERS                  = 4
+*                .
+*      IF SY-SUBRC <> 0.
+** MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+**         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+*      ENDIF.
+*    ENDIF.
+* Mod ES-UP 2012/08/22 -->
+
+WA_FILE-E_FLAG = CO_X.
+ENDIF.
+
+FREE IT_BDCDATA.
+
+ENDFORM.                    " EXE_BDC
+
+
+*&---------------------------------------------------------------------*
+*&      Form OUT_INPUT_DATA
+*&---------------------------------------------------------------------*
+*       実行
+*----------------------------------------------------------------------*
+FORM OUT_INPUT_DATA.
+* Add ES-UP 2012/10/05 -->
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+* Add ES-UP 2012/10/05 <--
+*入力ファイルパスの末尾「.txt」を
+*「_result.txt」へ書き換え、出力ファイルパス名とする
+CONCATENATE WK_RESTXT SY-DATUM SY-UZEIT CO_TXT
+INTO WK_RESTXT.
+
+REPLACE CO_TXT     ".TXT
+WITH WK_RESTXT  "_RESULT_YYYYMMDDHHMMSS.TXT
+INTO WK_FILEP.
+
+*ダウンロードファイルにヘッダ行を追加
+INSERT WK_DOWNLOAD_H INTO IT_DOWNLOAD INDEX 1.
+
+
+*ファイルダウンロード（GUI_DOWNLOAD呼び出し）
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+*   BIN_FILESIZE                  =
+FILENAME                      = WK_FILEP
+FILETYPE                      = 'ASC'
+*   APPEND                        = ' '
+*   WRITE_FIELD_SEPARATOR         = ' '
+*   HEADER                        = '00'
+*   TRUNC_TRAILING_BLANKS         = ' '
+*   WRITE_LF                      = 'X'
+*   COL_SELECT                    = ' '
+*   COL_SELECT_MASK               = ' '
+* Add ES-UP 2012/10/05 -->
+CODEPAGE                  = L_CODEPAGE
+* Add ES-UP 2012/10/05 <--
+* IMPORTING
+*   FILELENGTH                    =
+TABLES
+DATA_TAB                    = IT_DOWNLOAD
+EXCEPTIONS
+FILE_WRITE_ERROR              = 1
+NO_BATCH                      = 2
+GUI_REFUSE_FILETRANSFER       = 3
+INVALID_TYPE                  = 4
+NO_AUTHORITY                  = 5
+UNKNOWN_ERROR                 = 6
+HEADER_NOT_ALLOWED            = 7
+SEPARATOR_NOT_ALLOWED         = 8
+FILESIZE_NOT_ALLOWED          = 9
+HEADER_TOO_LONG               = 10
+DP_ERROR_CREATE               = 11
+DP_ERROR_SEND                 = 12
+DP_ERROR_WRITE                = 13
+UNKNOWN_DP_ERROR              = 14
+ACCESS_DENIED                 = 15
+DP_OUT_OF_MEMORY              = 16
+DISK_FULL                     = 17
+DP_TIMEOUT                    = 18
+FILE_NOT_FOUND                = 19
+DATAPROVIDER_EXCEPTION        = 20
+CONTROL_FLUSH_ERROR           = 21
+OTHERS                        = 22
+.
+IF SY-SUBRC <> 0.
+MESSAGE E400
+WITH '結果ファイルのダウンロードでエラーが発生しました'.
+ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  PACK_SO_WAERS
+*&---------------------------------------------------------------------*
+*&      入力通貨コードを内部テーブルに格納
+*&---------------------------------------------------------------------*
+FORM PACK_SO_WAERS.
+
+LOOP AT SO_WAERS INTO WA_WAERS.
+APPEND WA_WAERS-LOW TO IT_WAERS.
+ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  SORT_TABLE
+*&---------------------------------------------------------------------*
+*&      読込ファイルデータ保持内部テーブルを昇順ソート
+*&---------------------------------------------------------------------*
+FORM SORT_TABLE.
+
+REFRESH IT_FILE.
+LOOP AT IT_DOWNLOAD INTO WK_UPLOAD.
+SPLIT WK_UPLOAD AT CO_TAB
+INTO WA_FILE_C-ZZZKUNZE "エンドユーザ
+WA_FILE_C-ZZZKDMAT "得意先品目コード
+WA_FILE_C-KBETR    "エンドユーザ価格
+WA_FILE_C-KONWA    "通貨単位
+WA_FILE_C-KPEIN    "価格単位数量
+WA_FILE_C-KMEIN    "数量単位
+WA_FILE_C-DATAB    "有効開始日
+WA_FILE_C-DATBI    "有効終了日
+WA_FILE_C-E_FLAG   "エラーフラグ
+WA_FILE_C-E_MES.   "エラーメッセージ
+
+WA_FILE-ZZZKUNZE = WA_FILE_C-ZZZKUNZE. "エンドユーザ
+WA_FILE-ZZZKDMAT = WA_FILE_C-ZZZKDMAT. "得意先品目コード
+WA_FILE-KBETR    = WA_FILE_C-KBETR.    "エンドユーザ価格
+WA_FILE-KONWA    = WA_FILE_C-KONWA.    "通貨単位
+WA_FILE-KPEIN    = WA_FILE_C-KPEIN.    "価格単位数量
+WA_FILE-KMEIN    = WA_FILE_C-KMEIN.    "数量単位
+WA_FILE-DATAB    = WA_FILE_C-DATAB.    "有効開始日
+WA_FILE-DATBI    = WA_FILE_C-DATBI.    "有効終了日
+WA_FILE-E_FLAG   = WA_FILE_C-E_FLAG.   "エラーフラグ
+WA_FILE-E_MES    = WA_FILE_C-E_MES.    "エラーメッセージ
+
+APPEND WA_FILE TO IT_FILE.
+ENDLOOP.
+
+SORT IT_FILE BY ZZZKUNZE "エンドユーザ
+ZZZKDMAT "得意先品目コード
+DATAB    "有効開始日付
+DATBI    "有効終了日付
+ASCENDING.
+
+REFRESH IT_DOWNLOAD.
+LOOP AT IT_FILE INTO WA_FILE.
+CONCATENATE WA_FILE-ZZZKUNZE "エンドユーザ
+WA_FILE-ZZZKDMAT "得意先品目コード
+WA_FILE-KBETR    "エンドユーザ価格
+WA_FILE-KONWA    "通貨単位
+WA_FILE-KPEIN    "価格単位数量
+WA_FILE-KMEIN    "数量単位
+WA_FILE-DATAB    "有効開始日
+WA_FILE-DATBI    "有効終了日
+WA_FILE-E_FLAG   "エラーフラグ
+WA_FILE-E_MES    "エラーメッセージ
+INTO WK_UPLOAD SEPARATED BY CO_TAB.
+
+APPEND WK_UPLOAD TO IT_DOWNLOAD.
+ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  CALC_RESULT
+*&---------------------------------------------------------------------*
+*&      実行結果レコード数算出
+*&---------------------------------------------------------------------*
+FORM CALC_RESULT.
+*登録失敗件数を算出
+LOOP AT IT_FILE INTO WA_FILE.
+IF WA_FILE-E_FLAG = CO_X.
+ERROR_CO = ERROR_CO + 1.
+ENDIF.
+ENDLOOP.
+
+*登録件数を算出
+REGI_CO = ALL_CO - ERROR_CO.
+ENDFORM.

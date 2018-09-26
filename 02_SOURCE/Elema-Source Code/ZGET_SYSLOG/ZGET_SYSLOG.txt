@@ -1,0 +1,1250 @@
+REPORT zget_syslog.
+*----------------------------------------------------------------------*
+* table
+*----------------------------------------------------------------------*
+TABLES:
+rsauinfo, rslgsel.
+*----------------------------------------------------------------------*
+* type-pools
+*----------------------------------------------------------------------*
+TYPE-POOLS:
+sscr, slis.
+*----------------------------------------------------------------------*
+* types
+*----------------------------------------------------------------------*
+TYPES:
+BEGIN OF typ_usr01,
+bname TYPE usr01-bname,
+END OF typ_usr01,
+
+BEGIN OF typ_list,
+path(128)     TYPE c,
+filename(12)  TYPE c,
+END OF typ_list,
+
+typ_it_rslgetab TYPE TABLE OF rslgetab,
+
+BEGIN OF typ_out,
+algsystem(8)   TYPE c,
+alginst(20)    TYPE c,
+algdate        TYPE sy-datum,
+algtime        TYPE sy-uzeit,
+algclient      TYPE sy-mandt,
+alguser(12)    TYPE c,
+alglterm(20)   TYPE c,
+algtcode(20)   TYPE c,
+algrepna(40)   TYPE c,
+algarea(2)     TYPE c,
+algsubid(1)    TYPE c,
+txsubclsid(20) TYPE c,
+txseverity(20) TYPE c,
+algtext(132)   TYPE c,
+algfileno(6)   TYPE n,
+algfilepos(10) TYPE n,
+algtasktype(1) TYPE c,
+algtaskno(3)   TYPE c,
+txt(100)       TYPE c,
+tskna(3)       TYPE c,
+tsknu(2)       TYPE c,
+count          TYPE p,
+END OF typ_out.
+
+TYPES:
+BEGIN OF typ_aux_slgproc.
+INCLUDE STRUCTURE rslgpid.
+TYPES:
+END OF typ_aux_slgproc.
+
+TYPES:
+msgtext_t(700) TYPE c.
+
+TYPES:
+BEGIN OF typ_cur_syslogtab.
+INCLUDE STRUCTURE rslgtcache.
+TYPES:
+END OF typ_cur_syslogtab.
+*----------------------------------------------------------------------*
+* data
+*----------------------------------------------------------------------*
+DATA:
+w_days               TYPE p,
+w_rsausel            TYPE rsausel,
+msg_text(316)        TYPE c,
+msg_text_len(2)      TYPE p,
+cached_errno(6)      TYPE c,
+cached_t100(5)       TYPE c,
+aux_slgproc          TYPE typ_aux_slgproc,
+cur_syslogtab        TYPE typ_cur_syslogtab,
+cur_syslogtab_filled TYPE c,
+hide_params          TYPE rslgtype-paramarray,
+i_fieldcat           TYPE slis_t_fieldcat_alv,
+i_layout             TYPE slis_layout_alv.
+*----------------------------------------------------------------------*
+* inner table
+*----------------------------------------------------------------------*
+DATA:
+it_list     TYPE TABLE OF typ_list,      "ファイルリスト
+
+it_rfchosts TYPE TABLE OF rfchosts,
+it_usr01    TYPE TABLE OF typ_usr01,
+it_rslgetab TYPE TABLE OF rslgetab,
+it_outtab   TYPE TABLE OF typ_out.
+*----------------------------------------------------------------------*
+* constants
+*----------------------------------------------------------------------*
+CONSTANTS:
+var_part_lg    TYPE i VALUE 64,
+c_date(7)      TYPE c VALUE 'ALGDATE',
+c_time(7)      TYPE c VALUE 'ALGTIME',
+c_no(5)        TYPE c VALUE 'TSKNU',
+c_cat(5)       TYPE c VALUE 'TSKNA',
+c_term(8)      TYPE c VALUE 'ALGLTERM',
+c_cl(9)        TYPE c VALUE 'ALGCLIENT',
+c_user(7)      TYPE c VALUE 'ALGUSER',
+c_tcode(8)     TYPE c VALUE 'ALGTCODE',
+c_prog(8)      TYPE c VALUE 'ALGREPNA',
+c_text(7)      TYPE c VALUE 'ALGTEXT',
+c_count(5)     TYPE c VALUE 'COUNT',
+c_it_final(12) TYPE c VALUE 'IT_OUTTAB',
+c_etime(6)     TYPE c VALUE '235959'.
+*----------------------------------------------------------------------*
+* select-options
+*----------------------------------------------------------------------*
+*--条件
+SELECTION-SCREEN: BEGIN OF BLOCK bk1 WITH FRAME TITLE text-d01.
+SELECT-OPTIONS: s_date  FOR sy-datum NO-EXTENSION    "日付
+OBLIGATORY,
+s_time  FOR sy-uzeit NO-EXTENSION,   "時刻
+s_mandt FOR sy-mandt,                "client
+s_tcode FOR sy-tcode,                "Tr-Cd
+s_pgmna FOR rslgsel-repna,           "PGM-ID
+s_user  FOR rsauinfo-uname.          "User-ID
+SELECTION-SCREEN SKIP 1.
+SELECTION-SCREEN COMMENT 1(22) text-d02.
+SELECTION-SCREEN SKIP 1.
+SELECTION-SCREEN COMMENT 1(39) text-d07.
+SELECTION-SCREEN: END OF BLOCK bk1.
+*--オプション
+SELECTION-SCREEN: BEGIN OF BLOCK bk2 WITH FRAME TITLE text-d03.
+
+*** 集計キー
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(8) text-d04.
+* Tr-Cd
+SELECTION-SCREEN POSITION 33.
+PARAMETERS: p_chk_t AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 36(5) text-d05 FOR FIELD p_chk_t.
+* PGM
+SELECTION-SCREEN POSITION 44.
+PARAMETERS: p_chk_p AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 47(3) text-d06 FOR FIELD p_chk_p.
+SELECTION-SCREEN END OF LINE.
+
+*** ファイル読込方法
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(16) text-d08.
+* 非純正
+SELECTION-SCREEN POSITION 33.
+PARAMETERS p_nopure RADIOBUTTON GROUP ra01 USER-COMMAND change.
+SELECTION-SCREEN COMMENT 36(6) text-d09 FOR FIELD p_nopure.
+* 純正
+SELECTION-SCREEN POSITION 44.
+PARAMETERS p_pure RADIOBUTTON GROUP ra01.
+SELECTION-SCREEN COMMENT 47(4) text-d10 FOR FIELD p_pure.
+SELECTION-SCREEN END OF LINE.
+
+PARAMETERS p_infile(128) TYPE c MODIF ID mo1.
+SELECTION-SCREEN: END OF BLOCK bk2.
+
+*----------------------------------------------------------------------*
+* initialization
+*----------------------------------------------------------------------*
+INITIALIZATION.
+PERFORM init_proc.
+*----------------------------------------------------------------------*
+* at selection-screen output
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN OUTPUT.
+* 読込ファイル項目制御
+PERFORM control_screen_item.
+*----------------------------------------------------------------------*
+* start-of-selection.
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+* 読込ファイル項目チェック
+PERFORM check_screen_item.
+
+* データ取得
+IF p_pure = 'X'.
+PERFORM get_data.            "標準PGMを使って
+ELSE.
+PERFORM get_data_manual.     "標準PGMを使わずに
+ENDIF.
+* データ編集
+PERFORM edit_data.
+* ALV
+IF NOT it_outtab IS INITIAL.
+PERFORM build_alv.
+ELSE.
+MESSAGE s204(z1).
+LEAVE LIST-PROCESSING.
+ENDIF.
+*&---------------------------------------------------------------------*
+*&      Form  init_proc
+*&---------------------------------------------------------------------*
+*       INITIALIZATION
+*----------------------------------------------------------------------*
+FORM init_proc.
+* local
+DATA: lw_restrict TYPE sscr_restrict,
+lw_optlist  TYPE sscr_opt_list,
+lw_ass      TYPE sscr_ass.
+
+lw_optlist-name = 'SELOPT1'.
+lw_optlist-options-eq = 'X'.
+lw_optlist-options-bt = 'X'.
+APPEND lw_optlist TO lw_restrict-opt_list_tab.
+*
+lw_ass-kind  = 'S'.
+lw_ass-name  = 'S_DATE'.
+lw_ass-sg_main = 'I'.
+lw_ass-op_main = 'SELOPT1'.
+APPEND lw_ass TO lw_restrict-ass_tab.
+*
+lw_optlist-name = 'SELOPT2'.
+lw_optlist-options-eq = 'X'.
+lw_optlist-options-bt = 'X'.
+APPEND lw_optlist TO lw_restrict-opt_list_tab.
+*
+lw_ass-kind  = 'S'.
+lw_ass-name  = 'S_TIME'.
+lw_ass-sg_main = 'I'.
+lw_ass-op_main = 'SELOPT2'.
+APPEND lw_ass TO lw_restrict-ass_tab.
+
+CALL FUNCTION 'SELECT_OPTIONS_RESTRICT'
+EXPORTING
+restriction            = lw_restrict
+EXCEPTIONS
+too_late               = 1
+repeated               = 2
+selopt_without_options = 3
+selopt_without_signs   = 4
+invalid_sign           = 5
+empty_option_list      = 6
+invalid_kind           = 7
+repeated_kind_a        = 8
+OTHERS                 = 9.
+
+ENDFORM.                    " init_proc
+*&---------------------------------------------------------------------*
+*&      Form  get_data
+*&---------------------------------------------------------------------*
+*       データ取得
+*----------------------------------------------------------------------*
+FORM get_data.
+* local
+DATA: lw_rslgsel   TYPE rslgsel,
+lst_usr01    TYPE typ_usr01,
+lit_tmp      TYPE TABLE OF rslgetab,
+l_sdate      TYPE d,
+l_edate      TYPE d,
+l_days       TYPE p,
+l_cnt        TYPE p,
+lst_rfchosts TYPE rfchosts.
+
+REFRESH it_rslgetab.
+
+* 抽出条件データ取得
+PERFORM get_codition_data.
+
+* 抽出条件設定
+READ TABLE it_rfchosts INTO lst_rfchosts INDEX 1.
+lw_rslgsel-rfcdest = lst_rfchosts-rfcdest.
+lw_rslgsel-whichlog = 'A'.
+
+l_sdate = s_date-low.
+IF s_date-high IS INITIAL.
+l_edate = l_sdate.
+ELSE.
+l_edate = s_date-high.
+ENDIF.
+
+*--check
+IF sy-datum <= l_edate.
+l_edate = sy-datum - 3.
+IF l_sdate > l_edate.
+MESSAGE s650(db).
+LEAVE LIST-PROCESSING.
+ELSE.
+MESSAGE i039(z1) WITH text-i01.
+ENDIF.
+ENDIF.
+
+*--check
+IF sy-datum <= l_edate.
+l_edate = sy-datum - 3.
+ENDIF.
+
+*--期間
+l_days = l_edate - l_sdate + 1.
+
+*--データ取得
+IF NOT it_usr01 IS INITIAL.
+
+*   1日ごとに取得
+DO.
+IF l_sdate > l_edate.
+EXIT.
+ENDIF.
+*     loopカウント
+l_cnt = l_cnt + 1.
+*     timeout回避
+PERFORM progress_indicator USING l_cnt
+l_days
+l_sdate
+text-m01.
+
+LOOP AT it_usr01 INTO lst_usr01.
+*       UserID設定
+lw_rslgsel-user = lst_usr01-bname.
+*       日時設定
+PERFORM set_select_condition USING    l_sdate
+CHANGING lw_rslgsel.
+*       ファイル読込
+PERFORM read_file USING    lw_rslgsel
+CHANGING lit_tmp.
+APPEND LINES OF lit_tmp TO it_rslgetab.
+
+REFRESH lit_tmp.
+ENDLOOP.
+l_sdate = l_sdate + 1.
+ENDDO.
+ELSE.
+DO.
+IF l_sdate > l_edate.
+EXIT.
+ENDIF.
+*     loopカウント
+l_cnt = l_cnt + 1.
+*     日時設定
+PERFORM set_select_condition USING    l_sdate
+CHANGING lw_rslgsel.
+*     timeout回避
+PERFORM progress_indicator USING l_cnt
+l_days
+l_sdate
+text-m01.
+
+*     ファイル読込
+PERFORM read_file USING    lw_rslgsel
+CHANGING lit_tmp.
+APPEND LINES OF lit_tmp TO it_rslgetab.
+l_sdate = l_sdate + 1.
+
+REFRESH lit_tmp.
+ENDDO.
+ENDIF.
+
+IF it_rslgetab IS INITIAL.
+MESSAGE s204(z1).
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " get_data
+*&---------------------------------------------------------------------*
+*&      Form  set_select_condition
+*&---------------------------------------------------------------------*
+*       抽出条件設定
+*----------------------------------------------------------------------*
+*      -->I_DATE    日付
+*      <--O_RSLGSEL 抽出条件
+*----------------------------------------------------------------------*
+FORM set_select_condition USING    i_date    TYPE d
+CHANGING o_rslgsel TYPE rslgsel.
+
+* From
+o_rslgsel-date = i_date.
+o_rslgsel-time = s_time-low.
+CONCATENATE o_rslgsel-date o_rslgsel-time '00'
+INTO o_rslgsel-startdate.
+* TO
+o_rslgsel-edate = i_date.
+IF s_time-high IS INITIAL.
+o_rslgsel-etime = c_etime.
+ELSE.
+o_rslgsel-etime = s_time-high.
+ENDIF.
+CONCATENATE o_rslgsel-edate o_rslgsel-etime '00'
+INTO o_rslgsel-stop_date.
+
+ENDFORM.                    " set_select_condition
+*&---------------------------------------------------------------------*
+*&      Form  get_codition_data
+*&---------------------------------------------------------------------*
+*       条件用データ取得
+*----------------------------------------------------------------------*
+FORM get_codition_data.
+
+REFRESH: it_rfchosts, it_usr01.
+CLEAR    w_rsausel.
+
+* ホスト取得
+CALL FUNCTION 'RFC_GET_LOCAL_DESTINATIONS'
+TABLES
+localdest     = it_rfchosts
+EXCEPTIONS
+not_available = 1
+OTHERS        = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+
+CALL FUNCTION 'RSAU_SELINFO_INIT'
+CHANGING
+audit_selection = w_rsausel.
+
+* ユーザ
+IF NOT s_user IS INITIAL.
+SELECT bname FROM usr01 INTO TABLE it_usr01 WHERE bname IN s_user.
+ENDIF.
+ENDFORM.                    " get_codition_data
+*&---------------------------------------------------------------------*
+*&      Form  read_file
+*&---------------------------------------------------------------------*
+*       ファイル読込
+*----------------------------------------------------------------------*
+*      -->I_RLGSEL  text
+*      -->I_RSAUSEL  text
+*      <--O_LIT_TAB  text
+*----------------------------------------------------------------------*
+FORM read_file USING    i_rslgsel TYPE rslgsel
+CHANGING o_lit_tab TYPE typ_it_rslgetab.
+
+CALL FUNCTION 'RSAU_READ_FILE'
+EXPORTING
+selection             = i_rslgsel
+selection_audit       = w_rsausel
+*       FILE_NO_OLD           =
+*     IMPORTING
+*       COUNTERS              =
+*       END_INFO              =
+*       END_REASON            =
+*       FILE_NO_NEW           =
+TABLES
+syslog_in_table       = o_lit_tab
+*       AUDIT_FILE_STAT       =
+.
+
+ENDFORM.                    " read_file
+*&---------------------------------------------------------------------*
+*&      Form  edit_data
+*&---------------------------------------------------------------------*
+*       データ編集
+*----------------------------------------------------------------------*
+FORM edit_data.
+* local
+DATA: l_cnt      TYPE p,
+l_lines    TYPE p,
+l_date     TYPE d,
+l_date_bk  TYPE d,
+l_rslgetab TYPE rslgetab,
+l_entry    TYPE rslgentr,
+lst_tmp    TYPE typ_out,
+lst_outtab TYPE typ_out.
+
+* 処理件数
+DESCRIBE TABLE it_rslgetab LINES l_lines.
+
+LOOP AT it_rslgetab INTO l_rslgetab.
+*   loopカウント
+l_cnt = l_cnt + 1.
+
+CLEAR l_entry.
+l_entry = l_rslgetab-centdata.
+
+*   データ選別
+CHECK l_entry-slgmand  IN s_mandt.   "client
+CHECK l_entry-slgtc    IN s_tcode    "Tr-Cd
+OR l_entry-slgrepna IN s_pgmna.   "PGM-ID
+
+l_date = l_entry-slgdattim+0(8).
+IF l_date <> l_date_bk.
+*     timeout回避
+PERFORM progress_indicator USING l_cnt
+l_lines
+l_date
+text-m02.
+l_date_bk = l_date.
+ENDIF.
+
+CLEAR lst_outtab.
+lst_outtab-algtcode    = l_entry-slgtc.            "transaction
+lst_outtab-algrepna    = l_entry-slgrepna.         "program
+
+*   集計キーONの場合
+IF p_chk_t = 'X' AND p_chk_p = 'X'.
+*     PGMがブランクのものは除外
+CHECK lst_outtab-algrepna <> space.
+READ TABLE it_outtab INTO lst_tmp
+WITH KEY algtcode = lst_outtab-algtcode
+algrepna = lst_outtab-algrepna
+BINARY SEARCH.
+IF sy-subrc = 0.
+lst_tmp-count = lst_tmp-count + 1.
+MODIFY it_outtab FROM  lst_tmp TRANSPORTING count
+WHERE algtcode = lst_outtab-algtcode
+AND algrepna = lst_outtab-algrepna.
+CONTINUE.
+ELSE.
+lst_outtab-count = 1.
+ENDIF.
+ELSEIF p_chk_t = 'X' AND p_chk_p = space.
+*     PGMがブランクのものは除外
+CHECK lst_outtab-algrepna <> space.
+READ TABLE it_outtab INTO lst_tmp
+WITH KEY algtcode = lst_outtab-algtcode
+BINARY SEARCH.
+IF sy-subrc = 0.
+lst_tmp-count = lst_tmp-count + 1.
+MODIFY it_outtab FROM  lst_tmp TRANSPORTING count
+WHERE algtcode = lst_outtab-algtcode.
+CONTINUE.
+ELSE.
+lst_outtab-count = 1.
+ENDIF.
+ELSEIF  p_chk_t = space AND p_chk_p = 'X'.
+*     PGMがブランクのものは除外
+CHECK lst_outtab-algrepna <> space.
+READ TABLE it_outtab TRANSPORTING NO FIELDS
+WITH KEY algrepna = lst_outtab-algrepna
+BINARY SEARCH.
+IF sy-subrc = 0.
+lst_tmp-count = lst_tmp-count + 1.
+MODIFY it_outtab FROM  lst_tmp TRANSPORTING count
+WHERE algrepna = lst_outtab-algrepna.
+CONTINUE.
+ELSE.
+lst_outtab-count = 1.
+ENDIF.
+ENDIF.
+
+IF p_pure = 'X'.
+
+lst_outtab-alglterm    = l_entry-slgltrm.          "terminal
+lst_outtab-algclient   = l_entry-slgmand.          "client
+lst_outtab-alguser     = l_entry-slguser.          "user
+lst_outtab-algarea     = l_rslgetab-area.          "message area
+lst_outtab-algsubid    = l_rslgetab-subid.         "message id
+lst_outtab-alginst     = l_rslgetab-sender_id.     "system
+lst_outtab-algtasktype = l_rslgetab-slgttyp.       "process type
+lst_outtab-algsystem   = l_rslgetab-sender_id.
+
+**--Date and Time
+lst_outtab-algdate     = l_rslgetab-pos_creatt.
+lst_outtab-algtime     = l_rslgetab-pos_creatt+8.
+
+**--File and fileposition
+lst_outtab-algfileno   = l_rslgetab-file_no.
+lst_outtab-algfilepos  = l_rslgetab-pos.
+
+**--Build complete message with inserts
+PERFORM use_tabe_and_data USING l_rslgetab-area
+l_rslgetab-subid
+l_entry-slgdata
+msg_text
+msg_text_len
+l_entry-slgltrm
+l_entry-slgmode
+l_entry-slgdattim
+cached_errno
+cached_t100.
+
+lst_outtab-algtext  = msg_text.
+aux_slgproc         = l_entry-slgproc.
+lst_outtab-tsknu    = aux_slgproc-tasktno+3(2).
+
+**--To get the category.
+CASE lst_outtab-algtasktype(1).
+WHEN 'B'.
+lst_outtab-tskna = 'BTC'.
+WHEN 'D'.
+IF l_rslgetab-slgttyp = 'DP'.
+lst_outtab-tskna = 'DP '.
+lst_outtab-tsknu = '  '.
+ELSE.
+lst_outtab-tskna = 'DIA'.
+ENDIF.
+WHEN 'E'.
+lst_outtab-tskna = 'ENQ'.
+WHEN 'M'.
+lst_outtab-tskna = 'MS '.
+lst_outtab-tsknu = '  '.
+WHEN 'R'.
+lst_outtab-tskna = 'RD '.
+lst_outtab-tsknu = '  '.
+WHEN 'S'.
+lst_outtab-tskna = 'SPO'.
+WHEN 'U'.
+lst_outtab-tskna = 'UPD'.
+WHEN 'V'.
+lst_outtab-tskna = 'UP2'.
+WHEN 'W'.
+lst_outtab-tskna = 'WRK'.
+WHEN OTHERS.
+IF l_rslgetab-slgttyp = 'sa'.
+lst_outtab-tskna = 'S-A'.
+ENDIF.
+lst_outtab-tsknu = '  '.
+ENDCASE.
+ENDIF.
+
+APPEND lst_outtab TO it_outtab.
+*   sort
+IF p_chk_t = 'X' AND p_chk_p = 'X'.
+SORT it_outtab BY algtcode algrepna.
+ELSEIF p_chk_t = 'X' AND p_chk_p = space.
+SORT it_outtab BY algtcode.
+ELSEIF  p_chk_t = space AND p_chk_p = 'X'.
+SORT it_outtab BY algrepna.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " edit_data
+*&---------------------------------------------------------------------*
+*&      Form  USE_TABE_AND_DATA
+*&---------------------------------------------------------------------*
+*       This subroutine replace the variable data in the message text.
+*----------------------------------------------------------------------*
+FORM use_tabe_and_data  USING a36_area a36_subid
+a36_data a36_text a36_t_lg
+a36_slgltrm a36_slgmode a36_curtime
+a36_catched_errno a36_catched_t100.
+
+DATA msg_len       TYPE i.
+DATA dest_len      TYPE i.             " filled length of A36_TEXT
+DATA value_len     TYPE i.             " length of VALUE
+DATA tmp_len       TYPE i.             " length of VALUE
+DATA word_offset   TYPE i.
+DATA word_len      TYPE i.
+DATA part_len      TYPE i.
+DATA long_value    TYPE msgtext_t.     " as long as A36_TEXT ?!
+DATA l36_text      TYPE msgtext_t.     " buffer for standard text
+DATA l_pos         LIKE sy-fdpos.
+DATA l_decoded     LIKE sy-fdpos.
+DATA l_skip_param  TYPE i.
+DATA words(1024).                                         " 16 * 64
+DATA a_space VALUE ' '.
+DATA catch_errno           VALUE ' '.
+DATA catch_t100            VALUE ' '.
+
+FIELD-SYMBOLS: <dest_ptr>.
+FIELD-SYMBOLS: <value_ptr>.
+FIELD-SYMBOLS: <tmp_ptr>.
+FIELD-SYMBOLS: <words_ptr>.
+FIELD-SYMBOLS: <msg_ptr>.
+
+CALL FUNCTION 'RSLG_TAB_CACHE_ACCESS'
+EXPORTING
+area        = a36_area
+subid       = a36_subid
+IMPORTING
+cache_entry = cur_syslogtab.
+
+**--Entry found: substitute with variable data.
+
+msg_len = strlen( cur_syslogtab-txt ).
+IF msg_len > 0.
+IF cur_syslogtab-uses_32_do = space.
+*       " New method: value data may be seperated into words by '&'.
+*       "             Message text contains '&<cap_letter>' to collect
+*       "             the words in any order.
+*       " (1) Cut value into words and store them in WORDS.
+*       "
+value_len =  var_part_lg.
+dest_len  = 312.
+ASSIGN a36_data(value_len)    TO <value_ptr>.
+ASSIGN a36_text(dest_len)     TO <dest_ptr>.
+ASSIGN words(var_part_lg)     TO <words_ptr>.
+ASSIGN cur_syslogtab-txt(msg_len) TO <msg_ptr>.
+WHILE <value_ptr> CA '&'.
+*         " contains any &. 1st at FDPOS. FDPOS counts 0,1,2,...  !
+l_pos = sy-fdpos.
+*         " Store left hand word.
+tmp_len = l_pos.
+IF tmp_len > 0.
+ASSIGN <value_ptr>(tmp_len) TO <tmp_ptr>.
+ELSE.
+ASSIGN a_space TO <tmp_ptr>.
+ENDIF.
+MOVE <tmp_ptr> TO <words_ptr>.
+*         " Move to next storage location.
+ASSIGN <words_ptr>+var_part_lg(var_part_lg) TO <words_ptr>.
+*         " Pick up rest of value without the boundary '&'.
+value_len  = value_len - l_pos - 1.
+IF value_len > 0.
+tmp_len = l_pos + 1.
+ASSIGN <value_ptr>+tmp_len(value_len) TO <value_ptr>.
+ELSE.
+ASSIGN a_space TO <value_ptr>.
+ENDIF.
+ENDWHILE.
+*       " Store last word.
+MOVE <value_ptr> TO <words_ptr>.
+*       "
+
+*       "--------------
+*       " (2) Copy message text to output area, and during that
+*       "     replace each &A,&B,..  by word 1, word 2,...
+*       "     replace each &a,&b,..  by parameter a, parameter b,...
+*       "     replace each &1,&2,..  by 1,2,... characters from value
+*
+*       " Restore access to whole value (64 characters)
+long_value    = a36_data.
+ASSIGN long_value(msg_len) TO <value_ptr>.
+value_len = var_part_lg.
+*       " Loop throug message...
+WHILE <msg_ptr> CA '&'.
+*         " contains any '&'. 1st '&' is at FDPOS.
+l_pos = sy-fdpos.
+l_skip_param = 2.
+*         " Copy left hand fixed part.
+tmp_len = l_pos.
+IF tmp_len > 0.
+ASSIGN <msg_ptr>(tmp_len) TO <tmp_ptr>.
+MOVE <tmp_ptr> TO <dest_ptr>.
+dest_len = dest_len - tmp_len.
+ASSIGN <dest_ptr>+tmp_len(dest_len) TO <dest_ptr>.
+ENDIF.
+*         " Pick up the &i.
+tmp_len = l_pos + 1.
+ASSIGN <msg_ptr>+tmp_len(1) TO <tmp_ptr>.
+
+IF <tmp_ptr> = '>'.
+ASSIGN <tmp_ptr>+1(1) TO <tmp_ptr>.
+CASE <tmp_ptr>.
+WHEN 'E'.
+catch_errno = 'X'.
+ASSIGN <tmp_ptr>+1(1) TO <tmp_ptr>.
+ADD 2 TO l_skip_param.
+WHEN 'M'.
+catch_t100 = 'X'.
+ASSIGN <tmp_ptr>+1(1) TO <tmp_ptr>.
+ADD 2 TO l_skip_param.
+WHEN OTHERS.
+*               " A '&>' followed by something strange tries to ignore
+*               " the '>'.
+MOVE '&' TO <dest_ptr>.
+dest_len = dest_len - 1.
+ASSIGN <dest_ptr>+1(dest_len) TO <dest_ptr>.
+MOVE '>' TO <dest_ptr>.
+dest_len = dest_len - 1.
+ASSIGN <dest_ptr>+1(dest_len) TO <dest_ptr>.
+dest_len = dest_len - 1.
+ADD 1 TO l_skip_param.
+ENDCASE.
+ENDIF. " &>...
+
+IF 'ABCDEFGHIJKLMNOP' CA <tmp_ptr>.
+*           " &A, &B,.. identify the 1st, 2nd,.. '&'-seperated word from
+*           "         the 64 char value field.
+word_offset = sy-fdpos * var_part_lg.
+ASSIGN words+word_offset(var_part_lg) TO <words_ptr>.
+word_len = strlen( <words_ptr> ).
+IF word_len > 0.
+ASSIGN words+word_offset(word_len) TO <words_ptr>.
+MOVE <words_ptr> TO <dest_ptr>.
+dest_len = dest_len - word_len.
+ASSIGN <dest_ptr>+word_len(dest_len) TO <dest_ptr>.
+IF catch_errno = 'X'.
+MOVE <words_ptr> TO a36_catched_errno.
+ENDIF.
+IF catch_t100 = 'X'.
+MOVE <words_ptr> TO a36_catched_t100.
+ENDIF.
+ENDIF.
+
+ELSE. " ident not in range 'A',..,'P'
+IF 'abcdefghij' CA <tmp_ptr>.
+*             " &a, &b,.. identify one of the parameters of any
+*             "         preceeding parameter SysLog entries.
+l_decoded = sy-fdpos.
+PERFORM find_and_hide_params
+USING a36_slgltrm a36_slgmode a36_curtime.
+word_offset = l_decoded * ( var_part_lg - 2 ).
+part_len = var_part_lg - 2 .             " 2 for overhead.
+ASSIGN hide_params+word_offset(part_len) TO <words_ptr>.
+word_len = strlen( <words_ptr> ).
+IF word_len > 0.
+ASSIGN hide_params+word_offset(word_len) TO <words_ptr>.
+MOVE <words_ptr> TO <dest_ptr>.
+dest_len = dest_len - word_len.
+ASSIGN <dest_ptr>+word_len(dest_len) TO <dest_ptr>.
+IF catch_errno = 'X'.
+MOVE <words_ptr> TO a36_catched_errno.
+ENDIF.
+IF catch_t100 = 'X'.
+MOVE <words_ptr> TO a36_catched_t100.
+ENDIF.
+ENDIF.
+
+ELSE. " ident not in range 'A',..,'P' nor in 'a',..,'j'
+IF '123456789' CA <tmp_ptr>.
+*               " &1, &2,.. identify one to nine characters from the
+*               "           64 char value field, taken left to right.
+word_len = sy-fdpos + 1 .
+*               " Copy part of value field.
+MOVE <value_ptr> TO <dest_ptr>(word_len).
+IF catch_errno = 'X'.
+ASSIGN <value_ptr>(word_len) TO <value_ptr>.
+MOVE <value_ptr> TO a36_catched_errno.
+ENDIF.
+IF catch_t100 = 'X'.
+ASSIGN <value_ptr>(word_len) TO <value_ptr>.
+MOVE <value_ptr> TO a36_catched_t100.
+ENDIF.
+*               " Pick up the rest of value behind that word.
+value_len = value_len - word_len.
+IF value_len > 0.
+ASSIGN <value_ptr>+word_len(value_len) TO <value_ptr>.
+ELSE.
+ASSIGN '???????????????' TO <value_ptr>.
+ENDIF.
+*               " Pick up the rest of destination field.
+dest_len = dest_len - word_len.
+ASSIGN <dest_ptr>+word_len(dest_len) TO <dest_ptr>.
+
+ELSE. " ident not in ranges 'A'..'P' , 'a'..'j' , '1'..'9'
+*               " A '&' followed by something strange is not substituted
+MOVE '&' TO <dest_ptr>.
+dest_len = dest_len - 1.
+ASSIGN <dest_ptr>+1(dest_len) TO <dest_ptr>.
+MOVE <tmp_ptr> TO <dest_ptr>.
+dest_len = dest_len - 1.
+ASSIGN <dest_ptr>+1(dest_len) TO <dest_ptr>.
+ENDIF.
+ENDIF.
+ENDIF.
+CLEAR: catch_errno, catch_t100.
+*         " Pick up rest of message without the &i.
+msg_len = msg_len - l_pos - l_skip_param.
+IF msg_len > 0.
+tmp_len = l_pos + l_skip_param.
+ASSIGN <msg_ptr>+tmp_len(msg_len) TO <msg_ptr>.
+ELSE.
+ASSIGN a_space TO <msg_ptr>.
+ENDIF.
+ENDWHILE.
+*       " Copy last fixed part.
+MOVE <msg_ptr> TO <dest_ptr>.
+
+ELSE.
+*       " Old method: replace each '$' by one value character from left
+*       "             to right
+*       " (1) Copy whole message
+long_value    = a36_data.
+ASSIGN long_value(msg_len) TO <value_ptr>.
+a36_text = cur_syslogtab-txt.
+ASSIGN a36_text(msg_len) TO <dest_ptr>.
+*       " (2) Look for any $ and replace them.
+WHILE <dest_ptr> CA '$'.
+*         " contains any $. 1st at FDPOS.
+l_pos = sy-fdpos.
+*         " Now look at rest of msg, starting with 1st $
+msg_len = msg_len - l_pos.
+ASSIGN <dest_ptr>+sy-fdpos(msg_len) TO <dest_ptr>.
+IF <dest_ptr> CO '$'.
+*           " contains only dollars.
+*           " Replace them all.
+MOVE <value_ptr> TO <dest_ptr>.
+EXIT.
+ELSE.
+*           " contains not only dollars. 1st other char at FDPOS.
+l_pos = sy-fdpos.
+msg_len = msg_len - l_pos.
+*           " Replace next group of dollars.
+MOVE  <value_ptr> TO <dest_ptr>(l_pos).
+*           " Pick up the rest of msg behind that group.
+ASSIGN <dest_ptr>+l_pos(msg_len) TO <dest_ptr>.
+*           " Pick up the rest of value behind that group.
+ASSIGN <value_ptr>+l_pos(msg_len) TO <value_ptr>.
+ENDIF.
+ENDWHILE.
+ENDIF.
+CONDENSE a36_text.
+
+ELSE.
+*     Entry has empty text: set standard text.
+MOVE  'leer: TSL1T(   '(241)      TO l36_text.
+MOVE              sy-langu        TO l36_text+12.
+MOVE              ','             TO l36_text+14.
+MOVE                a36_area      TO l36_text+15.
+MOVE                  a36_subid   TO l36_text+17.
+MOVE                  '):'        TO l36_text+18.
+MOVE                     a36_data TO l36_text+10.
+MOVE                     l36_text TO a36_text.
+ENDIF.
+
+* Get the actual length of the string.
+a36_t_lg = strlen( a36_text ).
+ENDFORM.                    " USE_TABE_AND_DATA
+*&---------------------------------------------------------------------*
+*&      Form  FIND_AND_HIDE_PARAMS
+*&---------------------------------------------------------------------*
+FORM find_and_hide_params  USING    a_slgltrm
+a_slgmode
+a_curtime.
+
+CALL FUNCTION 'RSLG_FIND_PARAMS'
+EXPORTING
+date_time   = a_curtime
+extern_mode = a_slgmode
+terminal    = a_slgltrm
+IMPORTING
+param_array = hide_params
+EXCEPTIONS
+not_found   = 1.
+IF sy-subrc = 0.
+HIDE hide_params.
+ELSEIF sy-subrc = 1.
+CLEAR hide_params.
+ENDIF.
+
+ENDFORM.                    " FIND_AND_HIDE_PARAMS
+*&---------------------------------------------------------------------*
+*&      Form  build_alv
+*&---------------------------------------------------------------------*
+*       alv
+*----------------------------------------------------------------------*
+FORM build_alv.
+*--& Build field catelog for ALV
+PERFORM build_fieldcatalog.
+
+i_layout-colwidth_optimize = 'X'.
+i_layout-zebra = 'X'.
+
+*--& Display ALV
+PERFORM display_alv.
+ENDFORM.                    " build_alv
+*&---------------------------------------------------------------------*
+*&      Form  build_fieldcatalog
+*&---------------------------------------------------------------------*
+*       fieldcatalog作成
+*----------------------------------------------------------------------*
+FORM build_fieldcatalog.
+
+REFRESH i_fieldcat.
+
+**--Date
+PERFORM set_fieldcat USING c_date
+c_it_final
+10
+text-001.
+**--Time
+PERFORM set_fieldcat USING c_time
+c_it_final
+10
+text-002.
+**--Category
+PERFORM set_fieldcat USING c_cat
+c_it_final
+4
+text-003.
+**--No.
+PERFORM set_fieldcat USING c_no
+c_it_final
+3
+text-004.
+**--Client
+PERFORM set_fieldcat USING c_cl
+c_it_final
+4
+text-005.
+**--Transaction code
+PERFORM set_fieldcat USING c_tcode
+c_it_final
+15
+text-006.
+**--Program Name
+PERFORM set_fieldcat USING c_prog
+c_it_final
+20
+text-007.
+**--Terminal
+PERFORM set_fieldcat USING c_term
+c_it_final
+10
+text-008.
+**--Message Text
+PERFORM set_fieldcat USING c_text
+c_it_final
+45
+text-009.
+**--User Name
+PERFORM set_fieldcat USING c_user
+c_it_final
+12
+text-010.
+**--Counter
+PERFORM set_fieldcat USING c_count
+c_it_final
+10
+text-011.
+ENDFORM.                    " build_fieldcatalog
+*&---------------------------------------------------------------------*
+*&      Form  display_alv
+*&---------------------------------------------------------------------*
+*       Display ALV
+*----------------------------------------------------------------------*
+FORM display_alv.
+* local
+DATA l_repid TYPE sy-repid.
+
+l_repid = sy-repid.
+
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+i_callback_program       = l_repid
+i_callback_pf_status_set = 'SET_PF_STATUS'
+it_fieldcat              = i_fieldcat
+is_layout                = i_layout
+i_save                   = 'A'  "バリアント保存可能
+TABLES
+t_outtab                 = it_outtab
+EXCEPTIONS
+program_error            = 1
+OTHERS                   = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+ENDFORM.                    " display_alv
+*&---------------------------------------------------------------------*
+*&      FORM SET_PF_STATUS                                             *
+*&---------------------------------------------------------------------*
+FORM set_pf_status USING rt_extab TYPE slis_t_extab.
+SET PF-STATUS 'ZSTATUS'.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  progress_indicator
+*&---------------------------------------------------------------------*
+*       timeout回避
+*----------------------------------------------------------------------*
+*      -->I_CNT    処理回数
+*      -->I_TOTAL  処理対象件数
+*      -->I_DATE   現在の処理日付
+*      -->I_MSG    メッセージ
+*----------------------------------------------------------------------*
+FORM progress_indicator USING i_cnt   TYPE p
+i_total TYPE p
+i_date  TYPE d
+i_msg   TYPE c.
+* local
+DATA: l_per TYPE p,
+l_msg TYPE string.
+
+l_per = i_cnt / i_total * 100.
+
+CONCATENATE i_date i_msg INTO l_msg.
+
+CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+EXPORTING
+percentage = l_per
+text       = l_msg.
+
+ENDFORM.                    " progress_indicator
+*&---------------------------------------------------------------------*
+*&      Form  get_data_manual
+*&---------------------------------------------------------------------*
+*       データ取得(標準PGMを使わずに)
+*----------------------------------------------------------------------*
+FORM get_data_manual.
+* local
+DATA: l_path       TYPE typ_list,
+l_tmp        TYPE rslgetab-centdata,
+l_date       TYPE d,
+l_cnt        TYPE p,
+lst_rslgetab TYPE rslgetab.
+
+REFRESH it_rslgetab.
+
+LOOP AT it_list INTO l_path.
+*   日付
+l_date = l_path-filename(8).
+*   loopカウント
+l_cnt = l_cnt + 1.
+*   timeout回避
+PERFORM progress_indicator USING l_cnt
+w_days
+l_date
+text-m01.
+OPEN DATASET l_path FOR INPUT IN BINARY MODE.
+IF sy-subrc = 0.
+DO.
+READ DATASET l_path INTO l_tmp.
+IF sy-subrc <> 0.
+EXIT.
+ENDIF.
+
+lst_rslgetab-centdata = l_tmp.
+APPEND lst_rslgetab TO it_rslgetab.
+CLEAR: lst_rslgetab, l_tmp.
+ENDDO.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " get_data_manual
+*&---------------------------------------------------------------------*
+*&      Form  control_screen_item
+*&---------------------------------------------------------------------*
+*       画面項目制御
+*----------------------------------------------------------------------*
+FORM control_screen_item.
+LOOP AT SCREEN.
+IF screen-group1 = 'MO1'.
+IF p_pure = 'X'.
+screen-active = '0'.
+ELSE.
+screen-active = '1'.
+ENDIF.
+MODIFY SCREEN.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " control_screen_item
+*&---------------------------------------------------------------------*
+*&      Form  check_screen_item
+*&---------------------------------------------------------------------*
+*       画面項目チェック
+*----------------------------------------------------------------------*
+FORM check_screen_item.
+* 読込ファイルチェック
+IF p_nopure = 'X'.
+IF p_infile IS INITIAL.
+MESSAGE s495(fr).
+LEAVE LIST-PROCESSING.
+ELSE.
+*     ファイル一覧取得
+PERFORM external_command.
+IF it_list[] IS INITIAL.
+MESSAGE s798(m7).
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDFORM.                    " check_screen_item
+*&---------------------------------------------------------------------*
+*&      Form  external_command
+*&---------------------------------------------------------------------*
+*       ファイル一覧取得
+*----------------------------------------------------------------------*
+FORM external_command.
+* local
+DATA: l_sdate  TYPE d,
+l_edate  TYPE d,
+lit_tab  TYPE TABLE OF btcxpm,
+lst_tab  TYPE btcxpm,
+lst_list TYPE typ_list,
+l_para   TYPE sxpgcolist-parameters.
+FIELD-SYMBOLS: <date>.
+
+CLEAR w_days.
+REFRESH it_list.
+
+l_para = p_infile.
+
+CALL FUNCTION 'SXPG_COMMAND_EXECUTE'
+EXPORTING
+commandname                         = 'LIST_DB2DUMP'
+additional_parameters               = l_para
+*     OPERATINGSYSTEM                     = SY-OPSYS
+*     TARGETSYSTEM                        = SY-HOST
+*     DESTINATION                         =
+*     STDOUT                              = 'X'
+*     STDERR                              = 'X'
+*     TERMINATIONWAIT                     = 'X'
+*     TRACE                               =
+*   IMPORTING
+*     STATUS                              =
+*     EXITCODE                            =
+TABLES
+exec_protocol                       = lit_tab
+EXCEPTIONS
+no_permission                       = 1
+command_not_found                   = 2
+parameters_too_long                 = 3
+security_risk                       = 4
+wrong_check_call_interface          = 5
+program_start_error                 = 6
+program_termination_error           = 7
+x_error                             = 8
+parameter_expected                  = 9
+too_many_parameters                 = 10
+illegal_command                     = 11
+wrong_asynchronous_parameters       = 12
+cant_enq_tbtco_entry                = 13
+jobcount_generation_error           = 14
+OTHERS                              = 15.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+
+* 日付の設定
+l_sdate = s_date-low.
+IF s_date-high IS INITIAL.
+l_edate = l_sdate.
+ELSE.
+l_edate = s_date-high.
+ENDIF.
+*--期間
+w_days = l_edate - l_sdate + 1.
+
+LOOP AT lit_tab INTO lst_tab.
+IF lst_tab-message CS '.AUD'.
+ASSIGN lst_tab-message+36(8) TO <date>.
+IF l_sdate <= <date> AND <date> <= l_edate.
+CLEAR lst_list.
+CONCATENATE p_infile lst_tab-message+36(12)
+INTO lst_list-path.
+lst_list-filename = lst_tab-message+36(12).
+APPEND lst_list TO it_list.
+ENDIF.
+ENDIF.
+ENDLOOP.
+ENDFORM.                    " external_command
+*&---------------------------------------------------------------------*
+*&      Form  set_fieldcat
+*&---------------------------------------------------------------------*
+*       fieldcatalog設定
+*----------------------------------------------------------------------*
+*      -->I_C_FNAME    field name
+*      -->I_C_IT_FINAL innertable name
+*      -->I_OUTPUTLEN  length
+*      -->I_TEXT       text
+*----------------------------------------------------------------------*
+FORM set_fieldcat USING i_c_fname    TYPE c
+i_c_it_final TYPE c
+i_outputlen  TYPE n
+i_text       TYPE c.
+* local
+DATA l_fieldcat TYPE slis_fieldcat_alv.
+
+* Tr-CdとPGMとカウンタ以外を出力するのは、
+* 読込方法が純正で集計を行わない時
+IF i_c_fname <> c_tcode AND
+i_c_fname <> c_prog  AND
+i_c_fname <> c_count.
+IF p_pure = 'X' AND p_chk_t = space AND p_chk_p = space.
+ELSE.
+EXIT.
+ENDIF.
+ENDIF.
+
+CLEAR l_fieldcat.
+l_fieldcat-fieldname   = i_c_fname.
+l_fieldcat-tabname     = i_c_it_final.
+l_fieldcat-outputlen   = i_outputlen.
+l_fieldcat-seltext_l   = i_text.
+APPEND l_fieldcat TO i_fieldcat.
+
+ENDFORM.                    " set_fieldcat

@@ -1,0 +1,2458 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZM012900                                                    *
+*&         帳簿棚卸一覧表                                              *
+*&---------------------------------------------------------------------*
+*&  機能     :個別購買データ・在庫データをアドオンテーブルに格納する。
+*&  作成日   :2010/08/27
+*&  作成者   :S.KURATA(SOLFIS)
+*&  変更履歴 :
+*     2010/10/27
+*       明細行編集・合計行追加
+*     2011/03/30
+*       DELETE条件にプラント追加
+*     2011/04/01
+*       出荷分納時のバグ対応
+*     2011/05/16
+*       アベンド対応
+*     2011/11/07　DMW3608
+*       販売単位の変換ロジック追加
+*     2012/01/23　DMW3774
+*       個別購買品の保留在庫を一覧に反映
+*     2012/02/21　DMW3347,DMW3608
+*       預託品引渡(KB)と預託品出庫(KE)の出荷済未出荷の項目追加(DMW3347)
+*       移動平均原価を小数点2位まで出力(DMW3608)
+*     2012/03/15　DMW3991
+*       預託品、支給品数量の計算ロジック変更
+*     2014/09/16
+*       グローバル化対応
+*      2015/03/03
+*     保管場所運用改修
+*      2015/06/18
+*     受注在庫の場合、移動平均原価修正
+*&---------------------------------------------------------------------*
+REPORT ZM012900 MESSAGE-ID  Z1
+NO STANDARD PAGE HEADING
+LINE-SIZE   100.
+
+TABLES:T001W,MARC,MARD,S031.
+*----------------------------------------------------------------------*
+*  型定義
+*----------------------------------------------------------------------*
+* 受注在庫情報格納用
+TYPES:BEGIN OF T_MSKA,
+**** START DEL 2015/03/03 ISID12 ****
+*       MATNR            TYPE MSKA-MATNR,         "品目コード
+**** END DEL 2015/03/03 ISID12 ****
+WERKS            TYPE MSKA-WERKS,         "プラント
+**** START ADD 2015/03/03 ISID12 ****
+MATNR            TYPE MSKA-MATNR,         "品目コード
+**** END ADD 2015/03/03 ISID12 ****
+VBELN            TYPE MSKA-VBELN,         "販売伝票番号
+POSNR            TYPE MSKA-POSNR,         "販売明細番号
+**** START ADD 2015/03/03 ISID12 ****
+LGORT            TYPE MSKA-LGORT,         "保管場所
+**** END ADD 2015/03/03 ISID12 ****
+KALAB            TYPE MSKA-KALAB,         "利用可能評価在庫
+*--- Add Start 2012/1/23
+KASPE            TYPE MSKA-KASPE,         "保留在庫
+*--- Add End   2012/1/23
+EKGRP            TYPE MARC-EKGRP,         "購買グループ
+LGPBE            TYPE MARD-LGPBE,         "棚番
+**** START ADD 2015/03/03 ISID12 ****
+LABST            TYPE MARD-LABST,         "利用可能評価在庫
+SPEME            TYPE MARD-SPEME,        "保留在庫
+**** END ADD 2015/03/03 ISID12 ****
+END OF T_MSKA.
+
+* 受注伝票情報格納用
+TYPES:BEGIN OF T_VBAK,
+VBELN            TYPE VBAK-VBELN,         "販売伝票番号
+BSTNK            TYPE VBAK-BSTNK,         "得意先発注番号
+KUNNR            TYPE VBAK-KUNNR,         "受注先
+NAME1            TYPE KNA1-NAME1,         "名称１
+END OF T_VBAK.
+
+* 品目情報格納用
+TYPES:BEGIN OF T_MARA,
+MATNR            TYPE MAKT-MATNR,         "品目コード
+MAKTX            TYPE MAKT-MAKTX,         "品目テキスト
+MSEH3            TYPE T006A-MSEH3,        "商用数量単位
+*--- Add Start 2010/10/27
+WRKST            TYPE MARA-WRKST,         "主構成物質
+NORMT            TYPE MARA-NORMT,         "標準テキスト
+*--- Add End   2010/10/27
+END OF T_MARA.
+TYPES:BEGIN OF T_MARA_KEY,
+MATNR            TYPE MARA-MATNR,         "品目コード
+END OF T_MARA_KEY.
+
+* 通貨格納用
+TYPES:BEGIN OF T_T001K,
+WERKS            TYPE T001K-BWKEY,        "プラント
+WAERS            TYPE T001-WAERS,         "通貨コード
+END OF T_T001K.
+TYPES:BEGIN OF T_T001K_KEY,
+WERKS            TYPE T001K-BWKEY,        "プラント
+END OF T_T001K_KEY.
+
+* 購買Grテキスト格納用
+TYPES:BEGIN OF T_T024,
+EKGRP            TYPE T024-EKGRP,         "購買グループ
+EKNAM            TYPE T024-EKNAM,         "購買グループテキスト
+END OF T_T024.
+TYPES:BEGIN OF T_T024_KEY,
+EKGRP            TYPE T024-EKGRP,         "購買グループ
+END OF T_T024_KEY.
+
+* 購買伝票情報格納用
+TYPES:BEGIN OF T_EKKO,
+VBELV            TYPE VBFA-VBELV,         "先行販売伝票
+POSNV            TYPE VBFA-POSNV,         "販売伝票前明細
+VBELN            TYPE VBFA-VBELN,         "後続販売伝票
+POSNN            TYPE VBFA-POSNN,         "販売伝票次明細
+LIFNR            TYPE EKKO-LIFNR,         "仕入先
+NAME1            TYPE LFA1-NAME1,         "名称１
+END OF T_EKKO.
+
+* 入庫日格納用
+TYPES:BEGIN OF T_EKBE,
+EBELN            TYPE EKBE-EBELN,         "購買伝票番号
+EBELP            TYPE EKBE-EBELP,         "購買伝票明細
+ZEKKN            TYPE EKBE-ZEKKN,         "連続番号
+VGABE            TYPE EKBE-VGABE,         "履歴取引タイプ
+GJAHR            TYPE EKBE-GJAHR,         "入出庫伝票年度
+BELNR            TYPE EKBE-BELNR,         "入出庫伝票番号
+BUZEI            TYPE EKBE-BUZEI,         "入出庫明細番号
+BLDAT            TYPE EKBE-BLDAT,         "伝票日付
+END OF T_EKBE.
+
+* 受注納期格納用
+TYPES:BEGIN OF T_VBEP,
+VBELN            TYPE VBEP-VBELN,         "販売伝票番号
+POSNR            TYPE VBEP-POSNR,         "販売明細番号
+EDATU            TYPE VBEP-EDATU,         "納入日程日付
+END OF T_VBEP.
+
+* 単価算出情報格納用
+TYPES:BEGIN OF T_MBEW,
+MATNR            TYPE MBEW-MATNR,         "品目コード
+WERKS            TYPE MBEW-BWKEY,         "評価レベル
+* 2012/02/21 ADD START
+LBKUM            TYPE MBEW-LBKUM,         "評価在庫合計
+* 2012/02/21 ADD END
+SALK3            TYPE MBEW-SALK3,         "評価在庫合計額
+VERPR            TYPE MBEW-VERPR,         "移動平均原価
+PEINH            TYPE MBEW-PEINH,         "価格単位
+END OF T_MBEW.
+TYPES:BEGIN OF T_MBEW_KEY,
+MATNR            TYPE MBEW-MATNR,         "品目コード
+WERKS            TYPE MBEW-BWKEY,         "プラント
+END OF T_MBEW_KEY.
+
+* 在庫情報格納用
+TYPES:BEGIN OF T_MARC,
+MATNR            TYPE MARC-MATNR,         "品目コード
+WERKS            TYPE MARC-WERKS,         "プラント
+EKGRP            TYPE MARC-EKGRP,         "購買グループ
+TRAME            TYPE MARC-TRAME,         "積送中在庫
+**** START ADD 2015/03/03 ISID12 ****
+LGORT            TYPE MARD-LGORT,         "保管場所
+**** END ADD 2015/03/03 ISID12 ****
+LABST            TYPE MARD-LABST,         "利用可能在庫数量
+SPEME            TYPE MARD-SPEME,         "保留在庫
+LGPBE            TYPE MARD-LGPBE,         "棚番
+END OF T_MARC.
+
+* 仕入先情報格納用
+TYPES:BEGIN OF T_EORD,
+MATNR            TYPE EORD-MATNR,         "品目コード
+WERKS            TYPE EORD-WERKS,         "プラント
+ZEORD            TYPE EORD-ZEORD,         "レコード番号
+LIFNR            TYPE EORD-LIFNR,         "仕入先
+NAME1            TYPE LFA1-NAME1,         "名称１
+END OF T_EORD.
+
+* 預託在庫格納用
+TYPES:BEGIN OF T_MSKU,
+MATNR            TYPE MSKU-MATNR,         "品目コード
+WERKS            TYPE MSKU-WERKS,         "プラント
+CHARG            TYPE MSKU-CHARG,         "ロット番号
+KUNNR            TYPE MSKU-KUNNR,         "得意先
+KULAB            TYPE MSKU-KULAB,         "利用可能評価在庫
+END OF T_MSKU.
+
+* 支給在庫格納用
+TYPES:BEGIN OF T_MSLB,
+MATNR           TYPE MSLB-MATNR,          "品目コード
+WERKS           TYPE MSLB-WERKS,          "プラント
+CHARG           TYPE MSLB-CHARG,          "ロット番号
+LIFNR           TYPE MSLB-LIFNR,          "仕入先
+LBLAB           TYPE MSLB-LBLAB,          "利用可能評価在庫
+END OF T_MSLB.
+
+* 出済未出庫格納用(在庫データ)
+TYPES:BEGIN OF T_ZS0020,
+MATNR           TYPE ZS0020-MATNR,        "品目コード
+WERKS           TYPE ZS0020-WERKS,        "プラント
+LFIMG           TYPE ZS0020-LFIMG,        "出荷数量実績
+* 2012/02/21 ADD START
+LFIMG_KB        TYPE ZS0020-LFIMG_KB,     "出荷数量実績(KB)
+LFIMG_KE        TYPE ZS0020-LFIMG_KE,     "出荷数量実績(KE)
+* 2012/02/21 ADD END
+END OF T_ZS0020.
+
+* 出済未出庫格納用(個別購買データ)
+TYPES:BEGIN OF T_LIPS,
+*--- Add Start 2011/04/01
+VBELN           TYPE LIPS-VBELN,          "出荷伝票番号
+POSNR           TYPE LIPS-POSNR,          "出荷明細番号
+*--- Add End   2011/04/01
+VGBEL           TYPE LIPS-VGBEL,          "受注伝票番号
+VGPOS           TYPE LIPS-VGPOS,          "受注伝票明細
+LFIMG           TYPE LIPS-LFIMG,          "出荷数量実績
+*   insert 2011/11/7 C.MARUTA DMW3608{
+MEINS           TYPE LIPS-MEINS,          "基本数量単位
+VRKME           TYPE LIPS-VRKME,          "販売単位
+MATNR           TYPE LIPS-MATNR,          "品目コード
+* } insert 2011/11/7 C.MARUTA DMW3608
+END OF T_LIPS.
+
+*--- Add Start 2010/10/27
+TYPES:BEGIN OF T_TOTAL,
+LABST           TYPE MARD-LABST,          "当月残数
+KULAB           TYPE MSKU-KULAB,          "預託在庫
+LBLAB           TYPE MSLB-LBLAB,          "支給在庫
+TRAME           TYPE MARC-TRAME,          "積送中在庫
+LFIMG           TYPE LIPS-LFIMG,          "出荷数量
+* 2012/02/21 ADD START
+LFIMG_KB        TYPE ZS0020-LFIMG_KB,     "出荷数量(KB)
+LFIMG_KE        TYPE ZS0020-LFIMG_KE,     "出荷数量(KE)
+* 2012/02/21 ADD END
+SPEME           TYPE MARD-SPEME,          "保留在庫
+END OF T_TOTAL.
+*--- Add End   2010/10/27
+*--- Add Start 2011/03/30
+* 対象プラント
+TYPES:BEGIN OF TYP_PLANT,
+WERKS TYPE MARC-WERKS,                   "プラント
+END OF TYP_PLANT.
+*--- Add End   2011/03/30
+
+*----------------------------------------------------------------------*
+*  内部テーブル・構造定義
+*----------------------------------------------------------------------*
+* 受注在庫情報格納用
+DATA: IT_MSKA           TYPE STANDARD TABLE OF T_MSKA,
+WA_MSKA           TYPE T_MSKA.
+
+* 受注伝票情報格納用
+DATA: IT_VBAK           TYPE HASHED   TABLE OF T_VBAK
+WITH UNIQUE KEY VBELN,
+WA_VBAK           TYPE T_VBAK.
+
+* 品目情報格納用
+DATA: IT_MARA           TYPE HASHED   TABLE OF T_MARA
+WITH UNIQUE KEY MATNR,
+WA_MARA           TYPE T_MARA,
+IT_MARA_KEY       TYPE STANDARD TABLE OF T_MARA_KEY,
+WA_MARA_KEY       TYPE T_MARA_KEY.
+
+* 通貨格納用
+DATA: IT_T001K          TYPE HASHED   TABLE OF T_T001K
+WITH UNIQUE KEY WERKS,
+WA_T001K          TYPE T_T001K,
+IT_T001K_KEY      TYPE STANDARD TABLE OF T_T001K_KEY,
+WA_T001K_KEY      TYPE T_T001K_KEY.
+
+* 購買Grテキスト格納用
+DATA: IT_T024           TYPE HASHED   TABLE OF T_T024
+WITH UNIQUE KEY EKGRP,
+WA_T024           TYPE T_T024,
+IT_T024_KEY       TYPE STANDARD TABLE OF T_T024_KEY,
+WA_T024_KEY       TYPE T_T024_KEY.
+
+* 購買伝票情報格納用
+DATA: IT_EKKO           TYPE SORTED   TABLE OF T_EKKO
+WITH NON-UNIQUE KEY VBELV POSNV,
+WA_EKKO           TYPE T_EKKO.
+
+* 入庫日格納用
+DATA: IT_EKBE           TYPE STANDARD TABLE OF T_EKBE,
+WA_EKBE           TYPE T_EKBE.
+
+* 受注納期格納用
+DATA: IT_VBEP           TYPE HASHED   TABLE OF T_VBEP
+WITH UNIQUE KEY VBELN POSNR,
+WA_VBEP           TYPE T_VBEP.
+
+* 単価算出情報格納用
+*--- Mod Start 2011/05/16
+*DATA: it_mbew           TYPE HASHED   TABLE OF t_mbew
+*                        WITH UNIQUE KEY matnr werks,
+DATA: IT_MBEW           TYPE STANDARD TABLE OF T_MBEW,
+*--- Mod End   2011/05/16
+WA_MBEW           TYPE T_MBEW,
+IT_MBEW_KEY       TYPE STANDARD TABLE OF T_MBEW_KEY,
+WA_MBEW_KEY       TYPE T_MBEW_KEY.
+
+* 在庫データテーブル登録用
+DATA: IT_ZM0020         TYPE STANDARD TABLE OF ZM0020,
+WA_ZM0020         TYPE ZM0020.
+
+* 在庫情報格納用
+DATA: IT_MARC           TYPE STANDARD TABLE OF T_MARC,
+WA_MARC           TYPE T_MARC.
+
+* 仕入先情報格納用
+DATA: IT_EORD           TYPE SORTED TABLE OF T_EORD
+WITH NON-UNIQUE KEY MATNR WERKS,
+WA_EORD           TYPE T_EORD.
+
+* 預託在庫格納用
+**** START UPD 2015/03/03 ISID12 ****
+*DATA: IT_MSKU           TYPE SORTED TABLE OF T_MSKU
+*                        WITH NON-UNIQUE KEY MATNR WERKS
+DATA: IT_MSKU           TYPE STANDARD TABLE OF T_MSKU,
+**** END UPD 2015/03/03 ISID12 ****
+WA_MSKU           TYPE T_MSKU.
+
+**** START UPD 2015/03/03 ISID12 ****
+* 支給在庫格納用
+*DATA: IT_MSLB           TYPE SORTED TABLE OF T_MSLB
+*                        WITH NON-UNIQUE KEY MATNR WERKS.
+DATA: IT_MSLB           TYPE STANDARD TABLE OF T_MSLB,
+**** END UPD 2015/03/03 ISID12 ****
+WA_MSLB           TYPE T_MSLB.
+
+* 出済未出庫格納用(在庫データ)
+DATA: IT_ZS0020         TYPE HASHED TABLE OF T_ZS0020
+WITH UNIQUE KEY MATNR WERKS,
+WA_ZS0020         TYPE T_ZS0020.
+
+* 出済未出庫格納用(個別購買データ)
+DATA: IT_LIPS           TYPE STANDARD TABLE OF T_LIPS,
+WA_LIPS           TYPE T_LIPS.
+
+*--- Add Start 2010/10/27
+DATA: WA_TOTAL          TYPE T_TOTAL.
+*--- Add End   2010/10/27
+*--- Add Start 2011/03/30
+* 対象プラント
+DATA: IT_PLANT TYPE STANDARD TABLE OF TYP_PLANT.
+*--- Add End   2011/03/30
+
+**** START ADD 2014/09/16 ISID･喩 ****
+DATA: RT_WERKS TYPE RANGE_T_WERKS.
+**** END ADD 2014/09/16 ISID･喩 ****
+
+*----------------------------------------------------------------------*
+*  変数定義
+*----------------------------------------------------------------------*
+DATA:
+CNT_INS               TYPE I.
+
+*----------------------------------------------------------------------*
+*  定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+CNS_MONTH_01(2)       TYPE N VALUE '01',
+CNS_MONTH_12(2)       TYPE N VALUE '12',
+**** START DEL 2014/09/16 ISID･喩 ****
+*  CNS_SPRAS_J(1)        TYPE C VALUE 'J',
+**** END DEL 2014/09/16 ISID･喩 ****
+CNS_VBTYP_V(1)        TYPE C VALUE 'V',
+CNS_BWART_101(3)      TYPE C VALUE '101',
+CNS_ETENR_0001(4)     TYPE N VALUE '0001',
+CNS_ON(1)             TYPE C VALUE 'X',
+CNS_SOBKZ_W(1)        TYPE C VALUE 'W',
+CNS_SOBKZ_O(1)        TYPE C VALUE 'O',
+CNS_WBSTA_C(1)        TYPE C VALUE 'C',
+**** START ADD 2015/03/03 ISID12 ****
+CNS_BUKRS             TYPE BUKRS VALUE 'C001',
+CNS_LIFMG             TYPE LIFMG VALUE '9999999999.999',
+**** END ADD 2015/03/03 ISID12 ****
+**** START DEL2015/03/03 ISID12 ****
+*  CNS_LGPBE(4)          TYPE C VALUE '****',
+**** END DEL 2015/03/03 ISID12 ****
+**** START ADD 2014/09/16 ISID･喩 ****
+CNS_BUK               TYPE TPARA-PARAMID VALUE 'BUK'.
+**** END ADD 2014/09/16 ISID･喩 ****
+
+*----------------------------------------------------------------------*
+*  選択画面定義
+*----------------------------------------------------------------------*
+**** START ADD 2014/09/16 ISID･喩 ****
+*会社
+PARAMETERS     P_BUKRS  TYPE BUKRS OBLIGATORY.
+**** END ADD 2014/09/16 ISID･喩 ****
+
+*年
+PARAMETERS     P_YEAR   TYPE ZM0020-ZYEAR OBLIGATORY.
+*月
+PARAMETERS     P_MONTH  TYPE ZM0020-ZMONTH OBLIGATORY.
+*プラント
+**** START UPD 2015/03/03 ISID12 ****
+*SELECT-OPTIONS S_WERKS  FOR  T001W-WERKS MEMORY ID WRK OBLIGATORY.
+SELECT-OPTIONS S_WERKS  FOR  S031-WERKS MEMORY ID WRK OBLIGATORY.
+**** START UPD 2015/03/03 ISID12 ****
+*購買グループ
+SELECT-OPTIONS S_EKGRP  FOR  MARC-EKGRP  MEMORY ID EKG.
+
+*品目コード
+SELECT-OPTIONS S_MATNR  FOR  MARC-MATNR.
+*棚番
+SELECT-OPTIONS S_LGPBE  FOR  MARD-LGPBE.
+
+**** START ADD 2015/03/03 ISID12 ****
+*保管場所
+SELECT-OPTIONS S_LGORT FOR S031-LGORT.
+**** END ADD 2015/03/03 ISID12 ****
+
+**** START ADD 2014/09/16 ISID･喩 ****
+*----------------------------------------------------------------------*
+*  INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+
+GET PARAMETER ID CNS_BUK FIELD P_BUKRS.
+
+**** END ADD 2014/09/16 ISID･喩 ****
+
+*----------------------------------------------------------------------*
+*  AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+**** START ADD 2014/09/16 ISID･喩 ****
+* 会社コード、プラントのチェック
+PERFORM CHK_BUK_WRK.
+**** END ADD 2014/09/16 ISID･喩 ****
+**** START ADD 2015/03/03 ISID12 ****
+* 保管場所と工場の依存チェック
+PERFORM CHECK_LGORT_INPUT.
+****END ADD 2015/03/03 ISID12 ****
+
+* 月のチェック
+IF P_MONTH BETWEEN CNS_MONTH_01 AND CNS_MONTH_12.
+ELSE.
+*   月 が正しくありません
+MESSAGE E009 WITH TEXT-M01.
+ENDIF.
+
+*----------------------------------------------------------------------*
+*  START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 個別購買データ
+PERFORM PROCESS_KOBETSU.
+
+* 在庫データ
+PERFORM PROCESS_ZAIKO.
+
+*--- Add Start 2010/10/27
+* 処理対象データ再編集
+PERFORM RE-EDIT_STOCK_DATA.
+*--- Add End   2010/10/27
+
+* 処理対象データ存在チェック
+IF IT_ZM0020 IS INITIAL.
+*   帳簿棚卸一覧表に該当するデータがありません
+MESSAGE S600 WITH TEXT-M02.
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+* テーブル更新
+PERFORM UPDATE_ZM0020.
+
+* 結果出力
+* X件登録しました
+MESSAGE S618 WITH CNT_INS.
+
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_KOBETSU
+*&---------------------------------------------------------------------*
+*       個別購買データ
+*----------------------------------------------------------------------*
+FORM PROCESS_KOBETSU.
+
+* データ取得
+PERFORM GET_DATA_KOBETSU.
+
+* 編集
+PERFORM EDIT_DATA_KOBETSU.
+
+ENDFORM.                    " PROCESS_KOBETSU
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_KOBETSU
+*&---------------------------------------------------------------------*
+*       個別購買データ取得
+*----------------------------------------------------------------------*
+FORM GET_DATA_KOBETSU.
+
+* 受注在庫情報
+PERFORM GET_MSKA.
+IF IT_MSKA IS INITIAL.
+EXIT.
+ENDIF.
+
+* 受注伝票情報
+PERFORM GET_VBAK.
+
+* 品目情報
+PERFORM GET_MARA_K.
+
+* 通貨
+PERFORM GET_T001K_K.
+
+* 購買グループ名
+PERFORM GET_T024_K.
+
+* 購買伝票情報
+PERFORM GET_EKKO.
+
+* 入庫日
+PERFORM GET_EKBE.
+
+* 受注納期
+PERFORM GET_VBEP.
+
+* 単価・在庫金額
+PERFORM GET_MBEW_K.
+
+* 出済未出庫
+PERFORM GET_LIPS.
+
+ENDFORM.                    " GET_DATA_KOBETSU
+*&---------------------------------------------------------------------*
+*&      Form  GET_MSKA
+*&---------------------------------------------------------------------*
+*       受注在庫情報
+*----------------------------------------------------------------------*
+FORM GET_MSKA.
+
+DATA : LV_CNT   TYPE I,
+LT_MSKA  TYPE STANDARD TABLE OF T_MSKA,
+LW_MSKA  TYPE T_MSKA.
+
+REFRESH IT_MSKA.
+
+SELECT
+**** START DEL 2015/03/03 ISID12 ****
+*         MSKA~MATNR         "品目コード
+**** END DEL 2015/03/03 ISID12 ****
+MSKA~WERKS         "プラント
+**** START ADD 2015/03/03 ISID12 ****
+MSKA~MATNR         "品目コード
+**** END ADD 2015/03/03 ISID12 ****
+MSKA~VBELN         "販売伝票番号
+MSKA~POSNR         "販売明細番号
+**** START ADD 2015/03/03 ISID12 ****
+MSKA~LGORT         "保管場所
+**** END ADD 2015/03/03 ISID12 ****
+MSKA~KALAB         "利用可能評価在庫
+*--- Add Start 2012/1/23
+MSKA~KASPE         "保留在庫
+*--- Add End   2012/1/23
+MARC~EKGRP         "購買グループ
+MARD~LGPBE         "棚番
+**** START ADD 2015/03/03 ISID12 ****
+MARD~LABST         "利用可能評価在庫
+MARD~SPEME         "保留在庫
+**** END ADD 2015/03/03 ISID12 ****
+INTO TABLE IT_MSKA
+FROM MSKA
+INNER JOIN MARC
+ON MSKA~MATNR = MARC~MATNR
+AND MSKA~WERKS = MARC~WERKS
+INNER JOIN MARD
+ON MARC~MATNR = MARD~MATNR
+AND MARC~WERKS = MARD~WERKS
+**** START ADD 2015/03/03 ISID12 ****
+AND MSKA~LGORT = MARD~LGORT
+**** END ADD 2015/03/03 ISID12 ****
+WHERE MSKA~MATNR IN S_MATNR
+**** START UPD 2014/09/16 ISID･喩 ****
+*     AND MSKA~WERKS IN S_WERKS
+AND MSKA~WERKS IN RT_WERKS
+**** END UPD 2014/09/16 ISID･喩 ****
+*--- Mod Start 2012/1/23
+*     AND MSKA~KALAB <> 0
+AND ( MSKA~KALAB <> 0 OR MSKA~KASPE <> 0 )
+*--- Mod End   2012/1/23
+**** START ADD 2015/03/03 ISID12 ****
+AND MSKA~LGORT IN S_LGORT
+**** END ADD 2015/03/03 ISID12 ****
+AND MARC~EKGRP IN S_EKGRP
+AND MARD~LGPBE IN S_LGPBE.
+
+**** START DEL 2015/03/03 ISID12 ****
+** 同キーで複数レコード存在する場合、１レコードにして棚番に"****"を設定
+** KEY：品目コード・プラント・販売伝票番号・販売明細番号
+** ※同品目×プラントで、MARDが複数レコード存在する場合を考慮
+*  CHECK SY-SUBRC = 0.
+*  SORT IT_MSKA BY MATNR WERKS VBELN POSNR.
+*  LOOP AT IT_MSKA INTO WA_MSKA.
+*    LV_CNT = LV_CNT + 1.
+*    CLEAR LW_MSKA.
+*    LW_MSKA = WA_MSKA.
+*    AT END OF POSNR.
+**     同KEYが１レコード
+*      IF LV_CNT = 1.
+*        APPEND LW_MSKA TO LT_MSKA.
+*      ELSE.
+*        LW_MSKA-LGPBE = CNS_LGPBE.
+*        APPEND LW_MSKA TO LT_MSKA.
+*      ENDIF.
+*      CLEAR LV_CNT.
+*    ENDAT.
+*
+*  ENDLOOP.
+*  REFRESH IT_MSKA.
+*  IT_MSKA = LT_MSKA.
+**** END DEL 2015/03/03 ISID12 ****
+**** START ADD 2015/03/03 ISID12 ****z
+SORT IT_MSKA BY MATNR WERKS VBELN POSNR.
+IF P_BUKRS = CNS_BUKRS.
+CLEAR LW_MSKA-LGORT.
+MODIFY IT_MSKA FROM LW_MSKA TRANSPORTING LGORT
+WHERE LGORT <> SPACE.
+ENDIF.
+**** END ADD 2015/03/03 ISID12 ****
+
+ENDFORM.                    " GET_MSKA
+*&---------------------------------------------------------------------*
+*&      Form  GET_VBAK
+*&---------------------------------------------------------------------*
+*       受注伝票情報
+*----------------------------------------------------------------------*
+FORM GET_VBAK.
+
+DATA : LT_MSKA TYPE STANDARD TABLE OF T_MSKA.
+
+REFRESH IT_VBAK.
+LT_MSKA = IT_MSKA.
+SORT LT_MSKA BY VBELN.
+DELETE ADJACENT DUPLICATES FROM LT_MSKA COMPARING VBELN.
+
+SELECT VBAK~VBELN         "販売伝票番号
+VBAK~BSTNK         "得意先発注番号
+VBAK~KUNNR         "受注先
+KNA1~NAME1         "名称１
+INTO TABLE IT_VBAK
+FROM VBAK
+INNER JOIN KNA1
+ON VBAK~KUNNR = KNA1~KUNNR
+FOR ALL ENTRIES IN LT_MSKA
+WHERE VBAK~VBELN = LT_MSKA-VBELN.
+
+ENDFORM.                    " GET_VBAK
+*&---------------------------------------------------------------------*
+*&      Form  GET_MARA_K
+*&---------------------------------------------------------------------*
+*       品目情報(個別購買)
+*----------------------------------------------------------------------*
+FORM GET_MARA_K.
+
+DATA : LT_MSKA TYPE STANDARD TABLE OF T_MSKA.
+
+REFRESH : IT_MARA,IT_MARA_KEY.
+* 品目コードの重複を削除
+LT_MSKA = IT_MSKA.
+SORT LT_MSKA BY MATNR.
+DELETE ADJACENT DUPLICATES FROM LT_MSKA COMPARING MATNR.
+LOOP AT LT_MSKA INTO WA_MSKA.
+CLEAR WA_MARA_KEY.
+WA_MARA_KEY-MATNR = WA_MSKA-MATNR.
+APPEND WA_MARA_KEY TO IT_MARA_KEY.
+ENDLOOP.
+
+PERFORM GET_MARA TABLES IT_MARA_KEY.
+FREE IT_MARA_KEY.
+
+ENDFORM.                    " GET_MARA_K
+*&---------------------------------------------------------------------*
+*&      Form  GET_MARA
+*&---------------------------------------------------------------------*
+*       品目情報
+*----------------------------------------------------------------------*
+*      -->IT_KEY  抽出条件項目(品目コード)
+*----------------------------------------------------------------------*
+FORM GET_MARA TABLES   IT_KEY STRUCTURE WA_MARA_KEY.
+
+SELECT MAKT~MATNR         "品目コード
+MAKT~MAKTX         "品目テキスト
+T006A~MSEH3        "商用数量単位
+*--- Add Start 2010/10/27
+MARA~WRKST         "主構成物質
+MARA~NORMT         "標準テキスト
+*--- Add End   2010/10/27
+INTO TABLE IT_MARA
+FROM MARA
+INNER JOIN MAKT
+ON MARA~MATNR = MAKT~MATNR
+INNER JOIN T006A
+ON MARA~MEINS = T006A~MSEHI
+FOR ALL ENTRIES IN IT_KEY
+WHERE MARA~MATNR  = IT_KEY-MATNR
+**** START UPD 2014/09/16 ISID･喩 ****
+*     AND MAKT~SPRAS  = CNS_SPRAS_J
+*     AND T006A~SPRAS = CNS_SPRAS_J.
+AND MAKT~SPRAS  = SY-LANGU
+AND T006A~SPRAS = SY-LANGU.
+**** END UPD 2014/09/16 ISID･喩 ****
+
+ENDFORM.                    " GET_MARA
+*&---------------------------------------------------------------------*
+*&      Form  GET_T001K_K
+*&---------------------------------------------------------------------*
+*       通貨コード(個別購買)
+*----------------------------------------------------------------------*
+FORM GET_T001K_K.
+
+DATA : LT_MSKA TYPE STANDARD TABLE OF T_MSKA.
+
+REFRESH : IT_T001K,IT_T001K_KEY.
+* プラントの重複を削除
+LT_MSKA = IT_MSKA.
+SORT LT_MSKA BY WERKS.
+DELETE ADJACENT DUPLICATES FROM LT_MSKA COMPARING WERKS.
+LOOP AT LT_MSKA INTO WA_MSKA.
+CLEAR WA_T001K_KEY.
+WA_T001K_KEY-WERKS = WA_MSKA-WERKS.
+APPEND WA_T001K_KEY TO IT_T001K_KEY.
+ENDLOOP.
+
+PERFORM GET_T001K TABLES IT_T001K_KEY.
+FREE IT_T001K_KEY.
+
+ENDFORM.                    " GET_T001K_K
+*&---------------------------------------------------------------------*
+*&      Form  GET_T001K
+*&---------------------------------------------------------------------*
+*       通貨コード
+*----------------------------------------------------------------------*
+*      -->IT_KEY  抽出条件項目(プラント)
+*----------------------------------------------------------------------*
+FORM GET_T001K TABLES   IT_KEY STRUCTURE WA_T001K_KEY.
+
+SELECT T001K~BWKEY        "評価レベル
+T001~WAERS         "通貨コード
+INTO TABLE IT_T001K
+FROM T001K
+INNER JOIN T001
+ON T001K~BUKRS = T001~BUKRS
+FOR ALL ENTRIES IN IT_KEY
+WHERE T001K~BWKEY = IT_KEY-WERKS
+**** START ADD 2014/09/16 ISID･喩 ****
+AND T001~BUKRS = P_BUKRS.
+**** END ADD 2014/09/16 ISID･喩 ****
+
+ENDFORM.                                                    " GET_T001K
+*&---------------------------------------------------------------------*
+*&      Form  GET_T024_K
+*&---------------------------------------------------------------------*
+*       購買グループ名(個別購買)
+*----------------------------------------------------------------------*
+FORM GET_T024_K.
+
+DATA : LT_MSKA TYPE STANDARD TABLE OF T_MSKA.
+
+REFRESH : IT_T024,IT_T024_KEY.
+* 購買グループの重複を削除
+LT_MSKA = IT_MSKA.
+SORT LT_MSKA BY EKGRP.
+DELETE ADJACENT DUPLICATES FROM LT_MSKA COMPARING EKGRP.
+LOOP AT LT_MSKA INTO WA_MSKA.
+CLEAR WA_T024_KEY.
+WA_T024_KEY-EKGRP = WA_MSKA-EKGRP.
+APPEND WA_T024_KEY TO IT_T024_KEY.
+ENDLOOP.
+
+PERFORM GET_T024 TABLES IT_T024_KEY.
+FREE IT_T024_KEY.
+
+ENDFORM.                    " GET_T024_K
+*&---------------------------------------------------------------------*
+*&      Form  GET_T024
+*&---------------------------------------------------------------------*
+*       購買グループ名
+*----------------------------------------------------------------------*
+*      -->IT_KEY  抽出条件項目(購買グループ)
+*----------------------------------------------------------------------*
+FORM GET_T024 TABLES   IT_KEY STRUCTURE WA_T024_KEY.
+
+SELECT EKGRP              "購買グループ
+EKNAM              "購買グループテキスト
+INTO TABLE IT_T024
+FROM T024
+FOR ALL ENTRIES IN IT_KEY
+WHERE EKGRP = IT_KEY-EKGRP.
+
+ENDFORM.                                                    " GET_T024
+*&---------------------------------------------------------------------*
+*&      Form  GET_EKKO
+*&---------------------------------------------------------------------*
+*       購買伝票情報
+*----------------------------------------------------------------------*
+FORM GET_EKKO.
+
+DATA : LT_MSKA TYPE STANDARD TABLE OF T_MSKA.
+
+REFRESH IT_EKKO.
+* 販売伝票番号・明細番号の重複を削除
+LT_MSKA = IT_MSKA.
+SORT LT_MSKA BY VBELN POSNR.
+DELETE ADJACENT DUPLICATES FROM LT_MSKA COMPARING VBELN POSNR.
+
+SELECT VBFA~VBELV         "先行販売伝票
+VBFA~POSNV         "販売伝票前明細
+VBFA~VBELN         "後続販売伝票
+VBFA~POSNN         "販売伝票次明細
+EKKO~LIFNR         "仕入先
+LFA1~NAME1         "仕入先名
+INTO TABLE IT_EKKO
+FROM VBFA
+INNER JOIN EKKO
+ON VBFA~VBELN = EKKO~EBELN
+INNER JOIN LFA1
+ON EKKO~LIFNR = LFA1~LIFNR
+FOR ALL ENTRIES IN LT_MSKA
+WHERE VBFA~VBELV   = LT_MSKA-VBELN
+AND VBFA~POSNV   = LT_MSKA-POSNR
+AND VBFA~VBTYP_N = CNS_VBTYP_V
+**** START ADD 2014/09/16 ISID･喩 ****
+AND EKKO~BUKRS   = P_BUKRS.
+**** END ADD 2014/09/16 ISID･喩 ****
+
+ENDFORM.                    " GET_EKKO
+*&---------------------------------------------------------------------*
+*&      Form  GET_EKBE
+*&---------------------------------------------------------------------*
+*       入庫日
+*----------------------------------------------------------------------*
+FORM GET_EKBE.
+
+IF IT_EKKO IS INITIAL.
+EXIT.
+ENDIF.
+
+REFRESH IT_EKBE.
+SELECT EBELN              "購買伝票番号
+EBELP              "購買伝票明細番号
+ZEKKN              "連続番号
+VGABE              "取引タイプ
+GJAHR              "入出庫伝票年度
+BELNR              "入出庫伝票番号
+BUZEI              "入出庫明細番号
+BLDAT              "伝票日付
+INTO TABLE IT_EKBE
+FROM EKBE
+FOR ALL ENTRIES IN IT_EKKO
+WHERE EBELN = IT_EKKO-VBELN
+AND BWART = CNS_BWART_101.
+
+ENDFORM.                    " GET_EKBE
+*&---------------------------------------------------------------------*
+*&      Form  GET_VBEP
+*&---------------------------------------------------------------------*
+*       受注納期
+*----------------------------------------------------------------------*
+FORM GET_VBEP.
+
+REFRESH IT_VBEP.
+SELECT VBELN         "販売伝票番号
+POSNR         "販売明細番号
+EDATU         "納入日程日付
+INTO TABLE IT_VBEP
+FROM VBEP
+FOR ALL ENTRIES IN IT_MSKA
+WHERE VBELN = IT_MSKA-VBELN
+AND POSNR = IT_MSKA-POSNR
+AND ETENR = CNS_ETENR_0001.
+
+ENDFORM.                    " GET_VBEP
+*&---------------------------------------------------------------------*
+*&      Form  GET_MBEW_K
+*&---------------------------------------------------------------------*
+*       単価・在庫金額（個別購買)
+*----------------------------------------------------------------------*
+FORM GET_MBEW_K.
+
+DATA : LT_MSKA TYPE STANDARD TABLE OF T_MSKA.
+
+REFRESH : IT_MBEW,IT_MBEW_KEY.
+* 品目×プラントの重複を削除
+LT_MSKA = IT_MSKA.
+SORT LT_MSKA BY MATNR WERKS.
+DELETE ADJACENT DUPLICATES FROM LT_MSKA COMPARING MATNR WERKS.
+LOOP AT LT_MSKA INTO WA_MSKA.
+CLEAR WA_MBEW_KEY.
+WA_MBEW_KEY-MATNR = WA_MSKA-MATNR.  "品目コード
+WA_MBEW_KEY-WERKS = WA_MSKA-WERKS.  "プラント
+APPEND WA_MBEW_KEY TO IT_MBEW_KEY.
+ENDLOOP.
+
+*--- Del Start 2010/10/27
+*  PERFORM get_mbew TABLES it_mbew_key.
+*  FREE it_mbew_key.
+*--- Del End   2010/10/27
+ENDFORM.                    " GET_MBEW_K
+*&---------------------------------------------------------------------*
+*&      Form  GET_MBEW
+*&---------------------------------------------------------------------*
+*       単価・在庫金額
+*----------------------------------------------------------------------*
+*      -->IT_KEY  抽出条件項目(品目コード・プラント)
+*----------------------------------------------------------------------*
+FORM GET_MBEW TABLES   IT_KEY STRUCTURE WA_MBEW_KEY.
+
+SELECT MATNR         "品目コード
+BWKEY         "評価レベル
+* 2012/02/21 ADD START
+LBKUM         "評価在庫合計
+* 2012/02/21 ADD END
+SALK3         "評価在庫合計額
+VERPR         "移動平均原価
+PEINH         "価格単位
+INTO TABLE IT_MBEW
+FROM MBEW
+FOR ALL ENTRIES IN IT_KEY
+WHERE MATNR = IT_KEY-MATNR
+AND BWKEY = IT_KEY-WERKS.
+
+*--- Add Start 2011/05/16
+SORT IT_MBEW BY MATNR WERKS.
+*--- Add End   2011/05/16
+
+ENDFORM.                    " GET_MBEW
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_DATA_KOBETSU
+*&---------------------------------------------------------------------*
+*       個別購買データ編集
+*----------------------------------------------------------------------*
+FORM EDIT_DATA_KOBETSU.
+
+DATA : LV_LFIMG TYPE LIPS-LFIMG,
+**** START ADD 2015/03/03 ISID12 ****
+LWA_MSKA TYPE T_MSKA,
+LV_LFIMG_SUM TYPE LIPS-LFIMG.
+**** END ADD 2015/03/03 ISID12 ****
+
+* 入庫日を降順ソート　※同伝票番号で最新の日付を取得する為
+SORT IT_EKBE BY EBELN BLDAT DESCENDING.
+*--- Add Start 2011/04/01
+SORT IT_LIPS BY VGBEL VGPOS.
+*--- Add End   2011/04/01
+
+**** START UPD 2015/03/03 ISID12 ****
+SORT IT_MSKA BY WERKS MATNR VBELN POSNR.
+*  LOOP AT IT_MSKA INTO WA_MSKA.
+LOOP AT IT_MSKA INTO LWA_MSKA.
+**** END UPD 2015/03/03 ISID12 ****
+WA_MSKA = LWA_MSKA.
+CLEAR WA_ZM0020.
+
+*   受注伝票情報検索
+CLEAR WA_VBAK.
+READ TABLE IT_VBAK  INTO WA_VBAK
+WITH TABLE KEY VBELN = WA_MSKA-VBELN.
+*   品目情報
+CLEAR WA_MARA.
+READ TABLE IT_MARA  INTO WA_MARA
+WITH TABLE KEY MATNR = WA_MSKA-MATNR.
+*   通貨
+CLEAR WA_T001K.
+READ TABLE IT_T001K INTO WA_T001K
+WITH TABLE KEY WERKS = WA_MSKA-WERKS.
+*   購買グループ名
+CLEAR WA_T024.
+READ TABLE IT_T024  INTO WA_T024
+WITH TABLE KEY EKGRP = WA_MSKA-EKGRP.
+*   購買伝票情報
+CLEAR WA_EKKO.
+READ TABLE IT_EKKO  INTO WA_EKKO
+WITH TABLE KEY VBELV = WA_MSKA-VBELN
+POSNV = WA_MSKA-POSNR.
+*   入庫日
+CLEAR WA_EKBE.
+LOOP AT IT_EKBE INTO WA_EKBE
+WHERE EBELN = WA_EKKO-VBELN.
+*     取得できたらLOOPを抜ける
+EXIT.
+ENDLOOP.
+
+*   受注納期
+CLEAR WA_VBEP.
+READ TABLE IT_VBEP  INTO WA_VBEP
+WITH TABLE KEY VBELN = WA_MSKA-VBELN
+POSNR = WA_MSKA-POSNR.
+*--- Del Start 2010/10/27
+**   単価・在庫金額
+*    CLEAR wa_mbew.
+*    READ TABLE it_mbew  INTO wa_mbew
+*                        WITH TABLE KEY matnr = wa_mska-matnr
+*                                       werks = wa_mska-werks.
+*--- Del End   2010/10/27
+*   出済未出庫
+CLEAR LV_LFIMG.
+LOOP AT IT_LIPS INTO WA_LIPS WHERE VGBEL = WA_MSKA-VBELN
+AND VGPOS = WA_MSKA-POSNR.
+
+*   insert 2011/11/7 C.MARUTA DMW3608{
+*       基本数量単位と販売単位が異なる場合
+IF WA_LIPS-MEINS NE WA_LIPS-VRKME .
+*         単位の変換処理
+CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+EXPORTING
+I_MATNR              = WA_LIPS-MATNR
+I_IN_ME              = WA_LIPS-VRKME
+I_OUT_ME             = WA_LIPS-MEINS
+I_MENGE              = WA_LIPS-LFIMG
+IMPORTING
+E_MENGE              = WA_LIPS-LFIMG
+EXCEPTIONS
+ERROR_IN_APPLICATION = 1
+ERROR                = 2
+OTHERS               = 3.
+IF SY-SUBRC <> 0.
+ENDIF.
+ENDIF .
+* } insert 2011/11/7 C.MARUTA DMW3608
+*     未出庫の出荷数を集計
+LV_LFIMG = LV_LFIMG + WA_LIPS-LFIMG.
+ENDLOOP.
+
+**** START ADD 2015/03/03 ISID12 ****
+LV_LFIMG_SUM = LV_LFIMG_SUM + LV_LFIMG.
+**** END ADD 2015/03/03 ISID12 ****
+
+WA_ZM0020-ZYEAR   = P_YEAR.                  "年
+WA_ZM0020-ZMONTH  = P_MONTH.                 "月
+WA_ZM0020-WERKS   = WA_MSKA-WERKS.           "プラント
+WA_ZM0020-MATNR   = WA_MSKA-MATNR.           "品目コード
+WA_ZM0020-VBELN   = WA_MSKA-VBELN.           "受注番号
+WA_ZM0020-POSNR   = WA_MSKA-POSNR.           "明細番号
+WA_ZM0020-MAKTX   = WA_MARA-MAKTX.           "品目名
+WA_ZM0020-LGPBE   = WA_MSKA-LGPBE.           "棚番
+WA_ZM0020-MSEH3   = WA_MARA-MSEH3.           "単位
+WA_ZM0020-WAERS   = WA_T001K-WAERS.          "通貨
+WA_ZM0020-EKNAM   = WA_T024-EKNAM.           "グループ名
+WA_ZM0020-KUNNR   = WA_VBAK-KUNNR.           "得意先
+WA_ZM0020-KNAME   = WA_VBAK-NAME1.           "得意先名
+WA_ZM0020-BSTNK   = WA_VBAK-BSTNK.           "得意先発注番号
+WA_ZM0020-LIFNR   = WA_EKKO-LIFNR.           "仕入先
+WA_ZM0020-LNAME   = WA_EKKO-NAME1.           "仕入先名
+WA_ZM0020-BLDAT   = WA_EKBE-BLDAT.           "入庫日
+WA_ZM0020-EDATU   = WA_VBEP-EDATU.           "受注納期
+WA_ZM0020-LABST   = WA_MSKA-KALAB.           "当月残数
+*--- Add Start 2012/01/23
+WA_ZM0020-SPEME   = WA_MSKA-KASPE.           "保留在庫
+*--- Add End   2011/01/23
+WA_ZM0020-LFIMG   = LV_LFIMG.                "出済未出庫
+*--- Del Start 2010/10/27
+*    wa_zm0020-verpr   = wa_mbew-verpr.           "平均単価
+*    wa_zm0020-salk3   = wa_mbew-verpr / wa_mbew-peinh
+*                        * wa_zm0020-labst.       "在庫金額
+*    wa_zm0020-peinh   = wa_mbew-peinh.           "価格単位
+*--- Del End   2010/10/27
+*--- Add Start 2010/10/27
+WA_ZM0020-WRKST    = WA_MARA-WRKST.          "主構成物質
+WA_ZM0020-NORMT    = WA_MARA-NORMT.          "標準テキスト
+*--- Add End   2010/10/27
+
+**** START ADD 2015/03/03 ISID12 ****
+IF P_BUKRS <> CNS_BUKRS.
+WA_ZM0020-LGORT = WA_MSKA-LGORT.   "保管場所
+*    保管場所別の受注在庫情報を合計する。
+WA_ZM0020-LABST = WA_MSKA-KALAB.     "当月残数
+CLEAR WA_ZM0020-LFIMG.
+
+ENDIF.
+**** END ADD 2015/03/03 ISID12 ****
+
+APPEND WA_ZM0020 TO IT_ZM0020.
+
+**** START ADD 2015/03/03 ISID12 ****
+AT END OF MATNR.
+IF P_BUKRS <> CNS_BUKRS.
+WA_ZM0020-LFIMG = LV_LFIMG_SUM.
+CLEAR: WA_ZM0020-LGORT,
+WA_ZM0020-VBELN,
+WA_ZM0020-POSNR,
+WA_ZM0020-LABST,
+WA_ZM0020-LGPBE,
+WA_ZM0020-KUNNR,
+WA_ZM0020-KNAME,
+WA_ZM0020-BSTNK,
+WA_ZM0020-BLDAT,
+WA_ZM0020-EDATU.
+
+**** START DEL BY ISID REN 2015/06/01 ****
+*        IF WA_ZM0020-LFIMG > 0.
+**** END DEL BY ISID REN 2015/06/01 ****
+APPEND WA_ZM0020 TO IT_ZM0020.
+**** START DEL BY ISID REN 2015/06/01 ****
+*        ENDIF.
+**** END DEL BY ISID REN 2015/06/01 ****
+
+CLEAR LV_LFIMG_SUM.
+ENDIF.
+ENDAT.
+**** END ADD 2015/03/03 ISID12 ****
+ENDLOOP.
+
+FREE: IT_MSKA,IT_VBAK,IT_MARA,IT_T001K,IT_T024,
+IT_EKKO,IT_EKBE,IT_VBEP,IT_MBEW.
+
+ENDFORM.                    " EDIT_DATA_KOBETSU
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_ZAIKO
+*&---------------------------------------------------------------------*
+*       在庫データ
+*----------------------------------------------------------------------*
+FORM PROCESS_ZAIKO.
+
+* データ取得
+PERFORM GET_DATA_ZAIKO.
+
+* 編集
+PERFORM EDIT_DATA_ZAIKO.
+
+ENDFORM.                    " PROCESS_ZAIKO
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ZAIKO
+*&---------------------------------------------------------------------*
+*       在庫データ取得
+*----------------------------------------------------------------------*
+FORM GET_DATA_ZAIKO.
+
+* 在庫情報
+PERFORM GET_MARC.
+IF IT_MARC IS INITIAL.
+EXIT.
+ENDIF.
+
+* 購買グループ名
+PERFORM GET_T024_Z.
+
+* 品目情報
+PERFORM GET_MARA_Z.
+
+* 通貨
+PERFORM GET_T001K_Z.
+
+* 仕入先情報
+PERFORM GET_EORD.
+
+* 預託在庫
+PERFORM GET_MSKU.
+
+* 支給在庫
+PERFORM GET_MSLB.
+
+* 単価・在庫金額
+PERFORM GET_MBEW_Z.
+
+* 出済未出庫
+PERFORM GET_ZS0020.
+
+ENDFORM.                    " GET_DATA_ZAIKO
+*&---------------------------------------------------------------------*
+*&      Form  GET_MARC
+*&---------------------------------------------------------------------*
+*       在庫情報
+*----------------------------------------------------------------------*
+FORM GET_MARC.
+
+DATA: LW_MARC TYPE T_MARC.
+
+REFRESH IT_MARC.
+SELECT MARC~MATNR         "品目コード
+MARC~WERKS         "プラント
+MARC~EKGRP         "購買グループ
+MARC~TRAME         "積送中在庫
+**** START ADD 2015/03/03 ISID12 ****
+MARD~LGORT         "保管場所
+**** END ADD 2015/03/03 ISID12 ****
+MARD~LABST         "利用可能在庫数量
+MARD~SPEME         "保留在庫
+MARD~LGPBE         "棚番
+INTO TABLE IT_MARC
+FROM MARC
+INNER JOIN MARD
+ON MARC~MATNR = MARD~MATNR
+AND MARC~WERKS = MARD~WERKS
+WHERE MARC~MATNR IN S_MATNR
+**** START UPD 2014/09/16 ISID･喩 ****
+*     AND MARC~WERKS IN S_WERKS
+AND MARC~WERKS IN RT_WERKS
+**** END UPD 2014/09/16 ISID･喩 ****
+**** START ADD 2015/03/03 ISID12 ****
+AND MARD~LGORT IN S_LGORT
+**** END ADD 2015/03/03 ISID12 ****
+AND MARC~EKGRP IN S_EKGRP
+AND MARD~LGPBE IN S_LGPBE.
+
+**** START ADD 2015/03/03 ISID12 ****
+IF P_BUKRS = CNS_BUKRS.
+CLEAR LW_MARC-LGORT.
+MODIFY IT_MARC FROM LW_MARC TRANSPORTING LGORT
+WHERE LGORT <> SPACE.
+ENDIF.
+**** END ADD 2015/03/03 ISID12 ****
+
+ENDFORM.                    " GET_MARC
+*&---------------------------------------------------------------------*
+*&      Form  GET_T024_Z
+*&---------------------------------------------------------------------*
+*       購買グループ名(在庫)
+*----------------------------------------------------------------------*
+FORM GET_T024_Z.
+
+DATA : LT_MARC TYPE STANDARD TABLE OF T_MARC.
+
+REFRESH : IT_T024,IT_T024_KEY.
+* 購買グループの重複を削除
+LT_MARC = IT_MARC.
+SORT LT_MARC BY EKGRP.
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING EKGRP.
+LOOP AT LT_MARC INTO WA_MARC.
+CLEAR WA_T024_KEY.
+WA_T024_KEY-EKGRP = WA_MARC-EKGRP.
+APPEND WA_T024_KEY TO IT_T024_KEY.
+ENDLOOP.
+
+PERFORM GET_T024 TABLES IT_T024_KEY.
+FREE IT_T024_KEY.
+
+ENDFORM.                    " GET_T024_Z
+*&---------------------------------------------------------------------*
+*&      Form  GET_MARA_Z
+*&---------------------------------------------------------------------*
+*       品目情報(在庫)
+*----------------------------------------------------------------------*
+FORM GET_MARA_Z.
+
+DATA : LT_MARC TYPE STANDARD TABLE OF T_MARC.
+
+REFRESH : IT_MARA,IT_MARA_KEY.
+* 品目コードの重複を削除
+LT_MARC = IT_MARC.
+SORT LT_MARC BY MATNR.
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING MATNR.
+LOOP AT LT_MARC INTO WA_MARC.
+CLEAR WA_MARA_KEY.
+WA_MARA_KEY-MATNR = WA_MARC-MATNR.
+APPEND WA_MARA_KEY TO IT_MARA_KEY.
+ENDLOOP.
+
+PERFORM GET_MARA TABLES IT_MARA_KEY.
+FREE IT_MARA_KEY.
+
+ENDFORM.                    " GET_MARA_Z
+*&---------------------------------------------------------------------*
+*&      Form  GET_T001K_Z
+*&---------------------------------------------------------------------*
+*       通貨コード(在庫)
+*----------------------------------------------------------------------*
+FORM GET_T001K_Z.
+
+DATA : LT_MARC TYPE STANDARD TABLE OF T_MARC.
+
+REFRESH : IT_T001K,IT_T001K_KEY.
+* プラントの重複を削除
+LT_MARC = IT_MARC.
+**** START ADD 2015/03/03 ISID12 ****
+*  SORT IT_MARC BY WERKS.
+SORT LT_MARC BY WERKS.
+**** END ADD 2015/03/03 ISID12 ****
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING WERKS.
+LOOP AT LT_MARC INTO WA_MARC.
+CLEAR WA_T001K_KEY.
+WA_T001K_KEY-WERKS = WA_MARC-WERKS.
+APPEND WA_T001K_KEY TO IT_T001K_KEY.
+ENDLOOP.
+
+PERFORM GET_T001K TABLES IT_T001K_KEY.
+FREE IT_T001K_KEY.
+
+ENDFORM.                    " GET_T001K_Z
+*&---------------------------------------------------------------------*
+*&      Form  GET_EORD
+*&---------------------------------------------------------------------*
+*       仕入先情報
+*----------------------------------------------------------------------*
+FORM GET_EORD.
+
+DATA : LT_MARC TYPE STANDARD TABLE OF T_MARC.
+
+LT_MARC = IT_MARC.
+* 品目・プラントの重複を削除
+SORT LT_MARC BY MATNR WERKS.
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING MATNR WERKS.
+
+REFRESH IT_EORD.
+SELECT EORD~MATNR         "品目コード
+EORD~WERKS         "プラント
+EORD~ZEORD         "レコード番号
+EORD~LIFNR         "仕入先
+LFA1~NAME1         "名称１
+INTO TABLE IT_EORD
+FROM EORD
+INNER JOIN LFA1
+ON EORD~LIFNR = LFA1~LIFNR
+FOR ALL ENTRIES IN LT_MARC
+WHERE EORD~MATNR =  LT_MARC-MATNR
+AND EORD~WERKS =  LT_MARC-WERKS
+AND EORD~VDATU <= SY-DATUM
+AND EORD~BDATU >= SY-DATUM
+AND EORD~FLIFN =  CNS_ON.
+
+ENDFORM.                    " GET_EORD
+*&---------------------------------------------------------------------*
+*&      Form  GET_MSKU
+*&---------------------------------------------------------------------*
+*       預託在庫
+*----------------------------------------------------------------------*
+FORM GET_MSKU.
+
+DATA : LT_MARC TYPE STANDARD TABLE OF T_MARC,
+***** START ADD 2015/03/03 ISID12 ****
+LT_MSKU_COPY TYPE STANDARD TABLE OF T_MSKU,
+LV_KULAB TYPE MSKU-KULAB,
+LW_MSKU TYPE T_MSKU.
+***** END ADD 2015/03/03 ISID12 ****
+
+LT_MARC = IT_MARC.
+* 品目・プラントの重複を削除
+SORT LT_MARC BY MATNR WERKS.
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING MATNR WERKS.
+
+REFRESH IT_MSKU.
+SELECT MATNR         "品目コード
+WERKS         "プラント
+CHARG         "ロット番号
+KUNNR         "得意先
+KULAB         "利用可能評価在庫
+INTO TABLE IT_MSKU
+FROM MSKU
+FOR ALL ENTRIES IN LT_MARC
+WHERE MATNR = LT_MARC-MATNR
+AND WERKS = LT_MARC-WERKS
+AND SOBKZ = CNS_SOBKZ_W.
+
+***** START ADD 2015/03/03 ISID12 ****
+CLEAR LW_MSKU-CHARG.
+MODIFY IT_MSKU FROM LW_MSKU TRANSPORTING CHARG
+WHERE CHARG <> SPACE.
+
+SORT IT_MSKU BY MATNR
+WERKS
+CHARG
+KUNNR.
+* 得意先預託在庫を集計する
+LOOP AT IT_MSKU INTO LW_MSKU.
+
+TRY.
+LV_KULAB =  LV_KULAB + LW_MSKU-KULAB.
+CATCH CX_SY_ARITHMETIC_OVERFLOW.
+LV_KULAB = CNS_LIFMG.
+ENDTRY.
+
+AT END OF KUNNR.
+LW_MSKU-KULAB = LV_KULAB.
+APPEND LW_MSKU TO  LT_MSKU_COPY.
+CLEAR: LW_MSKU,
+LV_KULAB.
+ENDAT.
+ENDLOOP.
+
+REFRESH IT_MSKU.
+IT_MSKU = LT_MSKU_COPY.
+***** END ADD 2015/03/03 ISID12 ****
+
+ENDFORM.                    " GET_MSKU
+*&---------------------------------------------------------------------*
+*&      Form  GET_MSLB
+*&---------------------------------------------------------------------*
+*       支給在庫
+*----------------------------------------------------------------------*
+FORM GET_MSLB.
+
+DATA : LT_MARC TYPE STANDARD TABLE OF T_MARC,
+***** START ADD 2015/03/03 ISID12 ****
+LT_MSLB_COPY TYPE STANDARD TABLE OF T_MSLB,
+LV_LBLAB TYPE MSLB-LBLAB,
+LW_MSLB TYPE T_MSLB.
+***** END ADD 2015/03/03 ISID12 ****
+
+LT_MARC = IT_MARC.
+* 品目・プラントの重複を削除
+SORT LT_MARC BY MATNR WERKS.
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING MATNR WERKS.
+
+REFRESH IT_MSLB.
+SELECT MATNR          "品目コード
+WERKS          "プラント
+CHARG          "ロット番号
+LIFNR          "仕入先
+LBLAB          "利用可能評価在庫
+INTO TABLE IT_MSLB
+FROM MSLB
+FOR ALL ENTRIES IN LT_MARC
+WHERE MATNR = LT_MARC-MATNR
+AND WERKS = LT_MARC-WERKS
+AND SOBKZ = CNS_SOBKZ_O.
+
+***** START ADD 2015/03/03 ISID12 ****
+CLEAR LW_MSLB-CHARG.
+MODIFY IT_MSLB FROM LW_MSLB TRANSPORTING CHARG
+WHERE CHARG <> SPACE.
+
+SORT IT_MSLB BY MATNR
+WERKS
+CHARG
+LIFNR.
+
+LOOP AT IT_MSLB INTO LW_MSLB.
+TRY.
+LV_LBLAB =  LV_LBLAB + LW_MSLB-LBLAB.
+CATCH CX_SY_ARITHMETIC_OVERFLOW.
+LV_LBLAB = CNS_LIFMG.
+ENDTRY.
+
+AT END OF LIFNR.
+LW_MSLB-LBLAB = LV_LBLAB.
+APPEND LW_MSLB TO  LT_MSLB_COPY.
+CLEAR: LW_MSLB,
+LV_LBLAB.
+ENDAT.
+ENDLOOP.
+
+REFRESH IT_MSLB.
+IT_MSLB = LT_MSLB_COPY.
+***** END ADD 2015/03/03 ISID12 ****
+
+ENDFORM.                    " GET_MSLB
+*&---------------------------------------------------------------------*
+*&      Form  GET_MBEW_Z
+*&---------------------------------------------------------------------*
+*       単価・在庫金額(在庫)
+*----------------------------------------------------------------------*
+FORM GET_MBEW_Z.
+
+DATA LT_MARC TYPE STANDARD TABLE OF T_MARC.
+
+*--- Del Start 2010/10/27
+*  REFRESH : it_mbew,it_mbew_key.
+*--- Del End   2010/10/27
+* 品目×プラントの重複を削除
+LT_MARC = IT_MARC.
+SORT LT_MARC BY MATNR WERKS.
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING MATNR WERKS.
+LOOP AT LT_MARC INTO WA_MARC.
+*--- Del Start 2011/05/16
+**--- Add Start 2010/10/27
+*    READ TABLE it_mbew_key WITH KEY matnr = wa_marc-matnr
+*                                    werks = wa_marc-werks
+*                           TRANSPORTING NO FIELDS
+*                           BINARY SEARCH.
+*    IF sy-subrc = 0.
+*      CONTINUE.
+*    ENDIF.
+**--- Add End   2010/10/27
+*--- Del End   2011/05/16
+CLEAR WA_MBEW_KEY.
+WA_MBEW_KEY-MATNR = WA_MARC-MATNR. "品目コード
+WA_MBEW_KEY-WERKS = WA_MARC-WERKS. "プラント
+APPEND WA_MBEW_KEY TO IT_MBEW_KEY.
+ENDLOOP.
+
+*--- Add Start 2011/05/16
+SORT IT_MBEW_KEY BY MATNR WERKS.
+DELETE ADJACENT DUPLICATES FROM IT_MBEW_KEY COMPARING MATNR WERKS.
+*--- Add End   2011/05/16
+
+*--- Del Start 2010/10/27
+*  PERFORM get_mbew TABLES it_mbew_key.
+*  FREE it_mbew_key.
+*--- Del End   2010/10/27
+ENDFORM.                    " GET_MBEW_Z
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZS0020
+*&---------------------------------------------------------------------*
+*       出済未出庫
+*----------------------------------------------------------------------*
+FORM GET_ZS0020.
+
+DATA : LT_MARC TYPE STANDARD TABLE OF T_MARC.
+
+LT_MARC = IT_MARC.
+* 品目・プラントの重複を削除
+SORT LT_MARC BY MATNR WERKS.
+DELETE ADJACENT DUPLICATES FROM LT_MARC COMPARING MATNR WERKS.
+
+REFRESH IT_ZS0020.
+SELECT MATNR        "品目コード
+WERKS        "プラント
+LFIMG        "出荷数量実績
+* 2012/02/21 ADD START
+LFIMG_KB     "出荷数量実績(KB)
+LFIMG_KE     "出荷数量実績(KE)
+* 2012/02/21 ADD END
+INTO TABLE IT_ZS0020
+FROM ZS0020
+FOR ALL ENTRIES IN LT_MARC
+WHERE MATNR = LT_MARC-MATNR
+AND WERKS = LT_MARC-WERKS.
+
+ENDFORM.                    " GET_ZS0020
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_DATA_ZAIKO
+*&---------------------------------------------------------------------*
+*       在庫データ編集
+*----------------------------------------------------------------------*
+FORM EDIT_DATA_ZAIKO.
+
+**** START ADD 2015/03/03 ISID12 ****
+DATA:
+LV_TABIX TYPE I,
+LV_TABIX_END TYPE I,
+LV_LINES TYPE I,
+LV_LFIMG_KB TYPE ZS0020-LFIMG_KB,
+LV_LFIMG_KE TYPE ZS0020-LFIMG_KE,
+LV_LFIMG    TYPE ZS0020-LFIMG,
+LV_KULAB TYPE MSKU-KULAB,
+LV_LBLAB TYPE MSLB-LBLAB,
+LRT_KUNNR TYPE RANGE OF KUNNR,
+LRW_KUNNR LIKE LINE OF LRT_KUNNR,
+LWA_ZM0020 TYPE ZM0020,
+LWA_MARC TYPE T_MARC.
+
+DESCRIBE TABLE IT_MARC LINES LV_LINES.
+SORT IT_MARC BY MATNR WERKS.
+**** END ADD 2015/03/03 ISID12 ****
+
+LOOP AT IT_MARC INTO WA_MARC.
+CLEAR WA_ZM0020.
+**** START ADD 2015/03/03 ISID12 ****
+LV_TABIX = SY-TABIX.
+LV_TABIX_END = SY-TABIX + 1.
+**** END ADD 2015/03/03 ISID12 ****
+
+*   購買グループ名
+CLEAR WA_T024.
+READ TABLE IT_T024  INTO WA_T024
+WITH TABLE KEY EKGRP = WA_MARC-EKGRP.
+
+*   品目情報
+CLEAR WA_MARA.
+READ TABLE IT_MARA  INTO WA_MARA
+WITH TABLE KEY MATNR = WA_MARC-MATNR.
+
+*   通貨コード
+CLEAR WA_T001K.
+READ TABLE IT_T001K INTO WA_T001K
+WITH TABLE KEY WERKS = WA_MARC-WERKS.
+
+*   仕入先情報
+CLEAR WA_EORD.
+READ TABLE IT_EORD  INTO WA_EORD
+WITH TABLE KEY MATNR = WA_MARC-MATNR
+WERKS = WA_MARC-WERKS.
+*   預託在庫
+CLEAR WA_MSKU.
+* 2012/03/15 MOD START
+*    READ TABLE IT_MSKU  INTO WA_MSKU
+*                        WITH TABLE KEY MATNR = WA_MARC-MATNR
+*                                       WERKS = WA_MARC-WERKS.
+LOOP AT IT_MSKU INTO  WA_MSKU
+WHERE MATNR = WA_MARC-MATNR
+AND WERKS = WA_MARC-WERKS.
+ADD WA_MSKU-KULAB TO WA_ZM0020-KULAB.
+ENDLOOP.
+
+* 2012/03/15 MOD END
+*   支給在庫
+CLEAR WA_MSLB.
+* 2012/03/15 MOD START
+
+*    READ TABLE IT_MSLB  INTO WA_MSLB
+*                        WITH TABLE KEY MATNR = WA_MARC-MATNR
+*                                       WERKS = WA_MARC-WERKS.
+LOOP AT IT_MSLB INTO WA_MSLB
+WHERE MATNR = WA_MARC-MATNR
+AND WERKS = WA_MARC-WERKS.
+ADD WA_MSLB-LBLAB TO WA_ZM0020-LBLAB.
+ENDLOOP.
+
+* 2012/03/15 MOD END
+*   出済未出庫
+CLEAR WA_ZS0020.
+READ TABLE IT_ZS0020 INTO WA_ZS0020
+WITH TABLE KEY MATNR = WA_MARC-MATNR
+WERKS = WA_MARC-WERKS.
+
+*--- Del Start 2010/10/27
+**   単価・在庫金額
+*    CLEAR wa_mbew.
+*    READ TABLE it_mbew  INTO wa_mbew
+*                        WITH TABLE KEY matnr = wa_marc-matnr
+*                                       werks = wa_marc-werks.
+*--- Del End   2010/10/27
+
+WA_ZM0020-ZYEAR   = P_YEAR.                            "年
+WA_ZM0020-ZMONTH  = P_MONTH.                           "月
+WA_ZM0020-WERKS   = WA_MARC-WERKS.                     "プラント
+WA_ZM0020-MATNR   = WA_MARC-MATNR.                     "品目コード
+WA_ZM0020-MAKTX   = WA_MARA-MAKTX.                     "品目名
+WA_ZM0020-LGPBE   = WA_MARC-LGPBE.                     "棚番
+WA_ZM0020-MSEH3   = WA_MARA-MSEH3.                     "単位
+WA_ZM0020-WAERS   = WA_T001K-WAERS.                    "通貨
+WA_ZM0020-EKNAM   = WA_T024-EKNAM.                     "グループ名
+WA_ZM0020-LIFNR   = WA_EORD-LIFNR.                     "仕入先
+WA_ZM0020-LNAME   = WA_EORD-NAME1.                     "仕入先名
+WA_ZM0020-LABST   = WA_MARC-LABST.                     "当月残数
+* 2012/03/15 DEL START
+*    WA_ZM0020-KULAB   = WA_MSKU-KULAB.                    "預託在庫
+*    WA_ZM0020-LBLAB   = WA_MSLB-LBLAB.                    "支給在庫
+* 2012/03/15 DEL END
+WA_ZM0020-TRAME   = WA_MARC-TRAME.                     "転送中在庫
+WA_ZM0020-LFIMG   = WA_ZS0020-LFIMG.                   "出済未出庫
+* 2012/02/21 ADD START
+WA_ZM0020-LFIMG_KB = WA_ZS0020-LFIMG_KB.          "出荷済未出庫(KB)
+WA_ZM0020-LFIMG_KE = WA_ZS0020-LFIMG_KE.          "出荷済未出庫(KE)
+* 2012/02/21 ADD END
+WA_ZM0020-SPEME   = WA_MARC-SPEME.                     "保留在庫
+*--- Del Start 2010/10/27
+*    wa_zm0020-verpr   = wa_mbew-verpr.                     "平均単価
+*    wa_zm0020-salk3   = wa_mbew-salk3.                     "在庫金額
+*    wa_zm0020-peinh   = wa_mbew-peinh.                     "価格単位
+*--- Del End   2010/10/27
+*--- Add Start 2010/10/27
+WA_ZM0020-WRKST    = WA_MARA-WRKST.                    "主構成物質
+WA_ZM0020-NORMT    = WA_MARA-NORMT.                    "標準テキスト
+*--- Add End   2010/10/27
+
+*** START ADD 2015/03/03 ISID12 ****
+IF P_BUKRS <> CNS_BUKRS.
+LV_KULAB = WA_ZM0020-KULAB.
+LV_LBLAB = WA_ZM0020-LBLAB.
+
+
+CLEAR: LWA_MARC,
+WA_ZM0020-TRAME,
+WA_ZM0020-LFIMG_KB,
+WA_ZM0020-LFIMG_KE,
+WA_ZM0020-LFIMG,
+WA_ZM0020-KULAB,
+WA_ZM0020-LBLAB.
+READ TABLE IT_MARC INTO LWA_MARC INDEX LV_TABIX_END.
+
+**** START UPD BY ISID REN 2015/06/01 ****
+*      LOOP AT IT_ZM0020 INTO LWA_ZM0020
+*                    WHERE WERKS = WA_ZM0020-WERKS
+*                      AND MATNR = WA_ZM0020-MATNR
+*                      AND LFIMG IS NOT INITIAL.
+*        LV_LFIMG = LV_LFIMG + LWA_ZM0020-LFIMG.
+*      ENDLOOP.
+TRY.
+LV_LFIMG = LV_LFIMG + WA_ZS0020-LFIMG. "出済未出庫.
+
+CATCH CX_SY_ARITHMETIC_OVERFLOW.
+LV_LFIMG = CNS_LIFMG.
+ENDTRY.
+**** END UPD BY ISID REN 2015/06/01 ****
+
+IF LWA_MARC-WERKS <> WA_MARC-WERKS
+OR LWA_MARC-MATNR <> WA_MARC-MATNR
+OR LV_TABIX = LV_LINES.
+TRY.
+LV_LFIMG_KB = LV_LFIMG_KB + WA_ZS0020-LFIMG_KB.
+CATCH CX_SY_ARITHMETIC_OVERFLOW.
+LV_LFIMG_KB = CNS_LIFMG.
+ENDTRY.
+
+TRY.
+LV_LFIMG_KE = LV_LFIMG_KE + WA_ZS0020-LFIMG_KE.
+CATCH CX_SY_ARITHMETIC_OVERFLOW.
+LV_LFIMG_KE = CNS_LIFMG.
+ENDTRY.
+
+*        TRY.
+*          LV_LFIMG = LV_LFIMG + WA_ZS0020-LFIMG.
+*        CATCH CX_SY_ARITHMETIC_OVERFLOW.
+*          LV_LFIMG = CNS_LIFMG.
+*        ENDTRY.
+
+*       得意先預託在庫のレコードの場合
+IF LV_KULAB > 0.
+
+LOOP AT IT_MSKU INTO WA_MSKU WHERE MATNR = WA_MARC-MATNR
+AND WERKS = WA_MARC-WERKS.
+IF WA_MSKU-KULAB > 0.
+CLEAR:  WA_ZM0020-LGPBE,              "棚番
+WA_ZM0020-SPEME.              "保留在庫
+WA_ZM0020-KULAB = WA_MSKU-KULAB.      "預託在庫
+WA_ZM0020-LGORT = WA_MSKU-KUNNR.      "得意先コード
+WA_ZM0020-LABST = WA_MSKU-KULAB.      "当月残数total
+LRW_KUNNR-SIGN = 'I'.
+LRW_KUNNR-OPTION = 'EQ'.
+LRW_KUNNR-LOW = WA_MSKU-KUNNR.
+APPEND LRW_KUNNR TO LRT_KUNNR.
+CLEAR  LRW_KUNNR.
+APPEND WA_ZM0020 TO IT_ZM0020.
+CLEAR: WA_ZM0020-LABST,
+WA_ZM0020-LGORT,
+WA_ZM0020-KULAB.
+ENDIF.
+ENDLOOP.
+ENDIF.
+
+*       仕入先支給在庫のレコードの場合
+IF LV_LBLAB > 0.
+
+LOOP AT IT_MSLB INTO WA_MSLB WHERE MATNR = WA_MARC-MATNR
+AND WERKS = WA_MARC-WERKS.
+
+IF WA_MSLB-LBLAB > 0.
+
+CLEAR: WA_ZM0020-LGPBE,               "棚番
+WA_ZM0020-SPEME.               "保留在庫
+WA_ZM0020-LBLAB = WA_MSLB-LBLAB.      "支給在庫
+WA_ZM0020-LGORT = WA_MSLB-LIFNR.      "仕入先コード
+WA_ZM0020-LABST = WA_MSLB-LBLAB.      "当月残数total
+
+IF LRT_KUNNR IS NOT INITIAL.
+*               得意先、仕入先コードが同じ場合、レコードを分割しない
+IF WA_MSLB-LIFNR IN LRT_KUNNR.
+DELETE IT_ZM0020 WHERE MATNR = WA_MARC-MATNR
+AND WERKS = WA_MARC-WERKS
+AND LGORT = WA_MSLB-LIFNR.
+CLEAR WA_MSKU.
+READ TABLE IT_MSKU INTO WA_MSKU
+WITH KEY KUNNR = WA_MSLB-LIFNR
+MATNR = WA_MARC-MATNR
+WERKS = WA_MARC-WERKS.
+
+WA_ZM0020-KULAB = WA_MSKU-KULAB.      "預託在庫
+WA_ZM0020-LBLAB = WA_MSLB-LBLAB.      "支給在庫
+WA_ZM0020-LABST = WA_MSLB-LBLAB + WA_MSKU-KULAB.
+"当月残数total
+
+APPEND WA_ZM0020 TO IT_ZM0020.
+CLEAR: WA_ZM0020-LABST,
+WA_ZM0020-LBLAB,
+WA_ZM0020-LGORT.
+
+CONTINUE.
+
+ELSE.
+APPEND WA_ZM0020 TO IT_ZM0020.
+
+ENDIF.
+
+ELSE.
+APPEND WA_ZM0020 TO IT_ZM0020.
+ENDIF.
+
+CLEAR: WA_ZM0020-LABST,
+WA_ZM0020-LBLAB,
+WA_ZM0020-LGORT.
+
+ENDIF.
+ENDLOOP.
+CLEAR: LRT_KUNNR.
+ENDIF.
+
+*       積送在庫のレコードの場合
+IF WA_ZM0020-TRAME > 0
+OR LV_LFIMG_KB > 0
+OR LV_LFIMG_KE > 0
+OR LV_LFIMG > 0.
+
+CLEAR: WA_ZM0020-LGPBE,                 "棚番
+WA_ZM0020-LGORT,                 "保管場所
+WA_ZM0020-SPEME.                 "保留在庫
+
+WA_ZM0020-LABST = WA_ZM0020-TRAME.      "当月残数total
+WA_ZM0020-LFIMG = WA_ZS0020-LFIMG.      "出済未出庫
+WA_ZM0020-TRAME = WA_MARC-TRAME.        "転送中在庫
+*          WA_ZM0020-LFIMG = LV_LFIMG.             "出荷済未出庫
+**** START ADD BY ISID REN 2015/06/01 ****
+WA_ZM0020-LFIMG = LV_LFIMG.             "出荷済未出庫
+**** END ADD BY ISID REN 2015/06/01 ****
+WA_ZM0020-LFIMG_KB = LV_LFIMG_KB.       "出荷済未出庫(KB)
+WA_ZM0020-LFIMG_KE = LV_LFIMG_KE.       "出荷済未出庫(KE)
+
+READ TABLE IT_ZM0020 INTO LWA_ZM0020
+WITH KEY WERKS = WA_ZM0020-WERKS
+MATNR = WA_ZM0020-MATNR
+**** START ADD BY ISID REN 2015/06/01 ****
+LGORT = SPACE.
+**** END ADD BY ISID REN 2015/06/01 ****
+
+**** START UPD BY ISID REN 2015/06/01 ****
+*          IF LV_LFIMG IS NOT INITIAL.
+IF SY-SUBRC = 0.
+**** END UPD BY ISID REN 2015/06/01 ****
+MODIFY IT_ZM0020 FROM WA_ZM0020
+TRANSPORTING
+**** START ADD BY ISID REN 2015/06/01 ****
+LFIMG                  "出荷済未出庫
+**** END ADD BY ISID REN 2015/06/01 ****
+LFIMG_KB
+LFIMG_KE
+WHERE WERKS = WA_ZM0020-WERKS
+**** START ADD BY ISID REN 2015/05/31 ****
+AND MATNR = WA_ZM0020-MATNR     "品目コード
+**** END ADD BY ISID REN 2015/05/31 ****
+AND LGORT = WA_ZM0020-LGORT.
+**** START DEL BY ISID REN 2015/05/31
+*                  AND LFIMG IS NOT INITIAL.
+**** END DEL BY ISID REN 2015/05/31
+ELSE.
+APPEND WA_ZM0020 TO IT_ZM0020.
+ENDIF.
+
+CLEAR: WA_ZM0020-LABST,
+WA_ZM0020-TRAME,
+WA_ZM0020-LFIMG,
+LV_LFIMG,
+LV_LFIMG_KB,
+LV_LFIMG_KE.
+ENDIF.
+ELSE.
+CLEAR: WA_ZM0020-KULAB,
+WA_ZM0020-LBLAB,
+WA_ZM0020-LFIMG,
+WA_ZM0020-LFIMG_KB,
+WA_ZM0020-LFIMG_KE,
+WA_ZM0020-TRAME.
+ENDIF.
+
+WA_ZM0020-SPEME = WA_MARC-SPEME.                    "保留在庫
+WA_ZM0020-LGPBE = WA_MARC-LGPBE.                    "棚番
+*    保管場所別のレコードの場合
+WA_ZM0020-LGORT = WA_MARC-LGORT.                    "保管場所
+*    保管場所別の在庫情報を合計する
+TRY.
+WA_ZM0020-LABST = WA_MARC-LABST + WA_MARC-SPEME.    "当月残数total
+CATCH CX_SY_ARITHMETIC_OVERFLOW.
+WA_ZM0020-LABST = CNS_LIFMG.
+ENDTRY.
+CLEAR:WA_ZM0020-LFIMG_KB,
+WA_ZM0020-LFIMG_KE.
+
+ENDIF.
+*** END ADD 2015/03/03 ISID12 ****
+
+*   当月残数・預託在庫・支給在庫・転送中在庫・保留在庫
+*   すべてがゼロの場合、処理対象外とする。
+IF WA_ZM0020-LABST = 0  AND  "当月残数
+WA_ZM0020-KULAB = 0  AND  "預託在庫
+WA_ZM0020-LBLAB = 0  AND  "支給在庫
+WA_ZM0020-TRAME = 0  AND  "転送中在庫
+WA_ZM0020-SPEME = 0.      "保留在庫
+CONTINUE.
+ELSE.
+APPEND WA_ZM0020 TO IT_ZM0020.
+ENDIF.
+ENDLOOP.
+
+FREE: IT_MARC,IT_T024,IT_MARA,IT_T001K,
+IT_EORD,IT_MSKU,IT_MSLB,IT_ZS0020,IT_MBEW.
+
+ENDFORM.                    " EDIT_DATA_ZAIKO
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZM0020
+*&---------------------------------------------------------------------*
+*       テーブル更新
+*----------------------------------------------------------------------*
+FORM UPDATE_ZM0020.
+
+* テーブルロック
+PERFORM ENQUEUE_ZM0020.
+
+* データ削除
+PERFORM DELETE_ZM0020.
+
+* データ登録
+PERFORM INSERT_ZM0020.
+
+* ロック解除
+PERFORM DEQUEUE_ZM0020.
+
+ENDFORM.                    " UPDATE_ZM0020
+*&---------------------------------------------------------------------*
+*&      Form  ENQUEUE_ZM0020
+*&---------------------------------------------------------------------*
+*       テーブルロック
+*----------------------------------------------------------------------*
+FORM ENQUEUE_ZM0020.
+*--- Add Start 2011/03/30
+* local
+DATA: LWA_ZM0020 TYPE ZM0020,
+LWA_PLANT  TYPE TYP_PLANT.
+
+REFRESH IT_PLANT.
+* 対象プラント抽出
+LOOP AT IT_ZM0020 INTO LWA_ZM0020.
+READ TABLE IT_PLANT WITH KEY WERKS = LWA_ZM0020-WERKS
+TRANSPORTING NO FIELDS
+BINARY SEARCH.
+IF SY-SUBRC <> 0.
+CLEAR LWA_PLANT.
+LWA_PLANT-WERKS = LWA_ZM0020-WERKS.
+APPEND LWA_PLANT TO IT_PLANT.
+SORT IT_PLANT BY WERKS.
+ENDIF.
+ENDLOOP.
+
+* プラント毎にロック
+LOOP AT IT_PLANT INTO LWA_PLANT.
+*--- Add End   2011/03/30
+
+CALL FUNCTION 'ENQUEUE_EZ_ZM0020'
+EXPORTING
+ZYEAR          = P_YEAR
+ZMONTH         = P_MONTH
+*--- Add Start 2011/03/30
+WERKS          = LWA_PLANT-WERKS
+*--- Add End   2011/03/30
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 1.
+*     棚卸データテーブル は他のユーザによりロックされています
+MESSAGE S004 WITH TEXT-M03.
+LEAVE LIST-PROCESSING.
+WHEN OTHERS.
+*     ロックできませんでした
+MESSAGE S202.
+LEAVE LIST-PROCESSING.
+ENDCASE.
+*--- Add Start 2011/03/30
+ENDLOOP.
+*--- Add End   2011/03/30
+
+ENDFORM.                    " ENQUEUE_ZM0020
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_ZM0020
+*&---------------------------------------------------------------------*
+*       データ削除
+*----------------------------------------------------------------------*
+FORM DELETE_ZM0020.
+
+DELETE FROM ZM0020 WHERE ZYEAR  = P_YEAR
+AND ZMONTH = P_MONTH
+**** START UPD 2014/09/16 ISID･喩 ****
+**--- Add Start 2011/03/30
+*                       AND WERKS IN S_WERKS.
+**--- Add End   2011/03/30
+AND WERKS IN RT_WERKS.
+**** END UPD 2014/09/16 ISID･喩 ****
+
+* 削除エラー時
+CASE SY-SUBRC.
+WHEN 0 OR 4.
+WHEN OTHERS.
+*     ロールバック
+ROLLBACK WORK.
+*     ロック解除
+PERFORM DEQUEUE_ZM0020.
+*     棚卸データテーブルの削除でエラーが発生しました
+**** START UPD 2014/09/16 ISID･喩 ****
+*      MESSAGE S400 WITH TEXT-M04.
+MESSAGE S136(Z3).
+**** END UPD 2014/09/16 ISID･喩 ****
+LEAVE LIST-PROCESSING.
+ENDCASE.
+
+ENDFORM.                    " DELETE_ZM0020
+*&---------------------------------------------------------------------*
+*&      Form  INSERT_ZM0020
+*&---------------------------------------------------------------------*
+*       データ登録
+*----------------------------------------------------------------------*
+FORM INSERT_ZM0020.
+
+INSERT ZM0020 FROM TABLE IT_ZM0020 ACCEPTING DUPLICATE KEYS.
+
+* 登録正常時
+IF SY-SUBRC = 0.
+*   コミット
+COMMIT WORK.
+*   登録件数取得
+CNT_INS = SY-DBCNT.
+
+* 登録エラー時
+ELSE.
+*   ロールバック
+ROLLBACK WORK.
+*   ロック解除
+PERFORM DEQUEUE_ZM0020.
+*   棚卸データテーブルの登録でエラーが発生しました
+**** START UPD 2014/09/16 ISID･喩 ****
+*    MESSAGE S400 WITH TEXT-M05.
+MESSAGE S137(Z3).
+**** END UPD 2014/09/16 ISID･喩 ****
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+ENDFORM.                    " INSERT_ZM0020
+*&---------------------------------------------------------------------*
+*&      Form  DEQUEUE_ZM0020
+*&---------------------------------------------------------------------*
+*       ロック解除
+*----------------------------------------------------------------------*
+FORM DEQUEUE_ZM0020.
+*--- Add Start 2011/03/30
+* local
+DATA LWA_PLANT TYPE TYP_PLANT.
+
+LOOP AT IT_PLANT INTO LWA_PLANT.
+*--- Add End   2011/03/30
+CALL FUNCTION 'DEQUEUE_EZ_ZM0020'
+EXPORTING
+ZYEAR  = P_YEAR
+ZMONTH = P_MONTH
+*--- Add Start 2011/03/30
+WERKS  = LWA_PLANT-WERKS.
+ENDLOOP.
+*--- Add End   2011/03/30
+
+ENDFORM.                    " DEQUEUE_ZM0020
+*&---------------------------------------------------------------------*
+*&      Form  GET_LIPS
+*&---------------------------------------------------------------------*
+*       出済未出庫(個別購買データ)
+*----------------------------------------------------------------------*
+FORM GET_LIPS.
+
+REFRESH IT_LIPS.
+SELECT
+*--- Add Start 2011/04/01
+LIPS~VBELN
+LIPS~POSNR
+*--- Add End   2011/04/01
+LIPS~VGBEL    "参照伝票番号
+LIPS~VGPOS    "参照伝票明細
+LIPS~LFIMG    "出荷済未出庫
+*   insert 2011/11/7 C.MARUTA DMW3608{
+LIPS~MEINS    "基本数量単位
+LIPS~VRKME    "販売単位
+LIPS~MATNR    "品目コード
+* } insert 2011/11/7 C.MARUTA DMW3608
+INTO TABLE IT_LIPS
+FROM LIPS
+INNER JOIN VBUP
+ON LIPS~VBELN = VBUP~VBELN
+AND LIPS~POSNR = VBUP~POSNR
+FOR ALL ENTRIES IN IT_MSKA
+WHERE LIPS~VGBEL =  IT_MSKA-VBELN
+AND LIPS~VGPOS =  IT_MSKA-POSNR
+AND VBUP~WBSTA <> CNS_WBSTA_C.
+
+ENDFORM.                    " GET_LIPS
+*&---------------------------------------------------------------------*
+*&      Form  re-edit_stock_data
+*&---------------------------------------------------------------------*
+*       処理対象データ再編集
+*       (明細行)移動平均原価、価格単位
+*       (合計行)在庫金額
+*----------------------------------------------------------------------*
+FORM RE-EDIT_STOCK_DATA.
+* local
+DATA: LIT_ZM0020 TYPE TABLE OF ZM0020,
+LWA_ZM0020 TYPE ZM0020,
+**** START ADD 2015/03/03 ISID12 ****
+LIT_ZM0020_SORT TYPE TABLE OF ZM0020,
+LV_TABIX TYPE I,
+LV_TABIX_NEW TYPE I,
+LV_TABIX_END TYPE I,
+LV_LINES TYPE I,
+LWA_ZM0020X TYPE ZM0020.
+
+LIT_ZM0020_SORT = IT_ZM0020.
+SORT LIT_ZM0020_SORT BY ZYEAR ZMONTH WERKS LGORT MATNR VBELN POSNR.
+**** END ADD 2015/03/03 ISID12 ****
+
+* 2012/02/21 ADD START
+DATA L_SALK3 TYPE MBEW-SALK3.
+* 2012/02/21 ADD END
+
+* 品目評価
+PERFORM GET_MBEW TABLES IT_MBEW_KEY.
+FREE IT_MBEW_KEY.
+
+SORT IT_ZM0020 BY ZYEAR ZMONTH WERKS MATNR VBELN POSNR.
+
+*--明細行編集・合計行追加
+LOOP AT IT_ZM0020 INTO LWA_ZM0020.
+WA_ZM0020 = LWA_ZM0020.
+
+**** START ADD 2015/03/03 ISID12 ****
+LV_TABIX = SY-TABIX.
+LV_TABIX_NEW = SY-TABIX - 1.
+LV_TABIX_END = SY-TABIX + 1.
+
+CLEAR LWA_ZM0020X.
+READ TABLE IT_ZM0020 INTO LWA_ZM0020X
+INDEX LV_TABIX_NEW.
+
+*   AT NEW MATNR.
+IF   LWA_ZM0020X-ZYEAR <> LWA_ZM0020-ZYEAR
+OR LWA_ZM0020X-ZMONTH <> LWA_ZM0020-ZMONTH
+OR LWA_ZM0020X-WERKS <> LWA_ZM0020-WERKS
+OR LWA_ZM0020X-MATNR <> LWA_ZM0020-MATNR
+OR LV_TABIX = 1.
+**** END ADD 2015/03/03 ISID12 ****'
+
+CLEAR: WA_MBEW, WA_TOTAL.
+READ TABLE IT_MBEW INTO WA_MBEW
+*--- Mod Start 2011/05/16
+*                         WITH TABLE KEY matnr = wa_zm0020-matnr
+*                                        werks = wa_zm0020-werks.
+WITH KEY MATNR = WA_ZM0020-MATNR
+WERKS = WA_ZM0020-WERKS
+BINARY SEARCH.
+*--- Mod End   2011/05/16
+
+**** START ADD 2015/03/03 ISID12 ****
+*    ENDAT.
+ENDIF.
+**** END ADD 2015/03/03 ISID12 ****
+
+**** START ADD 2015/03/03 ISID12 ****
+*  本社の場合
+IF P_BUKRS = CNS_BUKRS.
+**** END ADD 2015/03/03 ISID12 ****
+*     明細行項目を編集
+"※wa_zm0020-labstは利用可能在庫ではない
+WA_ZM0020-LABST = WA_ZM0020-LABST + WA_ZM0020-KULAB +
+WA_ZM0020-LBLAB + WA_ZM0020-TRAME +
+WA_ZM0020-SPEME.                    "当月残数
+**** START ADD 2015/03/03 ISID12 ****
+ENDIF.
+**** END ADD 2015/03/03 ISID12 ****
+
+*  2012/02/21 MOD START
+*    WA_ZM0020-VERPR = WA_MBEW-VERPR.                      "平均単価
+*   平均単価
+IF WA_MBEW-LBKUM = 0.
+WA_ZM0020-VERPR = 0.
+ELSE.
+*     金額変換処理
+PERFORM CHANGE_COST USING    WA_ZM0020-WAERS
+WA_MBEW-SALK3
+CHANGING L_SALK3.
+WA_ZM0020-VERPR = L_SALK3 / WA_MBEW-LBKUM * WA_MBEW-PEINH.
+ENDIF.
+
+**** START ADD 2015/03/03 ISID12 ****
+**** START DEL 2015/06/18 ISI18 ****
+*    IF P_BUKRS <> CNS_BUKRS
+*    AND  WA_ZM0020-VBELN IS NOT INITIAL
+*    AND WA_ZM0020-POSNR IS NOT INITIAL.
+*      CLEAR WA_ZM0020-VERPR.
+*
+*    ENDIF.
+**** END DEL 2015/06/18 ISID18 ****
+**** END ADD 2015/03/03 ISID12 ****
+
+* 2012/02/21 MOD END
+WA_ZM0020-PEINH = WA_MBEW-PEINH.                      "価格単位
+MODIFY IT_ZM0020 FROM WA_ZM0020 TRANSPORTING LABST VERPR PEINH.
+
+*   各合計数量算出(合計行)
+PERFORM CALCULATE_TOTAL.
+
+**** START ADD 2015/03/03 ISID12 ****
+CLEAR LWA_ZM0020X.
+READ TABLE IT_ZM0020 INTO LWA_ZM0020X
+INDEX LV_TABIX_END.
+*    AT END OF MATNR.
+IF LWA_ZM0020X-ZYEAR <> LWA_ZM0020-ZYEAR
+OR LWA_ZM0020X-ZMONTH <> LWA_ZM0020-ZMONTH
+OR LWA_ZM0020X-WERKS <> LWA_ZM0020-WERKS
+OR LWA_ZM0020X-MATNR <> LWA_ZM0020-MATNR
+OR LV_LINES = LV_TABIX.
+**** END ADD 2015/03/03 ISID12 ****
+
+*     在庫品の出荷済未出庫数量の算出
+PERFORM CALCULATE_STOCK_QUANTITY
+**** START ADD 2015/03/03 ISID12 ****
+USING LIT_ZM0020_SORT.
+
+CLEAR: WA_ZM0020-LGORT,
+WA_ZM0020-VBELN,
+WA_ZM0020-POSNR,
+WA_ZM0020-LABST,
+WA_ZM0020-LGPBE,
+WA_ZM0020-KUNNR,
+WA_ZM0020-KNAME,
+WA_ZM0020-BSTNK,
+WA_ZM0020-BLDAT,
+WA_ZM0020-MAKTX,
+WA_ZM0020-LIFNR,
+WA_ZM0020-LNAME,
+WA_ZM0020-EDATU.
+
+**** END ADD 2015/03/03 ISID12 ****
+*     合計行データ設定
+PERFORM SET_TOTAL_RECORD.
+
+**** START ADD 2015/03/03 ISID12 ****
+*      CLEAR WA_ZM0020-LGORT.
+**** END ADD 2015/03/03 ISID12 ****
+APPEND WA_ZM0020 TO LIT_ZM0020.
+**** START UPD 2015/03/03 ISID12 ****
+*    ENDAT.
+ENDIF.
+**** END UPD 2015/03/03 ISID12 ****
+
+ENDLOOP.
+
+APPEND LINES OF LIT_ZM0020 TO IT_ZM0020.
+**** START ADD 2015/03/03 ISID12 ****
+SORT IT_ZM0020 BY ZYEAR ZMONTH WERKS MATNR ZFLG VBELN POSNR LGORT.
+**** END ADD 2015/03/03 ISID12 ****
+
+ENDFORM.                    " re-edit_stock_data
+*&---------------------------------------------------------------------*
+*&      Form  calculate_total
+*&---------------------------------------------------------------------*
+*       各合計数量算出
+*----------------------------------------------------------------------*
+FORM CALCULATE_TOTAL.
+WA_TOTAL-LABST = WA_TOTAL-LABST + WA_ZM0020-LABST.  "当月残数
+WA_TOTAL-KULAB = WA_TOTAL-KULAB + WA_ZM0020-KULAB.  "預託在庫
+WA_TOTAL-LBLAB = WA_TOTAL-LBLAB + WA_ZM0020-LBLAB.  "支給在庫
+WA_TOTAL-TRAME = WA_TOTAL-TRAME + WA_ZM0020-TRAME.  "転送中在庫
+WA_TOTAL-SPEME = WA_TOTAL-SPEME + WA_ZM0020-SPEME.  "保留在庫
+* 個別購買のみ
+IF WA_ZM0020-VBELN <> SPACE.
+WA_TOTAL-LFIMG = WA_TOTAL-LFIMG + WA_ZM0020-LFIMG.  "出荷済未出庫
+ENDIF.
+
+ENDFORM.                    " calculate_total
+*&---------------------------------------------------------------------*
+*&      Form  set_total_record
+*&---------------------------------------------------------------------*
+*       合計行データ設定
+*----------------------------------------------------------------------*
+FORM SET_TOTAL_RECORD.
+* 出力不要項目クリア
+CLEAR: WA_ZM0020-VBELN, WA_ZM0020-POSNR, WA_ZM0020-LGPBE,
+WA_ZM0020-EKNAM, WA_ZM0020-KUNNR, WA_ZM0020-KNAME,
+WA_ZM0020-BSTNK, WA_ZM0020-LIFNR, WA_ZM0020-LNAME,
+WA_ZM0020-BLDAT, WA_ZM0020-EDATU, WA_ZM0020-VERPR.
+
+* 各数量
+WA_ZM0020-LABST = WA_TOTAL-LABST.    "当月残数
+WA_ZM0020-KULAB = WA_TOTAL-KULAB.    "預託在庫
+WA_ZM0020-LBLAB = WA_TOTAL-LBLAB.    "支給在庫
+WA_ZM0020-TRAME = WA_TOTAL-TRAME.    "転送中在庫
+WA_ZM0020-LFIMG = WA_TOTAL-LFIMG.    "出荷済未出庫
+* 2012/02/21 ADD START
+WA_ZM0020-LFIMG_KB = WA_TOTAL-LFIMG_KB.    "出荷済未出庫(内訳:KB)
+WA_ZM0020-LFIMG_KE = WA_TOTAL-LFIMG_KE.    "出荷済未出庫(内訳:KE)
+* 2012/02/21 ADD END
+WA_ZM0020-SPEME = WA_TOTAL-SPEME.    "保留在庫
+* 在庫金額
+WA_ZM0020-SALK3 = WA_MBEW-SALK3.
+* 合計行判別フラグON
+WA_ZM0020-ZFLG  = CNS_ON.
+
+**** START ADD BY ISID REN 2015/06/03 ****
+WA_ZM0020-LGORT = 'ZZZZZZZZZZ'.
+**** END ADD BY ISID REN 2015/06/03 ****
+
+ENDFORM.                    " set_total_record
+*&---------------------------------------------------------------------*
+*&      Form  calculate_stock_quantity
+*&---------------------------------------------------------------------*
+*       在庫品の出荷済未出庫数量の算出
+*----------------------------------------------------------------------*
+FORM CALCULATE_STOCK_QUANTITY
+USING U_ZM0020 LIKE IT_ZM0020.
+* local
+DATA LWA_ZM0020 TYPE ZM0020.
+
+* 在庫品レコード検索
+*  READ TABLE IT_ZM0020 INTO LWA_ZM0020
+READ TABLE U_ZM0020 INTO LWA_ZM0020
+WITH KEY ZYEAR  = WA_ZM0020-ZYEAR
+ZMONTH = WA_ZM0020-ZMONTH
+WERKS  = WA_ZM0020-WERKS
+**** START ADD 2015/03/03 ISID12 ****
+LGORT  = SPACE
+**** END ADD 2015/03/03 ISID12 ****
+MATNR  = WA_ZM0020-MATNR
+VBELN  = SPACE
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+*   在庫品のみの出荷済未出庫数量
+LWA_ZM0020-LFIMG = LWA_ZM0020-LFIMG - WA_TOTAL-LFIMG.
+* 2012/02/21 ADD START]
+*   出荷済未出庫(KB)
+LWA_ZM0020-LFIMG_KB = LWA_ZM0020-LFIMG_KB - WA_TOTAL-LFIMG_KB.
+*   出荷済未出庫(KE)
+LWA_ZM0020-LFIMG_KE = LWA_ZM0020-LFIMG_KE - WA_TOTAL-LFIMG_KE.
+* 2012/02/21 ADD END
+MODIFY IT_ZM0020 FROM LWA_ZM0020 INDEX SY-TABIX TRANSPORTING LFIMG.
+
+*   在庫品と個別購買品の出荷済未出庫数量
+WA_TOTAL-LFIMG = WA_TOTAL-LFIMG + LWA_ZM0020-LFIMG.
+* 2012/02/21 ADD START
+*   出荷済未出庫(KB)
+WA_TOTAL-LFIMG_KB = LWA_ZM0020-LFIMG_KB - WA_TOTAL-LFIMG_KB.
+*   出荷済未出庫(KE)
+WA_TOTAL-LFIMG_KE = LWA_ZM0020-LFIMG_KE - WA_TOTAL-LFIMG_KE.
+* 2012/02/21 ADD END
+ENDIF.
+
+ENDFORM.                    " calculate_stock_quantity
+* 2012/02/21 ADD START
+*&---------------------------------------------------------------------*
+*&      Form  CHANGE_COST
+*&---------------------------------------------------------------------*
+*       金額変換処理
+*----------------------------------------------------------------------*
+*      -->AI_WAERS  通貨コード
+*      -->AI_SALK3  評価在庫合計額(内部)
+*      <--A0_SALK3  評価在庫合計額(外部)
+*----------------------------------------------------------------------*
+FORM CHANGE_COST USING    AI_WAERS
+AI_SALK3
+CHANGING AO_SALK3.
+
+DATA :
+L_CURRENCY   TYPE TCURC-WAERS,
+L_AMOUNT_INT TYPE WMTO_S-AMOUNT,
+L_AMOUNT_DIS TYPE WMTO_S-AMOUNT.
+
+L_CURRENCY = AI_WAERS.
+L_AMOUNT_INT = AI_SALK3.
+
+* 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_DISPLAY'
+EXPORTING
+CURRENCY        = L_CURRENCY
+AMOUNT_INTERNAL = L_AMOUNT_INT
+IMPORTING
+AMOUNT_DISPLAY  = L_AMOUNT_DIS
+EXCEPTIONS
+INTERNAL_ERROR  = 1
+OTHERS          = 2.
+
+IF SY-SUBRC = 0.
+AO_SALK3 = L_AMOUNT_DIS.
+ENDIF.
+
+ENDFORM.                    " CHANGE_COST
+* 2012/02/21 ADD END
+**** START ADD 2014/09/16 ISID･喩 ****
+*&---------------------------------------------------------------------*
+*&      Form  CHK_BUK_WRK
+*&---------------------------------------------------------------------*
+*       会社コード、プラントなどのチェック
+*----------------------------------------------------------------------*
+FORM CHK_BUK_WRK .
+DATA:
+LW_WAERS     TYPE WAERS,
+LW_RNG_WERKS TYPE RANGE_T_WERKS.
+
+CLEAR: RT_WERKS.
+
+* 会社コードの存在チェック
+SELECT SINGLE WAERS
+INTO LW_WAERS
+FROM T001
+WHERE BUKRS = P_BUKRS.
+
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E016(Z3) WITH P_BUKRS.
+ENDIF.
+
+* 会社コードの権限チェック
+AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+ID 'BUKRS' FIELD P_BUKRS
+ID 'ACTVT' FIELD '03'.
+
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E015(Z3) WITH P_BUKRS.
+ENDIF.
+
+CLEAR LW_RNG_WERKS.
+LW_RNG_WERKS = S_WERKS[].
+* 会社コードとプラントの関連チェック
+CALL FUNCTION 'ZEG_ZZ_WERKS_CHK'
+EXPORTING
+IMPBUKRS           = P_BUKRS
+*     IMPWERKS           =
+IMPRNGWERKS        = LW_RNG_WERKS
+IMPORTING
+EXPWERKS           = RT_WERKS
+*     EXPTABRET          =
+EXCEPTIONS
+WERKS_NOT_EXIST    = 1
+WERKS_NO_AUTHORITY = 2
+WERKS_BUKRS_ERROR  = 3
+OTHERS             = 4.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE ID SY-MSGID TYPE 'E' NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+ENDFORM.                    " CHK_BUK_WRK
+**** END ADD 2014/09/16 ISID･喩 ****
+
+***** START ADD 2015/03/03 ISID12 ****
+**&---------------------------------------------------------------------
+*
+*&      Form  CHECK_LGORT_INPUT
+*&---------------------------------------------------------------------
+*       保管場所と工場の依存チェック
+*----------------------------------------------------------------------
+FORM CHECK_LGORT_INPUT .
+
+DATA: LV_LGORT TYPE LGORT_D.
+
+SELECT LGORT UP TO 1 ROWS
+INTO LV_LGORT
+FROM T001L
+WHERE WERKS IN S_WERKS
+AND LGORT IN S_LGORT.
+ENDSELECT.
+
+IF SY-SUBRC <> 0.
+
+MESSAGE S009 WITH TEXT-M04 DISPLAY LIKE 'E'.
+LEAVE LIST-PROCESSING.
+
+ENDIF.
+
+ENDFORM.                    " CHECK_LGORT_INPUT
+**** END ADD 2015/03/03 ISID12 ****
+*Text symbol text・
+*M01:Month
+*M02:Account Book Inventory List
+*M03:Inventory data table
+*M04:Storage Location
+*Selection text・
+*P_BUKRS:        Company Code
+*P_MONTH:        Month
+*P_YEAR:        Year
+*S_EKGRP:        Purchasing Group
+*S_LGORT:        Storage Location
+*S_LGPBE:        Storage Bin
+*S_MATNR:        Material Number
+*S_WERKS:        Plant

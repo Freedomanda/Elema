@@ -1,0 +1,1240 @@
+*&---------------------------------------------------------------------*
+*& REPORT  YF021400                                                    *
+*& 受取手形ステータス変更                                              *
+*&---------------------------------------------------------------------*
+*& 処理概要：ステータス変更を行なう手形の抽出条件を入力し､手形のステー *
+*&           タスを変更する。ステータスの種類は取立(T)割引(W)裏書(U)と *
+*&           する。                                                    *
+*& 作成日  ：2004/07/09                                                *
+*& 作成者  ：NDSC A.MASUDA                                             *
+*& 変更履歴：2007/12    NDSC                                           *
+*&                      メッセージ多言語対応（テキストエレメント化）   *
+*&           2010/10/19 M.Murata                                       *
+*&                      1.手形ステータスがスペースの場合、変更、保存で *
+*&                        きるよう改修                                 *
+*&                      2.処理日付をシステム日付ではなく転記日付で     *
+*&                        チェックするよう改修(一括変更時)             *
+*&---------------------------------------------------------------------*
+REPORT YF021400 MESSAGE-ID Y1.
+
+*----------------------------------------------------------------------*
+* 構造宣言
+*----------------------------------------------------------------------*
+*--- 出力用データ取得構造
+TYPES:
+BEGIN OF TYP_OUTYFT01,
+BUKRS LIKE BSID-BUKRS,  "会社コード
+KUNNR LIKE BSID-KUNNR,
+"得意先コード 1
+GJAHR LIKE BSID-GJAHR,  "会計年度
+BELNR LIKE BSID-BELNR,  "会計伝票番号
+BUZEI LIKE BSID-BUZEI,  "会計伝票内の明細番号
+BUDAT LIKE BSID-BUDAT,  "伝票の転記日付
+WAERS LIKE BSID-WAERS,  "通貨コード
+WRBTR LIKE BSID-WRBTR,  "伝票通貨額
+ZFBDT LIKE BSID-ZFBDT,  "期日計算の支払基準日
+ZUONR LIKE BSID-ZUONR,  "ソートキー
+WDATE LIKE BSED-WDATE,  "手形振出日
+WLZBP LIKE BSED-WLZBP,  "中央銀行住所
+WBANK LIKE BSED-WBANK,  "手形が支払われる銀行住所
+STATS LIKE ZTGT01-STATS, "手形ステータス
+SRDAY LIKE ZTGT01-SRDAY, "処理日付
+TRDAY LIKE ZTGT01-TRDAY, "取消日付
+TRBKN LIKE ZTGT01-TRBKN, "取扱銀行
+LIFNR LIKE ZTGT01-LIFNR, "仕入先コード
+END   OF TYP_OUTYFT01.
+
+*--- 会計管理:得意先の二次索引(BSID)データ取得用構造
+TYPES:
+BEGIN OF TYP_BSID,
+BUKRS LIKE BSID-BUKRS, "会社コード
+KUNNR LIKE BSID-KUNNR,
+"得意先コード 1
+GJAHR LIKE BSID-GJAHR, "会計年度
+BELNR LIKE BSID-BELNR, "会計伝票番号
+BUZEI LIKE BSID-BUZEI, "会計伝票内の明細番号
+BUDAT LIKE BSID-BUDAT, "伝票の転記日付
+WAERS LIKE BSID-WAERS, "通貨コード
+WRBTR LIKE BSID-WRBTR, "伝票通貨額
+ZFBDT LIKE BSID-ZFBDT, "期日計算の支払基準日
+ZUONR LIKE BSID-ZUONR, "ソートキー
+UMSKZ LIKE BSID-UMSKZ, "特殊仕訳コード
+END   OF TYP_BSID.
+
+*--- 手形項目伝票セグメント(BSED)データ取得用構造
+TYPES:
+BEGIN OF TYP_BSED,
+BUKRS LIKE BSED-BUKRS, "会社コード
+GJAHR LIKE BSED-GJAHR, "会計年度
+BELNR LIKE BSED-BELNR, "会計伝票番号
+BUZEI LIKE BSED-BUZEI, "会計伝票内の明細番号
+WDATE LIKE BSED-WDATE, "手形振出日
+WLZBP LIKE BSED-WLZBP, "中央銀行住所
+WBANK LIKE BSED-WBANK, "手形が支払われる銀行住所
+END   OF TYP_BSED.
+
+*--- 受取手形明細データ(ztgt01)取得用構造
+TYPES:
+BEGIN OF TYP_ZTGT01,
+BUKRS LIKE ZTGT01-BUKRS, "会社コード
+GJAHR LIKE ZTGT01-GJAHR, "会計年度
+BELNR LIKE ZTGT01-BELNR, "会計伝票番号
+BUZEI LIKE ZTGT01-BUZEI, "会計伝票内の明細番号
+STATS LIKE ZTGT01-STATS, "手形ステータス
+SRDAY LIKE ZTGT01-SRDAY, "処理日付
+TRDAY LIKE ZTGT01-TRDAY, "取消日付
+TRBKN LIKE ZTGT01-TRBKN, "取扱銀行
+LIFNR LIKE ZTGT01-LIFNR, "仕入先コード
+END   OF TYP_ZTGT01.
+
+*----------------------------------------------------------------------*
+* 内部テーブル宣言(グローバル)
+*----------------------------------------------------------------------*
+DATA:
+GT_OUTYFT01 TYPE STANDARD TABLE OF TYP_OUTYFT01,
+"テーブルコントロール出力用
+GT_BEFORE   TYPE STANDARD TABLE OF TYP_OUTYFT01,
+"テーブルコントロール過去データ取得
+GT_BSID     TYPE STANDARD TABLE OF TYP_BSID,
+"会計管理:得意先の二次索引(BSID)取得用
+GT_BSED     TYPE STANDARD TABLE OF TYP_BSED,
+"手形項目伝票セグメント(BSED)取得用
+GT_ZTGT01    TYPE STANDARD TABLE OF TYP_ZTGT01.
+"受取手形明細データ(ztgt01)取得用
+
+*----------------------------------------------------------------------*
+* 内部変数宣言(グローバル)
+*----------------------------------------------------------------------*
+DATA:
+GW_OUTYFT01 TYPE TYP_OUTYFT01, "テーブルコントロール出力用
+GW_BEFORE   TYPE TYP_OUTYFT01, "テーブルコントロール過去データ取得
+GW_BSID     TYPE TYP_BSID,     "会計管理:得意先の二次索引(BSID)取得用
+GW_BSED     TYPE TYP_BSED,     "手形項目伝票セグメント(BSED)取得用
+GW_ZTGT01    TYPE TYP_ZTGT01,    "受取手形明細データ(ztgt01)取得用
+
+GW_BUKRS LIKE BSID-BUKRS,      "会社コード取得用
+GW_BNAME(40) TYPE C,           "会社名称取得用
+GW_MODEN(12) TYPE C,           "処理名称取得用
+GW_STATS LIKE ZTGT01-STATS,     "ポップアップ:手形ステータス用
+GW_SRDAY LIKE ZTGT01-SRDAY,     "ポップアップ:処理日付用
+GW_TRBKN LIKE ZTGT01-TRBKN,     "ポップアップ:取扱銀行用
+GW_LIFNR LIKE ZTGT01-LIFNR,     "ポップアップ:仕入先コード用
+
+GW_START LIKE SY-TABIX VALUE 30,
+GW_LINES LIKE SY-TABIX,
+OK_CODE1 LIKE SY-UCOMM,         "第二画面OK_CODE格納用
+OK_CODE2 LIKE SY-UCOMM,         "第三画面OK_CODE格納用
+GFLG_ERR(01) TYPE C.            "エラー発生確認フラグ
+
+DATA:
+GW_CURRENCY LIKE TCURC-WAERS,
+GW_AMOUNT_I LIKE BAPICURR-BAPICURR,
+GW_AMOUNT_O LIKE BAPICURR-BAPICURR.
+*----------------------------------------------------------------------*
+* レンジ構造宣言(グローバル)
+*----------------------------------------------------------------------*
+TYPES:
+BEGIN OF TYP_RANGES_WRBTR,
+SIGN(1)   TYPE C,
+OPTION(2) TYPE C,
+LOW       LIKE BSID-WRBTR,
+HIGH      LIKE BSID-WRBTR,
+END   OF TYP_RANGES_WRBTR.
+*----------------------------------------------------------------------*
+* レンジテーブル宣言(グローバル)
+*----------------------------------------------------------------------*
+DATA:
+GR_WRBTR LIKE RANGE OF BSID-WRBTR.
+*----------------------------------------------------------------------*
+* レンジ用作業領域宣言(グローバル)
+*----------------------------------------------------------------------*
+DATA:
+GW_WRBTR TYPE TYP_RANGES_WRBTR.
+
+*----------------------------------------------------------------------*
+* テーブルコントロール
+*----------------------------------------------------------------------*
+*--- テーブルコントロール
+CONTROLS: TC_OUTYFT01 TYPE TABLEVIEW USING SCREEN 9000.
+
+*----------------------------------------------------------------------*
+* SELECTION-SCREEN
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK B1.
+
+PARAMETERS:
+P_BUKRS LIKE BSID-BUKRS OBLIGATORY.      "会社コード
+
+SELECT-OPTIONS:
+S_KUNNR FOR GW_BSID-KUNNR,
+"得意先コード1
+S_WDATE FOR GW_BSED-WDATE,               "手形振出日
+S_ZFBDT FOR GW_BSID-ZFBDT,               "期日計算の支払基準日
+S_ZUONR FOR GW_BSID-ZUONR.               "ソートキー
+***
+PARAMETERS:
+P_WAERS LIKE GW_BSID-WAERS OBLIGATORY.    "通貨コード
+SELECT-OPTIONS:
+***
+S_WRBTR FOR GW_BSID-WRBTR,               "伝票通貨額
+S_STATS FOR GW_ZTGT01-STATS NO INTERVALS, "手形ステータス
+S_TRBKN FOR GW_ZTGT01-TRBKN NO INTERVALS. "取扱銀行
+
+SELECTION-SCREEN BEGIN OF BLOCK B2 WITH FRAME.
+PARAMETERS:
+RD_INSER RADIOBUTTON GROUP GR1,          "登録処理
+RD_DELET RADIOBUTTON GROUP GR1.          "仕訳取消処理
+SELECTION-SCREEN END   OF BLOCK B2.
+
+SELECT-OPTIONS:
+S_UMSKZ  FOR GW_BSID-UMSKZ  NO INTERVALS OBLIGATORY, "特殊仕訳キー
+S_STATS2 FOR GW_ZTGT01-STATS NO INTERVALS OBLIGATORY DEFAULT 'U'.
+"手形ステータス２
+SELECTION-SCREEN END   OF BLOCK B1.
+*----------------------------------------------------------------------*
+* AT SELECTION-SCREEN
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON S_STATS2.
+
+*--- 手形ステータスのチェック
+IF  S_STATS2-LOW <> 'U'
+AND S_STATS2-LOW <> 'W'
+AND S_STATS2-LOW <> 'T'.
+MESSAGE E000 WITH TEXT-001.
+ENDIF.
+
+*--- 入力金額を通貨コードに合わせた金額に内部変換する
+
+GW_CURRENCY = P_WAERS.  "通貨コード
+
+LOOP AT S_WRBTR INTO GW_WRBTR.
+
+GW_AMOUNT_I = GW_WRBTR-LOW.
+
+PERFORM CALL_BAPI_CURRENCY_CONV USING GW_CURRENCY
+GW_AMOUNT_I
+CHANGING GW_WRBTR-LOW.
+*   金額が範囲指定されている場合
+IF NOT GW_WRBTR-HIGH IS INITIAL.
+GW_AMOUNT_I = GW_WRBTR-HIGH.
+PERFORM CALL_BAPI_CURRENCY_CONV USING GW_CURRENCY
+GW_AMOUNT_I
+CHANGING GW_WRBTR-HIGH.
+ENDIF.
+*   検索用変換済みレンジテーブルに格納
+APPEND GW_WRBTR TO GR_WRBTR.
+
+ENDLOOP.
+
+*&---------------------------------------------------------------------*
+*&       Form FORM CALL_BAPI_CURRENCY_CONV
+*&---------------------------------------------------------------------*
+*        入力金額を通貨コードに合わせた金額に内部変換する
+*----------------------------------------------------------------------*
+*        -->  PA_CURRENCY  通貨コード
+*        -->  PA_AMOUNT_I  変換前金額
+*        <--  PA_AMOUNT_O  変換後金額
+*----------------------------------------------------------------------*
+FORM CALL_BAPI_CURRENCY_CONV USING PA_CURRENCY
+PA_AMOUNT_I
+CHANGING PA_AMOUNT_O.
+
+
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_INTERNAL'
+EXPORTING
+CURRENCY             = PA_CURRENCY
+AMOUNT_EXTERNAL      = PA_AMOUNT_I
+MAX_NUMBER_OF_DIGITS = 23
+IMPORTING
+AMOUNT_INTERNAL      = PA_AMOUNT_O.
+
+ENDFORM.                    "CALL_BAPI_CURRENCY_CONV
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 内部テーブル、変数初期化処理
+PERFORM INIT_SEC.
+* 更新対象データ取得処理
+PERFORM GET_DATA_SEC.
+* データが存在する時のみ処理続行
+IF NOT GT_ZTGT01 IS INITIAL.
+*   テーブルコントロール出力用内部テーブル作成処理
+PERFORM MAKE_TABLE_SEC.
+*   Dynpro9000の呼び出し処理
+PERFORM CALL_DYNPRO_SEC.
+ENDIF.
+
+*&---------------------------------------------------------------------*
+*&       Form INIT_SEC.
+*&---------------------------------------------------------------------*
+*        内部テーブル、変数初期化処理
+*----------------------------------------------------------------------*
+FORM INIT_SEC.
+
+* 内部テーブル(グローバル)
+REFRESH:
+GT_OUTYFT01,             "テーブルコントロール出力用
+GT_BEFORE,               "テーブルコントロール過去データ取得
+GT_BSID,                 "会計管理:得意先の二次索引(BSID)取得用
+GT_BSED,                 "手形項目伝票セグメント(BSED)取得用
+GT_ZTGT01.                "受取手形明細データ(ztgt01)取得用
+
+* 内部変数(グローバル)
+CLEAR:
+GW_OUTYFT01,             "テーブルコントロール出力用
+GW_BEFORE,               "テーブルコントロール過去データ取得
+GW_BSID,                 "会計管理:得意先の二次索引(BSID)取得用
+GW_BSED,                 "手形項目伝票セグメント(BSED)取得用
+GW_ZTGT01,                "受取手形明細データ(ztgt01)取得用
+
+GW_BUKRS,                "会社コード取得用
+GW_BNAME,                "会社名称取得用
+GW_MODEN,                "処理名称取得用
+GW_STATS,                "ポップアップ:手形ステータス用
+GW_SRDAY,                "ポップアップ:処理日付用
+GW_TRBKN,                "ポップアップ:取扱銀行用
+GW_LIFNR,                "ポップアップ:仕入先コード用
+
+GW_LINES,
+OK_CODE1,                "第二画面OK_CODE格納用
+OK_CODE2,                "第三画面OK_CODE格納用
+GFLG_ERR.                "エラー発生確認フラグ
+ENDFORM.                    "INIT_SEC
+
+*&---------------------------------------------------------------------*
+*&       Form GET_DATA_SEC.
+*&---------------------------------------------------------------------*
+*        更新対象データ取得処理
+*----------------------------------------------------------------------*
+FORM GET_DATA_SEC.
+
+* BSIDのデータを取得
+PERFORM GET_DATA_BSID_SEC.
+* データが存在する時のみ処理続行
+IF NOT GT_BSID[] IS INITIAL.
+*   BSEDのデータ取得
+PERFORM GET_DATA_BSED_SEC.
+*   データが存在する時のみ処理続行
+IF NOT GT_BSED IS INITIAL.
+*     登録処理時
+IF NOT RD_INSER IS INITIAL.
+*       ztgt01のデータ取得
+PERFORM GET_DATA_ZTGT01_I_SEC.
+GW_MODEN = '登録処理'.
+*     仕訳取消処理時
+ELSE.
+*       ztgt01のデータ取得
+PERFORM GET_DATA_ZTGT01_D_SEC.
+GW_MODEN = '仕訳取消処理'.
+ENDIF.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    "GET_DATA_SEC
+*&---------------------------------------------------------------------*
+*&      Form MAKE_TABLE_SEC
+*&---------------------------------------------------------------------*
+*       テーブルコントロール出力用内部テーブルの作成
+*----------------------------------------------------------------------*
+FORM MAKE_TABLE_SEC.
+
+* 会社コード出力
+GW_BUKRS = P_BUKRS.
+
+* 出力用内部テーブルを作成
+LOOP AT GT_ZTGT01 INTO GW_ZTGT01.
+*   BSIDのデータを読み込む
+READ TABLE GT_BSID WITH KEY BUKRS = GW_ZTGT01-BUKRS
+GJAHR = GW_ZTGT01-GJAHR
+BELNR = GW_ZTGT01-BELNR
+BUZEI = GW_ZTGT01-BUZEI
+INTO GW_BSID BINARY SEARCH.
+*   出力用内部テーブルに値を格納
+MOVE-CORRESPONDING GW_BSID TO GW_OUTYFT01.
+*   BSEDのデータを読み込む
+READ TABLE GT_BSED WITH KEY BUKRS = GW_ZTGT01-BUKRS
+GJAHR = GW_ZTGT01-GJAHR
+BELNR = GW_ZTGT01-BELNR
+BUZEI = GW_ZTGT01-BUZEI
+INTO GW_BSED BINARY SEARCH.
+*   出力用内部テーブルに値を格納
+MOVE-CORRESPONDING GW_BSED  TO GW_OUTYFT01.
+MOVE-CORRESPONDING GW_ZTGT01 TO GW_OUTYFT01.
+APPEND GW_OUTYFT01 TO GT_OUTYFT01.
+ENDLOOP.
+
+* 会社名称を取得
+PERFORM GET_DATA_ADRC_SEC.
+* 使用済内部テーブルを開放
+FREE:
+* Del Start 2010/10/19
+*    gt_bsid,
+* Del Start 2010/10/19
+GT_BSED,
+GT_ZTGT01.
+* 変数を初期化
+CLEAR:
+GW_BSID,
+GW_BSED,
+GW_ZTGT01.
+
+ENDFORM.                    "MAKE_TABLE_SEC
+*&---------------------------------------------------------------------*
+*&      From CALL_DYNPRO_SEC
+*&---------------------------------------------------------------------*
+*       Dynpro9000の呼び出し処理
+*----------------------------------------------------------------------*
+FORM CALL_DYNPRO_SEC.
+
+* テーブルztgt01のロック処理
+*  PERFORM ROCK_TABLE_ZTGT01.
+* ロックに失敗した場合
+IF NOT GFLG_ERR IS INITIAL.
+MESSAGE S000 WITH TEXT-002.
+*   使用したテーブル、変数を初期化
+CLEAR:GT_OUTYFT01,
+GW_OUTYFT01.
+ELSE.
+*   Dynpro9000番を呼び出し
+CALL SCREEN 9000.
+*   テーブルztgt01のロック解除処理
+*    PERFORM UNROCK_TABLE_ZTGT01.
+*   使用したテーブル、変数を初期化
+CLEAR:GT_OUTYFT01,
+GW_OUTYFT01.
+*   テーブル更新処理でエラーが発生した場合
+IF NOT GFLG_ERR IS INITIAL.
+*     メッセージを表示
+MESSAGE E401 WITH TEXT-003
+TEXT-004.
+ENDIF.
+ENDIF.
+ENDFORM.                    "CALL_DYNPRO_SEC
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_BSID_SEC                                        *
+*&---------------------------------------------------------------------*
+*       会計管理:得意先の二次索引(BSID)データ取得処理                  *
+*----------------------------------------------------------------------*
+FORM GET_DATA_BSID_SEC.
+
+SELECT BUKRS     "会社コード
+KUNNR
+"得意先コード 1
+GJAHR     "会計年度
+BELNR     "会計伝票番号
+BUZEI     "会計伝票内の明細番号
+BUDAT     "伝票の転記日付
+WAERS     "通貨コード
+WRBTR     "伝票通貨額
+ZFBDT     "期日計算の支払基準日
+ZUONR     "ソートキー
+UMSKZ     "特殊仕訳コード
+INTO TABLE GT_BSID
+FROM BSID
+WHERE BUKRS = P_BUKRS
+AND KUNNR IN S_KUNNR
+AND UMSKZ IN S_UMSKZ
+AND ZFBDT IN S_ZFBDT
+AND ZUONR IN S_ZUONR
+*
+AND WAERS = P_WAERS
+*
+AND WRBTR IN GR_WRBTR
+AND SHKZG = 'S'.
+IF SY-SUBRC = 0.
+SORT GT_BSID BY BUKRS GJAHR BELNR BUZEI.
+ELSE.
+MESSAGE S000 WITH TEXT-005.
+ENDIF.
+
+ENDFORM.                    "GET_DATA_BSID_SEC
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_BSED_SEC
+*&---------------------------------------------------------------------*
+*       手形項目伝票セグメント(BSED)データ取得処理
+*----------------------------------------------------------------------*
+FORM GET_DATA_BSED_SEC.
+
+SELECT BUKRS      "会社コード
+GJAHR      "会計年度
+BELNR      "会計伝票番号
+BUZEI      "会計伝票明細番号
+WDATE      "手形振出日
+WLZBP      "中央銀行住所
+WBANK      "手形が支払われる銀行住所
+INTO TABLE GT_BSED
+FROM BSED
+FOR ALL ENTRIES IN GT_BSID
+WHERE BUKRS = GT_BSID-BUKRS
+AND GJAHR = GT_BSID-GJAHR
+AND BELNR = GT_BSID-BELNR
+AND BUZEI = GT_BSID-BUZEI
+AND WDATE IN S_WDATE.
+IF SY-SUBRC = 0.
+SORT GT_BSED BY BUKRS GJAHR BELNR BUZEI.
+ELSE.
+MESSAGE S000 WITH TEXT-005.
+ENDIF.
+
+ENDFORM.                    "GET_DATA_BSED_SEC
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ztgt01_I_SEC
+*&---------------------------------------------------------------------*
+*       受取手形明細データ(ztgt01)の取得処理(登録処理時)
+*----------------------------------------------------------------------*
+FORM GET_DATA_ZTGT01_I_SEC.
+
+SELECT BUKRS      "会社コード
+GJAHR      "会計年度
+BELNR      "会計伝票番号
+BUZEI      "会計伝票明細番号
+STATS      "手形ステータス
+SRDAY      "処理日付
+TRDAY      "取消日付
+TRBKN      "取扱銀行
+LIFNR      "仕入先コード
+INTO TABLE GT_ZTGT01
+FROM ZTGT01
+FOR ALL ENTRIES IN GT_BSED
+WHERE BUKRS = GT_BSED-BUKRS
+AND BELNR = GT_BSED-BELNR
+AND GJAHR = GT_BSED-GJAHR
+AND BUZEI = GT_BSED-BUZEI
+AND STATS IN S_STATS
+AND TRBKN IN S_TRBKN
+AND FIFLG = SPACE.
+IF SY-SUBRC = 0.
+SORT GT_ZTGT01 BY BUKRS GJAHR BELNR BUZEI.
+ELSE.
+MESSAGE S000 WITH TEXT-005.
+ENDIF.
+
+ENDFORM.                    "GET_DATA_ztgt01_I_SEC
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_ztgt01_D_SEC
+*&---------------------------------------------------------------------*
+*       受取手形明細データ(ztgt01)の取得処理(取消処理時)
+*----------------------------------------------------------------------*
+FORM GET_DATA_ZTGT01_D_SEC.
+
+SELECT BUKRS      "会社コード
+GJAHR      "会計年度
+BELNR      "会計伝票番号
+BUZEI      "会計伝票明細番号
+STATS      "手形ステータス
+SRDAY      "処理日付
+TRDAY      "取消日付
+TRBKN      "取扱銀行
+LIFNR      "仕入先コード
+INTO TABLE GT_ZTGT01
+FROM ZTGT01
+FOR ALL ENTRIES IN GT_BSED
+WHERE BUKRS = GT_BSED-BUKRS
+AND BELNR = GT_BSED-BELNR
+AND GJAHR = GT_BSED-GJAHR
+AND BUZEI = GT_BSED-BUZEI
+AND STATS IN S_STATS
+AND TRBKN IN S_TRBKN
+AND FIFLG = 'X'.
+
+IF SY-SUBRC = 0.
+SORT GT_ZTGT01 BY BUKRS GJAHR BELNR BUZEI.
+ELSE.
+MESSAGE S000 WITH TEXT-005.
+ENDIF.
+
+ENDFORM.                    "GET_DATA_ztgt01_D_SEC
+*&---------------------------------------------------------------------*
+*&   Form  GET_DATA_ADRC_SEC
+*&---------------------------------------------------------------------*
+*    入力された会社コードの名称をADRCから取得
+*----------------------------------------------------------------------*
+FORM GET_DATA_ADRC_SEC.
+
+SELECT SINGLE NAME2
+INTO GW_BNAME
+FROM ADRC
+INNER JOIN T001
+ON ADRC~ADDRNUMBER = T001~ADRNR
+WHERE T001~BUKRS = P_BUKRS.
+IF SY-SUBRC <> 0.
+GW_BNAME = SPACE.
+ENDIF.
+
+ENDFORM.                    "GET_DATA_ADRC_SEC
+*&---------------------------------------------------------------------*
+*&   From  GET_DATA_LFA1_SEC
+*&---------------------------------------------------------------------*
+*    仕入先の存在チェック処理
+*----------------------------------------------------------------------*
+*    -->  PA_LIFNR  仕入先コード
+*----------------------------------------------------------------------*
+FORM GET_DATA_LFA1_SEC USING PA_LIFNR.
+
+DATA:
+LW_LIFNR LIKE LFA1-LIFNR.
+
+SELECT SINGLE LIFNR
+INTO LW_LIFNR
+FROM LFA1
+WHERE LIFNR = PA_LIFNR.
+IF SY-SUBRC <> 0.
+CLEAR:OK_CODE1.
+MESSAGE E000(Y1) WITH TEXT-006.
+ENDIF.
+CLEAR:LW_LIFNR.
+
+ENDFORM.                    "GET_DATA_LFA1_SEC
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA_BNKA_SEC
+*&---------------------------------------------------------------------*
+*       取扱銀行の存在チェック処理
+*----------------------------------------------------------------------*
+*       -->  PA_BUKRS  会社コード
+*       -->  PA_STATS  手形ステータス
+*       -->  PA_TRBKN  取扱銀行
+*----------------------------------------------------------------------*
+FORM GET_DATA_BNKA_SEC USING PA_BUKRS
+PA_STATS
+PA_TRBKN.
+
+DATA:
+LW_TRBKN LIKE ZTGT02-TRBKN.
+
+SELECT SINGLE TRBKN
+INTO LW_TRBKN
+FROM ZTGT02
+WHERE BUKRS = PA_BUKRS
+AND STATS = PA_STATS
+AND TRBKN = PA_TRBKN.
+IF SY-SUBRC <> 0.
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-007.
+ENDIF.
+CLEAR:LW_TRBKN.
+
+ENDFORM.                    "GET_DATA_BNKA_SEC
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_TABLE_ztgt01_SEC
+*&---------------------------------------------------------------------*
+*       受取手形明細データ(ztgt01)の更新処理
+*----------------------------------------------------------------------*
+FORM UPDATE_TABLE_ZTGT01_SEC.
+
+LOOP AT GT_OUTYFT01 INTO GW_OUTYFT01.
+*   登録処理時
+IF NOT RD_INSER IS INITIAL.
+UPDATE ZTGT01
+SET STATS  = GW_OUTYFT01-STATS
+SRDAY  = GW_OUTYFT01-SRDAY
+TRBKN  = GW_OUTYFT01-TRBKN
+LIFNR  = GW_OUTYFT01-LIFNR
+UPDDAY = SY-DATUM
+UPDTIM = SY-UZEIT
+UPDUSR = SY-UNAME
+WHERE BUKRS = GW_OUTYFT01-BUKRS
+AND GJAHR = GW_OUTYFT01-GJAHR
+AND BELNR = GW_OUTYFT01-BELNR
+AND BUZEI = GW_OUTYFT01-BUZEI.
+*   仕訳取消処理時
+ELSE.
+UPDATE ZTGT01
+SET TRDAY  = GW_OUTYFT01-TRDAY
+DEFLG  = 'X'
+UPDDAY = SY-DATUM
+UPDTIM = SY-UZEIT
+UPDUSR = SY-UNAME
+WHERE BUKRS = GW_OUTYFT01-BUKRS
+AND GJAHR = GW_OUTYFT01-GJAHR
+AND BELNR = GW_OUTYFT01-BELNR
+AND BUZEI = GW_OUTYFT01-BUZEI.
+ENDIF.
+*   登録に失敗した場合
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+*     エラー発生確認フラグON
+GFLG_ERR = 'X'.
+*     第一画面に戻る
+SET SCREEN 0.
+LEAVE SCREEN.
+ENDIF.
+ENDLOOP.
+COMMIT WORK.
+ENDFORM.                    "UPDATE_TABLE_ztgt01_SEC
+*&---------------------------------------------------------------------*
+*&      Form  CALL_ENQUEUE_EY_ztgt01
+*&---------------------------------------------------------------------*
+*       汎用モジュール:ENQUEUE_EY_ztgt01の呼び出し処理
+*----------------------------------------------------------------------*
+*       -->  PA_BUKRS  会社コード
+*       -->  PA_GJAHR  会計年度
+*       -->  PA_BELNR  会計伝票番号
+*       -->  PA_BUZEI  会計伝票内の明細番号
+*----------------------------------------------------------------------*
+FORM CALL_ENQUEUE_EY_ZTGT01 USING PA_BUKRS
+PA_GJAHR
+PA_BELNR
+PA_BUZEI.
+
+CALL FUNCTION 'ENQUEUE_EY_ztgt01'
+EXPORTING
+MODE_ZTGT01    = 'E'
+MANDT          = SY-MANDT
+BUKRS          = PA_BUKRS
+GJAHR          = PA_GJAHR
+BELNR          = PA_BELNR
+BUZEI          = PA_BUZEI
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+IF SY-SUBRC <> 0.
+GFLG_ERR = 'X'.
+ENDIF.
+
+ENDFORM.                    "CALL_ENQUEUE_EY_ztgt01
+*&---------------------------------------------------------------------*
+*&      Form  CALL_ENQUEUE_EY_ztgt01
+*&---------------------------------------------------------------------*
+*       汎用モジュール:DEQUEUE_EY_ztgt01の呼び出し処理
+*----------------------------------------------------------------------*
+*       -->  PA_BUKRS  会社コード
+*       -->  PA_GJAHR  会計年度
+*       -->  PA_BELNR  会計伝票番号
+*       -->  PA_BUZEI  会計伝票内の明細番号
+*----------------------------------------------------------------------*
+FORM CALL_DEQUEUE_EY_ZTGT01 USING PA_BUKRS
+PA_GJAHR
+PA_BELNR
+PA_BUZEI.
+
+CALL FUNCTION 'DEQUEUE_EY_ztgt01'
+EXPORTING
+MODE_ZTGT01 = 'E'
+MANDT       = SY-MANDT
+BUKRS       = PA_BUKRS
+GJAHR       = PA_GJAHR
+BELNR       = PA_BELNR
+BUZEI       = PA_BUZEI.
+
+ENDFORM.                    "CALL_DEQUEUE_EY_ztgt01
+*&---------------------------------------------------------------------*
+*&      MODULE  STATUS_9000 OUTPUT
+*&---------------------------------------------------------------------*
+*       画面9000のステータスセット処理
+*----------------------------------------------------------------------*
+MODULE STATUS_9000 OUTPUT.
+
+SET PF-STATUS 'Z_TGT1'.
+SET TITLEBAR  'YF021400TITLE'.
+
+ENDMODULE.                 " STATUS_9000 OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  CHANGE_SCREEN OUTPUT
+*&---------------------------------------------------------------------*
+*       画面9000の項目の入出力制御処理
+*----------------------------------------------------------------------*
+MODULE CHANGE_SCREEN OUTPUT.
+
+* 登録処理時
+IF NOT RD_INSER IS INITIAL.
+LOOP AT SCREEN.
+CASE SCREEN-NAME.
+WHEN 'GW_OUTYFT01-STATS'.
+SCREEN-INPUT = 1.
+WHEN 'GW_OUTYFT01-SRDAY'.
+SCREEN-INPUT = 1.
+WHEN 'GW_OUTYFT01-TRBKN'.
+IF  GW_OUTYFT01-STATS IS INITIAL
+AND GW_OUTYFT01-SRDAY IS INITIAL.
+SCREEN-INPUT = 0.
+ELSE.
+IF S_STATS2-LOW = GW_OUTYFT01-STATS.
+SCREEN-INPUT = 0.
+ELSE.
+SCREEN-INPUT = 1.
+ENDIF.
+ENDIF.
+WHEN 'GW_OUTYFT01-TRDAY'.
+SCREEN-INPUT = 0.
+WHEN 'GW_OUTYFT01-LIFNR'.
+IF  GW_OUTYFT01-STATS IS INITIAL
+AND GW_OUTYFT01-SRDAY IS INITIAL.
+SCREEN-INPUT = 0.
+ELSE.
+IF S_STATS2-LOW = GW_OUTYFT01-STATS.
+SCREEN-INPUT = 1.
+ELSE.
+SCREEN-INPUT = 0.
+ENDIF.
+ENDIF.
+ENDCASE.
+MODIFY SCREEN.
+ENDLOOP.
+* 仕訳取消処理時
+ELSE.
+LOOP AT SCREEN.
+CASE SCREEN-NAME.
+WHEN 'GW_OUTYFT01-STATS'.
+SCREEN-INPUT = 0.
+WHEN 'GW_OUTYFT01-SRDAY'.
+SCREEN-INPUT = 0.
+WHEN 'GW_OUTYFT01-TRBKN'.
+SCREEN-INPUT = 0.
+WHEN 'GW_OUTYFT01-TRDAY'.
+SCREEN-INPUT = 1.
+WHEN 'GW_OUTYFT01-LIFNR'.
+SCREEN-INPUT = 0.
+ENDCASE.
+MODIFY SCREEN.
+ENDLOOP.
+ENDIF.
+
+ENDMODULE.                 " CHANGE_SCREEN  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Form  ROCK_TABLE_ztgt01
+*&---------------------------------------------------------------------*
+*       テーブル受取手形明細データ(ztgt01)のロック処理
+*----------------------------------------------------------------------*
+FORM ROCK_TABLE_ZTGT01.
+
+LOOP AT GT_OUTYFT01 INTO GW_OUTYFT01.
+PERFORM CALL_ENQUEUE_EY_ZTGT01 USING GW_OUTYFT01-BUKRS
+GW_OUTYFT01-GJAHR
+GW_OUTYFT01-BELNR
+GW_OUTYFT01-BUZEI.
+ENDLOOP.
+
+ENDFORM.                 " ROCK_TABLE_ztgt01  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  UNROCK_TABLE_ztgt01  OUTPUT
+*&---------------------------------------------------------------------*
+*       テーブル受取手形明細データ(ztgt01)のロック解除処理
+*----------------------------------------------------------------------*
+FORM UNROCK_TABLE_ZTGT01.
+
+LOOP AT GT_OUTYFT01 INTO GW_OUTYFT01.
+PERFORM CALL_DEQUEUE_EY_ZTGT01 USING GW_OUTYFT01-BUKRS
+GW_OUTYFT01-GJAHR
+GW_OUTYFT01-BELNR
+GW_OUTYFT01-BUZEI.
+ENDLOOP.
+
+ENDFORM.                 " ROCK_TABLE_ztgt01  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  CLEAR_DATA  OUTPUT
+*&---------------------------------------------------------------------*
+*       ユーザーコマンドをクリア
+*----------------------------------------------------------------------*
+MODULE CLEAR_DATA OUTPUT.
+CLEAR:OK_CODE1,
+SY-UCOMM.
+ENDMODULE.                 " CLEAR_DATA  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  SET_USER_COMMAND_9000 INPUT
+*&---------------------------------------------------------------------*
+*       ユーザーコマンドを格納
+*----------------------------------------------------------------------*
+MODULE SET_USER_COMMAND_9000 INPUT.
+CLEAR:
+OK_CODE1.
+* ユーザーコマンドを格納
+OK_CODE1 = SY-UCOMM.
+SY-TABIX = GW_LINES.
+ENDMODULE.                    "SET_USER_COMMAND_9000 INPUT
+*&---------------------------------------------------------------------*
+*&      Module  DATA_CHECK_9000INPUT
+*&---------------------------------------------------------------------*
+*       入力された値のチェック
+*----------------------------------------------------------------------*
+MODULE DATA_CHECK_9000 INPUT.
+
+IF OK_CODE1 <> 'ALL_SET'.
+*--- 登録処理時のチェック
+IF NOT RD_INSER IS INITIAL.
+*--- 一回前の処理データを取得
+READ TABLE GT_BEFORE INTO GW_BEFORE
+WITH KEY BUKRS = GW_OUTYFT01-BUKRS
+GJAHR = GW_OUTYFT01-GJAHR
+BELNR = GW_OUTYFT01-BELNR
+BUZEI = GW_OUTYFT01-BUZEI
+BINARY SEARCH.
+
+* 手形ステータスのチェック
+*   入力可能値チェック
+IF  GW_OUTYFT01-STATS <> 'U'
+AND GW_OUTYFT01-STATS <> 'W'
+AND GW_OUTYFT01-STATS <> 'T'
+AND GW_OUTYFT01-STATS <> SPACE.
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-001.
+* Del Start 2010/10/19
+**   空白チェック
+*      ELSEIF gw_OUTYFT01-stats IS INITIAL.
+*        CLEAR:ok_code1.
+*        MESSAGE e000 WITH text-008.
+* Del End   2010/10/19
+ENDIF.
+
+*   処理日付の空白チェック
+* Add Start 2010/10/19
+IF NOT GW_OUTYFT01-STATS IS INITIAL.
+* Add End   2010/10/19
+IF GW_OUTYFT01-SRDAY IS INITIAL.
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-009.
+ENDIF.
+* Add Start 2010/10/19
+ENDIF.
+*   処理日付の初期化
+IF GW_OUTYFT01-STATS IS INITIAL.
+CLEAR GW_OUTYFT01-SRDAY.
+ENDIF.
+* Add End   2010/10/19
+*   処理日付の過去日付チェック
+* Add Start 2010/10/19
+IF NOT GW_OUTYFT01-SRDAY IS INITIAL.
+* Add End   2010/10/19
+IF GW_OUTYFT01-SRDAY < GW_OUTYFT01-BUDAT.
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-010.
+ENDIF.
+* Add Start 2010/10/19
+ENDIF.
+* Add End   2010/10/19
+
+* 取扱銀行のチェック
+*   取扱銀行設定不可能
+IF GW_OUTYFT01-STATS <> GW_BEFORE-STATS.
+GW_OUTYFT01-TRBKN = SPACE.
+*   取扱銀行設定可能
+ELSE.
+*     取扱銀行のマスタチェック
+IF GW_OUTYFT01-STATS <> S_STATS2-LOW.
+IF NOT GW_OUTYFT01-TRBKN IS INITIAL.
+PERFORM GET_DATA_BNKA_SEC USING GW_OUTYFT01-BUKRS
+GW_OUTYFT01-STATS
+GW_OUTYFT01-TRBKN.
+CLEAR:GW_OUTYFT01-LIFNR.
+*       空白チェック
+ELSE.
+* Add Start 2010/10/19
+IF NOT GW_OUTYFT01-STATS IS INITIAL.
+* Add End   2010/10/19
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-011.
+* Add Start 2010/10/19
+ENDIF.
+* Add End   2010/10/19
+ENDIF.
+ENDIF.
+ENDIF.
+
+* 仕入先コードのチェック
+*   仕入先コード設定不可能
+IF GW_OUTYFT01-STATS <> GW_BEFORE-STATS.
+GW_OUTYFT01-LIFNR = SPACE.
+*   仕入先コード設定可能
+ELSE.
+IF GW_OUTYFT01-STATS = S_STATS2-LOW.
+*       仕入先コードのマスタチェック
+IF NOT GW_OUTYFT01-LIFNR IS INITIAL.
+PERFORM GET_DATA_LFA1_SEC USING GW_OUTYFT01-LIFNR.
+CLEAR:GW_OUTYFT01-TRBKN.
+*       空白チェック
+ELSE.
+* Add Start 2010/10/19
+IF NOT GW_OUTYFT01-STATS IS INITIAL.
+* Add End   2010/10/19
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-012.
+* Add Start 2010/10/19
+ENDIF.
+* Add End   2010/10/19
+ENDIF.
+ENDIF.
+ENDIF.
+* 仕訳取消処理時のチェック
+ELSE.
+*   取消日付の空白チェック
+IF GW_OUTYFT01-TRDAY IS INITIAL.
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-013.
+ENDIF.
+*   取消日付の過去日付チェック
+IF GW_OUTYFT01-TRDAY < GW_OUTYFT01-BUDAT.
+CLEAR:OK_CODE1.
+MESSAGE E000 WITH TEXT-014.
+ENDIF.
+ENDIF.
+ENDIF.
+
+ENDMODULE.                    "DATA_CHECK_9000 INPUT
+*&---------------------------------------------------------------------*
+*&      Module  TC_OUTYFT01_MODIFY INPUT
+*&---------------------------------------------------------------------*
+*       テーブルコントロールの更新処理
+*----------------------------------------------------------------------*
+MODULE TC_OUTYFT01_MODIFY INPUT.
+MODIFY GT_OUTYFT01 FROM GW_OUTYFT01 INDEX TC_OUTYFT01-CURRENT_LINE.
+ENDMODULE.                    "TC_OUTYFT01_MODIFY INPUT
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_9000 INPUT
+*&---------------------------------------------------------------------*
+*       APツールバーステータスボタン押下時の処理
+*----------------------------------------------------------------------*
+MODULE USER_COMMAND_9000 INPUT.
+
+CASE OK_CODE1.
+*   保存ボタン押下時の処理
+WHEN 'SAVE'.
+IF GT_BEFORE[] = GT_OUTYFT01[].
+*     データを更新する
+PERFORM UPDATE_TABLE_ZTGT01_SEC.
+*     メッセージを表示
+MESSAGE S000 WITH TEXT-015.
+*     第一画面に戻る
+SET SCREEN 0.
+LEAVE SCREEN.
+ENDIF.
+ENDCASE.
+
+ENDMODULE.                 " USER_COMMAND_9000 INPUT
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_9000 INPUT
+*&---------------------------------------------------------------------*
+*       APツールバーステータスボタン押下時の処理
+*----------------------------------------------------------------------*
+MODULE USER_COMMAND_CALL_POPUP.
+
+CASE OK_CODE1.
+*   一括変更ボタン押下時の処理
+WHEN 'ALL_SET'.
+*     登録処理時のみ使用可能
+IF NOT RD_INSER IS INITIAL.
+*       一括入力用ポップアップ画面の出力
+CALL SCREEN 9001 STARTING AT 3 3 ENDING AT 69 15.
+ELSE.
+MESSAGE S000 WITH TEXT-016.
+ENDIF.
+ENDCASE.
+
+ENDMODULE.                 "USER_COMMAND_CALL_POPUP.
+*&---------------------------------------------------------------------*
+*&      Module  EXIT_COMMAND_9000 INPUT
+*&---------------------------------------------------------------------*
+*       機能キーボタン押下時の処理:画面9000
+*----------------------------------------------------------------------*
+MODULE EXIT_COMMAND_9000 INPUT.
+
+* メッセージを表示
+MESSAGE S000 WITH TEXT-017.
+* 第一画面に戻る
+SET SCREEN 0.
+LEAVE SCREEN.
+
+ENDMODULE.                 " EXIT_COMMAND_9000 INPUT
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_9001  OUTPUT
+*&---------------------------------------------------------------------*
+*       画面9001(POP UP)のステータスセット処理
+*----------------------------------------------------------------------*
+MODULE STATUS_9001 OUTPUT.
+
+SET PF-STATUS 'Z_TGT2'.
+SET TITLEBAR  'YF021400TITLE_2'.
+
+ENDMODULE.                 " STATUS_9001  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  SET_USER_COMMAND_9001 INPUT
+*&---------------------------------------------------------------------*
+*       ユーザーコマンドを格納
+*----------------------------------------------------------------------*
+MODULE SET_USER_COMMAND_9001 INPUT.
+CLEAR:
+OK_CODE2.
+* ユーザーコマンドを格納
+OK_CODE2 = SY-UCOMM.
+SY-TABIX = GW_LINES.
+ENDMODULE.                    "SET_USER_COMMAND_9001 INPUT
+*&---------------------------------------------------------------------*
+*&      Module  DATA_CHECK_9001  INPUT
+*&---------------------------------------------------------------------*
+*       入力項目のチェック処理
+*----------------------------------------------------------------------*
+MODULE DATA_CHECK_9001 INPUT.
+
+* 手形ステータスのチェック
+IF NOT GW_STATS IS INITIAL.
+IF  GW_STATS <> 'U'
+AND GW_STATS <> 'W'
+AND GW_STATS <> 'T'.
+MESSAGE E000 WITH TEXT-001.
+*   取扱銀行空白時
+ELSEIF GW_STATS <> S_STATS2-LOW
+AND    GW_TRBKN IS INITIAL.
+MESSAGE E000 WITH TEXT-011.
+*   仕入先コード空白時
+ELSEIF GW_STATS = S_STATS2-LOW
+AND    GW_LIFNR IS INITIAL.
+MESSAGE E000 WITH TEXT-012.
+ENDIF.
+* 手形ステータス空白時のチェック
+ELSE.
+*   取扱銀行が入力されている場合
+IF NOT GW_TRBKN IS INITIAL.
+MESSAGE E000 WITH TEXT-008.
+ENDIF.
+*   仕入先コードが入力されている場合
+IF NOT GW_LIFNR IS INITIAL.
+MESSAGE E000 WITH TEXT-008.
+ENDIF.
+ENDIF.
+
+* 処理日付のチェック
+* Add Start 2010/10/19
+* システム日付ではなく転記日付でチェック
+LOOP AT GT_BSID INTO GW_BSID.
+IF GW_SRDAY < GW_BSID-BUDAT AND
+NOT GW_SRDAY IS INITIAL.
+MESSAGE E000 WITH TEXT-010.
+ENDIF.
+ENDLOOP.
+* Add End   2010/10/19
+* Del Start 2010/10/19
+*  IF  GW_SRDAY <= SY-DATUM
+*  AND NOT GW_SRDAY IS INITIAL.
+*    MESSAGE E000 WITH text-018.
+*  ENDIF.
+* Del End   2010/10/19
+
+* 取扱銀行のマスタチェック
+IF  GW_STATS <> S_STATS2-LOW
+AND NOT GW_TRBKN IS INITIAL.
+PERFORM GET_DATA_BNKA_SEC USING GW_BUKRS
+GW_STATS
+GW_TRBKN.
+ENDIF.
+
+* 取扱銀行設定可能チェック
+IF  GW_STATS = S_STATS2-LOW
+AND NOT GW_TRBKN IS INITIAL.
+MESSAGE E000 WITH TEXT-019.
+ENDIF.
+
+* 仕入先コードのマスタチェック
+IF  GW_STATS = S_STATS2-LOW
+AND NOT GW_LIFNR IS INITIAL.
+PERFORM GET_DATA_LFA1_SEC USING GW_LIFNR.
+ENDIF.
+
+* 仕入先コード設定可能チェック
+IF  GW_STATS <> S_STATS2-LOW
+AND NOT GW_LIFNR IS INITIAL.
+MESSAGE E000 WITH TEXT-020.
+ENDIF.
+
+ENDMODULE.                    "DATA_CHECK_9001 INPUT
+*&---------------------------------------------------------------------*
+*&      Module  EXIT_COMMAND_9001  INPUT
+*&---------------------------------------------------------------------*
+*       APツールバーのボタン押下時の処理:画面9001
+*----------------------------------------------------------------------*
+MODULE EXIT_COMMAND_9001 INPUT.
+
+* 使用した変数を初期化
+CLEAR:GW_STATS,
+GW_TRBKN,
+GW_SRDAY,
+GW_LIFNR.
+* 第二画面に戻る
+SET SCREEN 0.
+LEAVE SCREEN.
+
+ENDMODULE.                 " EXIT_COMMAND_9001  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  POPUP_DATA_SET
+*&---------------------------------------------------------------------*
+*       画面9001(POP UP)のデータを画面9000の項目へ受け渡す処理
+*----------------------------------------------------------------------*
+FORM POPUP_DATA_SET.
+
+* 手形ステータス
+IF NOT GW_STATS IS INITIAL.
+GW_OUTYFT01-STATS = GW_STATS.
+MODIFY GT_OUTYFT01 FROM GW_OUTYFT01 TRANSPORTING STATS
+WHERE BUKRS <> SPACE.
+ENDIF.
+
+* 処理日付
+IF NOT GW_SRDAY IS INITIAL.
+GW_OUTYFT01-SRDAY = GW_SRDAY.
+MODIFY GT_OUTYFT01 FROM GW_OUTYFT01 TRANSPORTING SRDAY
+WHERE BUKRS <> SPACE.
+ENDIF.
+
+* 取扱銀行
+* 手形ステータスが手形ステータス２と等しくなく、空白でない場合
+IF  GW_STATS <> S_STATS2-LOW
+AND NOT GW_TRBKN IS INITIAL.
+GW_OUTYFT01-TRBKN = GW_TRBKN.
+MODIFY GT_OUTYFT01 FROM GW_OUTYFT01 TRANSPORTING TRBKN
+WHERE BUKRS <> SPACE.
+* 手形ステータスが手形ステータス２が等しく、空白でない場合
+ELSEIF GW_STATS = S_STATS2-LOW
+AND    NOT GW_STATS IS INITIAL.
+GW_OUTYFT01-TRBKN = SPACE.
+MODIFY GT_OUTYFT01 FROM GW_OUTYFT01 TRANSPORTING TRBKN
+WHERE BUKRS <> SPACE.
+ENDIF.
+
+* 仕入先コード
+* 手形ステータスが手形ステータス２が等しく、空白でない場合
+IF  GW_STATS = S_STATS2-LOW
+AND NOT GW_LIFNR IS INITIAL.
+GW_OUTYFT01-LIFNR = GW_LIFNR.
+MODIFY GT_OUTYFT01 FROM GW_OUTYFT01 TRANSPORTING LIFNR
+WHERE BUKRS <> SPACE.
+* 手形ステータスが手形ステータス２と等しくなく、空白でない場合
+ELSEIF GW_STATS <> S_STATS2-LOW
+AND    NOT GW_STATS IS INITIAL.
+GW_OUTYFT01-LIFNR = SPACE.
+MODIFY GT_OUTYFT01 FROM GW_OUTYFT01 TRANSPORTING LIFNR
+WHERE BUKRS <> SPACE.
+
+ENDIF.
+
+ENDFORM.                 " POPUP_DATA_SET
+*&---------------------------------------------------------------------*
+*&      Module  TC_OUTYFT01_GET  OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE TC_OUTYFT01_GET OUTPUT.
+
+CLEAR:GT_BEFORE.
+GT_BEFORE[] = GT_OUTYFT01[].
+DESCRIBE TABLE GT_OUTYFT01 LINES GW_LINES.
+
+ENDMODULE.                 " TC_OUTYFT01_GET  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_9001  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE USER_COMMAND_9001 INPUT.
+
+CASE OK_CODE2.
+*   続行ボタン押下時
+WHEN 'OK'.
+*     入力された値を第二画面のテーブルコントロールにセット
+PERFORM POPUP_DATA_SET.
+*     第二画面に戻る
+SET SCREEN 0.
+LEAVE SCREEN.
+ENDCASE.
+
+ENDMODULE.                 " USER_COMMAND_9001  INPUT

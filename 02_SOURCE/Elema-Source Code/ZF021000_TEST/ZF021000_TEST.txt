@@ -1,0 +1,948 @@
+REPORT ZF021000 NO STANDARD PAGE HEADING
+MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT 58.
+************************************************************************
+* プログラムID  :ZF021000
+* プログラム名  :仕入先得意先紐付テーブルメンテナンス処理
+* 作成日        :2008/01/08
+* 作成者        :DMC
+* 変更履歴      :
+************************************************************************
+*----------------------------------------------------------------------*
+*     宣言部
+*----------------------------------------------------------------------*
+TABLES:     LFA1,                      "仕入先マスタ (一般セクション)
+KNA1,                      "得意先マスタ: 一般データ
+KNVV,                      "得意先マスタ: 販売データ
+T052,                      "支払条件
+TVKO,                      "組織単位: 販売組織
+TVTW,                      "組織単位: 流通チャネル
+TSPA,                      "組織単位: 販売部門
+ZF2010.                    "仕入先得意先紐付テーブル
+*---------------------------------------------------------------------*
+*       構造定義          　　　　                                    *
+*---------------------------------------------------------------------*
+**入力ファイル格納
+TYPES:BEGIN OF TYP_WSDATA,
+DATALINE(200),
+END   OF TYP_WSDATA.
+**出力ファイルデータ
+TYPES:BEGIN OF TYP_OTDATA,
+LIFNR LIKE LFA1-LIFNR,            "仕入先コード
+LNAME LIKE LFA1-NAME1,            "仕入先名
+KUNNR LIKE KNA1-KUNNR,            "得意先コード
+KNAME LIKE KNA1-NAME1,            "得意先名
+COMNT LIKE ZF2010-COMNT,          "コメント
+VKBUR LIKE KNVV-VKBUR,            "部門コード
+ZTERM LIKE KNVV-ZTERM,            "支払条件
+ZFAEL LIKE T052-ZFAEL,            "締日
+ZSTG1 LIKE T052-ZSTG1,            "支払日
+END   OF TYP_OTDATA.
+**ZF2010更新用
+TYPES:BEGIN OF TYP_ZF2010.
+INCLUDE STRUCTURE ZF2010.
+TYPES:END   OF TYP_ZF2010.
+**削除・新規登録データ
+TYPES:BEGIN OF TYP_PRINT,
+FLG(1) TYPE C,                     "D:削除・I:新規登録
+LIFNR  LIKE LFA1-LIFNR,            "仕入先コード
+KUNNR  LIKE KNA1-KUNNR,            "得意先コード
+END   OF TYP_PRINT.
+*---------------------------------------------------------------------*
+*       テーブル定義                                                  *
+*---------------------------------------------------------------------*
+DATA: GT_WSDATA  TYPE TABLE OF TYP_WSDATA,
+GW_WSDATA  TYPE TYP_WSDATA.
+
+DATA: GT_DATA    TYPE TABLE OF TYP_ZF2010,
+GW_DATA    TYPE TYP_ZF2010.
+
+DATA: GT_INDATA  TYPE TABLE OF TYP_OTDATA,
+GW_INDATA  TYPE TYP_OTDATA.
+
+DATA: GT_OTDATA  TYPE TABLE OF TYP_OTDATA,
+GW_OTDATA  TYPE TYP_OTDATA.
+
+DATA: GT_FILE    TYPE STANDARD TABLE OF STRING,
+GW_FILE    TYPE STRING.
+
+DATA: GW_INDATA1 TYPE TYP_OTDATA.
+
+DATA: GT_PRINT   TYPE TABLE OF TYP_PRINT,
+GW_PRINT   TYPE TYP_PRINT.
+*---------------------------------------------------------------------*
+*       変数定義                                                      *
+*---------------------------------------------------------------------*
+**支払条件キー
+DATA:G_ZTERM LIKE KNVV-ZTERM.
+**サーバ出力先
+DATA:G_OTFILE TYPE STRING.
+**カウンタ
+DATA:G_DCNT TYPE P,   " ダウンロード件数
+G_UCNT TYPE P.   " アップロード件数
+**入力ファイル名
+DATA:G_SNAME LIKE RLGRAP-FILENAME.
+*---------------------------------------------------------------------*
+*       定数定義                                                      *
+*---------------------------------------------------------------------*
+CONSTANTS:
+C_CSV         TYPE C VALUE ',',
+C_CODE(1)     TYPE X VALUE '0A',
+C_MARK(1)     TYPE C VALUE '"',
+*  C_PATH(24)    TYPE C VALUE '\R3COMMON\WORK\ZF021000\'.
+C_PATH(6)    TYPE C VALUE '\WORK\'.
+*----------------------------------------------------------------------*
+*     入力画面定義
+*----------------------------------------------------------------------*
+SELECTION-SCREEN:BEGIN OF BLOCK BL1 WITH FRAME .
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: P_DOWN RADIOBUTTON GROUP RAD1 DEFAULT 'X'.
+SELECTION-SCREEN:COMMENT 04(15) TEXT-001.
+SELECTION-SCREEN END OF LINE.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: P_UP RADIOBUTTON GROUP RAD1.
+SELECTION-SCREEN:COMMENT 04(15) TEXT-002.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN:END OF BLOCK BL1.
+PARAMETERS:P_FILE(128) TYPE C LOWER CASE OBLIGATORY
+DEFAULT 'C:\仕入先得意先紐付けテーブル.csv'.
+*----------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+* 出力ファイル名の検索ヘルプ
+PERFORM F4HELP USING    '*.*'
+CHANGING P_FILE.
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+*----------------------------------------------------------------------*
+* バックグラウンド実行チェック
+IF SY-BATCH = 'X'.
+MESSAGE E612 WITH TEXT-M19.
+ENDIF.
+PERFORM CHECK_PATH.                "ファイルパス存在チェック
+************************************************************************
+START-OF-SELECTION.
+************************************************************************
+PERFORM CHECK_FILE.                "ファイル存在チェック
+PERFORM INT_SEC.                   "初期処理
+IF NOT P_DOWN IS INITIAL.
+PERFORM DLOAD_DATA.              "ダウンロード処理
+ELSE.
+PERFORM ULOAD_DATA.              "アップロード処理
+ENDIF.
+************************************************************************
+END-OF-SELECTION.
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  F4HELP
+*&---------------------------------------------------------------------*
+*       ファイル名のF4ヘルプ
+*----------------------------------------------------------------------*
+FORM F4HELP USING       P_FILTER
+CHANGING    P_FILE.
+
+DATA : LT_FILE TYPE FILETABLE,
+LW_FILE LIKE LINE OF LT_FILE.
+DATA : L_RC TYPE I.
+CLEAR:L_RC,LW_FILE,LT_FILE[].
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+EXPORTING
+DEFAULT_EXTENSION       =  P_FILTER
+CHANGING
+FILE_TABLE              =  LT_FILE
+RC                      =  L_RC
+EXCEPTIONS
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+others                  = 4.
+
+IF SY-SUBRC <> 0.
+MESSAGE S612 WITH TEXT-M05.
+ELSE.
+READ TABLE LT_FILE INTO LW_FILE INDEX 1.
+P_FILE = LW_FILE-FILENAME.
+ENDIF.
+
+ENDFORM.                    " F4HELP
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_PATH
+*&---------------------------------------------------------------------*
+*       ファイルパス存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_PATH.
+
+DATA: L_RC(4) TYPE C.
+DATA: L_FNAME LIKE RLGRAP-FILENAME,
+L_FPATH LIKE RLGRAP-FILENAME.
+CLEAR:L_RC,L_FNAME,L_FPATH,G_SNAME.
+L_FNAME = P_FILE.
+CALL FUNCTION 'SO_SPLIT_FILE_AND_PATH'
+EXPORTING
+FULL_NAME          = L_FNAME
+IMPORTING
+STRIPPED_NAME       = G_SNAME
+FILE_PATH           = L_FPATH
+EXCEPTIONS
+X_ERROR             = 1
+OTHERS              = 2.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+CALL FUNCTION 'WS_QUERY'
+EXPORTING
+FILENAME            = L_FPATH
+QUERY               = 'DE'
+IMPORTING
+RETURN               = L_RC
+EXCEPTIONS
+INV_QUERY            = 1
+NO_BATCH             = 2
+FRONTEND_ERROR       = 3
+OTHERS               = 4.
+* 存在しない場合
+IF L_RC <> '1'.
+MESSAGE E612 WITH TEXT-M06.
+STOP.
+ENDIF.
+
+ENDFORM.                    " CHECK_PATH
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_FILE
+*&---------------------------------------------------------------------*
+*       ファイル存在チェック
+*----------------------------------------------------------------------*
+FORM CHECK_FILE.
+
+DATA: L_FILE   TYPE STRING,
+L_RESULT(1) TYPE C,
+L_ANSWER(1) TYPE C.
+CLEAR:L_RESULT,L_ANSWER,L_FILE.
+L_FILE = P_FILE.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_EXIST
+EXPORTING
+FILE            =  L_FILE
+RECEIVING
+RESULT          =  L_RESULT
+EXCEPTIONS
+CNTL_ERROR      = 1
+ERROR_NO_GUI    = 2
+WRONG_PARAMETER = 3
+others          = 4.
+* 存在しない場合(アップロード場合のみ処理対象)
+IF L_RESULT <> 'X' AND P_UP = 'X'.
+MESSAGE E612 WITH TEXT-M07.
+STOP.
+* 存在する場合(ダウンロード場合のみ処理対象)
+ELSEIF L_RESULT = 'X' AND P_DOWN = 'X'.
+*   ファイルの上書き確認を行う
+CALL FUNCTION 'POPUP_TO_CONFIRM'
+EXPORTING
+TITLEBAR                    = TEXT-M01
+TEXT_QUESTION               = TEXT-M02
+TEXT_BUTTON_1               = TEXT-M03
+TEXT_BUTTON_2               = TEXT-M04
+IMPORTING
+ANSWER                      = L_ANSWER
+EXCEPTIONS
+TEXT_NOT_FOUND              = 1
+OTHERS                      = 2.
+*  【いええ】/【中止】が選択された場合
+IF L_ANSWER <> '1'.
+*     処理終了、元の画面に戻す
+STOP.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_FILE
+*&---------------------------------------------------------------------*
+*&      Form  INT_SEC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INT_SEC.
+
+CLEAR:   G_DCNT,G_UCNT,G_ZTERM,G_OTFILE,
+GW_WSDATA,GW_DATA,GW_INDATA,GW_PRINT,
+GW_OTDATA,GW_OTDATA,GW_INDATA1.
+REFRESH: GT_WSDATA,GT_DATA,GT_INDATA,
+GT_OTDATA,GT_FILE,GT_PRINT.
+
+ENDFORM.                    " INT_SEC
+*&---------------------------------------------------------------------*
+*&      Form  DLOAD_DATA
+*&---------------------------------------------------------------------*
+*       ダウンロード処理
+*----------------------------------------------------------------------*
+FORM DLOAD_DATA.
+
+* データ取得
+PERFORM GET_DATA.
+* 出力ファイルのタイトルをセットする
+PERFORM FRM_SET_TITLE.
+* 出力レコードの作成
+PERFORM FRM_APPENT_FILE TABLES GT_OTDATA
+GT_FILE
+USING C_CSV
+GW_OTDATA
+GW_FILE.
+* ファイル出力
+PERFORM FRM_OUT_FILE.
+
+ENDFORM.                    " DLOAD_DATA
+*&---------------------------------------------------------------------*
+*&      Form  ULOAD_DATA
+*&---------------------------------------------------------------------*
+*       アップロード処理
+*----------------------------------------------------------------------*
+FORM ULOAD_DATA.
+
+* ファイルアップロード
+PERFORM ULOAD_LFILE.
+* データ分割
+PERFORM SPLIT_DATA.
+* アップロードレコードのチェック
+PERFORM CHECK_DATA.
+* 既存テーブルにデータ取得
+PERFORM GET_DATA.
+* 削除・新規登録データ一覧作成
+PERFORM SET_DISP.
+* 既存テーブル内容のサーバダウンロード
+PERFORM DLOAD_SFILE.
+* アップロード処理
+PERFORM UPD_DATA.
+* 結果一覧出力
+PERFORM PRINT.
+
+ENDFORM.                    " ULOAD_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA
+*&---------------------------------------------------------------------*
+*       データ取得
+*----------------------------------------------------------------------*
+FORM GET_DATA.
+
+* 対象データの取得
+PERFORM GET_ZF2010.
+
+CLEAR:GW_OTDATA,G_ZTERM,GW_DATA.
+LOOP AT GT_DATA INTO GW_DATA.
+MOVE-CORRESPONDING GW_DATA TO GW_OTDATA.
+*   仕入先名称の取得
+PERFORM GET_LFA1 USING  GW_OTDATA-LIFNR
+GW_OTDATA-LNAME.
+*   得意先名称の取得
+PERFORM GET_KNA1 USING  GW_OTDATA-KUNNR
+GW_OTDATA-KNAME.
+*****
+*   編集処理
+PERFORM SET_NAME USING GW_OTDATA-LNAME.
+PERFORM SET_NAME USING GW_OTDATA-KNAME.
+PERFORM SET_NAME USING GW_OTDATA-COMNT.
+*****
+*   部門コード・支払条件キーの取得
+PERFORM GET_KNVV USING  GW_OTDATA-KUNNR
+GW_DATA-VKORG
+GW_DATA-VTWEG
+GW_DATA-SPART
+GW_OTDATA-ZTERM
+GW_OTDATA-VKBUR.
+IF NOT GW_OTDATA-ZTERM IS INITIAL.
+*     締日・支払日の取得
+PERFORM GET_T052 USING  GW_OTDATA-ZTERM
+GW_OTDATA-ZFAEL
+GW_OTDATA-ZSTG1.
+ENDIF.
+APPEND GW_OTDATA TO GT_OTDATA.
+ENDLOOP.
+*【仕入先】【得意先】ソート順とする
+SORT GT_OTDATA BY LIFNR KUNNR.
+
+ENDFORM.                    " GET_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZF2010
+*&---------------------------------------------------------------------*
+*       対象データの取得
+*----------------------------------------------------------------------*
+FORM GET_ZF2010.
+
+CLEAR: GT_DATA[].
+SELECT *
+INTO TABLE GT_DATA
+FROM ZF2010.
+
+ENDFORM.                    " GET_ZF2010
+*&---------------------------------------------------------------------*
+*&      Form  GET_LFA1
+*&---------------------------------------------------------------------*
+*       仕入先名称の取得
+*----------------------------------------------------------------------*
+*      -->P_LIFNR    仕入先コード
+*      <--P_LNAME    仕入先名
+*----------------------------------------------------------------------*
+FORM GET_LFA1 USING   P_LIFNR
+P_LNAME.
+SELECT SINGLE
+NAME1        "名称1
+FROM LFA1
+INTO P_LNAME
+WHERE LIFNR = P_LIFNR.
+
+ENDFORM.                    " GET_LFA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNA1
+*&---------------------------------------------------------------------*
+*       得意先名称の取得
+*----------------------------------------------------------------------*
+*      -->P_KUNNR    得意先コード
+*      <--P_KNAME    得意先名
+*----------------------------------------------------------------------*
+FORM GET_KNA1 USING     P_KUNNR
+P_KNAME.
+SELECT SINGLE
+NAME1        "名称1
+FROM KNA1
+INTO P_KNAME
+WHERE KUNNR = P_KUNNR.
+
+ENDFORM.                    " GET_KNA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNVV
+*&---------------------------------------------------------------------*
+*       部門コード・支払条件キーの取得
+*----------------------------------------------------------------------*
+*      -->P_KUNNR  得意先コード
+*      -->P_VKORG  販売組織
+*      -->P_VTWEG  流通チャネル
+*      -->P_SPART  製品部門
+*      <--P_ZTERM  支払条件キー
+*      <--P_VKBUR  営業所
+*----------------------------------------------------------------------*
+FORM GET_KNVV USING    P_KUNNR
+P_VKORG
+P_VTWEG
+P_SPART
+P_ZTERM
+P_VKBUR.
+
+SELECT SINGLE
+ZTERM        "支払条件キー
+VKBUR        "営業所
+FROM KNVV
+INTO (P_ZTERM, P_VKBUR)
+WHERE KUNNR = P_KUNNR
+AND VKORG = P_VKORG
+AND VTWEG = P_VTWEG
+AND SPART = P_SPART.
+
+ENDFORM.                    " GET_KNVV
+*&---------------------------------------------------------------------*
+*&      Form  GET_T052
+*&---------------------------------------------------------------------*
+*       締日・支払日の取得
+*----------------------------------------------------------------------*
+*      -->P_ZTERM  支払条件キー
+*      -->P_ZFAEL  締日
+*      -->P_ZSTG1  支払日
+*----------------------------------------------------------------------*
+FORM GET_T052 USING    P_ZTERM
+P_ZFAEL
+P_ZSTG1.
+
+SELECT ZFAEL        "支払基準日のカレンダ日
+ZSTG1        "特別条件の期日
+FROM T052 UP TO 1 ROWS
+INTO (P_ZFAEL, P_ZSTG1)
+WHERE ZTERM = P_ZTERM.
+ENDSELECT.
+IF P_ZFAEL = '00'.
+CLEAR: P_ZFAEL.
+ENDIF.
+IF P_ZSTG1 = '00'.
+CLEAR: P_ZSTG1.
+ENDIF.
+
+ENDFORM.                    " GET_T052
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_TITLE
+*&---------------------------------------------------------------------*
+*       出力ファイルのタイトルをセットする
+*----------------------------------------------------------------------*
+FORM FRM_SET_TITLE.
+DATA: L_TITLE TYPE STRING.
+
+CLEAR: GT_FILE[].
+
+CONCATENATE
+'仕入先コード'
+'仕入先名'
+'得意先コード'
+'得意先名'
+'コメント'
+'部門コード'
+'支払条件'
+'締日'
+'支払日'
+INTO L_TITLE SEPARATED BY C_CSV.
+
+APPEND L_TITLE TO GT_FILE.
+
+ENDFORM.                    " FRM_SET_TITLE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_APPENT_FILE
+*&---------------------------------------------------------------------*
+*       データ取得
+*----------------------------------------------------------------------*
+*      <--P_T_DATA     データ内部テーブル
+*      -->P_T_FILE     FILE 内部テーブル
+*      -->P_SEPARATOR  区切記号
+*      -->P_W_DATA     データ内部テーブルのヘッド
+*      -->P_W_FILE     FILE 内部テーブルのヘッド
+*----------------------------------------------------------------------*
+FORM FRM_APPENT_FILE  TABLES   P_T_DATA
+P_T_FILE
+USING    P_SEPARATOR
+P_W_DATA
+P_W_FILE.
+
+DATA: L_INDEX   TYPE SY-INDEX,
+L_INDEXC  TYPE SY-INDEX,
+L_TMP     TYPE STRING.
+
+FIELD-SYMBOLS: <FS_FIELD>     TYPE ANY,
+<FS_FIELD_COM> TYPE ANY.
+
+CLEAR:G_DCNT.
+LOOP AT P_T_DATA INTO P_W_DATA.
+
+CLEAR: P_W_FILE,
+L_INDEX,
+L_INDEXC.
+DO.
+L_INDEX = L_INDEX + 1.
+ASSIGN COMPONENT L_INDEX OF STRUCTURE P_W_DATA
+TO <FS_FIELD>.
+
+IF SY-SUBRC = 0.
+L_TMP = <FS_FIELD>.
+IF L_INDEX = 1.
+IF P_UP = 'X'.
+CONCATENATE C_CODE L_TMP INTO L_TMP.
+ENDIF.
+P_W_FILE = L_TMP.
+ELSE.
+CONCATENATE P_W_FILE L_TMP
+INTO P_W_FILE
+SEPARATED BY P_SEPARATOR.
+ENDIF.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+APPEND P_W_FILE TO P_T_FILE.
+G_DCNT = G_DCNT + 1.
+ENDLOOP.
+
+ENDFORM.                    " FRM_APPENT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_OUT_FILE
+*&---------------------------------------------------------------------*
+*       ファイル出力
+*----------------------------------------------------------------------*
+FORM FRM_OUT_FILE .
+
+DATA:L_FILE TYPE STRING.
+L_FILE = P_FILE.
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+FILENAME                      = L_FILE
+FILETYPE                      = 'ASC'
+TABLES
+DATA_TAB                     = GT_FILE
+EXCEPTIONS
+FILE_WRITE_ERROR              = 1
+NO_BATCH                      = 2
+GUI_REFUSE_FILETRANSFER       = 3
+INVALID_TYPE                  = 4
+NO_AUTHORITY                  = 5
+UNKNOWN_ERROR                 = 6
+HEADER_NOT_ALLOWED            = 7
+SEPARATOR_NOT_ALLOWED         = 8
+FILESIZE_NOT_ALLOWED          = 9
+HEADER_TOO_LONG               = 10
+DP_ERROR_CREATE               = 11
+DP_ERROR_SEND                 = 12
+DP_ERROR_WRITE                = 13
+UNKNOWN_DP_ERROR              = 14
+ACCESS_DENIED                 = 15
+DP_OUT_OF_MEMORY              = 16
+DISK_FULL                     = 17
+DP_TIMEOUT                    = 18
+FILE_NOT_FOUND                = 19
+DATAPROVIDER_EXCEPTION        = 20
+CONTROL_FLUSH_ERROR           = 21
+OTHERS                        = 22.
+
+IF SY-SUBRC = 0.
+MESSAGE S612 WITH TEXT-M08 G_DCNT TEXT-M10.
+ELSE.
+MESSAGE S612 WITH TEXT-M18.
+ENDIF.
+
+ENDFORM.                    " FRM_OUT_FILE
+*&---------------------------------------------------------------------*
+*&      Form  ULOAD_LFILE
+*&---------------------------------------------------------------------*
+*       ファイルアップロード処理
+*----------------------------------------------------------------------*
+FORM ULOAD_LFILE.
+
+DATA:L_FILE TYPE STRING.
+L_FILE = P_FILE.
+CLEAR: GT_WSDATA[].
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                      = L_FILE
+TABLES
+DATA_TAB                      = GT_WSDATA
+EXCEPTIONS
+FILE_OPEN_ERROR               = 1
+FILE_READ_ERROR               = 2
+NO_BATCH                      = 3
+GUI_REFUSE_FILETRANSFER       = 4
+INVALID_TYPE                  = 5
+NO_AUTHORITY                  = 6
+UNKNOWN_ERROR                 = 7
+BAD_DATA_FORMAT               = 8
+HEADER_NOT_ALLOWED            = 9
+SEPARATOR_NOT_ALLOWED         = 10
+HEADER_TOO_LONG               = 11
+UNKNOWN_DP_ERROR              = 12
+ACCESS_DENIED                 = 13
+DP_OUT_OF_MEMORY              = 14
+DISK_FULL                     = 15
+DP_TIMEOUT                    = 16
+OTHERS                        = 17
+.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " ULOAD_LFILE
+*&---------------------------------------------------------------------*
+*&      Form  SPLIT_DATA
+*&---------------------------------------------------------------------*
+*       データ分割
+*----------------------------------------------------------------------*
+FORM SPLIT_DATA.
+
+DATA :L_CNT TYPE I.
+CLEAR:GW_WSDATA,L_CNT.
+
+*  0件チェック
+DESCRIBE TABLE GT_WSDATA LINES L_CNT.
+IF ( L_CNT = 0 ).
+MESSAGE S612 WITH TEXT-M11.
+STOP.
+ENDIF.
+
+LOOP AT GT_WSDATA INTO GW_WSDATA.
+*    ヘッダ行スキップ
+IF SY-TABIX = 1.
+CONTINUE.
+ENDIF.
+*   データ分割
+CLEAR:GW_INDATA.
+SPLIT  GW_WSDATA-DATALINE AT C_CSV
+INTO  GW_INDATA-LIFNR          "仕入先コード
+GW_INDATA-LNAME          "仕入先名
+GW_INDATA-KUNNR          "得意先コード
+GW_INDATA-KNAME          "得意先名
+GW_INDATA-COMNT          "コメント
+GW_INDATA-VKBUR          "部門コード
+GW_INDATA-ZTERM          "支払条件
+GW_INDATA-ZFAEL          "締日
+GW_INDATA-ZSTG1.         "支払日
+APPEND GW_INDATA TO GT_INDATA.
+ENDLOOP.
+
+CLEAR:L_CNT.
+DESCRIBE TABLE GT_INDATA LINES L_CNT.
+IF ( L_CNT = 0 ).
+MESSAGE S612 WITH TEXT-M12.
+STOP.
+ENDIF.
+
+ENDFORM.                    " SPLIT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DATA
+*&---------------------------------------------------------------------*
+*       アップロードレコードのチェック
+*----------------------------------------------------------------------*
+FORM CHECK_DATA.
+
+CLEAR:GW_INDATA,GW_INDATA1.
+LOOP AT GT_INDATA INTO GW_INDATA.
+*   仕入先マスタ存在チェック
+PERFORM CHK_LFA1 USING GW_INDATA-LIFNR.
+*   得意先マスタ存在チェック
+PERFORM CHK_KNA1 USING GW_INDATA-KUNNR.
+*   得意先の重複チェック
+PERFORM CHK_INDATA USING GW_INDATA-KUNNR.
+ENDLOOP.
+
+ENDFORM.                    " CHECK_DATA
+*&---------------------------------------------------------------------*
+*&      Form  CHK_LFA1
+*&---------------------------------------------------------------------*
+*       仕入先マスタ存在チェック
+*----------------------------------------------------------------------*
+*      -->P_LIFNR  仕入先コード
+*----------------------------------------------------------------------*
+FORM CHK_LFA1 USING    P_LIFNR.
+
+SELECT COUNT(*)
+FROM LFA1
+WHERE LIFNR = P_LIFNR.
+IF SY-SUBRC <> 0.
+"仕入先マスタに存在しません
+MESSAGE S612 WITH P_LIFNR TEXT-M14.
+STOP.
+ENDIF.
+
+ENDFORM.                    " CHK_LFA1
+*&---------------------------------------------------------------------*
+*&      Form  CHK_KNA1
+*&---------------------------------------------------------------------*
+*       得意先マスタ存在チェック
+*----------------------------------------------------------------------*
+*      -->P_KUNNR  得意先コード
+*----------------------------------------------------------------------*
+FORM CHK_KNA1 USING    P_KUNNR.
+
+SELECT COUNT(*)
+FROM KNA1
+WHERE KUNNR = P_KUNNR.
+IF SY-SUBRC <> 0.
+"得意先マスタに存在しません
+MESSAGE S612 WITH P_KUNNR TEXT-M15.
+STOP.
+ENDIF.
+
+ENDFORM.                    " CHK_KNA1
+*&---------------------------------------------------------------------*
+*&      Form  CHK_INDATA
+*&---------------------------------------------------------------------*
+*       得意先の重複チェック
+*----------------------------------------------------------------------*
+*  -->  P_KUNNR        得意先コード
+*----------------------------------------------------------------------*
+FORM CHK_INDATA USING P_KUNNR.
+
+DATA : L_TABIX TYPE SY-TABIX.
+CLEAR: L_TABIX.
+LOOP AT GT_INDATA INTO GW_INDATA1
+WHERE KUNNR = P_KUNNR.
+L_TABIX = L_TABIX + 1.
+ENDLOOP.
+IF L_TABIX > 1.
+"得意先XXXXXXXが重複しています
+MESSAGE S612 WITH TEXT-M16 P_KUNNR TEXT-M17.
+STOP.
+ENDIF.
+
+ENDFORM.                    " CHK_INDATA
+*&---------------------------------------------------------------------*
+*&      Form  DLOAD_SFILE
+*&---------------------------------------------------------------------*
+*       既存テーブル内容のサーバダウンロード
+*----------------------------------------------------------------------*
+FORM DLOAD_SFILE.
+
+DATA:L_FNAME LIKE RLGRAP-FILENAME,
+L_TXT   LIKE RLGRAP-FILENAME.
+CLEAR:L_FNAME,L_TXT.
+SPLIT G_SNAME AT '.' INTO L_FNAME L_TXT.
+* サーバダウンロードパス
+CLEAR: G_OTFILE.
+CONCATENATE '\\'
+SY-HOST
+C_PATH
+L_FNAME
+'_'
+SY-DATUM
+SY-UZEIT
+'.csv'
+INTO G_OTFILE.
+* ファイルオープン
+OPEN DATASET G_OTFILE FOR OUTPUT IN TEXT MODE.
+IF SY-SUBRC <> 0.
+MESSAGE S612 WITH 'ファイルオープンエラー'.
+STOP.
+ELSE.
+DELETE DATASET G_OTFILE.
+ENDIF.
+
+* 出力ファイルのタイトルをセットする
+PERFORM FRM_SET_TITLE.
+
+* 出力レコードの作成
+PERFORM FRM_APPENT_FILE TABLES GT_OTDATA
+GT_FILE
+USING C_CSV
+GW_OTDATA
+GW_FILE.
+CLEAR:GW_FILE.
+LOOP AT GT_FILE INTO GW_FILE.
+TRANSFER GW_FILE TO G_OTFILE.
+ENDLOOP.
+
+* ファイルクローズ
+CLOSE DATASET G_OTFILE.
+
+ENDFORM.                    " DLOAD_SFILE
+*&---------------------------------------------------------------------*
+*&      Form  UPD_DATA
+*&---------------------------------------------------------------------*
+*       アップロード処理
+*----------------------------------------------------------------------*
+FORM UPD_DATA.
+
+DATA : LW_ZF2010 TYPE TYP_ZF2010.
+CLEAR: LW_ZF2010.
+* 既存テーブルにデータを全件削除する
+DELETE FROM ZF2010 WHERE KUNNR <> SPACE.
+* アップロードしたデータからテーブルに一括登録する
+CLEAR:GW_INDATA,G_UCNT.
+LOOP AT GT_INDATA INTO GW_INDATA.
+MOVE-CORRESPONDING GW_INDATA TO LW_ZF2010.
+LW_ZF2010-VKORG = '1000'.
+LW_ZF2010-VTWEG = '10'.
+LW_ZF2010-SPART = '10'.
+INSERT INTO ZF2010 VALUES LW_ZF2010.
+IF SY-SUBRC = 0.
+COMMIT WORK.
+G_UCNT = G_UCNT + 1.
+ELSE.
+ROLLBACK WORK.
+MESSAGE S612 WITH TEXT-M13.
+STOP.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " UPD_DATA
+*&---------------------------------------------------------------------*
+*&      Form  SET_DISP
+*&---------------------------------------------------------------------*
+*       削除・新規登録データ一覧作成
+*----------------------------------------------------------------------*
+FORM SET_DISP.
+
+DATA:LW_IND TYPE TYP_OTDATA,
+LW_OTD TYPE TYP_OTDATA.
+
+* 削除データ判断
+CLEAR: LW_IND,LW_OTD,GW_PRINT.
+LOOP AT GT_OTDATA INTO LW_OTD.
+READ TABLE GT_INDATA INTO LW_IND WITH KEY LIFNR = LW_OTD-LIFNR
+KUNNR = LW_OTD-KUNNR.
+IF SY-SUBRC <> 0.
+GW_PRINT-FLG = 'D'.
+GW_PRINT-LIFNR = LW_OTD-LIFNR.
+GW_PRINT-KUNNR = LW_OTD-KUNNR.
+APPEND GW_PRINT TO GT_PRINT.
+ENDIF.
+ENDLOOP.
+
+* 新規登録データ判断
+CLEAR: LW_IND,LW_OTD,GW_PRINT.
+LOOP AT GT_INDATA INTO LW_IND.
+READ TABLE GT_OTDATA INTO LW_OTD WITH KEY LIFNR = LW_IND-LIFNR
+KUNNR = LW_IND-KUNNR.
+IF SY-SUBRC <> 0.
+GW_PRINT-FLG = 'I'.
+GW_PRINT-LIFNR = LW_IND-LIFNR.
+GW_PRINT-KUNNR = LW_IND-KUNNR.
+APPEND GW_PRINT TO GT_PRINT.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " SET_DISP
+*&---------------------------------------------------------------------*
+*&      Form  PRINT
+*&---------------------------------------------------------------------*
+*       結果一覧出力
+*----------------------------------------------------------------------*
+FORM PRINT.
+
+DATA: L_DCNT TYPE P,
+L_ICNT TYPE P.
+CLEAR:L_DCNT,L_ICNT,GW_PRINT.
+* 件数カウント
+LOOP AT GT_PRINT INTO GW_PRINT.
+IF GW_PRINT-FLG = 'D'.           "削除
+L_DCNT = L_DCNT + 1.
+ELSEIF GW_PRINT-FLG = 'I'.       "新規登録
+L_ICNT = L_ICNT + 1.
+ENDIF.
+ENDLOOP.
+* 出力
+* 削除一覧
+WRITE:/001 '削除一覧：',
+027  L_DCNT,'件'.
+PERFORM CHECK_DISP USING L_DCNT 'D'.
+SKIP 2.
+* 新規登録一覧
+WRITE:/001 '新規登録一覧：',
+027  L_ICNT,'件'.
+PERFORM CHECK_DISP USING L_ICNT 'I'.
+SKIP 2.
+* ダウンロード件数
+WRITE:/001 'バックアップファイル件数:',
+027  G_DCNT,'件'.
+* アップロード件数
+WRITE:/001 'アップロード件数:',
+027  G_UCNT,'件'.
+
+ENDFORM.                    " PRINT
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DISP
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  P_CNT        削除・新規登録件数
+*  -->  P_FLG        削除・新規登録FLG
+*----------------------------------------------------------------------*
+FORM CHECK_DISP USING P_CNT
+P_FLG.
+
+IF P_CNT = 0.
+WRITE:/'対象データなし'.
+ELSE.
+WRITE:/'仕入先         得意先'.
+CLEAR:GW_PRINT.
+LOOP AT GT_PRINT INTO GW_PRINT WHERE FLG = P_FLG.
+WRITE:/001 GW_PRINT-LIFNR,
+016 GW_PRINT-KUNNR.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " CHECK_DISP
+*&---------------------------------------------------------------------*
+*&      Form  SET_NAME
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_NAME  text
+*----------------------------------------------------------------------*
+FORM SET_NAME USING    P_NAME.
+
+CONCATENATE C_MARK P_NAME C_MARK INTO P_NAME.
+
+ENDFORM.                    " SET_NAME

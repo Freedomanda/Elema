@@ -1,0 +1,983 @@
+*&-------------------------------------------------------------------
+*& Report  ZF020505
+*&-------------------------------------------------------------------
+* [プログラム名]
+*   ZF020505        相殺データ出力処理
+*
+* [処理概要]
+*　　　相殺データを出力する
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2005/04/26   DMC K.ONODA       新規開発　
+*  2012/07/31   K.FURUYA          データ源を支払予定テーブルに変更
+*                                 ZF020500 →　ZF020505にコピー
+*& YYYY/MM/DD  Programar         Description
+*& 2012/10/24  ISID              ES-UP
+*&-------------------------------------------------------------------
+REPORT  ZF020505
+LINE-SIZE 185
+LINE-COUNT 57(1)
+NO STANDARD PAGE HEADING.
+*===================================================================*
+* バリアント関連宣言
+*===================================================================*
+*--- バリアント情報取得TBL
+DATA GT_VAR TYPE TABLE OF RSPARAMS.
+DATA GF_VAR TYPE RSPARAMS.
+*--- バリアント関連設定項目
+DATA :G_HKONT LIKE BSIK-HKONT,                     "各勘定の型参照
+G_BLART LIKE BSIK-BLART.                     "伝票タイプの型参照
+DATA :G_ZFBDT LIKE BSIK-ZFBDT,                     "支払日
+G_LIFNR LIKE BSIK-LIFNR.                     "仕入先コード
+*===================================================================*
+* 処理関連宣言
+*===================================================================*
+*--- ファイル名取得関連項目
+DATA:  W_DEF_FILENM(255) TYPE C,                       "PCﾌｧｲﾙ名
+PC_FILENM         LIKE RLGRAP-FILENAME.         "ファイル名
+
+DATA: W_MASK(22)        TYPE C VALUE
+',*.CSV,*.CSV,*.*,*.*.'.                  "ファイルの種類
+
+*--- 定数項目
+CONSTANTS:
+CNS_INIT_RECNUM  TYPE P VALUE 3,"ヘッダレコード数
+CNS_REPTITLE(14) TYPE C VALUE '相殺データ出力',
+CNS_FILENAME(6) TYPE C VALUE '出力先',
+CNS_BUKRS(10)   TYPE C VALUE '会社コード',
+CNS_BUKRSC(12)  TYPE C VALUE '会社コード：',
+CNS_PAYDAY(8)   TYPE C VALUE '支払日：',
+CNS_LFA1_J(30)  TYPE C VALUE '仕入先マスタ（一般セクション）',
+CNS_LFB1_J(30)  TYPE C VALUE '仕入先マスタ（会社コード）',
+CNS_ST_LIFNR(12) TYPE C VALUE '仕入先コード',
+CNS_ST_NAME(10) TYPE C VALUE '仕入先名称',
+CNS_ST_OFFSET(8) TYPE C VALUE '相殺金額',
+CNS_KARA(2)      TYPE C VALUE '～',
+CNS_TOTAL_J(6)  TYPE C VALUE '＊計＊',
+CNS_LTOTAL_J(8) TYPE C VALUE '＊合計＊',
+CNS_X           TYPE C VALUE 'X',"BSAKフラグ
+CNS_H           TYPE C VALUE 'H',"借方貸借フラグ
+CNS_S           TYPE C VALUE 'S'."貸方貸借フラグ
+
+CONSTANTS: CNS_COM      TYPE C VALUE ','. "カンマ
+* Add ES-UP 2012/10/24 -->
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/10/24 <--
+
+*--- 型の定義
+* 仕入先マスタ（一般セクション）----------------------------*
+TYPES: BEGIN OF TYP_LFA1,
+LIFNR LIKE LFA1-LIFNR ,"仕入先コード
+NAME2 LIKE LFA1-NAME2,"仕入先名
+KUNNR LIKE LFA1-KUNNR,"得意先コード
+TELFX LIKE LFA1-TELFX,"仕入先ＦＡＸ番号
+END OF TYP_LFA1.
+
+DATA: GT_LFA1 TYPE TABLE OF TYP_LFA1,"仕入先マスタA内部ＴＢＬ
+GF_LFA1 TYPE TYP_LFA1         ,"仕入先マスタA構造
+GT_LFA1_EXCL TYPE TABLE OF TYP_LFA1,"仕入先マスタ得意先
+GF_LFA1_EXCL TYPE TYP_LFA1.         "仕入先マスタ得意先
+
+* Header of Payment actual result matrix -----------------*
+* 支払実績リストヘッダ項目[共用]
+TYPES: BEGIN OF TYP_HOFPARM,
+H_BUKRS(18)     TYPE C,"文字列”会社コード”
+BUKRS(13)       TYPE C,"会社コード：画面入力値
+BUTXT(20)       TYPE C,"会社名
+H_ZFBDT(13)     TYPE C,"文字列”支払日”
+ZFBDTFM(13)     TYPE C,"支払日(From)：画面入力値
+M_MARK(13)      TYPE C,"文字列”～”
+ZFBDTTO(13)     TYPE C,"支払日(To)：画面入力値
+H_LIFNR(13)     TYPE C,"文字列”仕入先”
+H_NAME(13)      TYPE C,"文字列”仕入先名称”
+H_OFFSET(13)    TYPE C,"文字列”相殺”
+END OF TYP_HOFPARM.
+
+DATA: GT_HOFPARM TYPE TABLE OF TYP_HOFPARM,"支払実績ＬＨ情報内部ＴＢＬ
+GF_HOFPARM TYPE TYP_HOFPARM.         "支払実績ＬＨ情報構造
+* Payment actual result matrix ---------------------------*
+* 支払実績リスト明細[ファイル用→帳票用]
+TYPES: BEGIN OF TYP_PARM,
+F01(20)      TYPE C,"番号
+F02(20)      TYPE C,"支払先／ソート／計
+F03(35)      TYPE C,"支払先名称／買掛金
+F04(35)      TYPE C,"売掛金
+F05(35)      TYPE C,"裏書手形
+F06(35)      TYPE C,"支払条件／銀行振込
+F07(35)      TYPE C,"支払方法／支払手形
+F08(35)      TYPE C,"その他
+F09(35)      TYPE C,"支払計
+F10(35)      TYPE C,"相殺
+F11(35)      TYPE C,"差額
+F12(35)      TYPE C,"仕入割引
+F03P(7)     TYPE P,"支払先名称／買掛金:帳票用データ
+F04P(7)     TYPE P,"売掛金           :帳票用データ
+F05P(7)     TYPE P,"現金             :帳票用データ
+F06P(7)     TYPE P,"支払条件／銀行振込:帳票用データ
+F07P(7)     TYPE P,"支払方法／支払手形:帳票用データ
+F08P(7)     TYPE P,"その他           :帳票用データ
+F09P(7)     TYPE P,"支払計           :帳票用データ
+F10P(7)     TYPE P,"相殺             :帳票用データ
+F11P(7)     TYPE P,"差額             :帳票用データ
+F12P(7)     TYPE P,"仕入割引         ：帳票用データ
+END OF TYP_PARM.
+
+DATA: GT_PARM TYPE TABLE OF TYP_PARM,"支払実績Ｌ明細情報内部ＴＢＬ
+GF_PARM TYPE TYP_PARM.         "支払実績Ｌ明細情報構造
+
+TYPES: BEGIN OF TYP_LIST,
+L01(20)      TYPE C,"会社コード(テキスト)／支払日(テキスト)
+L02(35)      TYPE C,"会社コード／支払日(LOW)
+L03(35)      TYPE C,"会社コード名称／～
+L04(35)      TYPE C,"支払日(LOW)
+L05(35)      TYPE C,"相殺
+L06(7)       TYPE P,"相殺:帳票用データ
+END OF TYP_LIST.
+
+DATA: GT_LIST TYPE TABLE OF TYP_LIST,
+GF_LIST TYPE TYP_LIST.
+
+* 支払実績リスト明細[ダウンロード用]
+TYPES: BEGIN OF TYP_DOWN,
+D01(20)      TYPE C,"仕入先コード
+D02(35)      TYPE C,"仕入先名称
+D03(20)      TYPE C,"相殺
+END OF TYP_DOWN.
+
+DATA: GT_DOWN TYPE TABLE OF TYP_DOWN,
+GF_DOWN TYPE TYP_DOWN.
+
+* Payment actual result matrix ---------------------------*
+* 支払実績リスト総合計[ファイル＆帳票用]
+TYPES: BEGIN OF TYP_PARMT,
+F01(14)      TYPE P,"番号
+F02(20)      TYPE C,"＊合計＊（文字列）
+F03(7)       TYPE P,"買掛金
+F04(7)       TYPE P,"売掛金
+F05(7)       TYPE P,"裏書手形
+F06(7)       TYPE P,"銀行振込
+F07(7)       TYPE P,"支払手形
+F08(7)       TYPE P,"その他
+F09(7)       TYPE P,"支払計
+F10(7)       TYPE P,"相殺
+F11(7)       TYPE P,"差額
+F12(7)       TYPE P,"仕入割引
+END OF TYP_PARMT.
+
+DATA: GT_PARMT TYPE TABLE OF TYP_PARMT,"支払実績Ｌ総合計情報内部ＴＢＬ
+GF_PARMT TYPE TYP_PARMT.         "支払実績Ｌ総合計情報構造
+
+* --- ファイルイメージ
+TYPES:BEGIN OF TYP_FILE_IMAGE,"ファイルイメージ
+FLINE(255) TYPE C,
+END OF TYP_FILE_IMAGE.
+
+DATA: GT_FILE_IMAGE TYPE TABLE OF TYP_FILE_IMAGE,"ファイルイメージ
+GF_FILE_IMAGE TYPE TYP_FILE_IMAGE.         "FILE IMAGE LINE
+
+*--- 共通項目
+DATA: CNT_NUM(4)     TYPE N.          "番号採番
+DATA: G_AP(14)       TYPE P,          "買掛金
+G_AR(14)       TYPE P.          "売掛金
+*--- 汎用モジュール&ファイル関連等(ショートダンプ対応用)
+DATA: G_FILENAME   TYPE RLGRAP-FILENAME,"ダウンロードファイル名
+G_REFILENAME TYPE RLGRAP-FILENAME."パスなしファイル名
+
+* 支払計＝０かつ差額＜０を対象外に変更
+* ローカル用
+DATA:LT_PARM TYPE TABLE OF TYP_PARM,"出力用の編集用
+LF_PARM TYPE TYP_PARM,         "集計用
+L_SUBRC LIKE SY-SUBRC,         "リターン値
+L_NUMBER(4) TYPE N.            "正規リスト番号
+
+*--- プッシュボタン用
+TABLES SSCRFIELDS.
+*===================================================================*
+* 選択画面定義
+*===================================================================*
+PARAMETERS: PR_BUKRS LIKE T001-BUKRS MEMORY ID BUK OBLIGATORY.
+"会社ＣＤ
+
+*PARAMETERS: PR_WAERS LIKE T001-WAERS OBLIGATORY. "通貨
+
+SELECT-OPTIONS: S_ZFBDT FOR G_ZFBDT OBLIGATORY, "支払日
+S_LIFNR FOR G_LIFNR OBLIGATORY. "仕入先コード
+
+PARAMETERS: PR_REP  AS CHECKBOX,     "レポートのみ
+PR_RDL RADIOBUTTON GROUP RB1,   "ローカルに出力
+PR_FILE1(40)  TYPE C,
+"参照しない場合のパス名＋ファイル名
+PR_FILE2 LIKE RTERM-FILE NO-DISPLAY.
+"参照した場合のパス名＋ファイル名
+SELECTION-SCREEN PUSHBUTTON 78(4) BUTTON USER-COMMAND GETFNAME.
+
+PARAMETERS: PR_RDS RADIOBUTTON GROUP RB1,   "サーバに出力
+PR_SFILE LIKE RLGRAP-FILENAME."APサーバ格納先
+
+AT SELECTION-SCREEN.
+* 参照ボタンのチェック
+IF SSCRFIELDS-UCOMM = 'GETFNAME'.
+PERFORM FRM_WS_FILENAME_GET.
+PR_FILE2 = PC_FILENM.
+PR_FILE1 = PR_FILE2+0(40).
+ELSE.
+PR_FILE2 = PR_FILE1.
+PERFORM FRM_CHECK_T001 USING PR_BUKRS.   "会社コード存在チェック
+ENDIF.
+*********************************************************************
+* INITIALIZATION
+*********************************************************************
+INITIALIZATION.
+BUTTON = TEXT-003.
+
+*********************************************************************
+* TOP-OF-PAGE
+*********************************************************************
+TOP-OF-PAGE.
+PERFORM FRM_H_FIREP USING CNS_REPTITLE.
+
+*********************************************************************
+* END-OF-PAGE
+*********************************************************************
+END-OF-PAGE.
+PERFORM FRM_SY_ULINE.
+
+*********************************************************************
+* START-OF-SELECTION
+*********************************************************************
+START-OF-SELECTION.
+* MAIN PROCESS
+PERFORM FRM_CHECK_REPONLY."出力先入力チェック
+
+PERFORM FRM_GET_LFA1.     "仕入先マスタ・得意先コード取得
+
+PERFORM FRM_H_SETDATE.    "ヘッダ支払日Ｆ＆Ｔの設定
+PERFORM FRM_H_SETETC.     "ヘッダその他の設定
+
+PERFORM GET_ZN002.        "支払予定データ取得
+
+PERFORM FRM_PUT_SUM.      "総合計を追加
+
+* DOWNLOAD PROCESS
+PERFORM FRM_LIST_DOWNLOAD."支払実績リストダウンロード
+
+* FILE OPEN PROCESS
+PERFORM FRM_LIST_FILE_UP_LOAD."ファイル処理
+
+* MESSAGE PROCESS
+PERFORM FRM_AFTER_MESSAGE."メッセージ処理
+
+* OUTPUT PROCESS
+PERFORM FRM_SCR_WRITE.    "帳票出力（画面）
+*&------------------------------------------------------------------*
+*&      Form  FRM_TEST_WRITE
+*&------------------------------------------------------------------*
+*       画面出力
+*-------------------------------------------------------------------*
+FORM FRM_SCR_WRITE.
+* 支払実績リストファイル出力用完成済内部ＴＢＬ
+LOOP AT GT_LIST INTO GF_LIST.
+*   ファイル出力用ヘッダ部は読み飛ばし
+IF SY-TABIX <= CNS_INIT_RECNUM.
+CONTINUE.
+ENDIF.
+
+*   明細行の設定
+PERFORM FRM_DETAILS_WRITE.
+ENDLOOP.
+
+ENDFORM.                    " FRM_TEST_WRITE
+*&------------------------------------------------------------------*
+*&      Form  FRM_WS_FILENAME_GET
+*&------------------------------------------------------------------*
+*       ファイル名の設定ポップアップ
+*-------------------------------------------------------------------*
+*  ファイル名をポップアップで設定する
+*-------------------------------------------------------------------*
+FORM FRM_WS_FILENAME_GET.
+* Mod ES-UP 2012/10/24 -->
+*  CALL FUNCTION 'WS_FILENAME_GET'
+*       EXPORTING
+*            DEF_FILENAME     = W_DEF_FILENM
+**           DEF_PATH         = W_DEF_PATH
+*            MASK             = W_MASK
+*            TITLE            = '保存場所'
+*       IMPORTING
+*            FILENAME         = PC_FILENM
+*       EXCEPTIONS
+*            SELECTION_CANCEL = 1
+*            OTHERS           = 2.
+DATA: L_FILE_TABLE TYPE FILETABLE,
+L_FILE       TYPE REF TO FILE_TABLE,
+L_TITLE      TYPE STRING,
+L_RC         TYPE I.
+L_TITLE = `保存場所`.
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+WINDOW_TITLE            = L_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+*      DEFAULT_FILENAME        = DEFAULT_FILENAME
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+*      INITIAL_DIRECTORY       = INITIAL_DIRECTORY
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = L_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS "POVの時は、すべて0にすること
+FILE_OPEN_DIALOG_FAILED = 0
+CNTL_ERROR              = 0
+ERROR_NO_GUI            = 0
+NOT_SUPPORTED_BY_GUI    = 0
+OTHERS                  = 0 ).
+IF L_RC > 0.
+READ TABLE L_FILE_TABLE REFERENCE INTO L_FILE INDEX 1.
+IF SY-SUBRC = 0.
+PC_FILENM = L_FILE->FILENAME.
+ENDIF.
+ENDIF.
+* Mod ES-UP 2012/10/24 <--
+IF SY-SUBRC <> 0.
+MESSAGE ID '00' TYPE 'S' NUMBER '208' WITH '処理中断'.
+STOP.
+ENDIF.
+
+ENDFORM.                    " FRM_WS_FILENAME_GET
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_REPONLY
+*&------------------------------------------------------------------*
+*       「レポートのみ」が押下されているときのファイル名のチェック
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_REPONLY.
+* レポートのみ（チェックボックス）チェック
+IF PR_REP = SPACE.
+IF PR_FILE2 = SPACE.
+MESSAGE S006(Z1) WITH CNS_FILENAME.
+STOP.
+ENDIF.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_REPONLY
+*&------------------------------------------------------------------*
+*&      Form  FRM_CHECK_T001
+*&------------------------------------------------------------------*
+*       会社コード存在チェック&会社名取得
+*-------------------------------------------------------------------*
+*  --> P_BUKRS 会社コード
+*-------------------------------------------------------------------*
+FORM FRM_CHECK_T001 USING P_BUKRS.
+
+SELECT SINGLE BUKRS BUTXT FROM T001
+INTO (GF_HOFPARM-BUKRS,GF_HOFPARM-BUTXT)
+WHERE BUKRS = P_BUKRS.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH CNS_BUKRS.
+STOP.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'T001' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CHECK_T001
+*&------------------------------------------------------------------*
+*&      Form  FRM_GET_LFA1
+*&------------------------------------------------------------------*
+*       仕入先名称・得意先コード取得
+*-------------------------------------------------------------------*
+FORM FRM_GET_LFA1.
+
+SELECT LIFNR
+NAME2
+KUNNR
+TELFX "仕入先ＦＡＸ番号
+FROM LFA1
+INTO CORRESPONDING FIELDS OF TABLE GT_LFA1
+WHERE LIFNR IN S_LIFNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S600(Z1) WITH CNS_LFA1_J.
+STOP.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'LFA1' SY-SUBRC.
+ENDCASE.
+* 得意先コードがないレコードは省き別の内部テーブルに格納する。
+LOOP AT GT_LFA1 INTO GF_LFA1
+WHERE KUNNR <> SPACE.
+APPEND GF_LFA1 TO GT_LFA1_EXCL.
+ENDLOOP.
+
+ENDFORM.                    " FRM_GET_LFA1
+*&------------------------------------------------------------------*
+*&      Form  FRM_H_SETDATE
+*&------------------------------------------------------------------*
+*       ヘッダ支払日Ｆ＆Ｔの設定
+*-------------------------------------------------------------------*
+FORM FRM_H_SETDATE.
+LOOP AT S_ZFBDT WHERE SIGN = 'I'.
+WRITE S_ZFBDT-LOW  TO GF_HOFPARM-ZFBDTFM  .
+WRITE S_ZFBDT-HIGH TO GF_HOFPARM-ZFBDTTO  .
+ENDLOOP.
+ENDFORM.                    " FRM_H_SETDATE
+*&------------------------------------------------------------------*
+*&      Form  FRM_H_SETETC
+*&------------------------------------------------------------------*
+*       ヘッダその他の設定
+*-------------------------------------------------------------------*
+FORM FRM_H_SETETC.
+
+GF_HOFPARM-H_LIFNR = CNS_ST_LIFNR.
+GF_HOFPARM-H_NAME  = CNS_ST_NAME.
+GF_HOFPARM-H_OFFSET = CNS_ST_OFFSET.
+
+*   ファイル出力用明細構造
+*---ヘッダ部　会社コード行
+MOVE:  CNS_BUKRSC       TO GF_LIST-L01.
+MOVE:  GF_HOFPARM-BUKRS TO GF_LIST-L02.
+MOVE:  GF_HOFPARM-BUTXT TO GF_LIST-L03.
+APPEND GF_LIST  TO GT_LIST .
+CLEAR GF_LIST.
+
+*---ヘッダ部　支払日行
+MOVE:  CNS_PAYDAY         TO GF_LIST-L01.
+MOVE:  GF_HOFPARM-ZFBDTFM TO GF_LIST-L02.
+MOVE:  CNS_KARA           TO GF_LIST-L03.
+MOVE:  GF_PARM-F04        TO GF_LIST-L04.
+APPEND GF_HOFPARM-ZFBDTTO TO GT_LIST .
+CLEAR GF_LIST.
+
+*---明細ヘッダ部
+MOVE:  GF_HOFPARM-H_LIFNR  TO GF_LIST-L01.
+MOVE:  GF_HOFPARM-H_NAME   TO GF_LIST-L02.
+MOVE:  GF_HOFPARM-H_OFFSET TO GF_LIST-L03.
+
+APPEND GF_LIST  TO GT_LIST .
+CLEAR GF_LIST.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PUT_SUM
+*&---------------------------------------------------------------------*
+*       支払実績リストファイル出力用総合計レコードを追加する
+*----------------------------------------------------------------------*
+FORM FRM_PUT_SUM.
+*   ファイル出力用明細構造
+WRITE: CNS_LTOTAL_J    TO GF_LIST-L01,
+GF_PARMT-F10    TO GF_LIST-L05.
+
+MOVE:  GF_PARMT-F10    TO GF_LIST-L06.
+
+APPEND GF_LIST TO GT_LIST.
+
+ENDFORM.                    " FRM_PUT_SUM
+*&---------------------------------------------------------------------*
+*&      Form  FRM_H_FIREP
+*&---------------------------------------------------------------------*
+*       ＦＩ共通ヘッダ
+*----------------------------------------------------------------------*
+*       改ページ処理時にヘッダを出力する
+*----------------------------------------------------------------------*
+FORM FRM_H_FIREP USING P_TITLE.
+
+* 共通レポートヘッダー出力　（１７０バイト用）
+* １行目
+WRITE : /56   P_TITLE,
+131  '出力日時:' ,
+140  SY-DATUM ,
+151  SY-UZEIT ,
+160'PAGE:' ,
+165  SY-PAGNO .
+
+PERFORM FRM_H_DETAILS.
+
+ENDFORM.                    " FRM_H_FIREP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_H_DETAILS
+*&---------------------------------------------------------------------*
+*       帳票出力明細ヘッダの出力
+*----------------------------------------------------------------------*
+FORM FRM_H_DETAILS.
+*---ヘッダ部　会社コード行
+WRITE:/2   CNS_BUKRSC       ,
+16  GF_HOFPARM-BUKRS ,
+22  GF_HOFPARM-BUTXT .
+
+*---ヘッダ部　支払日行
+WRITE:/2   CNS_PAYDAY         ,
+16  GF_HOFPARM-ZFBDTFM.
+
+IF GF_HOFPARM-ZFBDTTO <> '0000/00/00'.
+WRITE:  27  CNS_KARA,
+30  GF_HOFPARM-ZFBDTTO .
+ENDIF.
+
+*---明細ヘッダ部
+WRITE AT:  /1(185) SY-ULINE,
+/1(1) SY-VLINE.
+
+FORMAT COLOR 4 ON INTENSIFIED.
+WRITE:  10  GF_HOFPARM-H_LIFNR ,
+32  GF_HOFPARM-H_NAME ,
+77  GF_HOFPARM-H_OFFSET ,
+185(1) SY-VLINE.
+
+WRITE AT:  /1(185) SY-ULINE.
+
+FORMAT COLOR OFF.
+
+ENDFORM.                    " FRM_H_DETAILS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DETAILS_WRITE
+*&---------------------------------------------------------------------*
+*       帳票出力明細行の出力詳細
+*----------------------------------------------------------------------*
+FORM FRM_DETAILS_WRITE.
+
+FORMAT COLOR 2 ON INTENSIFIED.
+* 合計行の明細パターン
+IF GF_LIST-L01 = CNS_TOTAL_J.
+* 総合計行のパターン
+ELSEIF GF_LIST-L01 = CNS_LTOTAL_J.
+FORMAT COLOR 3 ON INTENSIFIED.
+*   総合計行明細出力
+WRITE AT:/1(1) SY-VLINE.
+WRITE AT:1(185) SY-ULINE.
+WRITE AT:185(1) SY-VLINE.
+PERFORM FRM_DETAILS_PT01.
+WRITE AT:/1(1) SY-VLINE.
+WRITE AT:1(185) SY-ULINE.
+WRITE AT:185(1) SY-VLINE.
+* 通常明細
+ELSE.
+PERFORM FRM_DETAILS_PT02.
+ENDIF.
+* 枠線の出力
+WRITE AT:185(1) SY-VLINE.
+FORMAT COLOR OFF.
+ENDFORM.                    " FRM_DETAILS_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DETAILS_PT01
+*&---------------------------------------------------------------------*
+*       明細合計行　パターン
+*----------------------------------------------------------------------*
+FORM FRM_DETAILS_PT01.
+* 枠線の出力
+WRITE AT:/1(1) SY-VLINE.
+* 明細合計行
+WRITE  10  GF_LIST-L01.
+WRITE  77  GF_LIST-L06.
+* 枠線の出力
+WRITE AT:1(1) SY-VLINE.
+WRITE AT:185(1) SY-VLINE.
+
+ENDFORM.                    " FRM_DETAILS_PT01
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DETAILS_PT02
+*&---------------------------------------------------------------------*
+*       ソートキー明細行
+*----------------------------------------------------------------------*
+FORM FRM_DETAILS_PT02.
+WRITE AT:/1(1) SY-VLINE.
+WRITE  10   GF_LIST-L01.
+WRITE  32   GF_LIST-L02.
+WRITE  77   GF_LIST-L06.
+WRITE AT:185(1) SY-VLINE.
+ENDFORM.                    " FRM_DETAILS_PT02
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LIST_DOWNLOAD
+*&---------------------------------------------------------------------*
+*       「レポートのみ」をチェックしなかった場合、指定された
+*       ローカルフォルダにダウンロードする。
+*----------------------------------------------------------------------*
+FORM FRM_LIST_DOWNLOAD.
+
+* 帳票用内部テーブルをダウンロード用内部ＴＢＬに格納する
+*（FILE OPEN でも仕様）
+DATA:L_TABIX LIKE SY-TABIX."ヘッダ部日付欠落対応用
+DATA: L_NUM(20) TYPE N.  "カンマ区切りを無くする用
+* Add ES-UP 2012/10/24 -->
+DATA: L_FILENAME TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING,
+L_TRUNC    TYPE ABAP_BOOL.
+* Add ES-UP 2012/10/24 <--
+
+CLEAR:GF_DOWN,"ダウンロード用
+GT_DOWN."ダウンロード用
+LOOP AT GT_LIST INTO GF_LIST.
+L_TABIX = SY-TABIX."ヘッダ部日付欠落対応用
+IF L_TABIX = 3.
+CONDENSE GF_LIST-L01 NO-GAPS.
+CONDENSE GF_LIST-L02 NO-GAPS.
+CONDENSE GF_LIST-L03 NO-GAPS.
+
+GF_DOWN-D01 = GF_LIST-L01.
+GF_DOWN-D02 = GF_LIST-L02.
+GF_DOWN-D03 = GF_LIST-L03.
+APPEND GF_DOWN TO GT_DOWN.
+ENDIF.
+IF L_TABIX > 3 AND GF_LIST-L01 <> CNS_LTOTAL_J.
+*     データ設定
+CONDENSE GF_LIST-L01 NO-GAPS.
+CONDENSE GF_LIST-L02 NO-GAPS.
+CONDENSE GF_LIST-L05 NO-GAPS.
+
+GF_DOWN-D01 = GF_LIST-L01.
+GF_DOWN-D02 = GF_LIST-L02.
+L_NUM = GF_LIST-L05.
+WRITE L_NUM TO GF_DOWN-D03 NO-ZERO.
+CONDENSE GF_DOWN-D03 NO-GAPS.
+APPEND GF_DOWN TO GT_DOWN.
+ENDIF.
+ENDLOOP.
+* ファイル名を指定の型に変換
+G_FILENAME = PR_FILE2.
+* レポートのみ　または　バッチ処理時はダウンロードしない
+IF PR_REP = SPACE AND SY-BATCH = SPACE.
+
+LOOP AT GT_DOWN INTO GF_DOWN.
+*   データ編集
+PERFORM FRM_DATA_EDIT.
+*   ファイルイメージ用
+APPEND GF_FILE_IMAGE TO GT_FILE_IMAGE.
+ENDLOOP.
+* Mod ES-UP 2012/10/24 -->
+*    CALL FUNCTION 'WS_DOWNLOAD'
+*         EXPORTING
+*              FILENAME                = G_FILENAME
+*              FILETYPE                = 'DAT'
+*         TABLES
+*              DATA_TAB                = GT_FILE_IMAGE
+*         EXCEPTIONS
+*              FILE_OPEN_ERROR         = 1
+*              FILE_WRITE_ERROR        = 2
+*              INVALID_FILESIZE        = 3
+*              INVALID_TYPE            = 4
+*              NO_BATCH                = 5
+*              UNKNOWN_ERROR           = 6
+*              INVALID_TABLE_WIDTH     = 7
+*              GUI_REFUSE_FILETRANSFER = 8
+*              CUSTOMER_ERROR          = 9
+*              OTHERS                  = 10.
+L_FILENAME = G_FILENAME.
+L_TRUNC    = ABAP_TRUE. "固定長のときは、ABAP_FALSE
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+CL_GUI_FRONTEND_SERVICES=>GUI_DOWNLOAD(
+EXPORTING
+*      BIN_FILESIZE              = BIN_FILESIZE
+FILENAME                  = L_FILENAME
+FILETYPE                  = 'DAT'
+*      APPEND                    = SPACE
+WRITE_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER                    = '00'
+TRUNC_TRAILING_BLANKS     = L_TRUNC
+*      WRITE_LF                  = 'X'
+*      COL_SELECT                = SPACE
+*      COL_SELECT_MASK           = SPACE
+*      DAT_MODE                  = SPACE
+*      CONFIRM_OVERWRITE         = SPACE
+*      NO_AUTH_CHECK             = SPACE
+CODEPAGE                  = L_CODEPAGE
+*      IGNORE_CERR               = ABAP_TRUE
+*      REPLACEMENT               = '#'
+*      WRITE_BOM                 = SPACE
+TRUNC_TRAILING_BLANKS_EOL = L_TRUNC
+*      WK1_N_FORMAT              = SPACE
+*      WK1_N_SIZE                = SPACE
+*      WK1_T_FORMAT              = SPACE
+*      WK1_T_SIZE                = SPACE
+*      SHOW_TRANSFER_STATUS      = 'X'
+*      FIELDNAMES                = FIELDNAMES
+*      WRITE_LF_AFTER_LAST_LINE  = 'X'
+*    IMPORTING
+*      FILELENGTH                = FILELENGTH
+CHANGING
+DATA_TAB                  = GT_FILE_IMAGE
+EXCEPTIONS
+FILE_WRITE_ERROR          = 1
+NO_BATCH                  = 2
+GUI_REFUSE_FILETRANSFER   = 3
+INVALID_TYPE              = 4
+NO_AUTHORITY              = 5
+UNKNOWN_ERROR             = 6
+HEADER_NOT_ALLOWED        = 7
+SEPARATOR_NOT_ALLOWED     = 8
+FILESIZE_NOT_ALLOWED      = 9
+HEADER_TOO_LONG           = 10
+DP_ERROR_CREATE           = 11
+DP_ERROR_SEND             = 12
+DP_ERROR_WRITE            = 13
+UNKNOWN_DP_ERROR          = 14
+ACCESS_DENIED             = 15
+DP_OUT_OF_MEMORY          = 16
+DISK_FULL                 = 17
+DP_TIMEOUT                = 18
+FILE_NOT_FOUND            = 19
+DATAPROVIDER_EXCEPTION    = 20
+CONTROL_FLUSH_ERROR       = 21
+NOT_SUPPORTED_BY_GUI      = 22
+ERROR_NO_GUI              = 23
+OTHERS                    = 24 ).
+* Mod ES-UP 2012/10/24 <--
+IF SY-SUBRC <> 0.
+*     汎用モジュールエラー
+* Mod ES-UP 2012/10/24 -->
+*      MESSAGE S502(Z1) WITH 'WS_DOWNLOAD' SY-SUBRC.
+MESSAGE S502(Z1) WITH 'GUI_DOWNLOAD' SY-SUBRC.
+* Mod ES-UP 2012/10/24 <--
+STOP.
+ENDIF.
+
+ENDIF."------ NO-BATCH = SPACE AND PR_REP = SPACE
+
+ENDFORM.                    " FRM_LIST_DOWNLOAD
+*&---------------------------------------------------------------------*
+*&      Form  FRM_LIST_FILE_UP_LOAD
+*&---------------------------------------------------------------------*
+*       タブ区切りのデータを作成しＲ／３サーバーへデータを格納する
+*----------------------------------------------------------------------*
+FORM FRM_LIST_FILE_UP_LOAD.
+* Add ES-UP 2012/10/24 -->
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+* Add ES-UP 2012/10/24 <--
+* レポートのみ　または　ローカル出力時はファイル処理をしない
+IF PR_REP = SPACE AND PR_RDS = CNS_X.
+
+* ファイル名の選定
+PERFORM FRM_FILEPATH_CUT USING    G_FILENAME
+CHANGING G_REFILENAME.
+* ファイルオープン
+* Mod ES-UP 2012/10/24 -->
+*    OPEN DATASET PR_SFILE FOR OUTPUT IN TEXT MODE.
+OPEN DATASET PR_SFILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/10/24 <--
+*   ファイルオープンエラーチェック
+IF SY-SUBRC <> 0.
+MESSAGE S209(Z1).
+STOP.
+ENDIF.
+
+LOOP AT GT_DOWN INTO GF_DOWN.
+*   データ編集
+PERFORM FRM_DATA_EDIT.
+*   実際にＲ／３：ＡＰサーバーへ転送
+TRANSFER GF_FILE_IMAGE TO PR_SFILE.
+ENDLOOP.
+* ファイルクローズ
+CLOSE DATASET PR_SFILE.
+
+ENDIF."------ NO-BATCH = SPACE AND PR_REP = CNS_X
+
+ENDFORM.                    " FRM_LIST_FILE_UP_LOAD
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPACE_CUT
+*&---------------------------------------------------------------------*
+*       スペースをカットする
+*----------------------------------------------------------------------*
+*      -->P_GF_FILE_IMAGE_FLINE  text
+*----------------------------------------------------------------------*
+FORM FRM_SPACE_CUT USING    P_GF_FILE_IMAGE_FLINE.
+
+DATA: L_STRING(256) TYPE C,
+L_LEN         TYPE P,
+L_CHANGE_LEN  TYPE P,
+L_LOOP        TYPE P.
+
+* 文字取得
+L_STRING = P_GF_FILE_IMAGE_FLINE.
+* 文字数取得
+L_LEN = STRLEN( L_STRING ).
+
+DO L_LEN TIMES.
+IF L_STRING+L_LOOP(1) <> SPACE.
+L_CHANGE_LEN = L_LEN - L_LOOP.
+P_GF_FILE_IMAGE_FLINE = L_STRING+L_LOOP(L_CHANGE_LEN).
+EXIT.
+ENDIF.
+L_LOOP = L_LOOP + 1.
+ENDDO.
+
+ENDFORM.                    " FRM_SPACE_CUT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_FILEPATH_CUT
+*&---------------------------------------------------------------------*
+*       パスつきファイル名からパス名を取り除く
+*----------------------------------------------------------------------*
+FORM FRM_FILEPATH_CUT USING    P_FILENAME
+CHANGING P_REFILENAME.
+DATA: LEN TYPE I,
+L_FILENAME(256) TYPE C.
+
+L_FILENAME = P_FILENAME.
+
+DO 256 TIMES.
+LEN = STRLEN( L_FILENAME ).
+SEARCH L_FILENAME FOR '\'.
+IF SY-SUBRC = 4.
+EXIT.
+ENDIF.
+SY-FDPOS = SY-FDPOS + 1.
+L_FILENAME = L_FILENAME+SY-FDPOS(LEN).
+ENDDO.
+
+P_REFILENAME = L_FILENAME.
+
+ENDFORM.                    " FRM_FILEPATH_CUT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_EDIT
+*&---------------------------------------------------------------------*
+*       ファイルをＡＰサーバーに格納する前のデータを編集する
+*----------------------------------------------------------------------*
+FORM FRM_DATA_EDIT.
+
+PERFORM FRM_SPACE_CUT USING GF_DOWN-D01.
+PERFORM FRM_SPACE_CUT USING GF_DOWN-D02.
+PERFORM FRM_SPACE_CUT USING GF_DOWN-D03.
+
+CONCATENATE:
+GF_DOWN-D01 CNS_COM
+GF_DOWN-D02 CNS_COM
+GF_DOWN-D03
+INTO GF_FILE_IMAGE-FLINE.
+
+ENDFORM.                    " FRM_DATA_EDIT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_AFTER_MESSAGE
+*&---------------------------------------------------------------------*
+*       メッセージ処理
+*----------------------------------------------------------------------*
+FORM FRM_AFTER_MESSAGE.
+* バッチ処理＋ファイル出力時時の完了メッセージ
+IF PR_REP = SPACE AND SY-BATCH = CNS_X.
+MESSAGE S853(Z1) WITH G_REFILENAME.
+* オンライン時＋ファイル出力時のメッセージ
+ELSEIF PR_REP = SPACE AND SY-BATCH = SPACE.
+*   ファイル名の選定
+PERFORM FRM_FILEPATH_CUT USING    G_FILENAME
+CHANGING G_REFILENAME.
+MESSAGE S859(Z1) WITH G_REFILENAME.
+* ファイル出力しないときのメッセージ
+ELSE.
+MESSAGE S858(Z1).
+ENDIF.
+ENDFORM.                    " FRM_AFTER_MESSAGE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SY_ULINE
+*&---------------------------------------------------------------------*
+*       下の横線を引く
+*----------------------------------------------------------------------*
+FORM FRM_SY_ULINE.
+WRITE : /1(185) SY-ULINE,
+185(1)   SY-VLINE.
+ENDFORM.                    " FRM_SY_ULINE
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN002
+*&---------------------------------------------------------------------*
+*       支払予定データ取得
+*----------------------------------------------------------------------*
+FORM GET_ZN002.
+DATA:LT_ZN002       TYPE TABLE OF ZN002.  "データ取得用
+DATA:L_ZN002        TYPE ZN002.           "ループ用
+DATA:L_PWRBTR       TYPE ZN002-PWRBTR.    "計算用
+DATA:L_PWRBTR_TOTAL TYPE ZN002-PWRBTR.    "計算用
+DATA:L_CNT          TYPE I.
+
+REFRESH:LT_ZN002.
+CLEAR:L_ZN002.
+
+SELECT *
+FROM ZN002
+INTO TABLE LT_ZN002
+WHERE BUKRS   = PR_BUKRS   "会社コード
+AND LIFNR  IN S_LIFNR    "仕入先
+AND PZFBDT IN S_ZFBDT    "支払予定日
+AND PZLSCH  = 'S'        "支払方法　相殺
+AND WAERS  = 'JPY'
+*   AND WAERS   = PR_WAERS   "通貨コード
+AND PSTFLG  = 'X'.       "会計振替　済
+
+IF SY-SUBRC <> 0.
+MESSAGE S611(Z1). "出力対象データが存在しません
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+*会社コード、仕入先でソート
+SORT LT_ZN002 ASCENDING BY BUKRS LIFNR.
+
+CLEAR:GF_PARMT-F10.
+CLEAR:GF_LIST,L_PWRBTR_TOTAL,L_CNT.
+
+*集計処理
+LOOP AT LT_ZN002 INTO L_ZN002.
+*-- リスト内容設定
+WRITE:L_ZN002-LIFNR TO GF_LIST-L01 NO-ZERO.
+
+CLEAR:GF_LFA1.
+READ TABLE GT_LFA1 INTO GF_LFA1 WITH KEY LIFNR = L_ZN002-LIFNR.
+
+IF SY-SUBRC = 0.
+GF_LIST-L02 = GF_LFA1-NAME2.
+ENDIF.
+
+*-- 出力用
+L_PWRBTR_TOTAL = L_PWRBTR_TOTAL + L_ZN002-PWRBTR.
+WRITE L_PWRBTR_TOTAL TO GF_LIST-L05 CURRENCY L_ZN002-WAERS.
+
+*-- 表示用
+CLEAR:L_PWRBTR.
+PERFORM F_CONV_CURR USING    L_ZN002-PWRBTR
+L_ZN002-WAERS
+CHANGING L_PWRBTR.
+GF_LIST-L06 = GF_LIST-L06 + L_PWRBTR .
+
+*-- キーブレイク
+AT END OF LIFNR.
+IF GF_LIST-L06 > 0.
+APPEND GF_LIST TO GT_LIST.                 "出力テーブル追加
+GF_PARMT-F10 = GF_PARMT-F10 + GF_LIST-L06. "合計表示用
+L_CNT = L_CNT + 1.
+ENDIF.
+CLEAR:GF_LIST,L_PWRBTR_TOTAL.            "変数初期化
+ENDAT.
+ENDLOOP.
+
+IF L_CNT = 0.
+MESSAGE S611(Z1). ""出力対象データが存在しません
+LEAVE LIST-PROCESSING.
+ENDIF.
+
+
+ENDFORM.                    " GET_ZN002
+*&---------------------------------------------------------------------*
+*&      Form  F_CONV_CURR
+*&---------------------------------------------------------------------*
+*       外部形式に変換
+*----------------------------------------------------------------------*
+*      -->P_ZN002_PWRBTR  テーブル金額
+*      -->P_WAERS   通貨
+*      <--P_PWRBTR  外部形式
+*----------------------------------------------------------------------*
+FORM F_CONV_CURR USING    P_ZN002_PWRBTR TYPE ANY
+P_WAERS        TYPE ANY
+CHANGING P_PWRBTR       TYPE ANY.
+
+DATA:L_BAPICURR_D TYPE BAPICURR_D.
+
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_EXTERNAL'
+EXPORTING
+CURRENCY              = P_WAERS
+AMOUNT_INTERNAL       = P_ZN002_PWRBTR
+IMPORTING
+AMOUNT_EXTERNAL       = L_BAPICURR_D
+.
+
+P_PWRBTR  =  L_BAPICURR_D.
+
+ENDFORM.                    " F_CONV_CURR

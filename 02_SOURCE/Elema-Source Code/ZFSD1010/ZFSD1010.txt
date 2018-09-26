@@ -1,0 +1,615 @@
+************************************************************************
+* [プログラム名]
+*   ZESD1010       納期回答データ出力
+*
+* [処理概要]
+*   ・特定の得意先へ受注伝票上で変更された納期の情報を納期回答として
+*　　送信する。(基本的に再送はしない)
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/01/10   PSD T.KAWAHARA     新規開発　
+************************************************************************
+REPORT  zesd1010 NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58(0)
+MESSAGE-ID z1.
+
+************************************************************************
+*                          TABLES                                      *
+************************************************************************
+TABLES:  kna1,"得意先マスタ：一般データ
+knb1,"得意先マスタ：会社コード
+vbak,"販売伝票：ヘッダデータ
+vbap,"販売伝票：明細データ
+nast,"出力管理テーブル
+vbep,"販売伝票：納入日程行データ
+vbkd."販売伝票：ビジネスデータ
+
+************************************************************************
+*                          DATA                                        *
+*　　　　　　　 　　　グローバル変数定義　　　　　　　 　　　　　　　  *
+************************************************************************
+DATA : g_e_flg(1)      TYPE c           .          "EXITフラグ
+DATA : g_cnt(5)        TYPE n           .          "明細件数カウンタ
+DATA : g_wk_cnt        TYPE i           .          "ログ用件数カウンタ
+DATA : g_file(512)     TYPE c           .          "ファイル用
+DATA : g_rec(512).
+CONSTANTS : c_kappl(2)   VALUE 'V1',
+c_kschl(4)   VALUE 'ZS00',
+c_parvw(2)   VALUE 'AG',
+c_vstat(1)   VALUE '0'.
+
+************************************************************************
+*                      TYPES / DATA         　　  　                   *
+*　　　　　　　　　　  　構造定義　　　　　                            *
+*　　　　　　　　　　　内部テーブル定義                          　　　*
+************************************************************************
+* BATコマンド名関連は暫定
+DATA g_commandname LIKE sxpgcolist-name.
+DATA g_status      LIKE extcmdexex-status.
+DATA g_tab_exec_protocol LIKE STANDARD TABLE OF btcxpm.
+* EDI送信ファイル用
+DATA:BEGIN OF edi,
+num(5)          TYPE n,         "データ処理№
+souce_cd(6)     TYPE c,         "情報区分コード
+make_date(6)    TYPE c,         "データ作成日
+hm_cd(12)       TYPE c,         "発注者コード
+um_cd(12)       TYPE c,         "受注者コード
+hbmo_cd(8)      TYPE c,         "発注部門コード
+bstnk(23)       TYPE c,         "注文番号
+sezo_num(19)    TYPE c,         "製造番号
+teisei(1)       TYPE c,         "訂正コード
+cock_type(1)    TYPE c,         "コック区分
+vrkme           LIKE vbap-vrkme,"単位
+order_num(12)   TYPE c,         "注文数量
+mm_pozision(7)  TYPE c,         "購買担当
+matnr(25)       TYPE c,         "受注者品名コード
+kdmat(25)       TYPE c,         "発注者品名コード
+nouki(6)        TYPE c,         "納期
+nou_no(8)       TYPE c,         "納入№
+bstdk(6)        TYPE c,         "回答納期
+kwmeng(12)      TYPE c,         "回答数量
+ch_mark(1)      TYPE c,         "確認マーク
+biko(30)        TYPE c,         "備考
+hbmo(20)        TYPE c,         "発注部門名
+mm_txt(14)      TYPE c,         "購買担当（漢字）
+biko_txt(60)    TYPE c,         "備考（漢字）
+hbmo_txt(40)    TYPE c.         "発注者部門名（漢字）
+DATA END   OF edi.
+
+DATA g_tab_edi  LIKE STANDARD TABLE OF edi.
+DATA g_tab_edi2 LIKE STANDARD TABLE OF edi WITH HEADER LINE.
+DATA g_tab_edi_file LIKE STANDARD TABLE OF g_file.
+DATA:
+wa_kna1    TYPE kna1 VALUE IS INITIAL,
+wa_vbak    TYPE vbak VALUE IS INITIAL,
+wa_vbap    TYPE vbap VALUE IS INITIAL,
+wa_nast    TYPE nast VALUE IS INITIAL,
+wa_vbep    TYPE vbep VALUE IS INITIAL,
+wa_vbkd    TYPE vbkd VALUE IS INITIAL,
+
+g_tab_kna1  TYPE STANDARD TABLE OF kna1,
+g_tab_vbak  TYPE STANDARD TABLE OF vbak,
+g_tab_vbap  TYPE STANDARD TABLE OF vbap,
+g_tab_nast  TYPE STANDARD TABLE OF nast,
+g_tab_nast2 TYPE STANDARD TABLE OF nast,
+g_tab_vbep  TYPE STANDARD TABLE OF vbep,
+g_tab_vbkd  TYPE STANDARD TABLE OF vbkd.
+
+************************************************************************
+*                         画面定義　                                   *
+*                                                                      *
+************************************************************************
+* 得意先コード
+SELECT-OPTIONS s_kunnr FOR kna1-kunnr.
+* 出力ファイル
+PARAMETERS:pr_file LIKE rterm-file.
+
+************************************************************************
+*                        INITIALIZATION                                *
+************************************************************************
+INITIALIZATION.
+*初期化処理
+REFRESH: g_tab_edi  , g_tab_kna1 , g_tab_vbak , g_tab_vbap ,
+g_tab_nast , g_tab_vbep , g_tab_vbkd .
+
+CLEAR : edi ,  wa_kna1 , wa_vbak , wa_vbap , wa_nast ,  wa_vbep ,
+wa_vbkd .
+CLEAR : g_e_flg.
+************************************************************************
+*                        AT SELECTION-SCREEN                           *
+************************************************************************
+AT SELECTION-SCREEN.
+* 得意先コード存在チェック
+PERFORM f_check_kunnr.
+************************************************************************
+*                        START-OF-SELECTION                            *
+************************************************************************
+START-OF-SELECTION.
+* 対象データ抽出処理
+PERFORM f_get_data.
+IF g_e_flg = 'X'.
+EXIT.
+ENDIF.
+* ロック処理
+PERFORM f_enqueue_eznast.
+* ファイル作成処理
+PERFORM f_make_file.
+IF g_e_flg = 'X'.
+EXIT.
+ENDIF.
+* EDIサーバへ送信処理
+PERFORM f_upload_edi.
+*  IF g_e_flg = 'X'.
+*    EXIT.
+*  ENDIF.
+
+* BAT起動処理
+PERFORM f_bat_action.
+
+************************************************************************
+*                        END-OF-SELECTION                              *
+************************************************************************
+END-OF-SELECTION.
+
+* 終了メッセージ処理
+PERFORM f_end_mesg.
+IF g_e_flg = 'X'.
+EXIT.
+ENDIF.
+* NAST出力ステータス更新処理
+PERFORM f_update_nast.
+* ロック解除処理
+PERFORM f_dequeue_eznast.
+
+************************************************************************
+*                        TOP-OF-PAGE                                   *
+************************************************************************
+TOP-OF-PAGE .
+SKIP.
+WRITE:/002 '受注伝票番号',
+014 'テキスト'.
+
+************************************************************************
+*                        サブルーチン                                  *
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  f_check_kunnr
+*&---------------------------------------------------------------------*
+*       得意先コード存在チェック
+*----------------------------------------------------------------------*
+FORM f_check_kunnr.
+SELECT SINGLE kunnr FROM knb1
+INTO knb1-kunnr
+WHERE bukrs = 'C001'
+AND kunnr IN s_kunnr.
+IF sy-subrc <> 0.
+MESSAGE e600(z1) WITH '得意先マスタ'.
+* 得意先マスタに該当するデータがありません
+SET CURSOR FIELD s_kunnr-low.
+ENDIF.
+ENDFORM.                    " f_check_kunnr
+
+
+*&---------------------------------------------------------------------*
+*&      Form  f_get_data
+*&---------------------------------------------------------------------*
+*       対象データ抽出処理
+*----------------------------------------------------------------------*
+FORM f_get_data.
+* 出力管理TBL読込処理
+PERFORM f_read_nast.
+IF g_e_flg = 'X'.
+EXIT.
+ENDIF.
+ENDFORM.                    " f_get_data
+
+*&---------------------------------------------------------------------*
+*&      Form  f_read_nast
+*&---------------------------------------------------------------------*
+*       出力管理TBL読込処理
+*----------------------------------------------------------------------*
+FORM f_read_nast.
+SELECT objky erdat eruhr FROM nast
+INTO CORRESPONDING FIELDS OF TABLE  g_tab_nast
+WHERE  kappl = c_kappl   "アプリケーション
+AND  kschl = c_kschl   "メッセージタイプ
+AND  spras = 'J'       "言語
+AND  parvw = c_parvw   "パートナ機能
+AND  vstat = c_vstat.  "処理ステータス
+CASE sy-subrc.
+WHEN '0'.
+WHEN '4'."対象データなし
+MESSAGE i600  WITH 'メッセージステータス'.
+g_e_flg = 'X'.
+WHEN OTHERS."異常終了
+MESSAGE a603  WITH sy-repid 'NAST' sy-subrc.
+ENDCASE.
+ENDFORM.                    " f_read_nast
+*&---------------------------------------------------------------------*
+*&      Form  f_read_vbap
+*&---------------------------------------------------------------------*
+*       販売伝票：明細データTBL読込処理
+*----------------------------------------------------------------------*
+FORM f_read_vbap.
+SELECT  vbeln posnr matnr kdmat kwmeng vrkme FROM vbap
+INTO CORRESPONDING FIELDS OF  wa_vbap
+FOR ALL ENTRIES IN g_tab_nast
+WHERE vbeln = g_tab_nast-objky+0(10).
+APPEND wa_vbap TO g_tab_vbap.
+ENDSELECT.
+CASE sy-subrc.
+WHEN '0'.
+WHEN '4'."対象データなし
+MESSAGE i600  WITH '販売伝票：明細データ'.
+g_e_flg = 'X'.
+WHEN OTHERS."異常終了
+MESSAGE a603  WITH sy-repid 'VBAP' sy-subrc.
+ENDCASE.
+
+
+ENDFORM.                    " f_read_vbap
+*&---------------------------------------------------------------------*
+*&      Form  f_read_vbak
+*&---------------------------------------------------------------------*
+*       販売伝票：ヘッダデータTBL読込処理
+*----------------------------------------------------------------------*
+FORM f_read_vbak.
+SELECT SINGLE bstnk kunnr FROM vbak
+INTO CORRESPONDING FIELDS OF wa_vbak
+WHERE  vbeln = wa_vbap-vbeln
+AND  kunnr IN s_kunnr.
+CASE sy-subrc.
+WHEN '0'.
+WHEN '4'."対象データなし
+*      MESSAGE i600  WITH '販売伝票：ヘッダデータ'.
+*      g_e_flg = 'X'.
+WHEN OTHERS."異常終了
+MESSAGE a603  WITH sy-repid 'VBAK' sy-subrc.
+ENDCASE.
+* 項目セット
+edi-hm_cd = wa_vbak-kunnr.
+edi-hm_cd+10(2) = '  '.
+edi-um_cd = '            '.
+edi-bstnk = '                       '.
+edi-bstnk(20) = wa_vbak-bstnk.
+
+ENDFORM.                    " f_read_vbak
+*&---------------------------------------------------------------------*
+*&      Form  f_read_vbkd
+*&---------------------------------------------------------------------*
+*       販売伝票：ビジネスデータTBL読込処理
+*----------------------------------------------------------------------*
+FORM f_read_vbkd.
+SELECT SINGLE bstdk FROM vbkd
+INTO vbkd-bstdk
+WHERE vbeln =  wa_vbap-vbeln
+AND posnr =  '000000'.
+CASE sy-subrc.
+WHEN '0'.
+*    WHEN '4'."対象データなし
+*      MESSAGE i600  WITH '販売伝票：ビジネスデータ'.
+*      g_e_flg = 'X'.
+WHEN OTHERS."異常終了
+MESSAGE a603  WITH sy-repid 'VBKD' sy-subrc.
+ENDCASE.
+edi-bstdk = vbkd-bstdk+2(6).
+
+ENDFORM.                    " f_read_vbkd
+*&---------------------------------------------------------------------*
+*&      Form  f_enqueue_eznast
+*&---------------------------------------------------------------------*
+*       ロック処理
+*----------------------------------------------------------------------*
+FORM f_enqueue_eznast.
+CALL FUNCTION 'ENQUEUE_EZNAST'
+EXPORTING
+mode_nast      = 'E'
+mandt          = sy-mandt
+kappl          = c_kappl
+kschl          = c_kschl
+parvw          = c_parvw
+vstat          = c_vstat
+EXCEPTIONS
+foreign_lock   = 1
+system_failure = 2
+OTHERS         = 3.
+* 汎用モジュールエラー
+IF sy-subrc <> 0.
+MESSAGE a502 WITH 'ENQUEUE_EZNAST' sy-subrc .
+ENDIF.
+ENDFORM.                    " f_enqueue_eznast
+*&---------------------------------------------------------------------*
+*&      Form  f_make_file
+*&---------------------------------------------------------------------*
+*       ファイル作成処理
+*----------------------------------------------------------------------*
+FORM f_make_file.
+* 販売伝票：明細データTBL読込処理
+PERFORM f_read_vbap.
+IF g_e_flg = 'X'.
+EXIT.
+ENDIF.
+
+LOOP AT g_tab_vbap INTO wa_vbap.
+g_cnt   = g_cnt + 1.
+edi-num = g_cnt.
+edi-souce_cd  = '0702'.
+edi-make_date = sy-datum+2(6).
+edi-sezo_num  = '                   '.
+edi-teisei = ' '.
+edi-cock_type = ' '.
+edi-vrkme  = '   '.
+edi-vrkme  = wa_vbap-vrkme.
+edi-order_num = '            '.
+edi-mm_pozision = '       '.
+edi-matnr  = '                         '.
+edi-matnr  = wa_vbap-matnr.
+edi-kdmat  = '                         '.
+edi-kdmat  = wa_vbap-kdmat.
+edi-nouki  = '      '.
+edi-nou_no = '        '.
+edi-kwmeng = '            '.
+edi-kwmeng = wa_vbap-kwmeng.
+edi-ch_mark = ' '.
+edi-biko   = '                              '.
+edi-hbmo   = '                    '.
+edi-mm_txt = '              '.
+edi-biko_txt = '                                                  '.
+edi-hbmo_txt = '                                        '.
+* 販売伝票：ヘッダデータTBL読込処理
+PERFORM f_read_vbak.
+* 販売伝票：ビジネスデータTBL読込処理
+PERFORM f_read_vbkd.
+* 発注部門コード取得処理
+PERFORM f_read_txt.
+APPEND edi TO g_tab_edi.
+* ファイル用オフセット処理
+PERFORM f_set_file.
+
+APPEND g_file TO g_tab_edi_file.
+ENDLOOP.
+
+
+ENDFORM.                    " f_make_file
+*&---------------------------------------------------------------------*
+*&      Form  f_read_txt
+*&---------------------------------------------------------------------*
+*       受注部門コード取得処理
+*----------------------------------------------------------------------*
+FORM f_read_txt.
+DATA l_vbeln LIKE thead-tdname.
+CLEAR : l_vbeln.
+l_vbeln = wa_vbap-vbeln.
+CALL FUNCTION 'READ_TEXT'
+EXPORTING
+client                         = sy-mandt
+id                            = 'Z001'
+language                      = 'J'
+name                          =  l_vbeln
+object                        =  'VBBK'
+*   ARCHIVE_HANDLE                = 0
+*   LOCAL_CAT                     = ' '
+* IMPORTING
+*   HEADER                        =
+TABLES
+lines                      = g_tab_edi2
+EXCEPTIONS
+id                            = 1
+language                      = 2
+name                          = 3
+not_found                     = 4
+object                        = 5
+reference_check               = 6
+wrong_access_to_archive       = 7
+OTHERS                        = 8            .
+edi-hbmo_cd = '        '.
+IF sy-subrc = 0.
+edi-hbmo_cd = g_tab_edi2-hbmo_cd.
+ELSE.
+*   MESSAGE a502 WITH 'READ_TEXT' sy-subrc .
+ENDIF.
+
+ENDFORM.                    " f_read_txt
+*&---------------------------------------------------------------------*
+*&      Form  f_set_file
+*&---------------------------------------------------------------------*
+*       ファイル用オフセット処理
+*----------------------------------------------------------------------*
+FORM f_set_file.
+*   CONCATENATE  edi-num  edi-souce_cd edi-make_date edi-hm_cd edi-um_cd
+*                         edi-hbmo_cd  edi-bstnk edi-sezo_num edi-teisei
+*                 edi-cock_type edi-vrkme edi-order_num  edi-mm_pozision
+*                  edi-matnr edi-kdmat  edi-nouki edi-nou_no edi-bstdk_e
+*                  edi-kwmeng edi-ch_mark edi-biko  edi-hbmo  edi-mm_txt
+*                                           edi-biko_txt edi-hbmo_txt
+*                                      INTO g_file SEPARATED BY '","'.
+*
+*      CONCATENATE '"' g_file '"' INTO g_file.
+MOVE '"'              TO g_file.
+MOVE edi-num          TO g_file+1(5).
+MOVE '","'            TO g_file+6(3).
+MOVE edi-souce_cd     TO g_file+9(4).
+MOVE '","'            TO g_file+13(3).
+MOVE edi-make_date    TO g_file+16(6).
+MOVE '","'            TO g_file+22(3).
+MOVE edi-hm_cd        TO g_file+25(12).
+MOVE '","'            TO g_file+37(3).
+MOVE edi-um_cd        TO g_file+40(12).
+MOVE '","'            TO g_file+52(3).
+MOVE edi-hbmo_cd      TO g_file+55(8).
+MOVE '","'            TO g_file+63(3).
+MOVE edi-bstnk        TO g_file+66(23).
+MOVE '","'            TO g_file+89(3).
+MOVE edi-sezo_num     TO g_file+92(19).
+MOVE '","'            TO g_file+111(3).
+MOVE edi-teisei       TO g_file+114(1).
+MOVE '","'            TO g_file+115(3).
+MOVE edi-cock_type    TO g_file+118(1).
+MOVE '","'            TO g_file+119(3).
+MOVE edi-vrkme        TO g_file+122(3).
+MOVE '","'            TO g_file+125(3).
+MOVE edi-order_num    TO g_file+128(12).
+MOVE '","'            TO g_file+140(3).
+MOVE edi-mm_pozision  TO g_file+143(7).
+MOVE '","'            TO g_file+150(3).
+MOVE edi-matnr        TO g_file+153(25).
+MOVE '","'            TO g_file+178(3).
+MOVE edi-kdmat        TO g_file+181(25).
+MOVE '","'            TO g_file+206(3).
+MOVE edi-nouki        TO g_file+209(6).
+MOVE '","'            TO g_file+215(3).
+MOVE edi-nou_no       TO g_file+218(8).
+MOVE '","'            TO g_file+221(3).
+MOVE edi-bstdk        TO g_file+224(6).
+MOVE '","'            TO g_file+230(3).
+MOVE edi-kwmeng       TO g_file+233(12).
+MOVE '","'            TO g_file+245(3).
+MOVE edi-ch_mark      TO g_file+248(1).
+MOVE '","'            TO g_file+249(3).
+MOVE edi-biko         TO g_file+252(30).
+MOVE '","'            TO g_file+282(3).
+MOVE edi-hbmo         TO g_file+285(20).
+MOVE '","'            TO g_file+305(3).
+MOVE edi-mm_txt       TO g_file+308(14).
+MOVE '","'            TO g_file+322(3).
+MOVE edi-biko_txt     TO g_file+325(60).
+MOVE '","'            TO g_file+385(3).
+MOVE edi-hbmo_txt     TO g_file+388(40).
+MOVE '"'              TO g_file+428(1).
+
+
+ENDFORM.                    " f_set_file
+
+*&---------------------------------------------------------------------*
+*&      Form  f_upload_edi
+*&---------------------------------------------------------------------*
+*       EDIサーバへ送信処理
+*----------------------------------------------------------------------*
+FORM f_upload_edi.
+
+OPEN DATASET pr_file FOR OUTPUT IN TEXT MODE.
+
+IF sy-subrc = 0.
+LOOP AT g_tab_edi_file INTO g_file.
+TRANSFER g_file TO pr_file.
+ENDLOOP.
+CLOSE DATASET pr_file.
+ELSE.
+MESSAGE i209 ."ファイルオープンエラー
+g_e_flg = 'X'.
+ENDIF.
+
+ENDFORM.                    " f_upload_edi
+*&---------------------------------------------------------------------*
+*&      Form  f_bat_action
+*&---------------------------------------------------------------------*
+*       BAT起動処理
+*----------------------------------------------------------------------*
+FORM f_bat_action.
+CALL FUNCTION 'SXPG_CALL_SYSTEM'
+EXPORTING
+commandname                    = g_commandname
+*   ADDITIONAL_PARAMETERS            = ' '
+* IMPORTING
+*   STATUS                           =
+*   EXITCODE                         =
+TABLES
+exec_protocol                 = g_tab_exec_protocol
+EXCEPTIONS
+no_permission                    = 1
+command_not_found                = 2
+parameters_too_long              = 3
+security_risk                    = 4
+wrong_check_call_interface       = 5
+program_start_error              = 6
+program_termination_error        = 7
+x_error                          = 8
+parameter_expected               = 9
+too_many_parameters              = 10
+illegal_command                  = 11
+OTHERS                           = 12
+.
+*  IF sy-subrc <> 0.
+*    MESSAGE a502 WITH 'SXPG_CALL_SYSTEM' sy-subrc .
+*  ENDIF.
+
+ENDFORM.                    " f_bat_action
+*&---------------------------------------------------------------------*
+*&      Form  f_end_mesg
+*&---------------------------------------------------------------------*
+*       終了メッセージ処理
+*----------------------------------------------------------------------*
+FORM f_end_mesg.
+IF g_e_flg = 'X'.
+EXIT.
+ENDIF.
+* 納期回答データが&件出力されました
+MESSAGE i810 WITH g_cnt.
+ENDFORM.                    " f_end_mesg
+*&---------------------------------------------------------------------*
+*&      Form  f_update_nast
+*&---------------------------------------------------------------------*
+*       NAST出力ステータス更新処理
+*----------------------------------------------------------------------*
+FORM f_update_nast.
+CLEAR: wa_vbap,wa_nast.
+SORT g_tab_vbap BY vbeln .
+SORT g_tab_nast BY objky.
+
+LOOP AT g_tab_vbap INTO wa_vbap.
+LOOP AT g_tab_nast INTO wa_nast WHERE objky = wa_vbap-vbeln.
+UPDATE nast SET vstat = '1'
+datvr = sy-datum         "処理日付
+uhrvr = sy-uzeit         "処理日
+WHERE objky = wa_nast-objky  "対象キー
+AND kappl = c_kappl         "アプリケーション
+AND kschl = c_kschl         "メッセージタイプ
+AND spras = 'J'             "言語
+AND parvw = c_parvw         "パートナ機能
+AND erdat = wa_nast-erdat   "登録日
+AND eruhr = wa_nast-eruhr   "登録時刻
+AND vstat = c_vstat.        "処理ステータ
+CASE sy-subrc.
+WHEN 0.
+IF sy-dbcnt <> 1.
+ROLLBACK WORK.
+WRITE :/002 wa_nast-objky+0(10),
+014 '出力更新に失敗しました'.
+ELSE.
+COMMIT WORK.
+ENDIF.
+
+WHEN 4."更新エラー
+WRITE :/002 wa_nast-objky+0(10),
+014 '出力更新に失敗しました'.
+
+WHEN 8."システムエラー
+MESSAGE a603 WITH sy-repid 'NAST' sy-subrc.
+ENDCASE.
+ENDLOOP.
+ENDLOOP.
+
+ENDFORM.                    " f_update_nast
+*&---------------------------------------------------------------------*
+*&      Form  f_dequeue_eznast
+*&---------------------------------------------------------------------*
+*       ロック解除処理
+*----------------------------------------------------------------------*
+FORM f_dequeue_eznast.
+CALL FUNCTION 'DEQUEUE_EZNAST'
+EXPORTING
+mode_nast = 'E'
+mandt     = sy-mandt
+kappl     = c_kappl
+kschl     = c_kschl
+parvw     = c_parvw
+vstat     = c_vstat
+EXCEPTIONS
+OTHERS    = 3.
+* 汎用モジュールエラー
+IF sy-subrc <> 0.
+MESSAGE a502 WITH 'DEQUEUE_EZNAST' sy-subrc .
+ENDIF.
+ENDFORM.                    " f_dequeue_eznast

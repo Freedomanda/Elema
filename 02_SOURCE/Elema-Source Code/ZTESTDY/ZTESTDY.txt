@@ -1,0 +1,576 @@
+REPORT ZTESTDY MESSAGE-ID Y1 NO STANDARD PAGE HEADING
+LINE-SIZE 170 LINE-COUNT 58.
+
+*&---------------------------------------------------------------------*
+*&   定数定義
+*&---------------------------------------------------------------------*
+CONSTANTS:
+CNS_INFILE(128)   TYPE C VALUE 'C:\*.*',
+CNS_EOF TYPE X VALUE '20'.
+
+*&---------------------------------------------------------------------*
+*&   TYPES定義
+*&---------------------------------------------------------------------*
+TYPES:
+BEGIN OF TYP_DATA,                         " Aフォーマット
+SEQ        TYPE I,      "SEQ番号
+KUBUN(1)   TYPE N,      "データ区分
+SNO(6)     TYPE N,      "照会番号
+KJDATE(6)  TYPE N,      "勘定日
+KSDATE(6)  TYPE N,      "起算日
+KG(10)     TYPE N,      "金額
+TT_KG(10)  TYPE N,      "内他店券金額
+FCODE(10)  TYPE N,      "振込依頼人コード
+FNAME(48)  TYPE C,      "振込依頼人名
+SBANK(15)  TYPE C,      "仕向銀行名
+SSHOP(15)  TYPE C,      "仕向店名
+DFLG(1)    TYPE C,      "取消区分
+EDI(20)    TYPE C,      "EDI情報
+DUMMY(52)  TYPE C,      "ダミー
+END OF TYP_DATA.
+
+
+*&---------------------------------------------------------------------*
+*&   DATA定義（内部テーブル、テーブルヘッダ）
+*&---------------------------------------------------------------------*
+DATA: IT_IFILE TYPE STANDARD TABLE OF STRING,
+IF_IFILE TYPE STRING,
+IT_OFILE TYPE STANDARD TABLE OF STRING,
+IF_OFILE TYPE STRING,
+IT_DATA  TYPE STANDARD TABLE OF TYP_DATA,
+IF_DATA  TYPE TYP_DATA,
+IT_MERGE TYPE STANDARD TABLE OF TYP_DATA,
+IF_MERGE TYPE TYP_DATA,
+IT_LIST  TYPE STANDARD TABLE OF TYP_DATA,
+IF_LIST  TYPE TYP_DATA,
+
+L_X TYPE X,
+L_CDPOS TYPE CDPOS,
+L_C1(1) type c,
+L_C2(13) type c.
+
+*&---------------------------------------------------------------------*
+*&   DATA定義（グローバル変数）
+*&---------------------------------------------------------------------*
+DATA:    G_HEAD(200)    TYPE C,   "ヘッダレコード
+G_TRAILER(200) TYPE C,   "トレーラーレコード
+G_END(200)     TYPE C.   "エンドレコード
+
+*&---------------------------------------------------------------------*
+*&   画面定義
+*&---------------------------------------------------------------------*
+PARAMETERS: PR_IFILE(255) TYPE C OBLIGATORY
+DEFAULT TEXT-001,               "入力ファイル
+PR_OFILE(255) TYPE C OBLIGATORY
+DEFAULT TEXT-002.               "出力ファイル
+
+
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* 出力フォルダの存在チェック
+PERFORM FRM_CHECK_PATH.
+
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR PR_IFILE.
+* ファイル名の検索ヘルプ
+PERFORM CHOOSE_LOCAL_FILE USING PR_IFILE
+CNS_INFILE
+'*.*'.
+
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR PR_OFILE.
+* ファイル名の検索ヘルプ
+PERFORM CHOOSE_LOCAL_FILE USING PR_OFILE
+CNS_INFILE
+'*.*'.
+
+*&---------------------------------------------------------------------*
+*&   START-OF-SELECTION
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+L_X = space.
+* 入力ファイルの取得
+PERFORM FRM_GET_IFILE .
+
+* 入力ファイルチェック
+PERFORM FRM_CHECK_IFILE.
+
+* マージ処理
+PERFORM FRM_MERGE.
+
+* 出力ファイルの作成
+PERFORM FRM_MAKE_OFILE.
+
+* 合算されなっかたデータのリストを出力する
+PERFORM FRM_OUTPUT_LIST.
+
+* ファイルの出力
+PERFORM FRM_OUTPUT_OFILE .
+
+
+*&---------------------------------------------------------------------*
+*&      Form  CHOOSE_LOCAL_FILE
+*&---------------------------------------------------------------------*
+*       ファイルをオープンする
+*----------------------------------------------------------------------*
+FORM CHOOSE_LOCAL_FILE USING    PR_IFILE
+PR_PATH
+PR_FILTER.
+DATA: L_IT_FNAME     TYPE FILETABLE,
+L_SUBRC        TYPE I,
+INIT_DIRECTORY TYPE STRING,
+WINDOW_TITLE   TYPE STRING,
+FILE_FILTER    TYPE STRING,
+L_PATH         TYPE STRING.
+
+FILE_FILTER = PR_FILTER.
+L_PATH = PR_PATH.
+REFRESH : L_IT_FNAME.
+MOVE 'C:\' TO INIT_DIRECTORY.
+CALL METHOD CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG
+EXPORTING  WINDOW_TITLE            =  WINDOW_TITLE
+DEFAULT_FILENAME        =  L_PATH
+FILE_FILTER             =  FILE_FILTER
+INITIAL_DIRECTORY       =  INIT_DIRECTORY
+MULTISELECTION          =  ABAP_FALSE
+CHANGING   FILE_TABLE              =  L_IT_FNAME
+RC                      =  L_SUBRC
+EXCEPTIONS FILE_OPEN_DIALOG_FAILED =  1
+CNTL_ERROR              =  2
+ERROR_NO_GUI            =  3
+OTHERS                  =  4
+.
+IF SY-SUBRC <> 0.
+ELSE.
+IF L_SUBRC = 1.
+READ TABLE L_IT_FNAME INTO PR_IFILE INDEX 1.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHOOSE_LOCAL_FILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_IFILE
+*&---------------------------------------------------------------------*
+*      入力ファイルの取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_IFILE.
+
+DATA: L_LINES   TYPE I,
+L_INDEX   TYPE I,
+L_INDEX_F TYPE I,
+L_LEN     TYPE I,
+L_FLEN    TYPE I,
+L_END     TYPE I,
+L_TRAILER TYPE I,
+L_OFFLEN  TYPE I,
+L_FIELD   TYPE STRING.
+
+FIELD-SYMBOLS <FS_FIELD>.
+
+* ファイルをアップロードする
+PERFORM FRM_UPLOAD_IFILE.
+
+DESCRIBE TABLE IT_IFILE LINES L_LINES.
+L_END = L_LINES.
+L_TRAILER = L_LINES - 1.
+
+LOOP AT IT_IFILE
+INTO IF_IFILE.
+
+L_LEN = STRLEN( IF_IFILE ).
+IF L_LEN <> 200.
+* 不正な電子銀行報告書ファイルです
+STOP.
+ENDIF.
+
+L_INDEX = L_INDEX + 1.
+IF L_INDEX = 1.
+G_HEAD = IF_IFILE.
+CONTINUE.
+ENDIF.
+IF L_INDEX = L_TRAILER.
+G_TRAILER = IF_IFILE.
+CONTINUE.
+ENDIF.
+IF L_INDEX = L_END.
+G_END = IF_IFILE.
+CONTINUE.
+ENDIF.
+CLEAR: L_INDEX_F,
+L_FLEN,
+L_OFFLEN,
+IF_MERGE.
+DO.
+L_INDEX_F = L_INDEX_F + 1.
+ASSIGN COMPONENT L_INDEX_F OF STRUCTURE IF_MERGE
+TO <FS_FIELD>.
+IF SY-SUBRC = 0.
+IF L_INDEX_F = 1.
+<FS_FIELD> = L_INDEX.
+ELSE.
+DESCRIBE FIELD <FS_FIELD> LENGTH L_FLEN.
+L_FIELD = IF_IFILE+L_OFFLEN(L_FLEN).
+L_OFFLEN = L_OFFLEN + L_FLEN.
+<FS_FIELD> = L_FIELD.
+ENDIF.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+APPEND IF_MERGE TO IT_MERGE.
+ENDLOOP.
+
+ENDFORM.                    " FRM_GET_IFILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_OUTPUT_OFILE
+*&---------------------------------------------------------------------*
+*       ファイルの出力
+*----------------------------------------------------------------------*
+FORM FRM_OUTPUT_OFILE.
+
+DATA: L_OFILE  TYPE STRING.
+DATA: L_OFILE2 TYPE RLGRAP-FILENAME.
+L_OFILE2 = PR_OFILE.
+L_OFILE = PR_OFILE.
+CALL FUNCTION 'GUI_DOWNLOAD'
+EXPORTING
+FILENAME                     = L_OFILE
+TRUNC_TRAILING_BLANKS_EOL = 'X'
+TABLES
+DATA_TAB                     = IT_OFILE
+EXCEPTIONS
+FILE_WRITE_ERROR              = 1
+NO_BATCH                      = 2
+GUI_REFUSE_FILETRANSFER       = 3
+INVALID_TYPE                  = 4
+NO_AUTHORITY                  = 5
+UNKNOWN_ERROR                 = 6
+HEADER_NOT_ALLOWED            = 7
+SEPARATOR_NOT_ALLOWED         = 8
+FILESIZE_NOT_ALLOWED          = 9
+HEADER_TOO_LONG               = 10
+DP_ERROR_CREATE               = 11
+DP_ERROR_SEND                 = 12
+DP_ERROR_WRITE                = 13
+UNKNOWN_DP_ERROR              = 14
+ACCESS_DENIED                 = 15
+DP_OUT_OF_MEMORY              = 16
+DISK_FULL                     = 17
+DP_TIMEOUT                    = 18
+FILE_NOT_FOUND                = 19
+DATAPROVIDER_EXCEPTION        = 20
+CONTROL_FLUSH_ERROR           = 21
+OTHERS                        = 22
+.
+
+IF SY-SUBRC <> 0.
+* ファイル出力に失敗しました
+ENDIF.
+
+ENDFORM.                    " FRM_OUTPUT_OFILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_IFILE
+*&---------------------------------------------------------------------*
+*       入力ファイルチェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_IFILE.
+
+IF G_HEAD+0(1) <> '1'.
+* 不正な電子銀行報告書ファイルです
+STOP.
+ENDIF.
+
+LOOP AT IT_MERGE
+INTO IF_MERGE.
+IF IF_MERGE-KUBUN <> '2'.
+* 不正な電子銀行報告書ファイルです
+STOP.
+ENDIF.
+ENDLOOP.
+
+IF G_TRAILER+0(1) <> '8'.
+* 不正な電子銀行報告書ファイルです
+STOP.
+ENDIF.
+
+IF G_END+0(1) <> '9'.
+* 不正な電子銀行報告書ファイルです
+STOP.
+ENDIF.
+
+ENDFORM.                    " FRM_CHECK_IFILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MERGE
+*&---------------------------------------------------------------------*
+*       マージ処理
+*----------------------------------------------------------------------*
+FORM FRM_MERGE.
+
+DATA: L_COUNT(20) TYPE N,
+L_LINES TYPE I,
+LT_MERGE    TYPE STANDARD TABLE OF TYP_DATA,
+LF_MERGE    TYPE TYP_DATA.
+
+DELETE IT_MERGE WHERE DFLG = '1'.
+
+SORT IT_MERGE BY KJDATE FNAME.
+
+CLEAR:  IT_DATA[],
+IT_LIST[].
+LOOP AT IT_MERGE
+INTO IF_MERGE.
+
+IF LF_MERGE-KJDATE = IF_MERGE-KJDATE
+AND LF_MERGE-FNAME = IF_MERGE-FNAME.
+APPEND IF_MERGE TO LT_MERGE.
+ELSE.
+DESCRIBE TABLE LT_MERGE LINES L_LINES.
+IF L_LINES <> 0.
+* 集計
+CLEAR: L_COUNT.
+PERFORM FRM_COUNT TABLES LT_MERGE
+USING L_COUNT.
+IF L_COUNT > '9999999999'.
+APPEND LINES OF LT_MERGE TO IT_LIST.
+APPEND LINES OF LT_MERGE TO IT_DATA.
+ELSE.
+LF_MERGE-KG = L_COUNT.
+APPEND LF_MERGE TO IT_DATA.
+ENDIF.
+CLEAR: LT_MERGE[].
+ENDIF.
+APPEND IF_MERGE TO LT_MERGE.
+ENDIF.
+LF_MERGE = IF_MERGE.
+
+ENDLOOP.
+CLEAR: L_COUNT.
+PERFORM FRM_COUNT TABLES LT_MERGE
+USING L_COUNT.
+IF L_COUNT > '9999999999'.
+APPEND LINES OF LT_MERGE TO IT_LIST.
+APPEND LINES OF LT_MERGE TO IT_DATA.
+ELSE.
+LF_MERGE-KG = L_COUNT.
+APPEND LF_MERGE TO IT_DATA.
+ENDIF.
+CLEAR: LT_MERGE[].
+
+ENDFORM.                    " FRM_MERGE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_OFILE
+*&---------------------------------------------------------------------*
+*       出力ファイルの作成
+*----------------------------------------------------------------------*
+FORM FRM_MAKE_OFILE.
+
+DATA: L_INDEX     TYPE SY-INDEX,
+LF_DATA     TYPE TYP_DATA,
+L_FLEN      TYPE I,
+L_OFFLEN    TYPE I,
+L_FILE(200) TYPE C,
+L_TMP       TYPE STRING.
+
+FIELD-SYMBOLS: <FS_FIELD> TYPE ANY.
+
+APPEND G_HEAD TO IT_OFILE.
+
+LOOP AT IT_DATA
+INTO LF_DATA.
+
+CLEAR: L_INDEX,
+L_OFFLEN,
+L_FILE,
+L_TMP.
+LF_DATA-EDI = SPACE.
+DO.
+L_INDEX = L_INDEX + 1.
+ASSIGN COMPONENT L_INDEX OF STRUCTURE LF_DATA
+TO <FS_FIELD>.
+
+IF SY-SUBRC = 0.
+IF L_INDEX = 1.
+CONTINUE.
+ELSE.
+DESCRIBE FIELD <FS_FIELD> LENGTH L_FLEN.
+L_FILE+L_OFFLEN(L_FLEN) = <FS_FIELD>.
+L_OFFLEN = L_OFFLEN + L_FLEN.
+ENDIF.
+ELSE.
+EXIT.
+ENDIF.
+ENDDO.
+*    L_FILE+199(1) = CNS_EOF.
+
+APPEND L_FILE TO IT_OFILE.
+ENDLOOP.
+
+APPEND G_TRAILER TO IT_OFILE.
+APPEND G_END TO IT_OFILE.
+
+ENDFORM.                    " FRM_MAKE_OFILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_OUTPUT_LIST
+*&---------------------------------------------------------------------*
+*       合算されなっかたデータのリストを出力する
+*----------------------------------------------------------------------*
+FORM FRM_OUTPUT_LIST.
+
+DATA: L_LINES TYPE I.
+* title
+WRITE:/30 TEXT-T01.
+SKIP.
+
+FORMAT COLOR COL_HEADING.
+WRITE:/0(84) SY-ULINE.
+WRITE:/ SY-VLINE, 4(8)   TEXT-T02,                  "SEQ番号
+SY-VLINE, 15(6)  TEXT-T03,                  "勘定日
+SY-VLINE, 23(48) TEXT-T04,                  "振込依頼人名
+SY-VLINE, 73(10) TEXT-T05, SY-VLINE.        "金額
+WRITE:/0(84) SY-ULINE.
+FORMAT COLOR OFF.
+
+SORT IT_LIST BY KJDATE FNAME SEQ.
+LOOP AT IT_LIST
+INTO IF_LIST.
+
+WRITE:/ SY-VLINE, 4(8)   IF_LIST-SEQ,                 "SEQ番号
+SY-VLINE, 15(6)  IF_LIST-KJDATE,              "勘定日
+SY-VLINE, 23(48) IF_LIST-FNAME,               "振込依頼人名
+SY-VLINE, 73(10) IF_LIST-KG, SY-VLINE.        "金額
+WRITE:/0(84) SY-ULINE.
+L_LINES = SY-TABIX MOD 30.
+IF L_LINES = 0.
+NEW-PAGE.
+ENDIF.
+
+ENDLOOP.
+
+ENDFORM.                    " FRM_OUTPUT_LIST
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_NUMBER
+*&---------------------------------------------------------------------*
+*       数値妥当性チェック
+*----------------------------------------------------------------------*
+*      -->P_VAL   値
+*      <--P_RC    リターンコード
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_NUMBER  USING    P_VAL
+P_RC.
+
+DATA: L_VAL(10) TYPE P DECIMALS 5.
+
+CATCH SYSTEM-EXCEPTIONS CONVT_NO_NUMBER = 1.
+L_VAL = P_VAL.
+ENDCATCH.
+IF SY-SUBRC <> 0.
+P_RC = 'X'.
+ENDIF.
+
+ENDFORM.                    " FRM_CHECK_NUMBER
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPLOAD_IFILE
+*&---------------------------------------------------------------------*
+*       ファイルをアップロードする
+*----------------------------------------------------------------------*
+FORM FRM_UPLOAD_IFILE.
+
+DATA: L_IFILE  TYPE STRING.
+
+L_IFILE = PR_IFILE.
+CALL FUNCTION 'GUI_UPLOAD'
+EXPORTING
+FILENAME                      = L_IFILE
+TABLES
+DATA_TAB                      = IT_IFILE
+EXCEPTIONS
+FILE_OPEN_ERROR               = 1
+FILE_READ_ERROR               = 2
+NO_BATCH                      = 3
+GUI_REFUSE_FILETRANSFER       = 4
+INVALID_TYPE                  = 5
+NO_AUTHORITY                  = 6
+UNKNOWN_ERROR                 = 7
+BAD_DATA_FORMAT               = 8
+HEADER_NOT_ALLOWED            = 9
+SEPARATOR_NOT_ALLOWED         = 10
+HEADER_TOO_LONG               = 11
+UNKNOWN_DP_ERROR              = 12
+ACCESS_DENIED                 = 13
+DP_OUT_OF_MEMORY              = 14
+DISK_FULL                     = 15
+DP_TIMEOUT                    = 16
+OTHERS                        = 17
+.
+IF SY-SUBRC <> 0.
+* 電子銀行報告書のアップロードに失敗しました
+STOP.
+ENDIF.
+
+ENDFORM.                    " FRM_UPLOAD_IFILE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_COUNT
+*&---------------------------------------------------------------------*
+*       集計
+*----------------------------------------------------------------------*
+*      -->PT_MERGE
+*      <--P_COUNT
+*----------------------------------------------------------------------*
+FORM FRM_COUNT  TABLES   PT_MERGE
+USING    P_COUNT.
+
+DATA: LF_MERGE TYPE TYP_DATA.
+
+LOOP AT PT_MERGE
+INTO LF_MERGE.
+
+P_COUNT = P_COUNT + LF_MERGE-KG.
+
+ENDLOOP.
+
+ENDFORM.                    " FRM_COUNT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_PATH
+*&---------------------------------------------------------------------*
+*       出力フォルダの存在チェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_PATH.
+
+DATA: LT_STR   TYPE STANDARD TABLE OF STRING,
+LF_STR   TYPE STRING,
+L_LINES  TYPE I,
+L_PATH   TYPE PCFILE-PATH,
+L_RETURN TYPE STRING.
+
+SPLIT PR_OFILE AT '\' INTO TABLE LT_STR.
+DESCRIBE TABLE LT_STR LINES L_LINES.
+LOOP AT LT_STR
+INTO LF_STR.
+IF SY-TABIX <> L_LINES.
+CONCATENATE L_PATH LF_STR '\' INTO L_PATH.
+ENDIF.
+ENDLOOP.
+
+CALL FUNCTION 'WS_QUERY'
+EXPORTING
+FILENAME             = L_PATH
+QUERY                = 'DE'
+IMPORTING
+RETURN               = L_RETURN
+EXCEPTIONS
+INV_QUERY            = 1
+NO_BATCH             = 2
+FRONTEND_ERROR       = 3
+OTHERS               = 4
+.
+IF L_RETURN <> '1'.
+EXIT.
+ENDIF.
+
+ENDFORM.                    " FRM_CHECK_PATH

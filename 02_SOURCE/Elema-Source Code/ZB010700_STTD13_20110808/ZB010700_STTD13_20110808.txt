@@ -1,0 +1,1327 @@
+*----------------------------------------------------------------------
+*   PROGRAM ZB010700
+*   ※INCLUDE ZXNIWU07kから複製
+*
+*----------------------------------------------------------------------
+*
+* 低価法対応：時価取得ロジック
+*
+*  時価判断：①　受注残が存在した場合には受注残テーブルより伝票単価を
+*　　　　　　　　取得。スケールについては考慮しない。
+*　　　　　　　　受注残の中で納期が一番遅い伝票を採用する。
+*　　　　　　②　受注残が存在しない場合には価格マスタより時価を取得
+*　　　　　　　　スケールが登録されていた場合には在庫数量に見合った
+*　　　　　　　　価格を取得する
+*
+*　特殊判断条件：①受注残にはプラントが設定されていない為プラントから
+*　　　　　　　　営業所への変換が必要になる
+*　　　　　　　　プラントと営業所の関係は４桁のプラントの２文字目以降
+*　　　　　　　　に０を付加した形となる
+*　　　　　　　　例）プラント「P040」の場合⇒営業所「0400」
+*
+*　　　　　　　　②価格マスタから取得する条件はZPR0であり、決定条件は
+*　　　　　　　　「得意先／得意先品目」となる。
+*　　　　　　　　そのため営業所に紐付く得意先とそこに紐付く得意先品目で
+*　　　　　　　　価格を取得する必要がある。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar        Description
+*  2010/04/07   R.Hata           セット品明細の不具合対応
+*  2010/06/30   S.Mikami         社内レート取得の不具合対応
+*----------------------------------------------------------------------
+REPORT ZB010700 .
+TABLES:MBEW.
+*----------------------------------------------------------------------
+* データ定義
+*----------------------------------------------------------------------
+*-- 内部テーブル
+*   MBEWメインテーブル
+TYPES:BEGIN OF T_MBEW,
+MATNR TYPE MBEW-MATNR, "品目
+BWKEY TYPE MBEW-BWKEY, "評価レベル
+BWTAR TYPE MBEW-BWTAR, "評価タイプ
+BKLAS TYPE MBEW-BKLAS, "評価クラス
+LBKUM TYPE MBEW-LBKUM, "評価在庫合計
+END OF T_MBEW.
+DATA:GT_MBEW TYPE STANDARD TABLE OF T_MBEW,
+GW_MBEW TYPE T_MBEW.
+
+*   品目マスタ
+TYPES:BEGIN OF T_MARA,
+MATNR TYPE MARA-MATNR, "品目コード
+MEINS TYPE MARA-MEINS, "基本数量単位
+END OF T_MARA.
+DATA:GT_MARA TYPE HASHED TABLE OF T_MARA
+WITH UNIQUE KEY MATNR,
+GW_MARA TYPE T_MARA.
+
+*   受注残の販売価格取得
+TYPES:BEGIN OF T_YS0011_MST,
+MATNR     TYPE YS0011-MATNR,     "品目コード
+VKBUR     TYPE YS0011-VKBUR,     "営業所
+NOUKI     TYPE YS0011-NOUKI,     "納入日程日付
+AUART     TYPE YS0011-AUART,     "伝票タイプ
+VBELN     TYPE YS0011-VBELN,     "販売伝票
+POSNR     TYPE YS0011-POSNR,     "販売伝票明細
+JTANKA    TYPE YS0011-JTANKA,    "受注単価
+VRKME     TYPE YS0011-VRKME,     "販売単位
+WAERK     TYPE YS0011-WAERK,     "販売伝票通貨
+TANITANKA TYPE YS0011-TANITANKA, "単位単価
+END OF T_YS0011_MST.
+
+DATA: GT_YS0011_MST TYPE SORTED TABLE OF T_YS0011_MST
+WITH UNIQUE KEY MATNR VKBUR NOUKI AUART
+VBELN POSNR,
+GW_YS0011_MST TYPE T_YS0011_MST.
+
+*   受注残の販売価格取得(品目と営業所固定で、納期で逆ソート)
+DATA: GT_YS0011 TYPE STANDARD TABLE OF T_YS0011_MST,
+GW_YS0011 TYPE T_YS0011_MST.
+
+* 伝票条件番号の取得
+TYPES:BEGIN OF T_VBAK,
+VBELN TYPE VBAK-VBELN, "販売伝票番号
+KNUMV TYPE VBAK-KNUMV, "伝票条件番号
+END OF T_VBAK.
+
+DATA: GT_VBAK TYPE SORTED TABLE OF T_VBAK
+WITH NON-UNIQUE KEY VBELN,
+GW_VBAK TYPE T_VBAK.
+
+TYPES:BEGIN OF T_KNUMV,
+KNUMV TYPE KONV-KNUMV, "伝票条件番号
+KMEIN TYPE KONV-KMEIN, "伝票の条件単位
+END OF T_KNUMV.
+
+DATA: GT_KNUMV TYPE SORTED TABLE OF T_KNUMV
+WITH NON-UNIQUE KEY KNUMV,
+GW_KNUMV TYPE T_KNUMV.
+
+*   品目数量単位
+TYPES:BEGIN OF T_MARM,
+MATNR TYPE MARM-MATNR, "品目コード
+MEINH TYPE MARM-MEINH, "在庫単位の代替数量単位
+UMREZ TYPE MARM-UMREZ, "基本数量単位への換算分子
+UMREN TYPE MARM-UMREN, "分母: 基本数量単位へ変換する場合
+END OF T_MARM.
+
+DATA: GT_MARM TYPE HASHED TABLE OF T_MARM
+WITH UNIQUE KEY MATNR MEINH,
+GW_MARM TYPE T_MARM.
+
+*   換算レートタイプ
+TYPES:BEGIN OF T_KURSK,
+KURST TYPE TCURR-KURST,"換算レートタイプ
+FCURR TYPE TCURR-FCURR,"換算前通貨
+TCURR TYPE TCURR-TCURR,"換算後通貨
+GDATU TYPE TCURR-GDATU,"換算レート有効開始日
+UKURS TYPE TCURR-UKURS,"換算レート
+END OF T_KURSK.
+
+DATA: GT_KURSK TYPE HASHED TABLE OF T_KURSK
+WITH UNIQUE KEY KURST FCURR TCURR GDATU,
+GW_KURSK TYPE T_KURSK.
+
+*   明細の換算レート取得
+TYPES:BEGIN OF T_VBKD,
+VBELN TYPE VBKD-VBELN,
+POSNR TYPE VBKD-POSNR,
+KURSK TYPE VBKD-KURSK,
+END OF T_VBKD.
+
+DATA: GT_VBKD TYPE HASHED TABLE OF T_VBKD
+WITH UNIQUE KEY VBELN POSNR,
+GW_VBKD TYPE T_VBKD.
+
+* 請求伝票の一括取得
+TYPES:BEGIN OF T_VBRP,
+WERKS TYPE VBRP-WERKS, "プラント
+MATNR TYPE VBRP-MATNR, "品目
+FKDAT TYPE VBRK-FKDAT, "請求日
+VBELN TYPE VBRP-VBELN, "請求伝票番号
+POSNR TYPE VBRP-POSNR, "請求明細
+KNUMV TYPE VBRK-KNUMV, "伝票条件番号
+KURSK TYPE VBRP-KURSK, "換算レート - 価格設定/統計
+END OF T_VBRP.
+
+DATA: GT_VBRP TYPE SORTED TABLE OF T_VBRP
+WITH UNIQUE KEY WERKS MATNR FKDAT
+VBELN POSNR,
+GW_VBRP TYPE T_VBRP.
+
+*   伝票の条件単位の一括取得
+TYPES:BEGIN OF T_KONV,
+KNUMV TYPE KONV-KNUMV, "伝票条件番号
+KPOSN TYPE KONV-KPOSN, "条件明細番号(DUMMY)
+STUNR TYPE KONV-STUNR, "ステップ番号(DUMMY)
+ZAEHK TYPE KONV-ZAEHK, "条件カウンタ(DUMMY)
+KMEIN TYPE KONV-KMEIN, "伝票の条件単位
+KBETR TYPE KONV-KBETR, "条件レート
+WAERS TYPE KONV-WAERS, "通貨コード
+KPEIN TYPE KONV-KPEIN, "価格条件単位
+END OF T_KONV.
+DATA:GT_KONV TYPE SORTED TABLE OF T_KONV
+WITH UNIQUE KEY KNUMV KPOSN STUNR ZAEHK,
+GW_KONV TYPE T_KONV.
+
+*営業所に紐づく得意先を取得
+TYPES: BEGIN OF T_KNVV,
+VKBUR TYPE KNVV-VKBUR,
+MATNR TYPE KNMT-MATNR,
+KUNNR TYPE KNVV-KUNNR,
+VKORG TYPE KNMT-VKORG,
+VTWEG TYPE KNMT-VTWEG,
+SPART TYPE KNVV-SPART,
+KDMAT TYPE KNMT-KDMAT,
+KNUMH TYPE A901-KNUMH,
+END OF T_KNVV.
+
+
+DATA: GT_KNVV TYPE SORTED TABLE OF T_KNVV  "得意先：販売エリア
+WITH UNIQUE KEY VKBUR MATNR KUNNR VKORG VTWEG SPART,
+GW_KNVV TYPE T_KNVV.            "得意先：販売エリア
+
+* 価格マスタ(得意先/得意先品目)から条件番号を取得
+TYPES: BEGIN OF T_A901,
+VKORGAU  TYPE A901-VKORGAU,  "受注伝票の販売組織
+VTWEG    TYPE A901-VTWEG,    "流通チャネル
+SPART    TYPE A901-SPART,    "製品部門
+KUNNR    TYPE A901-KUNNR,    "得意先コード
+ZZZKDMAT TYPE A901-ZZZKDMAT, "得意先品目コード
+DATAB    TYPE A901-DATAB,    "条件マスタ有効開始日
+DATBI    TYPE A901-DATBI,    "条件マスタ有効終了日
+KFRST    TYPE A901-KFRST,    "承認ステータス
+KBSTAT   TYPE A901-KBSTAT,   "条件の処理ステータス
+KNUMH    TYPE A901-KNUMH,    "条件レコード番号
+END OF T_A901.
+
+DATA: GT_A901 TYPE SORTED TABLE OF T_A901
+WITH NON-UNIQUE KEY VKORGAU VTWEG SPART
+KUNNR ZZZKDMAT DATAB DATBI,
+GW_A901 TYPE T_A901.       "得意先：販売エリア
+
+*   条件明細より販売価格を取得
+TYPES:BEGIN OF T_KONP,
+KNUMH TYPE KONP-KNUMH, "条件レコード番号
+KOPOS TYPE KONP-KOPOS, "条件連続番号
+KMEIN TYPE KONP-KMEIN, "条件単位
+KBETR TYPE KONP-KBETR, "スケールなしの条件金額/百分率
+KONWA TYPE KONP-KONWA, "価格単位 (通貨、率)
+KPEIN TYPE KONP-KPEIN, "価格条件単位
+END OF T_KONP.
+
+DATA: GT_KONP TYPE SORTED TABLE OF T_KONP
+WITH UNIQUE KEY KNUMH KOPOS,
+GW_KONP TYPE T_KONP.
+
+*   スケール条件よりスケール価格を取得
+TYPES:BEGIN OF T_KONM_MST,
+KNUMH TYPE KONM-KNUMH, "条件レコード番号
+KOPOS TYPE KONM-KOPOS, "条件連続番号
+KLFN1 TYPE KONM-KLFN1, "明細スケールの現在の番号
+KSTBM TYPE KONM-KSTBM, "条件スケール数量
+KBETR TYPE KONM-KBETR, "条件レート (条件金額/パーセント)
+END OF T_KONM_MST.
+
+DATA: GT_KONM_MST TYPE SORTED TABLE OF T_KONM_MST
+WITH UNIQUE KEY KNUMH KOPOS KLFN1,
+GW_KONM_MST TYPE T_KONM_MST.
+
+
+*   低価法比較価格テーブル用内部テーブル
+DATA:GT_ZB0011 TYPE STANDARD TABLE OF ZB0011,
+GW_ZB0011 TYPE ZB0011.
+
+*-- 定数 ------------------------------------------------------------
+CONSTANTS:C_ON(1)  TYPE C VALUE 'X',  "フラグON
+C_ERR(1) TYPE C VALUE 'E'.  "エラー
+
+*-- 変数 ------------------------------------------------------------
+DATA:G_DEL_CNT      TYPE I,                    "削除件数
+G_IN_CNT       TYPE I,                    "登録件数
+G_VKBUR        TYPE VBAK-VKBUR,           "営業所
+G_LAST_DAT     TYPE D,                    "末日
+G_LAST_DAT_FLG TYPE SY-SUBRC,             "末日判定結果
+G_ERRFLG(1)    TYPE C.                    "エラーありなし
+
+
+*----------------------------------------------------------------------
+* 選択画面
+*----------------------------------------------------------------------
+SELECT-OPTIONS:S_MATNR FOR MBEW-MATNR,"品目
+S_BWKEY FOR MBEW-BWKEY,"評価レベル
+S_BWTAR FOR MBEW-BWTAR,"評価タイプ
+S_BKLAS FOR MBEW-BKLAS."評価クラス
+PARAMETERS:P_STDAT TYPE D OBLIGATORY. "売上基準日
+
+*----------------------------------------------------------------------
+* 主処理
+*----------------------------------------------------------------------
+START-OF-SELECTION.
+
+*-- 低価法比較価格テーブル削除
+PERFORM DELETE_ZB0011.
+
+*-- メインテーブル(MBEW)取得
+PERFORM GET_MAIN_TABLE.
+CHECK G_ERRFLG IS INITIAL.
+
+*-- 補足データ一括取得
+PERFORM GET_SUB_DATA.
+
+*-- 低価法比較価格テーブル用データ作成
+PERFORM EDIT_DATA_ZB0011.
+
+*-- 低価法比較価格テーブル用データ登録
+PERFORM INSERT_ZB0011.
+
+*-- 実行結果メッセージ出力
+PERFORM WRITE_MESSAGE.
+
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_ZB0011
+*&---------------------------------------------------------------------*
+*       低価法比較価格テーブル削除
+*----------------------------------------------------------------------*
+FORM DELETE_ZB0011.
+*-- 初期化
+CLEAR:G_ERRFLG,G_DEL_CNT.
+
+DELETE FROM ZB0011 WHERE MATNR IN S_MATNR
+AND BWKEY IN S_BWKEY
+AND BWTAR IN S_BWTAR.
+IF SY-SUBRC = 0.
+G_DEL_CNT = SY-DBCNT.  "削除件数確保
+ELSEIF SY-SUBRC = 4.
+G_DEL_CNT = 0.         "削除件数ゼロ固定
+ELSE.
+ROLLBACK WORK.
+*   低価法比較価格テーブルの削除でエラーが発生しました。
+MESSAGE E400(Z1) WITH TEXT-001.
+G_ERRFLG = C_ON.
+ENDIF.
+ENDFORM.                    " DELETE_ZB0011
+*&---------------------------------------------------------------------*
+*&      Form  GET_MAIN_TABLE
+*&---------------------------------------------------------------------*
+*       メインテーブル取得
+*----------------------------------------------------------------------*
+FORM GET_MAIN_TABLE.
+*-- 初期化
+CLEAR:G_ERRFLG,GW_MBEW.
+REFRESH:GT_MBEW.
+
+*-- 取得
+SELECT MATNR BWKEY BWTAR BKLAS LBKUM
+INTO TABLE GT_MBEW
+FROM MBEW
+WHERE MATNR IN S_MATNR
+AND BWKEY IN S_BWKEY
+AND BWTAR IN S_BWTAR
+AND BKLAS IN S_BKLAS.
+
+IF GT_MBEW[] IS INITIAL. "該当データなし
+*   該当データは存在しません
+MESSAGE S008(Z1).
+G_ERRFLG = C_ON.
+ENDIF.
+
+
+ENDFORM.                    " GET_MAIN_TABLE
+*&---------------------------------------------------------------------*
+*&      Form  GET_SUB_DATA
+*&---------------------------------------------------------------------*
+*       補足データ一括取得
+*----------------------------------------------------------------------*
+FORM GET_SUB_DATA.
+TYPES : BEGIN OF LTY_KNVV ,
+KUNNR TYPE KNVV-KUNNR ,
+VKBUR TYPE KNVV-VKBUR ,
+SPART TYPE KNVV-SPART ,
+LOEVM TYPE KNVV-LOEVM ,
+END OF LTY_KNVV .
+
+TYPES : BEGIN OF LTY_KNMT ,
+MATNR TYPE KNMT-MATNR ,
+KUNNR TYPE KNMT-KUNNR ,
+VKORG TYPE KNMT-VKORG ,
+VTWEG TYPE KNMT-VTWEG ,
+KDMAT TYPE KNMT-KDMAT ,
+END OF LTY_KNMT .
+
+
+DATA:LV_MAE          TYPE D.                  "直近1ヶ月の日付
+
+DATA : LT_KNV2 TYPE TABLE OF LTY_KNVV ,
+LW_KNV2 TYPE LTY_KNVV .
+
+DATA : LT_KNMT TYPE TABLE OF LTY_KNMT ,
+LW_KNMT TYPE LTY_KNMT .
+
+LV_MAE = P_STDAT - 31.
+*-- 初期化
+*   内部テーブル
+REFRESH:GT_MARA,
+GT_YS0011_MST,
+GT_VBAK,
+GT_KNUMV,
+GT_MARM,
+GT_KURSK,
+GT_VBKD,
+GT_VBRP,
+GT_KONV,
+GT_KNVV,
+GT_A901,
+GT_KONP,
+GT_KONM_MST.
+
+*-- テーブル読み込み
+*   品目マスタ
+SELECT MATNR MEINS
+INTO TABLE GT_MARA
+FROM MARA
+FOR ALL ENTRIES IN GT_MBEW
+WHERE MATNR = GT_MBEW-MATNR.
+
+*   受注残の販売価格
+SELECT MATNR VKBUR NOUKI AUART
+VBELN POSNR JTANKA
+VRKME WAERK TANITANKA
+INTO TABLE GT_YS0011_MST
+FROM YS0011.
+
+IF NOT GT_YS0011_MST[] IS INITIAL.
+*   伝票条件番号の取得
+SELECT VBELN
+KNUMV
+INTO TABLE GT_VBAK
+FROM VBAK
+FOR ALL ENTRIES IN GT_YS0011_MST
+WHERE VBELN = GT_YS0011_MST-VBELN.
+ENDIF.
+
+IF NOT GT_VBAK[] IS INITIAL.
+SELECT KNUMV
+KMEIN
+INTO TABLE GT_KNUMV
+FROM KONV
+FOR ALL ENTRIES IN GT_VBAK
+WHERE KNUMV = GT_VBAK-KNUMV.
+ENDIF.
+
+*   品目数量単位
+SELECT MATNR MEINH
+UMREZ UMREN
+INTO TABLE GT_MARM
+FROM MARM
+FOR ALL ENTRIES IN GT_MBEW
+WHERE MATNR = GT_MBEW-MATNR.
+
+*   換算レートタイプ
+SELECT KURST FCURR TCURR GDATU UKURS
+INTO TABLE GT_KURSK
+FROM TCURR
+WHERE ( KURST = 'K'   OR KURST = 'EURK' )
+AND ( FCURR = 'USD' OR FCURR = 'JPY'  )
+AND ( TCURR = 'JPY' OR TCURR = 'EUR'  ).
+
+*   明細の換算レート
+IF NOT GT_YS0011_MST[] IS INITIAL.
+SELECT VBELN POSNR KURSK
+INTO TABLE GT_VBKD
+FROM VBKD
+FOR ALL ENTRIES IN GT_YS0011_MST
+WHERE VBELN = GT_YS0011_MST-VBELN.
+ENDIF.
+
+*   請求伝票の一括取得
+SELECT VBRP~WERKS VBRP~MATNR
+VBRK~FKDAT
+VBRP~VBELN VBRP~POSNR
+VBRK~KNUMV
+VBRP~KURSK
+INTO TABLE GT_VBRP
+FROM VBRK
+INNER JOIN VBRP
+ON VBRK~VBELN = VBRP~VBELN
+WHERE VBRK~FKDAT <= P_STDAT          "請求日 <= キー日付
+AND VBRK~FKDAT >= LV_MAE.          "請求日 >= 31日前
+
+*-- 伝票の条件単位の一括取得
+SELECT KNUMV   "伝票条件番号
+KPOSN   "条件明細
+STUNR   "ステップ番号
+ZAEHK   "条件カウンタ
+KMEIN   "条件単位
+KBETR   "条件レート
+WAERS   "通貨コード
+KPEIN   "価格条件単位
+FROM KONV
+INTO TABLE GT_KONV
+FOR ALL ENTRIES IN GT_VBRP
+WHERE KNUMV = GT_VBRP-KNUMV "伝票条件番号
+AND KSCHL = 'ZPR0'.
+
+*   営業所に紐づく得意先を取得
+*  SELECT DISTINCT
+*         KNVV~VKBUR
+*         KNMT~MATNR
+*         KNVV~KUNNR
+*         KNMT~VKORG
+*         KNMT~VTWEG
+*         KNVV~SPART
+*         KNMT~KDMAT
+*    INTO TABLE GT_KNVV
+*    FROM KNVV
+*         INNER JOIN KNMT
+*            ON KNVV~VKORG = KNMT~VKORG
+*           AND KNVV~VTWEG = KNMT~VTWEG
+*           AND KNVV~KUNNR = KNMT~KUNNR
+*     FOR ALL ENTRIES IN GT_MBEW
+*   WHERE KNVV~LOEVM =  SPACE
+*     AND KNMT~MATNR =  GT_MBEW-MATNR.
+*
+
+SELECT MATNR
+KUNNR
+VKORG
+VTWEG
+KDMAT
+INTO TABLE LT_KNMT
+FROM KNMT .
+*     FOR ALL ENTRIES IN GT_MBEW
+*   WHERE VKORG = '1000'
+*    and  MATNR =  GT_MBEW-MATNR.
+*
+
+
+SELECT KUNNR VKBUR SPART LOEVM
+INTO TABLE LT_KNV2
+FROM KNVV
+FOR ALL ENTRIES IN GT_KNVV
+WHERE KUNNR = GT_KNVV-KUNNR
+AND  VKORG = GT_KNVV-VKORG
+AND  VTWEG = GT_KNVV-VTWEG
+.
+
+LOOP AT LT_KNMT INTO LW_KNMT WHERE MATNR IN S_MATNR .
+READ TABLE LT_KNV2 INTO LW_KNV2 WITH KEY KUNNR = LW_KNMT-KUNNR .
+IF SY-SUBRC EQ 0 AND LW_KNV2-LOEVM EQ SPACE .
+MOVE :
+LW_KNV2-VKBUR TO GW_KNVV-VKBUR ,
+LW_KNMT-MATNR TO GW_KNVV-MATNR ,
+LW_KNMT-KUNNR TO GW_KNVV-KUNNR ,
+LW_KNMT-VKORG TO GW_KNVV-VKORG ,
+LW_KNMT-VTWEG TO GW_KNVV-VTWEG ,
+LW_KNV2-SPART TO GW_KNVV-SPART ,
+LW_KNMT-KDMAT TO GW_KNVV-KDMAT .
+INSERT GW_KNVV INTO TABLE GT_KNVV.
+ENDIF .
+CLEAR : GW_KNVV ,LW_KNV2 ,LW_KNMT .
+ENDLOOP .
+
+
+*   価格マスタ(得意先/得意先品目)から条件番号を取得
+IF NOT  GT_KNVV[] IS INITIAL.
+SELECT VKORGAU  "受注伝票の販売組織
+VTWEG    "流通チャネル
+SPART    "製品部門
+KUNNR    "得意先コード
+ZZZKDMAT "得意先品目コード
+DATAB    "条件マスタ有効開始日
+DATBI    "条件マスタ有効終了日
+KFRST    "承認ステータス
+KBSTAT   "条件の処理ステータス
+KNUMH    "条件レコード番号
+INTO TABLE GT_A901
+FROM A901
+FOR ALL ENTRIES IN GT_KNVV
+WHERE KAPPL    = 'V'
+AND KSCHL    = 'ZPR0'
+AND VKORGAU  = GT_KNVV-VKORG
+AND VTWEG    = GT_KNVV-VTWEG
+AND SPART    = GT_KNVV-SPART
+AND KUNNR    = GT_KNVV-KUNNR
+AND ZZZKDMAT = GT_KNVV-KDMAT
+AND DATBI   => SY-DATUM
+AND DATAB   <= SY-DATUM.
+ENDIF.
+
+IF NOT GT_A901[] IS INITIAL.
+*   条件明細より販売価格を取得
+SELECT KNUMH KOPOS KMEIN KBETR KONWA KPEIN
+INTO TABLE GT_KONP
+FROM KONP
+FOR ALL ENTRIES IN GT_A901
+WHERE KNUMH = GT_A901-KNUMH
+AND KSCHL = 'ZPR0'.
+*   スケール条件よりスケール価格を取得
+SELECT KNUMH KOPOS KLFN1 KSTBM KBETR
+INTO TABLE GT_KONM_MST
+FROM KONM
+FOR ALL ENTRIES IN GT_A901
+WHERE KNUMH = GT_A901-KNUMH.
+ENDIF.
+
+* 末日取得
+CLEAR:G_LAST_DAT,
+G_LAST_DAT_FLG.
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+DAY_IN            = P_STDAT
+IMPORTING
+LAST_DAY_OF_MONTH = G_LAST_DAT
+EXCEPTIONS
+DAY_IN_NO_DATE    = 1
+OTHERS            = 2.
+G_LAST_DAT_FLG = SY-SUBRC.
+
+ENDFORM.                    " GET_SUB_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_DATA_ZB0011
+*&---------------------------------------------------------------------*
+*       低価法比較価格テーブル登録用データ作成
+*----------------------------------------------------------------------*
+FORM EDIT_DATA_ZB0011.
+*-- 初期化
+CLEAR:GW_ZB0011.
+REFRESH:GT_ZB0011.
+
+*--MBEW ループ開始
+LOOP AT GT_MBEW INTO GW_MBEW.
+*  --初期化処理
+PERFORM LOOP_IN_CLEAR_PROC.
+
+*  -- 営業所編集
+G_VKBUR = GW_MBEW-BWKEY+1(3).
+G_VKBUR+3(1) = '0'.
+
+*  -- 基本数量単位取得
+READ TABLE GT_MARA INTO GW_MARA
+WITH TABLE KEY MATNR = GW_MBEW-MATNR.
+
+*  -- 受注残の販売価格取得
+LOOP AT GT_YS0011_MST INTO GW_YS0011_MST
+WHERE  MATNR = GW_MBEW-MATNR
+AND  VKBUR = G_VKBUR.
+IF GW_YS0011_MST-AUART = 'TA'
+OR GW_YS0011_MST-AUART = 'ZOR'.
+APPEND GW_YS0011_MST TO GT_YS0011.
+ENDIF.
+ENDLOOP.
+
+*  -- 受注残の販売価格取得で分岐
+*  -- 取得できた場合 受注残の販売価格を取得
+IF NOT GT_YS0011[] IS INITIAL.
+PERFORM GET_JYUTYUUZAN.
+*  -- 取得できなかった場合 売上実績の価格（直近1ヶ月）の存在を確認し、
+*  -- あればそこから販売価格を取得
+*  -- 無ければ価格マスタから販売価格を取得する。
+ELSE.
+PERFORM GET_JISSEKI.
+ENDIF.
+
+* -- 低価法比較価格テーブル登録用データを内部テーブルに格納
+GW_ZB0011-MANDT = SY-MANDT.
+GW_ZB0011-MATNR = GW_MBEW-MATNR. "品目コード
+GW_ZB0011-BWKEY = GW_MBEW-BWKEY. "評価レベル
+GW_ZB0011-BWTAR = GW_MBEW-BWTAR. "評価タイプ
+*   GW_ZB0011-BWPRH = 商法による評価額: レベル 1.上で確定済み
+GW_ZB0011-DATUM = P_STDAT.       "売上基準日
+APPEND GW_ZB0011 TO GT_ZB0011.
+
+ENDLOOP.
+
+* 使用した内部テーブルを全て破棄
+FREE:GT_MBEW,GT_MARA,GT_YS0011_MST,GT_YS0011,GT_VBAK,
+GT_KNUMV,GT_MARM,GT_KURSK,GT_VBKD,GT_VBRP,GT_KONV,
+GT_KNVV,GT_A901,GT_KONP,GT_KONM_MST.
+
+ENDFORM.                    " EDIT_DATA_ZB0011
+*&---------------------------------------------------------------------*
+*&      Form  LOOP_IN_CLEAR_PROC
+*&---------------------------------------------------------------------*
+*       ループ内で使用する変数の初期化
+*----------------------------------------------------------------------*
+FORM LOOP_IN_CLEAR_PROC.
+* 構造体
+CLEAR:GW_MARA,
+GW_YS0011_MST,
+GW_VBAK,
+GW_KNUMV,
+GW_MARM,
+GW_KURSK,
+GW_VBKD,
+GW_VBRP,
+GW_KONV,
+GW_KNVV,
+GW_A901,
+GW_KONP,
+GW_KONM_MST,
+GW_YS0011,
+GW_ZB0011.
+* 変数
+CLEAR:G_VKBUR. "営業所
+
+* 内部テーブル
+REFRESH:GT_YS0011.
+
+ENDFORM.                    " LOOP_IN_CLEAR_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_JYUTYUUZAN
+*&---------------------------------------------------------------------*
+*       ①受注残がある場合は受注残の販売価格を取得
+*----------------------------------------------------------------------*
+FORM GET_JYUTYUUZAN.
+*-- ローカル定義
+DATA:I_STDAT       TYPE D.
+DATA:LV_MENGE      TYPE EKPO-MENGE,
+LV_NOUKI      TYPE D,
+LV_KURSK      TYPE VBKD-KURSK,           "換算レート
+LV_KURST      TYPE TCURR-KURST,          "換算レートタイプ
+LV_UMREZ      TYPE MARM-UMREZ,           "分子
+LV_UMREN      TYPE MARM-UMREN,           "分母
+LV_STDAT      TYPE TCURR-GDATU,          "キー日付(内部形式)
+LV_KBETR      TYPE RM08Y-NIWE_PREIS ,
+LV_KBETR_MIN  TYPE RM08Y-NIWE_PREIS VALUE '999999999.99'.
+
+*-- 初期化
+CLEAR:LV_MENGE,
+LV_NOUKI,
+LV_UMREZ,
+LV_UMREN,
+LV_KURST,
+LV_KURSK,
+LV_KBETR.
+
+*-- 受注残を、納期で逆ソート
+SORT GT_YS0011 BY NOUKI  DESCENDING.
+
+*-- 売上基準日をコピー
+I_STDAT = P_STDAT.
+
+*-- 受注残ループ開始
+LOOP AT GT_YS0011 INTO GW_YS0011.
+CLEAR: LV_MENGE.
+
+*   納期が最大のデータのみを処理対象とする
+IF LV_NOUKI > GW_YS0011-NOUKI.
+EXIT.
+ENDIF.
+
+*   伝票条件番号の取得
+CLEAR:GW_VBAK.
+READ TABLE GT_VBAK INTO GW_VBAK
+WITH TABLE KEY VBELN = GW_YS0011-VBELN.
+
+*   伝票の条件単位取得
+CLEAR:GW_KNUMV.
+READ TABLE GT_KNUMV INTO GW_KNUMV
+WITH TABLE KEY KNUMV = GW_VBAK-KNUMV.
+
+*   伝票の条件単位が品目マスタの条件単位と違う場合,
+*   品目数量単位を取得
+IF GW_KNUMV-KMEIN <> GW_MARA-MEINS.
+CLEAR : LV_UMREZ,LV_UMREN,GW_MARM.
+READ TABLE GT_MARM INTO GW_MARM
+WITH TABLE KEY MATNR = GW_YS0011-MATNR
+MEINH = GW_KNUMV-KMEIN.
+IF SY-SUBRC = 0.
+*        基本数量単位での受注単価を算出
+LV_UMREN = GW_MARM-UMREN. "分母
+LV_UMREZ = GW_MARM-UMREZ. "分子
+GW_YS0011-JTANKA = GW_YS0011-JTANKA * LV_UMREN / LV_UMREZ.
+ELSE.
+*       計算対象外
+CONTINUE.
+ENDIF.
+ENDIF.
+
+***円貨以外の場合は通貨変換をする
+IF GW_YS0011-WAERK <> 'JPY'.
+*     指定されたキー日付が末日の場合
+*   modify 2010/06/30 S.MIKAMI {
+*      IF G_LAST_DAT_FLG = 0.
+*        I_STDAT  = G_LAST_DAT.
+IF G_LAST_DAT_FLG = 0
+AND I_STDAT  = G_LAST_DAT.
+* } modify 2010/06/30 S.MIKAMI
+*      換算レートタイプを取得　　　　
+CASE GW_YS0011-WAERK.
+WHEN 'USD'.
+LV_KURST = 'K'.
+WHEN 'EUR'.
+LV_KURST = 'EURK'.
+WHEN OTHERS.
+LV_KURST = 'M'.
+ENDCASE.
+*      決算日レートの取得
+IF LV_KURST = 'K'     OR
+LV_KURST = 'EURK'.
+*        キー日付を外部⇒内部形式に変換
+CALL FUNCTION 'CONVERSION_EXIT_INVDT_INPUT'
+EXPORTING
+INPUT  = I_STDAT
+IMPORTING
+OUTPUT = LV_STDAT.
+
+CLEAR:GW_KURSK.
+CASE LV_KURST.
+*          換算レートタイプ'K'の場合、元USD→先JPY
+WHEN 'K'.
+READ TABLE GT_KURSK INTO GW_KURSK
+WITH TABLE KEY KURST = 'K'
+FCURR = 'USD'
+TCURR = 'JPY'
+GDATU = LV_STDAT.
+*          換算レートタイプ'EURK'の場合、元JPY→先EUR
+WHEN 'EURK'.
+READ TABLE GT_KURSK INTO GW_KURSK
+WITH TABLE KEY KURST = 'EURK'
+FCURR = 'JPY'
+TCURR = 'EUR'
+GDATU = LV_STDAT.
+WHEN OTHERS.
+ENDCASE.
+
+LV_KURSK = GW_KURSK-UKURS.
+
+IF SY-SUBRC = 0.
+*          換算レートタイプ'EURK'の場合は、レートをプラス値に変換
+IF LV_KURST = 'EURK'.
+LV_KURSK = LV_KURSK * -1.
+ENDIF.
+ELSE.
+*          決算日レートが取得できない場合は、メッセージ出力
+MESSAGE S400(Z1) WITH '決算日レートが未登録です'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+*     指定されたキー日付が末日でない場合
+ELSE.
+*       換算レートタイプは'M'
+LV_KURST = 'M'.
+ENDIF.
+
+*     社内レートの取得
+IF LV_KURST = 'M'.
+*       明細の換算レート取得
+CLEAR:GW_VBKD.
+READ TABLE GT_VBKD INTO GW_VBKD
+WITH TABLE KEY VBELN = GW_YS0011-VBELN
+POSNR = GW_YS0011-POSNR.
+*       明細の換算レートが無ければヘッダの換算レート
+IF SY-SUBRC <> 0.
+READ TABLE GT_VBKD INTO GW_VBKD
+WITH TABLE KEY VBELN = GW_YS0011-VBELN
+POSNR = '000000'.
+ENDIF.
+LV_KURSK = GW_VBKD-KURSK.
+ENDIF.
+
+*     汎用モジュールで円貨に変換
+CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+EXPORTING
+DATE             = SY-DATUM
+FOREIGN_AMOUNT   = GW_YS0011-JTANKA
+FOREIGN_CURRENCY = GW_YS0011-WAERK
+LOCAL_CURRENCY   = 'JPY'
+RATE             = LV_KURSK
+TYPE_OF_RATE     = LV_KURST
+READ_TCURR       = ' '
+IMPORTING
+LOCAL_AMOUNT     = GW_YS0011-JTANKA
+EXCEPTIONS
+NO_RATE_FOUND    = 1
+OVERFLOW         = 2
+NO_FACTORS_FOUND = 3
+NO_SPREAD_FOUND  = 4
+DERIVED_2_TIMES  = 5
+OTHERS           = 6.
+ENDIF.
+*   販売価格を比較し最低価格を取得
+LV_KBETR = GW_YS0011-JTANKA / GW_YS0011-TANITANKA.
+IF LV_KBETR_MIN > LV_KBETR .
+LV_KBETR_MIN = LV_KBETR .
+ENDIF .
+
+LV_NOUKI = GW_YS0011-NOUKI.
+ENDLOOP.
+
+IF LV_KBETR_MIN <> '999999999.99'.
+GW_ZB0011-NIWE_PREIS = LV_KBETR_MIN .
+ENDIF.
+
+ENDFORM.                    " GET_JYUTYUUZAN
+*&---------------------------------------------------------------------*
+*&      Form  GET_JISSEKI
+*&---------------------------------------------------------------------*
+*       ②売上実績の価格（直近1ヶ月）から販売価格を取得
+*       ③受注残が無い場合は価格マスタから販売価格を取得
+*----------------------------------------------------------------------*
+FORM GET_JISSEKI.
+
+*-- ローカル定義
+DATA:I_STDAT       TYPE D.
+
+DATA:LV_KURSK      TYPE VBKD-KURSK,           "換算レート
+LV_KURST      TYPE TCURR-KURST,          "換算レートタイプ
+LV_STDAT      TYPE TCURR-GDATU,          "キー日付(内部形式)
+LV_UMREZ      TYPE MARM-UMREZ,           "分子
+LV_UMREN      TYPE MARM-UMREN,           "分母
+LV_KBETR      TYPE RM08Y-NIWE_PREIS ,
+LV_KBETR_MIN  TYPE RM08Y-NIWE_PREIS VALUE '999999999.99'.
+
+* 請求伝票データ格納用内部テーブル
+TYPES:BEGIN OF TYP_VBR,
+FKDAT TYPE VBRK-FKDAT,"請求日
+KNUMV TYPE VBRK-KNUMV,"伝票条件番号
+KURSK TYPE VBRP-KURSK,"換算レート
+* Add 2010/04/07 >>>
+POSNR TYPE VBRP-POSNR,
+* Add 2010/04/07 <<<
+END OF TYP_VBR.
+DATA:LT_VBR TYPE STANDARD TABLE OF TYP_VBR,
+LW_VBR TYPE TYP_VBR.
+
+*-- 伝票条件テーブル格納用内部テーブル
+DATA: LW_KONV TYPE T_KONV.
+
+*-- 初期化
+REFRESH:LT_VBR.
+CLEAR:LW_VBR,
+LV_KURSK,
+LV_KURST,
+LV_STDAT,
+LV_UMREZ,
+LV_UMREN,
+LV_KBETR.
+LV_KBETR_MIN = '999999999.99'.
+
+*-- 売上基準日をコピー
+I_STDAT = P_STDAT.
+*-- 請求伝票の一括取得
+LOOP AT GT_VBRP INTO GW_VBRP
+WHERE WERKS = GW_MBEW-BWKEY     "プラント
+AND MATNR = GW_MBEW-MATNR.     "品目
+CLEAR LW_VBR.
+MOVE-CORRESPONDING GW_VBRP TO LW_VBR.
+APPEND LW_VBR TO LT_VBR.
+ENDLOOP.
+
+IF LT_VBR[] IS INITIAL.        "該当データがない場合、③価格マスタ取得
+PERFORM GET_MASTER.
+ELSE.                          "あれば②売上実績の処理を行う。
+*-- 最大請求日のデータのみを残して廃棄
+SORT LT_VBR BY FKDAT DESCENDING .         "請求日で降順ソート
+READ TABLE LT_VBR INTO LW_VBR INDEX 1.    "先頭一件読込
+DELETE LT_VBR WHERE FKDAT <> LW_VBR-FKDAT."先頭と同じ日付以外排除
+
+*-- 処理対象データでループ
+LOOP AT LT_VBR INTO LW_VBR.
+*---- 使用変数の初期化
+CLEAR:LW_KONV,             "伝票条件取得項目
+LV_UMREZ,
+LV_UMREN,
+LV_KURSK,            "換算レート
+LV_KURST.            "換算レートタイプ
+
+*---- 伝票の条件単位取得
+LOOP AT GT_KONV INTO LW_KONV WHERE KNUMV = LW_VBR-KNUMV
+* Add 2010/04/07 >>>
+AND  KPOSN = LW_VBR-POSNR
+* Add 2010/04/07 <<<
+.
+EXIT.                    "伝票条件番号でヒットした先頭を採用
+ENDLOOP.
+
+*---- 型変換（KONV → YS0011)
+CLEAR:GW_YS0011.
+GW_YS0011-JTANKA    = LW_KONV-KBETR. "単価として条件レートを格納
+GW_YS0011-WAERK     = LW_KONV-WAERS. "通貨コード格納
+GW_YS0011-TANITANKA = LW_KONV-KPEIN. "単位単価として価格単位を格納
+
+*---- 伝票条件単位と基本数量単位を比較
+IF GW_MARA-MEINS <> LW_KONV-KMEIN.
+CLEAR:GT_MARM,LV_UMREZ,LV_UMREN.
+READ TABLE GT_MARM INTO GW_MARM
+WITH TABLE KEY  MATNR = GW_MBEW-MATNR
+MEINH = LW_KONV-KMEIN.
+IF SY-SUBRC = 0.
+LV_UMREN = GW_MARM-UMREN.
+LV_UMREZ = GW_MARM-UMREZ.
+*        基本数量単位での受注単価を算出
+GW_YS0011-JTANKA = GW_YS0011-JTANKA * LV_UMREN / LV_UMREZ.
+ELSE.
+CONTINUE.             "次の請求伝票データへ
+ENDIF.
+ENDIF.
+
+*---- 円貨以外の場合は通貨変換をする
+IF GW_YS0011-WAERK <> 'JPY'.
+*       指定されたキー日付が末日の場合
+IF G_LAST_DAT_FLG = 0        AND
+I_STDAT  = G_LAST_DAT.
+*        換算レートタイプを取得　　　　
+CASE GW_YS0011-WAERK.
+WHEN 'USD'.
+LV_KURST = 'K'.
+WHEN 'EUR'.
+LV_KURST = 'EURK'.
+WHEN OTHERS.
+LV_KURST = 'M'.
+ENDCASE.
+
+*        決算日レートの取得
+IF LV_KURST = 'K'     OR
+LV_KURST = 'EURK'.
+*          キー日付を外部⇒内部形式に変換
+CLEAR: LV_STDAT.
+CALL FUNCTION 'CONVERSION_EXIT_INVDT_INPUT'
+EXPORTING
+INPUT  = I_STDAT
+IMPORTING
+OUTPUT = LV_STDAT.
+
+CLEAR:LV_KURSK,GW_KURSK.
+CASE LV_KURST.
+*            換算レートタイプ'K'の場合、元USD→先JPY
+WHEN 'K'.
+READ TABLE GT_KURSK INTO GW_KURSK
+WITH TABLE KEY KURST = 'K'
+FCURR = 'USD'
+TCURR = 'JPY'
+GDATU = LV_STDAT.
+*            換算レートタイプ'EURK'の場合、元JPY→先EUR
+WHEN 'EURK'.
+READ TABLE GT_KURSK INTO GW_KURSK
+WITH TABLE KEY KURST = 'EURK'
+FCURR = 'JPY'
+TCURR = 'EUR'
+GDATU = LV_STDAT.
+WHEN OTHERS.
+ENDCASE.
+
+LV_KURSK = GW_KURSK-UKURS.
+
+IF SY-SUBRC = 0.
+*            換算レートタイプ'EURK'の場合は、レートをプラス値に変換
+IF LV_KURST = 'EURK'.
+LV_KURSK = LV_KURSK * -1.
+ENDIF.
+ELSE.
+*            決算日レートが取得できない場合は、メッセージ出力
+MESSAGE S400(Z1) WITH '決算日レートが未登録です'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+*       指定されたキー日付が末日でない場合
+ELSE.
+*         換算レートタイプは'M'
+LV_KURST = 'M'.
+ENDIF.
+*       社内レートの取得
+IF LV_KURST = 'M'.
+*         明細の換算レート取得
+LV_KURSK = LW_VBR-KURSK. "社内レートは請求伝票の換算レート
+ENDIF.
+*       汎用モジュールで円貨に変換
+CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+EXPORTING
+DATE             = SY-DATUM
+FOREIGN_AMOUNT   = GW_YS0011-JTANKA
+FOREIGN_CURRENCY = GW_YS0011-WAERK
+LOCAL_CURRENCY   = 'JPY'
+RATE             = LV_KURSK
+TYPE_OF_RATE     = LV_KURST
+READ_TCURR       = ' '
+IMPORTING
+LOCAL_AMOUNT     = GW_YS0011-JTANKA
+EXCEPTIONS
+NO_RATE_FOUND    = 1
+OVERFLOW         = 2
+NO_FACTORS_FOUND = 3
+NO_SPREAD_FOUND  = 4
+DERIVED_2_TIMES  = 5
+OTHERS           = 6.
+ENDIF.
+
+*     価格条件単位で割り算
+LV_KBETR = GW_YS0011-JTANKA / GW_YS0011-TANITANKA.
+
+*     算出結果の最小値をセット
+IF LV_KBETR_MIN > LV_KBETR .
+LV_KBETR_MIN = LV_KBETR .
+ENDIF .
+
+ENDLOOP.
+
+IF LV_KBETR_MIN <> '999999999.99'.
+GW_ZB0011-NIWE_PREIS = LV_KBETR_MIN .
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " GET_JISSEKI
+*&---------------------------------------------------------------------*
+*&      Form  GET_MASTER
+*&---------------------------------------------------------------------*
+*       価格マスタから販売価格を取得
+*----------------------------------------------------------------------*
+FORM GET_MASTER.
+* ローカル定義
+TYPES: BEGIN OF TYP_KNVV,
+KUNNR TYPE KNVV-KUNNR,
+VKORG TYPE KNMT-VKORG,
+VTWEG TYPE KNMT-VTWEG,
+SPART TYPE KNVV-SPART,
+KDMAT TYPE KNMT-KDMAT,
+KNUMH TYPE A901-KNUMH,
+END OF TYP_KNVV.
+
+DATA: LT_KNVV TYPE TABLE OF TYP_KNVV, "得意先：販売エリア
+LW_KNVV TYPE TYP_KNVV,          "得意先：販売エリア
+LT_KONM TYPE TABLE OF KONM,     "条件(スケール)
+LW_KONM TYPE KONM.              "条件(スケール)
+
+DATA: LV_MENGE      TYPE EKPO-MENGE,
+LV_KURST      TYPE TCURR-KURST,          "換算レートタイプ
+LV_KURSK      TYPE VBKD-KURSK,           "換算レート
+LV_UMREZ      TYPE MARM-UMREZ,  "分子
+LV_UMREN      TYPE MARM-UMREN,  "分母
+LV_STDAT      TYPE TCURR-GDATU,
+LV_KBETR      TYPE RM08Y-NIWE_PREIS ,
+LV_KBETR_MIN  TYPE RM08Y-NIWE_PREIS VALUE '999999999.99'.
+
+
+DATA:I_STDAT       TYPE D.
+
+* 初期化
+CLEAR:LW_KNVV,
+LW_KONM,
+LV_MENGE,
+LV_KURST,
+LV_KURSK,
+LV_UMREZ,
+LV_UMREN,
+LV_STDAT,
+LV_KBETR.
+
+LV_KBETR_MIN = '999999999.99'.
+
+REFRESH:LT_KNVV,
+LT_KONM.
+
+I_STDAT = P_STDAT.
+
+* 営業所に紐づく得意先を取得
+LOOP AT GT_KNVV INTO GW_KNVV
+WHERE VKBUR = G_VKBUR
+AND MATNR = GW_MBEW-MATNR.
+CLEAR:LW_KNVV.
+MOVE-CORRESPONDING GW_KNVV TO LW_KNVV.
+APPEND LW_KNVV TO LT_KNVV.
+ENDLOOP.
+
+* 重複削除
+SORT LT_KNVV.
+DELETE ADJACENT DUPLICATES FROM LT_KNVV.
+
+* 得意先の販売価格のうち、最低価格を取得する
+LOOP AT LT_KNVV INTO LW_KNVV.
+CLEAR:LV_MENGE.
+
+*   価格マスタ(得意先/得意先品目)から条件番号を取得
+CLEAR:GW_A901.
+LOOP AT GT_A901 INTO GW_A901
+WHERE VKORGAU  = LW_KNVV-VKORG
+AND VTWEG    = LW_KNVV-VTWEG
+AND SPART    = LW_KNVV-SPART
+AND KUNNR    = LW_KNVV-KUNNR
+AND ZZZKDMAT = LW_KNVV-KDMAT.
+EXIT. "最初の１件だけでよい
+ENDLOOP.
+
+IF GW_A901 IS INITIAL.
+CONTINUE.
+ENDIF.
+
+*   条件明細より販売価格を取得
+CLEAR:GW_KONP.
+LOOP AT GT_KONP INTO GW_KONP
+WHERE KNUMH = GW_A901-KNUMH.
+EXIT.
+ENDLOOP.
+
+IF GW_KONP IS INITIAL.
+CONTINUE.
+ENDIF.
+
+*   スケール条件よりスケール価格を取得
+LOOP AT GT_KONM_MST INTO GW_KONM_MST
+WHERE KNUMH = GW_A901-KNUMH.
+CLEAR:LW_KONM.
+MOVE-CORRESPONDING GW_KONM_MST TO LW_KONM.
+APPEND LW_KONM TO LT_KONM.
+ENDLOOP.
+
+*   スケールが登録されている場合は在庫数に見合う価格を取得
+SORT LT_KONM BY KSTBM DESCENDING.
+LOOP AT LT_KONM INTO LW_KONM.
+IF LW_KONM-KSTBM <= GW_MBEW-LBKUM.
+GW_KONP-KBETR = LW_KONM-KBETR.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+IF GW_KONP-KMEIN <> GW_MARA-MEINS.
+CLEAR : LV_UMREZ,LV_UMREN.
+*      品目数量単位取得
+CLEAR:GW_MARM.
+READ TABLE GT_MARM INTO GW_MARM
+WITH TABLE KEY MATNR = GW_MBEW-MATNR
+MEINH = GW_KONP-KMEIN.
+IF SY-SUBRC = 0.
+LV_UMREZ = GW_MARM-UMREZ.
+LV_UMREN = GW_MARM-UMREN.
+*        基本数量単位での単価を算出
+GW_KONP-KBETR = GW_KONP-KBETR * LV_UMREN / LV_UMREZ.
+ELSE.
+CONTINUE.
+ENDIF.
+ENDIF.
+
+****円貨以外の場合は円貨に換算する
+IF GW_KONP-KONWA <> 'JPY'.
+*     指定されたキー日付が末日の場合
+IF G_LAST_DAT_FLG = 0  AND
+I_STDAT  = G_LAST_DAT.
+*       換算レートタイプ取得
+CASE GW_KONP-KONWA.
+WHEN 'USD'.
+LV_KURST = 'K'.
+WHEN 'EUR'.
+LV_KURST = 'EURK'.
+WHEN OTHERS.
+LV_KURST = 'M'.
+ENDCASE.
+*       決算レート取得
+IF LV_KURST = 'K'     OR
+LV_KURST = 'EURK'.
+*         キー日付を外部⇒内部形式に変換
+CLEAR:LV_STDAT.
+CALL FUNCTION 'CONVERSION_EXIT_INVDT_INPUT'
+EXPORTING
+INPUT  = I_STDAT
+IMPORTING
+OUTPUT = LV_STDAT.
+
+CLEAR:GW_KURSK.
+CASE LV_KURST.
+*           換算レートタイプ'K'の場合、元USD→先JPY
+WHEN 'K'.
+READ TABLE GT_KURSK INTO GW_KURSK
+WITH TABLE KEY KURST = 'K'
+FCURR = 'USD'
+TCURR = 'JPY'
+GDATU = LV_STDAT.
+*           換算レートタイプ'EURK'の場合、元JPY→先EUR
+WHEN 'EURK'.
+READ TABLE GT_KURSK INTO GW_KURSK
+WITH TABLE KEY KURST = 'EURK'
+FCURR = 'JPY'
+TCURR = 'EUR'
+GDATU = LV_STDAT.
+WHEN OTHERS.
+ENDCASE.
+
+IF SY-SUBRC = 0.
+*           換算レートタイプ'EURK'の場合は、レートをプラス値に変換
+IF LV_KURST = 'EURK'.
+LV_KURSK = LV_KURSK * -1.
+ENDIF.
+ELSE.
+*           決算日レートが取得できない場合は、メッセージ出力
+MESSAGE S400(Z1) WITH '決算日レートが未登録です'.
+LEAVE LIST-PROCESSING.
+ENDIF.
+ENDIF.
+ELSE.
+LV_KURST = 'M'.
+ENDIF.
+
+*     社内レート換算の場合、レートは初期値にしておく
+IF LV_KURST = 'M'.
+CLEAR LV_KURSK.
+ENDIF.
+
+*     汎用モジュールで換算する
+CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+EXPORTING
+DATE             = SY-DATUM
+FOREIGN_AMOUNT   = GW_KONP-KBETR
+FOREIGN_CURRENCY = GW_KONP-KONWA
+LOCAL_CURRENCY   = 'JPY'
+RATE             = LV_KURSK
+TYPE_OF_RATE     = LV_KURST
+READ_TCURR       = 'X'
+IMPORTING
+LOCAL_AMOUNT     = GW_KONP-KBETR
+EXCEPTIONS
+NO_RATE_FOUND    = 1
+OVERFLOW         = 2
+NO_FACTORS_FOUND = 3
+NO_SPREAD_FOUND  = 4
+DERIVED_2_TIMES  = 5
+OTHERS           = 6.
+ENDIF.
+*   販売価格を比較し最低価格を取得
+LV_KBETR = GW_KONP-KBETR / GW_KONP-KPEIN .
+IF LV_KBETR_MIN > LV_KBETR .
+LV_KBETR_MIN = LV_KBETR .
+ENDIF .
+
+ENDLOOP.
+IF LV_KBETR_MIN <> '999999999.99'.
+GW_ZB0011-NIWE_PREIS  = LV_KBETR_MIN .
+ENDIF.
+ENDFORM.                    " GET_MASTER
+*&---------------------------------------------------------------------*
+*&      Form  INSERT_ZB0011
+*&---------------------------------------------------------------------*
+*       アドオンテーブル登録
+*----------------------------------------------------------------------*
+FORM INSERT_ZB0011.
+CLEAR:G_IN_CNT.
+
+CHECK NOT GT_ZB0011[] IS INITIAL.
+
+SORT GT_ZB0011.
+DELETE ADJACENT DUPLICATES FROM GT_ZB0011.
+INSERT ZB0011  FROM TABLE GT_ZB0011 ACCEPTING DUPLICATE KEYS.
+IF SY-SUBRC = 0.
+DESCRIBE TABLE GT_ZB0011 LINES G_IN_CNT.
+ELSE.
+ROLLBACK WORK.
+*   低価法比較価格テーブルの登録でエラーが発生しました。
+MESSAGE E400(Z1) WITH TEXT-002.
+ENDIF.
+ENDFORM.                    " INSERT_ZB0011
+
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_MESSAGE
+*&---------------------------------------------------------------------*
+*       メッセージ出力
+*----------------------------------------------------------------------*
+FORM WRITE_MESSAGE.
+* 低価法比較価格テーブル 更新件数
+WRITE:/1 TEXT-005.
+
+* 削除： XXXXXXX
+WRITE:/1 TEXT-003,
+8 G_DEL_CNT.
+
+* 登録： XXXXXXX
+WRITE:/1 TEXT-004,
+8 G_IN_CNT.
+
+ENDFORM.                    " WRITE_MESSAGE

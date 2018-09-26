@@ -1,0 +1,661 @@
+report zk014120 line-size  170
+line-count 58
+message-id y1
+no standard page heading .
+************************************************************************
+*    ﾌﾟﾛｸﾞﾗﾑID： ZK014120                                              *
+*    ﾌﾟﾛｸﾞﾗﾑ名： 支払予定締処理                                        *
+*    処理種別 ： ﾊﾞｯﾁ(ABAP/4)                                          *
+*    処理概要 ： 支払予定データにより支払予定の仕訳を                  *
+*                バッチインプット(Call Transaction)にて登録する。      *
+*                支払予定データの検索条件／仕訳データの固定項目は      *
+*                バリアント画面より入力する。                          *
+*----------------------------------------------------------------------*
+*    作成日   ：2002/01/22                                             *
+*    作成者   ：舘林 裕香                                              *
+*    変更履歴 ：2002/02/15  仕様変更に伴う変更                         *
+*    変更履歴 ：2002/03/04  選択画面調整                               *
+*    変更履歴 ：2002/03/13  YK410読書込処理修正                        *
+*    変更履歴 ：2002/05/16  出力メッセージの選択                       *
+*    変更履歴 ：2002/05/27  会計連絡フラグの更新を修正                 *
+*    変更履歴 ：2002/09/23  プラントをキーに追加                       *
+*                           金額のクリアを追加  　                     *
+*                           YK014120よりコピー  　                     *
+*    変更履歴 ：2002/09/24  金額がマイナスの場合の処理を追加           *
+*                           エントリロックの単位を変更                 *
+************************************************************************
+*// データベース定義 //*
+tables : yk410 .
+tables   t001.     " 2002/03/13 ADD
+************************************************************************
+*// 内部テーブル定義 //*
+*- データ取得
+data : i_yk410 like table of yk410 with header line .
+*- データ編集
+data : begin of st_data ,
+key_bukrs   like  yk410-bukrs   ,    " 会社コード
+key_lifn1   like  yk410-lifn1   ,    " 支払先
+*- 2002/09/23 ADD
+key_werks   like  yk410-werks   ,    "プラント
+*- 2002/09/23 ADD END
+key_paydat  like  yk410-paydat  .    " 支払予定日
+include structure yk410 .
+data : end   of st_data .
+data : i_data  like table of st_data with header line .
+*-
+data : i_bacht like table of st_data with header line .
+*- ＢＤＣテーブル
+data : i_bdcdata like table of bdcdata    with header line ,
+*- メッセージテーブル
+i_messtab like table of bdcmsgcoll with header line ,
+*-
+i_msg     like table of message    with header line .
+************************************************************************
+*// 作業領域定義(ワーク変数、フラグ、カウンタ等) //*
+data : ct_data_input  type n            ,     " 入力件数
+ct_data_check  type n            ,     " 伝票登録件数
+ct_data_err    type n            ,     " エラー件数
+w_bschl_100    like bseg-bschl   ,     " 転記キー｢Dynpro100｣
+w_bschl_302    like bseg-bschl   .     " 転記キー｢Dynpro302｣
+data: w_gjahr like t009b-bdatj.  " 転記日付の年度 2002/03/13 ADD
+************************************************************************
+*選択画面定義
+* selection-screen skip 1 .                              "2002/03/04 DEL
+*- 選択条件
+selection-screen begin of block se1 with frame title text-f01 .
+parameters     : p_bukrs    like  yk410-bukrs
+memory id buk obligatory .    " 会社コード
+select-options : s_lifnr    for   yk410-lifnr  .    " 仕入先コード
+parameters     : p_paydat   like  yk410-paydat
+obligatory .    " 支払予定日
+select-options : s_lifre    for   yk410-lifre  ,    " 請求元
+s_lifn1    for   yk410-lifn1  ,    " 支払先
+s_gsber    for   yk410-gsber  ,    " 事業領域
+s_werks    for   yk410-werks  ,    " プラント
+s_ekorg    for   yk410-ekorg  ,    " 購買組織
+s_ekgrp    for   yk410-ekgrp  .    " 購買グループ
+selection-screen end   of block se1 .
+selection-screen skip 1 .
+*- 転記条件
+selection-screen begin of block se2 with frame title text-f02 .
+parameters :
+p_tcode  like  tstc-tcode                         " t-code
+default 'FB01'    obligatory  ,
+p_blart  like  bkpf-blart                         " 伝票タイプ
+default 'KA'      obligatory  ,
+p_bldat  like  bkpf-bldat          obligatory  ,  " 伝票日付
+p_budat  like  bkpf-budat                         " 転記日付
+default sy-datum  obligatory  ,
+p_bktxt  like  bkpf-bktxt                      ,  " 伝票ﾍｯﾀﾞﾃｷｽﾄ
+*      p_debtor like  bseg-bschl                         " 借方転記キー
+*                       default '27'      obligatory  ,
+*      p_credit like  bseg-bschl                         " 貸方転記キー
+*                       default '34'      obligatory  ,
+p_hkont  like  bseg-hkont          obligatory  ,  " 支払予定勘定
+p_bs_27  like  bseg-bschl                         " 支払予定
+default '27'      obligatory  ,  "  借方転記キー
+p_bs_37  like  bseg-bschl                         " 支払予定
+default '37'      obligatory  ,  "  貸方転記キー
+p_bs_24  like  bseg-bschl                         " 売掛金
+default '24'      obligatory  ,  "  借方転記キー
+p_bs_34  like  bseg-bschl                         " 売掛金
+default '34'      obligatory  ,  "  貸方転記キー
+p_dismo  like  ctu_params-dismode                 " 照会モード
+default 'N'       obligatory  ,
+p_updmo  like  ctu_params-updmode                 " 更新モード
+default 'S'       obligatory  .
+selection-screen end   of block se2 .
+* >> 2002/05/16
+select-options s_msgty for i_msg-msgty default 'S'. "メッセージタイプ
+select-options s_msgno for i_msg-msgno default '312'. "メッセージ番号
+* >>
+
+************************************************************************
+start-of-selection .
+
+*- ロック処理
+* perform frm_enqueue_table .
+*- データ抽出
+perform frm_select_yk410  .
+*- データ作成
+perform frm_make_data     .
+*- バッチインプット処理
+perform frm_batch_main    .
+*- アンロック処理
+perform frm_dequeue_table .
+*- 終了処理
+message s608 with ct_data_input ct_data_check ct_data_err .
+
+*&---------------------------------------------------------------------*
+*&      Form  frm_enqueue_table
+*&---------------------------------------------------------------------*
+*       テーブルロック
+*----------------------------------------------------------------------*
+form frm_enqueue_table.
+
+data : w_msgv1 like sy-msgv1 .   " ロックしてるユーザ取得用
+
+*- テーブルロック<YK410>
+call function 'ENQUEUE_EY_YK410'
+exporting
+mode_yk410     = 'E'
+mandt          = sy-mandt
+exceptions
+foreign_lock   = 1
+system_failure = 2
+others         = 3.
+if sy-subrc <> 0 .
+w_msgv1 = sy-msgv1 .
+message s605 with w_msgv1 .
+stop .
+endif.
+
+endform.                    " frm_enqueue_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_select_yk410
+*&---------------------------------------------------------------------*
+*       データ抽出
+*----------------------------------------------------------------------*
+form frm_select_yk410 .
+*DATA W_DAT LIKE SY-DATUM.                  "2002/03/13 ADD
+*  CLEAR W_DAT.                             "2002/03/13 ADD
+select * from yk410
+into table i_yk410
+where bukrs  =   p_bukrs            " 会社コード
+and lifnr  in  s_lifnr            " 仕入先コード
+and paydat =   p_paydat           " 支払予定日
+and lifre  in  s_lifre            " 請求元
+and lifn1  in  s_lifn1            " 支払先
+and gsber  in  s_gsber            " 事業領域
+and werks  in  s_werks            " プラント
+and ekorg  in  s_ekorg            " 購買組織
+and ekgrp  in  s_ekgrp            " 購買グループ
+*              AND PRCDAT = W_DAT                "2002/03/13 ADD
+and fiflg  = space                "2002/03/13 ADD
+and delflg =   space          .   "
+if sy-subrc <> 0 .
+message s606 .
+stop .
+endif .
+* ロック 2002/09/24 ADD
+data : w_msgv1 like sy-msgv1 .   " ロックしてるユーザ取得用
+loop at i_yk410.
+call function 'ENQUEUE_EY_YK410'
+exporting
+bukrs          = i_yk410-bukrs
+lifnr          = i_yk410-lifnr
+paydoc         = i_yk410-paydoc
+exceptions
+foreign_lock   = 1
+system_failure = 2
+others         = 3.
+if sy-subrc <> 0.
+w_msgv1 = sy-msgv1 .
+message s605 with w_msgv1 .
+stop .
+endif.
+endloop.
+
+endform.                    " frm_select_yk410
+*&---------------------------------------------------------------------*
+*&      Form  frm_make_data
+*&---------------------------------------------------------------------*
+*       データ作成
+*----------------------------------------------------------------------*
+form frm_make_data .
+
+data : w_payamt like yk410-payamt .   " 支払予定額
+
+*- i_yk410 → i_data
+loop at i_yk410 .
+move-corresponding i_yk410 to i_data .
+i_data-key_bukrs  = i_yk410-bukrs  .   " 会社コード
+i_data-key_lifn1  = i_yk410-lifn1  .   " 支払先
+*-2002/09/23 ADD
+i_data-key_werks  = i_yk410-werks  .   "プラント
+*-2002/09/23 ADDEND
+*2002/03/18 MOD START
+*    i_data-key_paydat = i_yk410-paydat .   " 支払予定日
+i_data-key_paydat = i_yk410-zfbdt .   " 支払予定日
+*2002/03/18 MOD END
+append   i_data .
+clear  : i_data , i_yk410 .
+endloop .
+*- i_data → i_bacht
+*-2002/09/23 MOD
+*  sort i_data by key_bukrs key_lifn1 key_paydat .
+*-2002/09/23 MOD END
+*-2002/09/23 ADD
+sort i_data by key_bukrs key_lifn1 key_werks key_paydat .
+*-2002/09/23 ADD END
+loop at i_data .
+move-corresponding i_data to i_bacht .
+w_payamt = w_payamt + i_data-payamt  .
+at end of key_paydat .
+i_bacht-payamt = w_payamt .
+append   i_bacht .
+*-2002/09/23 MOD
+*      clear  : i_bacht , i_data .
+*-2002/09/23 MOD END
+*-2002/09/23 ADD
+clear  : i_bacht , i_data , w_payamt.
+*-2002/09/23 ADD END
+endat .
+endloop .
+
+endform.                    " frm_make_data
+*&---------------------------------------------------------------------*
+*&      Form  frm_batch_main
+*&---------------------------------------------------------------------*
+*       バッチインプット処理
+*----------------------------------------------------------------------*
+form frm_batch_main .
+
+data : w_payamt(13)  type  c          ,   " 通貨設定用
+w_zterm       like  lfb1-zterm .   " 支払条件
+data w_wrbtr like bseg-wrbtr. "2002/09/24 ADD 伝票金額用
+
+loop at i_bacht .
+refresh : i_bdcdata , i_messtab .
+clear   : i_bdcdata , i_messtab , w_payamt .
+*-- 転記キー設定＆支払条件取得
+if i_bacht-payamt = 0 .
+write:/26 text-e01 .
+continue .
+else .
+perform frm_set_bschl changing w_zterm .
+endif .
+*-- 通貨項目
+* 2002/09/24 MOD START
+*   write i_bacht-payamt to w_payamt
+*              currency i_bacht-waers no-grouping  left-justified .
+if i_bacht-payamt > 0.
+w_wrbtr = i_bacht-payamt.
+else.
+w_wrbtr = i_bacht-payamt * -1.
+endif.
+write w_wrbtr to w_payamt
+currency i_bacht-waers no-grouping  left-justified .
+* 2002/09/24 MOD END
+*-- 伝票転記：sapmf05a_100
+perform frm_sapmf05a_100 .
+*-- 伝票転記：sapmf05a_302
+perform frm_sapmf05a_302_1 using w_payamt .
+*-- 伝票転記：sapmf05a_332
+perform frm_sapmf05a_332   using '/00'    .
+*-- 伝票転記：sapmf05a_302
+perform frm_sapmf05a_302_2 using w_payamt w_zterm .
+*-- 伝票転記：sapmf05a_332
+perform frm_sapmf05a_332   using '=BU'    .
+*-- Call Transaction
+perform frm_call_tran .
+*-- プルーフリスト
+perform frm_write_message .
+endloop .
+
+endform.                    " frm_batch_main
+*&---------------------------------------------------------------------*
+*&      Form  frm_sapmf05a_100
+*&---------------------------------------------------------------------*
+*       伝票転記：ヘッダデータ
+*----------------------------------------------------------------------*
+form frm_sapmf05a_100 .
+
+*- 伝票転記：ヘッダデータ
+perform frm_set_bdctab tables   i_bdcdata
+using  : 'X' 'SAPMF05A'    '100'         ,
+*- 伝票転記：ヘッダデータ-伝票日付
+' ' 'BKPF-BLDAT'  p_bldat       ,
+*- 伝票転記：ヘッダデータ-伝票タイプ
+' ' 'BKPF-BLART'  p_blart       ,
+*- 伝票転記：ヘッダデータ-会社コード
+' ' 'BKPF-BUKRS'  p_bukrs       ,
+*- 伝票転記：ヘッダデータ-転記日付
+' ' 'BKPF-BUDAT'  p_budat       ,
+*- 伝票転記：ヘッダデータ-通貨コード
+' ' 'BKPF-WAERS'  i_bacht-waers ,
+*- 伝票転記：ヘッダデータ-締日(換算日付)
+' ' 'BKPF-WWERT'  i_bacht-zfbdt ,
+*- 伝票転記：ヘッダデータ-伝票テキスト(伝票ヘッダ Text)
+' ' 'BKPF-BKTXT'  p_bktxt       ,
+*- 伝票転記：ヘッダデータ-借方転記キー
+*                                 ' ' 'RF05A-NEWBS' p_debtor      ,
+' ' 'RF05A-NEWBS' w_bschl_100   ,
+*- 伝票転記：ヘッダデータ-請求元
+' ' 'RF05A-NEWKO' i_bacht-lifre ,
+*- 伝票転記：ヘッダデータ-エンター
+' ' 'BDC_OKCODE'  '/00'         .
+
+endform.                    " frm_sapmf05a_100
+*&---------------------------------------------------------------------*
+*&      Form  frm_sapmf05a_302
+*&---------------------------------------------------------------------*
+*       伝票転記：追加 仕入先明細
+*----------------------------------------------------------------------*
+form frm_sapmf05a_302_1 using p_payamt .
+
+*- 伝票転記：ヘッダデータ
+perform frm_set_bdctab tables   i_bdcdata
+using  : 'X' 'SAPMF05A'    '302'          ,
+*- 伝票転記：ヘッダデータ-支払予定額
+' ' 'BSEG-WRBTR'  p_payamt       ,
+*- 伝票転記：ヘッダデータ-事業領域
+' ' 'BSEG-GSBER'  i_bacht-gsber  ,
+*- 伝票転記：ヘッダデータ-支払予定日
+' ' 'BSEG-ZFBDT'  i_bacht-paydat ,
+*- 伝票転記：ヘッダデータ-ソートキー
+' ' 'BSEG-ZUONR'  i_bacht-zuonr  ,
+*- 伝票転記：ヘッダデータ-明細テキスト
+' ' 'BSEG-SGTXT'  i_bacht-sgtxt  ,
+*-次明細-*
+*- 伝票転記：ヘッダデータ-貸方転記キー
+*                                 ' ' 'RF05A-NEWBS' p_credit       ,
+' ' 'RF05A-NEWBS' w_bschl_302    ,
+*- 伝票転記：ヘッダデータ-支払先
+' ' 'RF05A-NEWKO' i_bacht-lifn1  ,
+*- 伝票転記：ヘッダデータ-エンター
+' ' 'BDC_OKCODE'  '/07'          .
+
+endform.                    " frm_sapmf05a_302_1
+*&---------------------------------------------------------------------*
+*&      Form  frm_sapmf05a_310_2
+*&---------------------------------------------------------------------*
+*       伝票転記：
+*----------------------------------------------------------------------*
+form frm_sapmf05a_302_2 using p_payamt p_zterm .
+
+*- 伝票転記：ヘッダデータ
+perform frm_set_bdctab tables   i_bdcdata
+using  : 'X' 'SAPMF05A'    '302'          ,
+*- 伝票転記：ヘッダデータ-支払予定勘定
+' ' 'BSEG-HKONT'  p_hkont        ,
+*- 伝票転記：ヘッダデータ-支払予定額
+' ' 'BSEG-WRBTR'  p_payamt       ,
+*- 伝票転記：ヘッダデータ-事業領域
+' ' 'BSEG-GSBER'  i_bacht-gsber  ,
+*- 伝票転記：ヘッダデータ-支払条件<add>
+' ' 'BSEG-ZTERM'  p_zterm        ,
+*- 伝票転記：ヘッダデータ-支払予定日
+' ' 'BSEG-ZFBDT'  i_bacht-paydat ,
+*- 伝票転記：ヘッダデータ-ソートキー
+' ' 'BSEG-ZUONR'  i_bacht-zuonr  ,
+*- 伝票転記：ヘッダデータ-明細テキスト
+' ' 'BSEG-SGTXT'  i_bacht-sgtxt  ,
+*- 伝票転記：ヘッダデータ-保存
+' ' 'BDC_OKCODE'  '/07'          .
+
+endform.                    " frm_sapmf05a_310_2
+*&---------------------------------------------------------------------*
+*&      Form  frm_sapmf05a_332
+*&---------------------------------------------------------------------*
+*       伝票転記：追加 仕入先明細
+*----------------------------------------------------------------------*
+form frm_sapmf05a_332   using p_okcode .
+
+*- 伝票転記：ヘッダデータ
+perform frm_set_bdctab tables   i_bdcdata
+using  : 'X' 'SAPMF05A'    '332'          ,
+*- 伝票転記：ヘッダデータ-請求元
+' ' 'BSEG-XREF1'  i_bacht-lifre  ,
+*- 伝票転記：ヘッダデータ-購買グループ
+' ' 'BSEG-XREF2'  i_bacht-ekgrp  ,
+*- 伝票転記：ヘッダデータ-締日
+' ' 'BSEG-XREF3'  i_bacht-zfbdt  ,
+*- 伝票転記：ヘッダデータ-
+' ' 'BDC_OKCODE'  p_okcode       .
+
+endform.                    " frm_sapmf05a_332
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_bdctab
+*&---------------------------------------------------------------------*
+*       ＤＢＣテーブルへのセット
+*----------------------------------------------------------------------*
+*      -->PBDCDATA    ＢＤＣテーブル
+*      -->operand1    text
+*      -->operand2    text
+*      -->operand3    text
+*----------------------------------------------------------------------*
+form frm_set_bdctab tables p_bdcdata structure bdcdata
+using  value(operand1)
+value(operand2)
+value(operand3) .
+
+clear p_bdcdata .
+
+if operand1 = 'X' .
+p_bdcdata-dynbegin = operand1 .     " 'X'
+p_bdcdata-program  = operand2 .     " PROGRAM NAME
+p_bdcdata-dynpro   = operand3 .     " Dynpro NO
+append p_bdcdata .
+else .
+p_bdcdata-fnam = operand2 .
+p_bdcdata-fval = operand3 .
+append p_bdcdata .
+endif .
+
+endform.                    " frm_set_bdctab
+*&---------------------------------------------------------------------*
+*&      Form  frm_call_tran
+*&---------------------------------------------------------------------*
+*       Call Transaction
+*----------------------------------------------------------------------*
+form frm_call_tran.
+
+ct_data_input = ct_data_input + 1 .
+
+call transaction  p_tcode using         i_bdcdata
+mode          p_dismo
+update        p_updmo
+messages into i_messtab .
+if sy-subrc = 0 .
+ct_data_check = ct_data_check + 1 .
+else  .
+ct_data_err   = ct_data_err   + 1 .
+endif .
+
+endform.                    " frm_call_tran
+*&---------------------------------------------------------------------*
+*&      Form  frm_dequeue_table
+*&---------------------------------------------------------------------*
+*       アンロック<yk410>
+*----------------------------------------------------------------------*
+form frm_dequeue_table .
+
+* 2002/09/24 MOD START
+* call function 'DEQUEUE_EY_YK410'
+*      exporting
+*           mode_yk410 = 'E'
+*           mandt      = sy-mandt
+*           bukrs      = p_bukrs.
+loop at i_yk410.
+call function 'DEQUEUE_EY_YK410'
+exporting
+bukrs  = i_yk410-bukrs
+lifnr  = i_yk410-lifnr
+paydoc = i_yk410-paydoc.
+endloop.
+* 2002/09/24 MOD END
+
+endform.                    " frm_dequeue_table
+*&---------------------------------------------------------------------*
+*&      Form  frm_write_message
+*&---------------------------------------------------------------------*
+*       プルーフリスト出力
+*----------------------------------------------------------------------*
+form frm_write_message .
+
+data : w_cputm   like bkpf-cputm .         " 登録時刻
+*2002/03/13 MOD START
+*         w_gjahr   type n          .        " 転記日付の年度
+*-
+* w_gjahr = p_budat(4) .
+data w_periv like t009b-periv.
+clear t001.
+select single periv into w_periv from t001
+where bukrs = p_bukrs.
+call function 'DATE_TO_PERIOD_CONVERT'
+exporting
+i_date               = p_budat
+*     I_MONMIT             = 00
+i_periv              = w_periv
+importing
+*     E_BUPER              =
+e_gjahr              = w_gjahr
+exceptions
+input_false          = 1
+t009_notfound        = 2
+t009b_notfound       = 3
+others               = 4.
+*2002/03/13 MOD END
+loop at i_messtab .
+*-- メッセージの取得
+perform frm_get_message .
+*--
+if i_messtab-msgv1 <> space .
+select single cputm from bkpf
+into w_cputm
+where bukrs  =  p_bukrs
+and belnr  =  i_messtab-msgv1
+and gjahr  =  w_gjahr .
+if sy-subrc = 0 .
+*------ yk410 の 更新
+perform frm_update_yk410 using i_messtab-msgv1 .
+else .
+message s607 .
+endif .
+endif .
+endloop .
+
+endform.                    " frm_write_message
+*&---------------------------------------------------------------------*
+*&      Form  frm_get_message
+*&---------------------------------------------------------------------*
+*      メッセージの取得
+*----------------------------------------------------------------------*
+form frm_get_message .
+
+data : w_msgid   like sy-msgid   ,   " メッセージ、メッセージクラス
+w_msgno   like sy-msgno   ,   " メッセージ、メッセージ番号
+w_msgty   like sy-msgty   .   " メッセージ、メッセージタイプ
+
+w_msgid = i_messtab-msgid  .
+w_msgno = i_messtab-msgnr  .
+w_msgty = i_messtab-msgtyp .
+
+call function 'WRITE_MESSAGE'
+exporting
+msgid  = w_msgid  " メッセージ、メッセージクラス
+msgno  = w_msgno  " メッセージ、メッセージ番号
+msgty  = w_msgty  " メッセージ、メッセージタイプ
+msgv1  = i_messtab-msgv1
+msgv2  = i_messtab-msgv2
+msgv3  = i_messtab-msgv3
+msgv4  = i_messtab-msgv4
+importing
+messg  = i_msg
+exceptions
+others = 1.
+
+* << 2002/05/15
+*   if sy-subrc = 0 .
+* <<
+* >>
+if sy-subrc     = 0       and
+i_msg-msgty in s_msgty and
+i_msg-msgno in s_msgno.
+* >>
+write:/1 i_msg .
+endif .
+
+endform.                    " frm_get_message
+*&---------------------------------------------------------------------*
+*&      Form  frm_update_yk410
+*&---------------------------------------------------------------------*
+*       yk410 の 更新
+*----------------------------------------------------------------------*
+form frm_update_yk410 using p_msgv1 .
+
+data : p_buper  like  t009b-poper  .
+
+* 2002/05/27 ADD 複数明細を更新する必要がある
+*-2002/09/23 MOD
+*  loop at i_data where key_bukrs  = i_bacht-key_bukrs
+*                   and key_lifn1  = i_bacht-key_lifn1
+*                   and key_paydat = i_bacht-key_paydat.
+*-2002/09/23 MODEND
+*-2002/09/23 ADD
+loop at i_data where key_bukrs  = i_bacht-key_bukrs
+and key_lifn1  = i_bacht-key_lifn1
+and key_werks  = i_bacht-key_werks
+and key_paydat = i_bacht-key_paydat.
+*-2002/09/23 ADDEND
+* move-corresponding i_bacht to yk410 . 2002/05/27 MOD
+move-corresponding i_data to yk410 .
+
+*- 会計年度の取得
+*2002/03/13 MOD START
+*  call function 'DATE_TO_PERIOD_CONVERT'
+*    exporting
+*      i_date               = sy-datum
+*      i_periv              = 'V3'
+*    importing
+*      e_buper              = p_buper
+*      e_gjahr              = yk410-gjahr
+*    exceptions
+*      input_false          = 1
+*      t009_notfound        = 2
+*      t009b_notfound       = 3
+*      others               = 4 .
+yk410-gjahr = w_gjahr.
+*= 更新情報の追加
+yk410-upddat = sy-datum.
+yk410-updtim = sy-uzeit.
+yk410-updusr = sy-uname.
+yk410-fiflg  = 'X'.
+*2002/03/13 MOD END
+*- 会計伝票番号
+yk410-belnr = p_msgv1 .
+*- 処理日
+yk410-prcdat = sy-datum .
+*- 更新
+update yk410.
+*2002/03/12 ADD START
+if sy-subrc <> 0.
+message id 'Y1' type 'E' number '402'
+with 'YK410の更新に失敗しました' yk410-bukrs yk410-lifnr
+yk410-paydoc.
+endif.
+*2002/03/12 ADD END
+clear  yk410 .
+
+* 2002/05/27 ADD
+endloop.
+
+
+endform.                    " frm_update_yk410
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_bschl
+*&---------------------------------------------------------------------*
+*       転記キー設定
+*----------------------------------------------------------------------*
+form frm_set_bschl changing w_zterm .
+
+*- Dynpro100 用
+if     i_bacht-payamt > 0 .
+w_bschl_100 = p_bs_24 .
+elseif i_bacht-payamt < 0 .
+w_bschl_100 = p_bs_34 .
+endif .
+*- Dynpro302 用
+if     i_bacht-payamt > 0 .
+w_bschl_302 = p_bs_37 .
+elseif i_bacht-payamt < 0 .
+w_bschl_302 = p_bs_27 .
+endif .
+*- 支払条件の取得
+select zterm from lfb1 into w_zterm
+where lifnr = i_bacht-lifnr
+and bukrs = p_bukrs        .
+endselect .
+
+endform.                    " frm_set_bschl

@@ -1,0 +1,595 @@
+*&---------------------------------------------------------------------*
+*& 検収照合システム                                                    *
+*&     プログラム名称：一括請求書入金予定作成                          *
+*&     プログラムＩＤ：YK015400                                        *
+*&                   ：ZYK15400(2006.04.10 ～)                         *
+*&     作成者　　　　：K.KAJISA(NDSC)    作成日　　　　：2002/02/19    *
+*&---------------------------------------------------------------------*
+*& 変更履歴
+*& 2002.03.13A 入力パラメータの参照項目変更                    INAGOSHI
+*& 2002.04.02A 会計連絡済YK510-FIFLGを見て抽出 & YK510-FIFLG更新  INA
+*& 2002.05.16  得意先マスタ　会計テキスト長による対象の限定    KURANO
+*&             得意先マスタ　参照製品部門の使用
+*& 2002.10.01  当月請求額→当月税込額へ変更                    KAJISA
+*& 2002.10.17  取引先機能を選択可能に変更                      KAJISA
+*& 2002.10.24  入金先と支払人の取得方を変更                    KAJISA
+*& 2003.04.28  得意先マスタからの営業Ｇ自動提案を削除          ABE
+*& 2006.04.10  会計ﾃｷｽﾄ：XXXの得意先はYK310ﾚｺｰﾄﾞを作成しない   MIKAMI
+*&---------------------------------------------------------------------*
+REPORT      YK015400
+LINE-COUNT 65
+LINE-SIZE 255
+NO STANDARD PAGE HEADING
+MESSAGE-ID Y1.
+************************************************************************
+* 使用DB定義
+TABLES:YK510,
+YK310,
+KNVP,
+KNVV,
+T052,
+TVKBT.
+************************************************************************
+* 内部テーブル定義
+DATA:BEGIN OF ST_YK510,
+BUKRS  LIKE YK510-BUKRS,    "会社コード
+KUNNR  LIKE YK510-KUNNR,    "得意先コード
+ZFBDT  LIKE YK510-ZFBDT,    "締日
+CBLAMT LIKE YK510-CBLAMT,   "入金予定額
+WAERS  LIKE YK510-WAERS,    "通貨コード
+CSTAMT LIKE YK510-CSTAMT,   "当月税込額 2002/10/01 ADD
+END OF ST_YK510.
+
+DATA:I_YK310      LIKE YK310     OCCURS 0 WITH HEADER LINE,
+I_YK510      LIKE ST_YK510  OCCURS 0 WITH HEADER LINE.
+
+************************************************************************
+* ワーク定義
+DATA: CT_REC  TYPE P,                       "汎用カウンタ
+CT_ERR  TYPE P.                       "エラーカウンタ
+* 定数
+DATA:C_PRCFLG LIKE YK310-PRCFLG VALUE '1'. "入力区分(固定値)
+*2002/10/17 DEL START
+*     c_shiharai(2) type c value 'RG',      "支払人(固定値) KNVP検索用
+*     c_nyukin(2)   type c value 'Y3'.      "入金先(固定値) KNVP検索用
+*2002/10/17 DEL END
+DATA W_UPDCNT LIKE SY-DBCNT.               "2002.04.02A
+************************************************************************
+* 選択画面定義
+*parameters     p_bukrs like yk510-bukrs memory id buk    "会社コード
+*               obligatory.
+*select-options s_kunnr for  yk510-kunnr.                 "得意先コード
+*parameters:    p_zfbdt like yk510-zfbdt                  "締日
+*               obligatory,
+*               p_gsber like yk310-gsber memory id gsb,   "事業領域
+*               p_vkorg like yk310-vkorg memory id vko,   "販売組織
+*               p_vtweg like yk310-vtweg memory id vtw,   "流通チャネル
+*               p_spart like yk310-spart memory id spa,   "製品部門
+*               p_sgtxt like yk310-sgtxt.                 "明細テキスト
+************ 2002.03.13A 上記を下記に訂正
+PARAMETERS     P_BUKRS LIKE TVKO-BUKRS MEMORY ID BUK    "会社コード
+OBLIGATORY.
+SELECT-OPTIONS S_KUNNR FOR  KNVV-KUNNR.                 "得意先コード
+PARAMETERS:    P_ZFBDT LIKE YK510-ZFBDT                 "締日
+OBLIGATORY,
+P_GSBER LIKE LIPS-GSBER MEMORY ID GSB,   "事業領域
+P_VKORG LIKE KNVV-VKORG MEMORY ID VKO,   "販売組織
+P_VTWEG LIKE KNVV-VTWEG MEMORY ID VTW,   "流通チャネル
+P_SPART LIKE KNVV-SPART MEMORY ID SPA,   "製品部門
+P_SGTXT LIKE YK310-SGTXT.                "明細テキスト
+PARAMETERS     P_FIFLG AS CHECKBOX DEFAULT ' '.
+"会計連絡済(チェックなら、再作成)
+*select-options s_fiflg for yk510-fiflg no intervals.    "会計連絡済
+
+* >> 2002.05.16
+PARAMETERS     P_TDID  LIKE STXH-TDID DEFAULT 'ZK01'.   "テキストＩＤ
+* >>
+*2002/10/17 ADD START
+PARAMETERS:    P_SHIHA LIKE KNVP-PARVW DEFAULT 'RG',"支払先
+P_NYU   LIKE KNVP-PARVW DEFAULT 'Y3'."入金先
+*2002/10/17 ADD END
+************************************************************************
+INITIALIZATION.
+* 選択条件の初期化
+**  "会計連絡済            2002.04.02A
+*  s_fiflg-sign    = 'I'.
+*  s_fiflg-option  = 'NE'.
+*  s_fiflg-low     = 'X'.
+*  append s_fiflg.
+
+************************************************************************
+START-OF-SELECTION.
+PERFORM INIT_PROC.                      "初期処理
+PERFORM MAIN_PROC.                      "主処理
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INIT_PROC.
+CLEAR:   I_YK310,I_YK510.  "使用内部テーブル初期化
+REFRESH: I_YK310,I_YK510.
+CLEAR: CT_REC,CT_ERR.              "カウンタクリア
+ENDFORM.                    " INIT_PROC
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_PROC
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM MAIN_PROC.
+PERFORM GET_YK510.        "一括請求書ヘッダデータ取得
+PERFORM EDIT_DATA.        "補足データ取得
+PERFORM INSERT_DATA.      "データ登録
+PERFORM F_YK510_MODIFY.   "会計連絡済フラグ更新
+MESSAGE I402(Y1) WITH 'YK310:' CT_REC '件 登録しました'.
+ENDFORM.                    " MAIN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_YK510
+*&---------------------------------------------------------------------*
+*       一括請求書ヘッダデータ 取得
+*----------------------------------------------------------------------*
+FORM GET_YK510.
+* ローカル変数
+* 2006/04/10 MOD START MIKAMI
+*DATA W_STXH LIKE STXH.
+DATA: W_LINE TYPE TLINE.
+*TYPES: BEGIN OF ST_TDNAME,
+*         KUNNR LIKE KNB1-KUNNR,
+*         BUKRS LIKE KNB1-BUKRS,
+*       END OF ST_TDNAME.
+*DATA W_TDNAME TYPE ST_TDNAME.
+DATA W_TDNAME TYPE THEAD-TDNAME.
+* 2006/04/10 MOD END MIKAMI
+
+*
+*  select bukrs kunnr zfbdt waers cblamt        "2002/10/01 MOD
+SELECT BUKRS KUNNR ZFBDT WAERS CSTAMT CBLAMT  "2002/10/01 MOD
+INTO CORRESPONDING FIELDS OF TABLE I_YK510 FROM YK510
+WHERE BUKRS = P_BUKRS
+AND KUNNR IN S_KUNNR
+AND ZFBDT = P_ZFBDT
+AND VKORG = P_VKORG
+AND VTWEG = P_VTWEG
+AND SPART = P_SPART
+AND FIFLG EQ P_FIFLG.         "会計連絡済 2002.04.02A
+*      AND FIFLG IN S_FIFLG.        "会計連絡済 2002.04.02A
+
+* >> 2002.05.16
+* 一括請求書の対象を選択
+LOOP AT I_YK510.
+* 2006/04/10 MOD START MIKAMI
+*    W_TDNAME-KUNNR = I_YK510-KUNNR.
+*    W_TDNAME-BUKRS = P_BUKRS.
+W_TDNAME(10)   = I_YK510-KUNNR.
+W_TDNAME+10(4) = P_BUKRS.
+*    SELECT SINGLE * FROM STXH INTO W_STXH
+*        WHERE TDOBJECT = 'KNB1'
+*          AND TDNAME   = W_TDNAME
+*          AND TDID     = P_TDID
+*          AND TDSPRAS  = SY-LANGU.
+*    IF SY-SUBRC <> 0.
+*      DELETE I_YK510.
+*    ENDIF.
+PERFORM GET_KAIKEI_TEXT USING W_TDNAME
+CHANGING W_LINE.
+CASE W_LINE.
+WHEN SPACE.
+DELETE I_YK510.
+WHEN 'X'.
+WHEN 'XX'.
+WHEN 'XXX'.
+DELETE I_YK510.
+ENDCASE.
+* 2006/04/10 MOD END MIKAMI
+ENDLOOP.
+* >>
+
+ENDFORM.                                                  " GET_YK510
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_DATA
+*&---------------------------------------------------------------------*
+*       補足データ取得
+*----------------------------------------------------------------------*
+FORM EDIT_DATA.
+LOOP AT I_YK510.
+PERFORM OTHES_EDIT.     "雑項目セット
+PERFORM GET_KNVP.       "KNVPデータの取得
+PERFORM GET_KNVV.       "KNVVデータの取得
+PERFORM GET_T052.       "T052データの取得
+PERFORM GET_TVKBT.      "TVKBTデータの取得
+APPEND I_YK310.
+ENDLOOP.
+ENDFORM.                    " EDIT_DATA
+*&---------------------------------------------------------------------*
+*&      Form  OTHES_EDIT
+*&---------------------------------------------------------------------*
+*       雑項目セット
+*----------------------------------------------------------------------*
+FORM OTHES_EDIT.
+* 初期値項目セット
+CLEAR:I_YK310.                        "初期化
+* YK510からの項目セット
+MOVE-CORRESPONDING I_YK510 TO I_YK310."会社、得意先、締日、通貨
+*  i_yk310-incamt = i_yk510-cblamt.      "入金予定額 2002/10/01 MOD
+I_YK310-INCAMT = I_YK510-CSTAMT.      "            2002/10/01 MOD
+* 各固定値のセット
+I_YK310-PRCFLG = C_PRCFLG.            "入力区分
+*パラメータからのセット
+I_YK310-SGTXT = P_SGTXT.              "明細テキスト
+I_YK310-GSBER = P_GSBER.              "事業領域
+I_YK310-VKORG = P_VKORG.              "販売組織
+I_YK310-VTWEG = P_VTWEG.              "流通チャネル
+I_YK310-SPART = P_SPART.              "製品部門
+*システム項目
+I_YK310-INSDAT = SY-DATUM.            "登録日
+I_YK310-INSTIM = SY-UZEIT.            "登録時刻
+I_YK310-INSUSR = SY-UNAME.            "登録者
+* 入金予定番号取得
+PERFORM GET_NUMBER.                   "入金予定番号取得
+* 入金予定日取得
+PERFORM GET_DAY.                      "入金予定日取得
+ENDFORM.                    " OTHES_EDIT
+*&---------------------------------------------------------------------*
+*&      Form  GET_DAY
+*&---------------------------------------------------------------------*
+*       入金予定日取得
+*----------------------------------------------------------------------*
+FORM GET_DAY.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD               = I_YK310-KUNNR
+I_VKORG              = I_YK310-VKORG
+I_VTWEG              = I_YK310-VTWEG
+I_SPART              = I_YK310-SPART
+I_DAY                = I_YK310-ZFBDT
+IMPORTING
+E_SIHARAIBI          = I_YK310-INCDAT
+EXCEPTIONS
+NO_GET_T052          = 1
+NO_GOOD_GETDAY       = 2
+NO_GET_ZTERM         = 3
+OTHERS               = 4.
+IF SY-SUBRC <> 0.
+MESSAGE E001 WITH 'YK_ZFBDT_GET_BY_KNVV' SY-SUBRC.
+"汎用モジュールがエラーリターンしました(ﾓｼﾞｭｰﾙ名=&、ｴﾗｰｺｰﾄﾞ=&)
+ENDIF.
+ENDFORM.                    " GET_DAY
+*&---------------------------------------------------------------------*
+*&      Form  GET_NUMBER
+*&---------------------------------------------------------------------*
+*       入金予定番号取得
+*----------------------------------------------------------------------*
+FORM GET_NUMBER.
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+NR_RANGE_NR             = '10'
+OBJECT                  = 'YKINCDOC'
+QUANTITY                = '1'
+SUBOBJECT               = I_YK310-BUKRS     " 会社コード
+IMPORTING
+NUMBER                  = I_YK310-INCDOC    " 入金予定番号
+EXCEPTIONS
+INTERVAL_NOT_FOUND      = 1
+NUMBER_RANGE_NOT_INTERN = 2
+OBJECT_NOT_FOUND        = 3
+QUANTITY_IS_0           = 4
+QUANTITY_IS_NOT_1       = 5
+INTERVAL_OVERFLOW       = 6
+BUFFER_OVERFLOW         = 7.
+IF SY-SUBRC <> 0.
+MESSAGE E001 WITH 'NUMBER_GET_NEXT' SY-SUBRC.
+"汎用モジュールがエラーリターンしました(ﾓｼﾞｭｰﾙ名=&、ｴﾗｰｺｰﾄﾞ=&)
+ENDIF.
+ENDFORM.                    " GET_NUMBER
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNVP
+*&---------------------------------------------------------------------*
+*       得意先マスタ 取引先機能(KNVP)取得
+*----------------------------------------------------------------------*
+FORM GET_KNVP.
+* ローカル変数
+DATA W_SPART LIKE TVTA-SPART.
+CLEAR W_SPART.
+*2002/10/24 MOD START
+*  clear:knvp.
+*  select parvw kunn2 into (knvp-parvw,knvp-kunn2) from knvp
+*    where kunnr = i_yk310-kunnr
+*      and vkorg = i_yk310-vkorg
+*      and vtweg = i_yk310-vtweg
+*      and spart = i_yk310-spart
+**2002/10/17 MOD START
+**      and ( parvw = c_shiharai
+**         or parvw = c_nyukin ).
+**    if knvp-parvw = c_shiharai.
+*      and ( parvw = P_shiha
+*         or parvw = P_nyu ).
+*    if knvp-parvw = P_shiha.
+**2002/10/17 MOD END
+*      i_yk310-kunrg = knvp-kunn2.        "支払人
+**    elseif knvp-parvw = c_nyukin.       "2002/10/17 MOD
+*     elseif knvp-parvw = P_nyu.          "2002/10/17 MOD
+*      i_yk310-kunr1   = knvp-kunn2.      "入金先
+*    endif.
+*  endselect.
+PERFORM GET_KUNN2 USING P_SHIHA I_YK310-KUNRG.
+PERFORM GET_KUNN2 USING P_NYU   I_YK310-KUNR1.
+*2002/10/24 MOD END
+* >> 2002.05.16
+IF SY-SUBRC <> 0.
+SELECT SINGLE SPAKU FROM TVTA INTO W_SPART
+WHERE VKORG = I_YK310-VKORG
+AND VTWEG = I_YK310-VTWEG
+AND SPART = I_YK310-SPART.
+SELECT PARVW KUNN2 INTO (KNVP-PARVW,KNVP-KUNN2) FROM KNVP
+WHERE KUNNR = I_YK310-KUNNR
+AND VKORG = I_YK310-VKORG
+AND VTWEG = I_YK310-VTWEG
+AND SPART = W_SPART
+*2002/10/17 MOD START
+*        and ( parvw = c_shiharai
+*           or parvw = c_nyukin ).
+*      if knvp-parvw = c_shiharai.
+AND ( PARVW = P_SHIHA
+OR PARVW = P_NYU ).
+IF KNVP-PARVW = P_SHIHA.
+*2002/10/17 MOD END
+I_YK310-KUNRG = KNVP-KUNN2.        "支払人
+*     elseif knvp-parvw = c_nyukin.        "2002/10/17 MOD
+ELSEIF KNVP-PARVW = P_NYU.           "2002/10/17 MOD
+I_YK310-KUNR1   = KNVP-KUNN2.      "入金先
+ENDIF.
+ENDSELECT.
+ENDIF.
+* >>
+
+ENDFORM.                    " GET_KNVP
+*&---------------------------------------------------------------------*
+*&      Form  GET_KNVV
+*&---------------------------------------------------------------------*
+*       得意先マスタ: 販売データ(KNVV)取得
+*----------------------------------------------------------------------*
+FORM GET_KNVV.
+* ローカル変数
+DATA W_SPART LIKE TVTA-SPART.
+CLEAR W_SPART.
+*
+CLEAR KNVV.
+* 2003/04/28 MOD-S
+*  SELECT SINGLE ZTERM VKBUR VKGRP
+*    INTO (I_YK310-ZTERM,I_YK310-VKBUR,I_YK310-VKGRP) FROM KNVV
+SELECT SINGLE ZTERM VKBUR
+INTO (I_YK310-ZTERM,I_YK310-VKBUR) FROM KNVV
+* 2003/04/28 MOD-E
+WHERE KUNNR = I_YK310-KUNNR
+AND VKORG = I_YK310-VKORG
+AND VTWEG = I_YK310-VTWEG
+AND SPART = I_YK310-SPART.
+* >> 2002.05.16
+IF SY-SUBRC <> 0.
+SELECT SINGLE SPAKU FROM TVTA INTO W_SPART
+WHERE VKORG = I_YK310-VKORG
+AND VTWEG = I_YK310-VTWEG
+AND SPART = I_YK310-SPART.
+* 2003/04/28 MOD-S
+*    SELECT SINGLE ZTERM VKBUR VKGRP
+*      INTO (I_YK310-ZTERM,I_YK310-VKBUR,I_YK310-VKGRP) FROM KNVV
+SELECT SINGLE ZTERM VKBUR
+INTO (I_YK310-ZTERM,I_YK310-VKBUR) FROM KNVV
+* 2003/04/28 MOD-E
+WHERE KUNNR = I_YK310-KUNNR
+AND VKORG = I_YK310-VKORG
+AND VTWEG = I_YK310-VTWEG
+AND SPART = W_SPART.
+ENDIF.
+* >>
+ENDFORM.                    " GET_KNVV
+*&---------------------------------------------------------------------*
+*&      Form  GET_T052
+*&---------------------------------------------------------------------*
+*       支払条件(T052)の取得
+*----------------------------------------------------------------------*
+FORM GET_T052.
+CLEAR T052.
+SELECT ZLSCH ZSCHF INTO (I_YK310-ZLSCH,I_YK310-ZLSPR)
+FROM T052 UP TO 1 ROWS
+WHERE ZTERM = I_YK310-ZTERM.
+ENDSELECT.
+ENDFORM.                    " GET_T052
+*&---------------------------------------------------------------------*
+*&      Form  GET_TVKBT
+*&---------------------------------------------------------------------*
+*       組織単位: 営業所: テキスト(TVKBT)の取得
+*----------------------------------------------------------------------*
+FORM GET_TVKBT.
+CLEAR TVKBT.
+SELECT SINGLE BEZEI INTO TVKBT-BEZEI FROM TVKBT
+WHERE SPRAS = SY-LANGU
+AND VKBUR = I_YK310-VKBUR.
+IF SY-SUBRC = 0.
+I_YK310-ZUONR = TVKBT-BEZEI(18).
+ENDIF.
+ENDFORM.                    " GET_TVKBT
+*&---------------------------------------------------------------------*
+*&      Form  INSERT_DATA
+*&---------------------------------------------------------------------*
+*       データ登録
+*----------------------------------------------------------------------*
+FORM INSERT_DATA.
+CLEAR: CT_REC, CT_ERR.
+LOOP AT I_YK310.
+SELECT COUNT(*) FROM YK310
+WHERE BUKRS  = I_YK310-BUKRS
+AND KUNNR  = I_YK310-KUNNR
+AND INCDOC = I_YK310-INCDOC.
+IF SY-SUBRC = 0.
+CT_ERR = CT_ERR + 1.
+WRITE:/1  I_YK310-BUKRS,
+6  I_YK310-KUNNR,
+18 I_YK310-INCDOC,
+30 'INSERTエラー'.
+ELSE.
+YK310 = I_YK310.
+INSERT  YK310 .
+IF SY-SUBRC = 0.
+CT_REC = CT_REC + 1.
+ENDIF.
+ENDIF.
+ENDLOOP.
+*  write:1 'YK310:', ct_rec, '件 登録しました'.
+*  message i402(y1) with 'YK310:' ct_rec '件 登録しました'.
+IF NOT CT_ERR IS INITIAL.
+SKIP.
+*    write: /1 ct_err, '件 ERRでした'.
+MESSAGE I401(Y1) WITH CT_ERR '件 ERRでした'.
+ENDIF.
+ENDFORM.                    " INSERT_DATA
+*---------------------------------------------------------------------*
+*       FORM f_yk510_modify 会計連絡済フラグ更新  2002.04.02A
+*---------------------------------------------------------------------*
+FORM F_YK510_MODIFY.
+* ロック
+LOOP AT I_YK510.
+CALL FUNCTION 'ENQUEUE_EY_YK510'
+EXPORTING
+BUKRS          = I_YK510-BUKRS
+KUNNR          = I_YK510-KUNNR
+VKORG          = P_VKORG
+VTWEG          = P_VTWEG
+SPART          = P_SPART
+ZFBDT          = I_YK510-ZFBDT
+WAERS          = I_YK510-WAERS
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+PERFORM F_DEQUEUE_ALL.
+IF SY-BATCH = 'X'.
+MESSAGE E400(Y1) WITH
+'テーブル:YK510 をロックできません'.
+ELSE.
+MESSAGE S400(Y1) WITH
+'テーブル:YK510 をロックできません'.
+STOP.
+ENDIF.
+ENDIF.
+ENDLOOP.
+* テーブル更新
+LOOP AT I_YK510.
+*** 同一キーの存在チェック
+CLEAR YK510.
+SELECT SINGLE * FROM  YK510
+WHERE  BUKRS  = I_YK510-BUKRS
+AND    KUNNR  = I_YK510-KUNNR
+AND    VKORG  = P_VKORG
+AND    VTWEG  = P_VTWEG
+AND    SPART  = P_SPART
+AND    ZFBDT  = I_YK510-ZFBDT
+AND    WAERS  = I_YK510-WAERS.
+IF SY-SUBRC = 0.
+PERFORM F_YK510_UPDATE. "更新
+ENDIF.
+ENDLOOP.
+* アンロック
+PERFORM F_DEQUEUE_ALL.
+*
+*  message i402(y1) with 'テーブル:YK510' w_updcnt '件更新しました'.
+ENDFORM.                                              " f_yk510_modify
+*---------------------------------------------------------------------*
+*       FORM f_dequeue_all  2002.04.02A
+*---------------------------------------------------------------------*
+FORM F_DEQUEUE_ALL.
+LOOP AT I_YK510.
+CALL FUNCTION 'DEQUEUE_EY_YK510'
+EXPORTING
+BUKRS = I_YK510-BUKRS
+KUNNR = I_YK510-KUNNR
+VKORG = P_VKORG
+VTWEG = P_VTWEG
+SPART = P_SPART
+ZFBDT = I_YK510-ZFBDT
+WAERS = I_YK510-WAERS.
+ENDLOOP.
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM f_yk510_update  2002.04.02A
+*---------------------------------------------------------------------*
+FORM F_YK510_UPDATE.
+YK510-FIFLG = 'X'.  "会計連絡済フラグ=ON
+YK510-UPDDAT = SY-DATUM.
+YK510-UPDTIM = SY-UZEIT.
+YK510-UPDUSR = SY-UNAME.
+UPDATE YK510.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+PERFORM F_DEQUEUE_ALL.
+MESSAGE E400(Y1) WITH 'テーブル:YK510 の更新に失敗しました'.
+ENDIF.
+ADD 1 TO W_UPDCNT.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  GET_KUNN2
+*&---------------------------------------------------------------------*
+*       取引先機能コード取得 2002/10/24 ADD
+*----------------------------------------------------------------------*
+*      -->P_PARVW  取引先機能
+*      -->P_KUNN2  コード
+*----------------------------------------------------------------------*
+FORM GET_KUNN2 USING    P_PARVW
+P_KUNN2.
+CLEAR:KNVP.
+SELECT SINGLE PARVW KUNN2 INTO (KNVP-PARVW,KNVP-KUNN2) FROM KNVP
+WHERE KUNNR = I_YK310-KUNNR
+AND VKORG = I_YK310-VKORG
+AND VTWEG = I_YK310-VTWEG
+AND SPART = I_YK310-SPART
+AND PARVW = P_PARVW.
+P_KUNN2 = KNVP-KUNN2.
+
+ENDFORM.                    " GET_KUNN2
+* 2006/04/10 INS START MIKAMI
+*&---------------------------------------------------------------------*
+*&      Form  GET_KAIKEI_TEXT
+*&---------------------------------------------------------------------*
+*       得意先の会計テキストの取得
+*----------------------------------------------------------------------*
+*       -->  PA_TEXT  取得した得意先の会計テキスト画面の項目値
+*----------------------------------------------------------------------*
+FORM GET_KAIKEI_TEXT USING PA_TDNAME type THEAD-TDNAME
+CHANGING PA_TEXT.
+
+DATA:
+I_TLINE LIKE STANDARD TABLE OF TLINE WITH HEADER LINE.
+
+CALL FUNCTION 'READ_TEXT'  "テキストデータ読込
+EXPORTING
+*      CLIENT                        = SY-MANDT
+ID                            = P_TDID
+LANGUAGE                      = SY-LANGU
+NAME                          = PA_TDNAME
+OBJECT                        = 'KNB1'
+TABLES
+LINES                         = I_TLINE
+EXCEPTIONS
+ID                            = 1
+LANGUAGE                      = 2
+NAME                          = 3
+NOT_FOUND                     = 4
+OBJECT                        = 5
+REFERENCE_CHECK               = 6
+WRONG_ACCESS_TO_ARCHIVE       = 7
+OTHERS                        = 8
+.
+CASE SY-SUBRC.
+WHEN 0 OR 4.
+WHEN OTHERS.
+MESSAGE S001(Z1) WITH '汎用モジュールエラー' SY-SUBRC.
+ENDCASE.
+READ TABLE I_TLINE INTO I_TLINE INDEX 1.
+
+PA_TEXT = I_TLINE-TDLINE.
+
+ENDFORM.
+* 2006/04/10 INS END MIKAMI

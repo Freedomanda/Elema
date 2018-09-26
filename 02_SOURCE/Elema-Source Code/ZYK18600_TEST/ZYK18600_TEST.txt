@@ -1,0 +1,543 @@
+*&-------------------------------------------------------------------- *
+*& 検収照合システム                                                    *
+*&     プログラム名称：照合結果リスト（売検収）                        *
+*&     プログラムＩＤ：ZYK18600                                        *
+*&                                                                     *
+*&     作成者　　　　：X.XXXXXXXX        作成日　　　　：YYYY/MM/DD    *
+*&     更新者　　　　：X.XXXXXXXXX       作成日　　　　：YYYY/MM/DD    *
+*&                    XXXXXXXXX                                        *
+*&---------------------------------------------------------------------*
+REPORT ZYK18600_test
+LINE-SIZE 170
+LINE-COUNT 58
+NO STANDARD PAGE HEADING
+MESSAGE-ID Y1 .
+*---------------------------------------------------------------------
+*   宣言部
+*---------------------------------------------------------------------
+TYPE-POOLS: SLIS.
+TABLES:  YK110,                     " 検収データ
+YK130,                     " 売上データ
+VBRP,                      " 請求伝票：明細データ
+KNA1,                      " 得意先マスタ：一般データ
+TVGRT.                     " 組織単位:販売グループ：テキスト
+TABLES   KNVV.                      " 20020/03/11 ADD
+TABLES:  TSTCT.                     " トランザクションコ－ドテキスト
+TABLES   YK150.                     " 売上照合マスタ 2003/05/13 ADD
+* YK110データ格納構造体
+TYPES: BEGIN OF ST_YK110TBL.
+INCLUDE STRUCTURE YK110.
+TYPES KEN_KUBUN(4) TYPE C.  " 検収区分
+TYPES END OF ST_YK110TBL.
+
+*  アンマッチリスト内部テーブル１
+DATA I_ANMATI_1 TYPE STANDARD TABLE OF ST_YK110TBL
+WITH HEADER LINE.
+
+* YK130データ格納構造体
+TYPES: BEGIN OF ST_YK130TBL.
+INCLUDE STRUCTURE YK130.
+TYPES URI_KUBUN(4) TYPE C.        " 売上区分
+TYPES AUBEL LIKE VBRP-AUBEL.      " 販売伝票
+TYPES END OF ST_YK130TBL.
+
+*  アンマッチリスト内部テーブル２
+DATA I_ANMATI_2 TYPE STANDARD TABLE OF ST_YK130TBL
+WITH HEADER LINE.
+
+*  アンマッチリストﾚｲｱｳﾄ取得構造体定義
+TYPES: BEGIN OF ST_ALLTBL.
+TYPES URI_KUBUN(4) TYPE C.      " 売上区分
+TYPES KEN_KUBUN(4) TYPE C.      " 検収区分
+INCLUDE STRUCTURE ZYK01180010.
+TYPES END OF ST_ALLTBL.
+
+*  アンマッチリスト内部テーブル３
+DATA I_ANMATI_3 TYPE STANDARD TABLE OF ST_ALLTBL
+WITH HEADER LINE.
+
+*   ＡＬＶ関係の定義
+*   （改頁、ソート）
+DATA: W_SORT     TYPE SLIS_SORTINFO_ALV,    " 改頁のソートキー情報
+I_SORT     TYPE SLIS_T_SORTINFO_ALV,  " (内部テーブル）
+W_LAYOUT   TYPE SLIS_LAYOUT_ALV,      " 改頁処理の宣言
+
+*   （ヘッダー出力）
+W_EVENT    TYPE SLIS_ALV_EVENT,       " 実行可能なイベント群
+I_EVENT    TYPE SLIS_T_EVENT,         " （内部テーブル）
+
+*   （フィールドカタログ）
+W_SNAME    LIKE DD02L-TABNAME VALUE 'ZYK01180010',
+I_FIELDCAT TYPE SLIS_T_FIELDCAT_ALV,  " （内部テーブル）
+
+*   （帳票印刷用）
+W_PRINT    TYPE SLIS_PRINT_ALV.
+
+*   ワークエリア
+DATA: W_REPID LIKE SY-REPID.    " 当レポート名
+DATA RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+
+DATA:CT_REC TYPE P.             " 2002/03/04 ADD
+DATA W_OLD_KUNNR LIKE YK110-KUNNR. "2002/12/12 ADD
+DATA: W_SPART LIKE VBRK-SPART.     "2003/05/23 ADD
+*---------------------------------------------------------------------
+*   入力画面定義
+*---------------------------------------------------------------------
+PARAMETERS:P_BUKRS LIKE YK110-BUKRS MEMORY ID BUK OBLIGATORY, "会社
+P_VKORG LIKE YK110-VKORG MEMORY ID VKO OBLIGATORY, "販売組織
+P_VTWEG LIKE YK110-VTWEG MEMORY ID VTW OBLIGATORY, "流通
+P_SPART LIKE YK110-SPART MEMORY ID SPA OBLIGATORY. "製品部門
+SELECT-OPTIONS: S_GSBER FOR YK110-GSBER MEMORY ID GSB         "事業領域
+NO INTERVALS.
+*得意先コード
+SELECT-OPTIONS: S_KUNNR  FOR YK130-KUNNR
+NO INTERVALS,
+S_VKBUR FOR YK110-VKBUR                  "営業所
+NO INTERVALS,
+S_VKGRP FOR YK110-VKGRP                  "営業グループ
+NO INTERVALS.
+SELECT-OPTIONS S_ZFBDT  FOR YK130-ZFBDT                  "照合締日
+NO INTERVALS.
+SELECT-OPTIONS S_KEKKBN FOR YK130-KEKKBN.                " 照合結果区分
+PARAMETERS:P_TITLE LIKE SY-TITLE.
+**********************************************************************
+INITIALIZATION.
+IF SY-TCODE+0(1) = 'Y' OR SY-TCODE+0(1) = 'Z'.
+SELECT SINGLE * FROM  TSTCT
+WHERE  SPRSL  = SY-LANGU
+AND    TCODE  = SY-TCODE.
+IF SY-SUBRC = 0.
+SY-TITLE = TSTCT-TTEXT.
+ENDIF.
+ENDIF.
+CLEAR W_OLD_KUNNR.
+**********************************************************************
+AT SELECTION-SCREEN.
+DATA CT_REC TYPE P.
+CHECK SY-UCOMM IS INITIAL.          "ENTER時のみ処理
+DESCRIBE TABLE S_KUNNR LINES CT_REC.
+IF CT_REC = 1.
+READ TABLE S_KUNNR INDEX 1.
+IF SY-BATCH NE 'X' .
+IF W_OLD_KUNNR <> S_KUNNR-LOW.
+IF S_KUNNR-OPTION = 'EQ' OR  S_KUNNR-OPTION = SPACE.
+REFRESH: S_ZFBDT, S_VKBUR, S_VKGRP.
+PERFORM SET_ZFBDT.              "締日初期値セット
+PERFORM SET_EIGYO.              "営業所&営業グループ初期値セット
+MESSAGE ID 'Y1' TYPE 'S' NUMBER '400' WITH '初期値設定しました'.
+ENDIF.
+W_OLD_KUNNR = S_KUNNR-LOW.
+ENDIF.
+ENDIF  .
+ELSE.
+CLEAR W_OLD_KUNNR.
+ENDIF.
+
+AT SELECTION-SCREEN OUTPUT.
+SY-TITLE = P_TITLE.
+
+**********************************************************************
+START-OF-SELECTION.
+**********************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  SEC_YK110
+*&---------------------------------------------------------------------*
+*       検収データ読込
+*----------------------------------------------------------------------*
+*FORM SEC_YK110.
+REFRESH I_ANMATI_1.
+* 1-1: 検収データ取得、取得した内容を内部テーブル１に格納する
+SELECT * FROM YK110
+INTO CORRESPONDING FIELDS OF TABLE I_ANMATI_1
+WHERE KUNNR IN S_KUNNR
+AND BUKRS  = P_BUKRS
+AND VKORG  = P_VKORG
+AND VTWEG  = P_VTWEG
+AND SPART  = P_SPART
+AND GSBER IN S_GSBER
+AND VKBUR IN S_VKBUR
+AND VKGRP IN S_VKGRP
+AND ZFBDT2 IN S_ZFBDT
+AND KEKKBN IN S_KEKKBN
+AND DELFLG = SPACE.
+
+
+LOOP AT I_ANMATI_1.
+I_ANMATI_1-KEN_KUBUN = '検収'.
+MODIFY: I_ANMATI_1.
+ENDLOOP.
+
+* 1-2: 売上データ取得,内容を内部テーブル２に格納する
+REFRESH I_ANMATI_2.
+SELECT * FROM YK130
+INTO CORRESPONDING FIELDS OF I_ANMATI_2 " 2002/01/22
+WHERE KUNNR IN S_KUNNR
+AND BUKRS  = P_BUKRS
+AND VKORG  = P_VKORG
+AND VTWEG  = P_VTWEG
+AND SPART  = P_SPART
+AND GSBER IN S_GSBER
+AND VKBUR IN S_VKBUR
+AND VKGRP IN S_VKGRP
+AND ZFBDT2 IN S_ZFBDT
+AND KEKKBN IN S_KEKKBN.
+APPEND: I_ANMATI_2.
+ENDSELECT.
+LOOP AT I_ANMATI_2.
+I_ANMATI_2-URI_KUBUN = '売上'.
+MODIFY: I_ANMATI_2.
+ENDLOOP.
+
+DESCRIBE TABLE I_ANMATI_1 LINES CT_REC.
+IF CT_REC = 0.
+DESCRIBE TABLE I_ANMATI_2 LINES CT_REC.
+IF CT_REC = 0.
+MESSAGE S653 .
+STOP.
+ENDIF.
+ENDIF.
+
+* 1-3: 請求明細データを取得、内部テーブル２に付加する
+LOOP AT I_ANMATI_2.
+SELECT SINGLE AUBEL FROM VBRP
+INTO I_ANMATI_2-AUBEL
+WHERE VBELN = I_ANMATI_2-VBELN
+AND POSNR = I_ANMATI_2-POSNR.
+MODIFY: I_ANMATI_2.
+ENDLOOP.
+
+* 1-4: "売上データ","検収データ"が取得、内部テーブル３に格納する
+LOOP AT I_ANMATI_2.
+CLEAR I_ANMATI_3.
+MOVE-CORRESPONDING I_ANMATI_2 TO I_ANMATI_3.
+I_ANMATI_3-KUBUN = I_ANMATI_3-URI_KUBUN.   " 売上データ区分
+I_ANMATI_3-YKDOCNO = I_ANMATI_2-VBELN.     " 売上データ伝票番号
+I_ANMATI_3-KNITXAMT1 = I_ANMATI_2-KNITXAMT. "売上金額
+I_ANMATI_3-KNTAXAMT1 = I_ANMATI_2-KNTAXAMT. "売上消費税
+I_ANMATI_3-KNETXAMT1 = I_ANMATI_2-KNETXAMT. "売上税込額
+PERFORM GET_BSTKDNO USING I_ANMATI_2-URI_KUBUN
+I_ANMATI_2-BSTKD
+I_ANMATI_3-BSTKD2.
+APPEND: I_ANMATI_3.
+ENDLOOP.
+
+LOOP AT I_ANMATI_1.
+CLEAR I_ANMATI_3. "2002/01/28.
+MOVE-CORRESPONDING I_ANMATI_1 TO I_ANMATI_3.
+I_ANMATI_3-KUBUN = I_ANMATI_3-KEN_KUBUN.   " 検収データ区分
+I_ANMATI_3-YKDOCNO = I_ANMATI_1-AUDDOC.    " 検収データ伝票番号
+I_ANMATI_3-KNITXAMT2 = I_ANMATI_1-KNITXAMT. "検収金額
+I_ANMATI_3-KNTAXAMT2 = I_ANMATI_1-KNTAXAMT. "検収消費税
+I_ANMATI_3-KNETXAMT2 = I_ANMATI_1-KNETXAMT. "検収税込額
+PERFORM GET_BSTKDNO USING I_ANMATI_1-KEN_KUBUN
+I_ANMATI_1-BSTKD
+I_ANMATI_3-BSTKD2.
+APPEND: I_ANMATI_3.
+ENDLOOP.
+
+* 1-5:  内部テーブル３のデータを以下の順にソードする
+*  売上データが先に順にする
+SORT I_ANMATI_3 BY KUNNR PRCNO VKGRP BSTKD KUBUN DESCENDING
+AUBEL AUDDOC VBELN MAKTX.
+*&---------------------------------------------------------------------*
+*&      Form  TABLE_OUT
+*&---------------------------------------------------------------------*
+*       ＡＬＶ帳票の出力
+*----------------------------------------------------------------------*
+* 呼出元を設定
+W_REPID = SY-REPID.
+
+*   項目カタログの作成
+CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+EXPORTING
+I_STRUCTURE_NAME       = W_SNAME
+CHANGING
+CT_FIELDCAT            = I_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE = 1
+PROGRAM_ERROR          = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+*        MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*                WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+*   実行可能なイベント群の作成
+W_EVENT-FORM = 'TOP_OF_PAGE'.
+W_EVENT-NAME = 'TOP_OF_PAGE'.
+APPEND W_EVENT TO I_EVENT.
+
+W_EVENT-FORM = 'CALLER_EXIT'.
+W_EVENT-NAME = 'CALLER_EXIT'.
+APPEND W_EVENT TO I_EVENT.
+
+*   "TOP-OF-PAGE"を定義
+READ TABLE I_EVENT INTO W_EVENT WITH KEY NAME = 'TOP_OF_PAGE'.
+W_EVENT-FORM = 'TOP_OF_PAGE'.
+MODIFY I_EVENT FROM W_EVENT TRANSPORTING
+FORM WHERE NAME = 'TOP_OF_PAGE'.
+
+*   ソート & ページイジェクト
+W_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+W_PRINT-NO_PRINT_LISTINFOS = 'X'.   " Extra printing pageを抑制
+W_LAYOUT-NO_TOTALLINE = 'X'.        " 2002/04/12 ADD
+
+W_SORT-SPOS      = '01'.
+W_SORT-FIELDNAME = 'KUNNR'.    " 得意先コードの項目名
+W_SORT-UP        = 'X'.
+W_SORT-SUBTOT    = 'X'.
+W_SORT-GROUP     = '*'.
+APPEND W_SORT TO I_SORT.
+
+W_SORT-SPOS      = '02'.
+W_SORT-FIELDNAME = 'VKGRP'.    " 営業グループの項目名
+W_SORT-UP        = 'X'.
+W_SORT-SUBTOT    = 'X'.
+W_SORT-GROUP     = '*'.
+APPEND W_SORT TO I_SORT.
+
+*   レポート表示
+CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM = W_REPID
+IT_FIELDCAT        = I_FIELDCAT
+I_SAVE             = 'A'
+IT_EVENTS          = I_EVENT[]
+IS_LAYOUT          = W_LAYOUT
+IT_SORT            = I_SORT
+IS_PRINT           = W_PRINT
+TABLES
+T_OUTTAB           = I_ANMATI_3
+EXCEPTIONS
+PROGRAM_ERROR      = 1
+OTHERS             = 2.
+
+IF SY-SUBRC <> 0.
+*        MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*                WITH SY-MASV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+*ENDFORM.                    " TABLE_OUT
+
+*&---------------------------------------------------------------------*
+*&      Form  CALLER_EXIT
+*&---------------------------------------------------------------------*
+*       先頭行取得定義
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM CALLER_EXIT USING RS_DATA TYPE SLIS_DATA_CALLER_EXIT.
+RS_DATA-CALLBACK_HEADER_TRANSPORT = 'FILITEXTS_TEXT_TRANSPORT'.
+ENDFORM.            " CALLER_EXIT
+
+**********************************************************************
+***          TOP_OF_PAGE                                           ***
+**********************************************************************
+FORM TOP_OF_PAGE.
+DATA: W_NAME1 LIKE KNA1-NAME1
+VALUE '                    ',
+W_BEZEI LIKE TVGRT-BEZEI
+VALUE '                    '.
+* ALV帳票出力データ格納テーブル
+
+*   ページヘッダー
+WRITE: /1 P_TITLE.
+WRITE: /1 'Page:',
+SY-PAGNO.
+WRITE: /1 '作成日時：  ',
+SY-DATUM USING EDIT MASK '____/__/__',  "2002/08/05 MOD
+SY-UZEIT USING EDIT MASK '__:__'.
+IF NOT ( I_ANMATI_3-ZFBDT IS INITIAL AND
+I_ANMATI_3-KUNNR IS INITIAL ).
+WRITE: /.
+SELECT SINGLE NAME1
+FROM KNA1 INTO W_NAME1
+WHERE KUNNR = I_ANMATI_3-KUNNR.
+
+IF SY-SUBRC <> 0.
+MOVE SPACE TO W_NAME1.
+ENDIF.
+
+WRITE: /1 '得意先:　　 ',
+15 I_ANMATI_3-KUNNR,
+26 '得意先名称:',
+42 W_NAME1.
+IF I_ANMATI_3-VKGRP = ''.
+PERFORM GET_EIGYO_GROUP.
+ENDIF.
+SELECT SINGLE BEZEI
+FROM TVGRT INTO W_BEZEI
+WHERE VKGRP = I_ANMATI_3-VKGRP.
+WRITE: /1 '営業グループ:',
+15 I_ANMATI_3-VKGRP,
+26 '営業グループ名:',
+42 W_BEZEI.
+ENDIF.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  SET_ZFBDT
+*&---------------------------------------------------------------------*
+*      締日の初期値セット
+*----------------------------------------------------------------------*
+FORM SET_ZFBDT.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD         = S_KUNNR-LOW
+I_VKORG        = P_VKORG
+I_VTWEG        = P_VTWEG
+I_SPART        = P_SPART
+I_DAY          = SY-DATUM
+IMPORTING
+E_ZFBDT_OLD    = S_ZFBDT-LOW
+EXCEPTIONS
+NO_GET_T052    = 1
+NO_GOOD_GETDAY = 2
+NO_GET_ZTERM   = 3
+OTHERS         = 4.
+IF SY-SUBRC = 0.
+S_ZFBDT-SIGN   = 'I'.
+S_ZFBDT-OPTION = 'EQ'.
+APPEND S_ZFBDT.
+ENDIF.
+
+ENDFORM.                    " SET_ZFBDT
+*&---------------------------------------------------------------------*
+*&      Form  SET_EIGYO
+*&---------------------------------------------------------------------*
+*       営業所&営業グループ初期値セット
+*----------------------------------------------------------------------*
+FORM SET_EIGYO.
+PERFORM GET_INIT_CHK.
+CLEAR KNVV.
+SELECT SINGLE VKBUR VKGRP INTO (S_VKBUR-LOW, S_VKGRP-LOW) FROM KNVV
+WHERE KUNNR = S_KUNNR-LOW
+AND VKORG = P_VKORG
+AND VTWEG = P_VTWEG
+AND SPART = W_SPART.
+IF SY-SUBRC = 0.
+IF YK150-B_VKBUR_INIT = 'X'.
+S_VKBUR-SIGN   = 'I'.
+S_VKBUR-OPTION = 'EQ'.
+APPEND S_VKBUR.
+ENDIF.
+IF YK150-B_VKGRP_INIT = 'X'.
+S_VKGRP-SIGN   = 'I'.
+S_VKGRP-OPTION = 'EQ'.
+APPEND S_VKGRP.
+ENDIF.
+ENDIF.
+IF YK150-B_VKBUR_INIT <> 'X'.
+CLEAR S_VKBUR.
+REFRESH S_VKBUR.
+ENDIF.
+IF YK150-B_VKGRP_INIT <> 'X'.
+CLEAR S_VKGRP.
+REFRESH S_VKGRP.
+ENDIF.
+
+ENDFORM.                    " SET_EIGYO
+*&---------------------------------------------------------------------*
+*&      Form  GET_INIT_CHK
+*&---------------------------------------------------------------------*
+*       製品部門変換
+*----------------------------------------------------------------------*
+FORM GET_INIT_CHK.
+CLEAR W_SPART.
+SELECT SINGLE SPAKU FROM TVTA INTO  W_SPART
+WHERE VKORG = P_VKORG
+AND VTWEG = P_VTWEG
+AND SPART = P_SPART.
+IF SY-SUBRC <> 0.
+W_SPART = P_SPART.
+ENDIF.
+CLEAR YK150.
+SELECT SINGLE B_VKBUR_INIT B_VKGRP_INIT
+INTO (YK150-B_VKBUR_INIT,YK150-B_VKGRP_INIT) FROM YK150
+WHERE BUKRS = P_BUKRS
+AND KUNNR = S_KUNNR-LOW
+AND VKORG = P_VKORG
+AND VTWEG = P_VTWEG
+AND SPART = P_SPART.
+IF SY-SUBRC <> 0.
+SELECT  B_VKBUR_INIT B_VKGRP_INIT
+INTO (YK150-B_VKBUR_INIT,YK150-B_VKGRP_INIT) FROM YK150
+UP TO 1 ROWS
+WHERE KUNNR = 'DEFAULT'.
+ENDSELECT.
+ENDIF.
+
+ENDFORM.                    " GET_INIT_CHK
+*&---------------------------------------------------------------------*
+*&      Form GET_BSTKDNO
+*&---------------------------------------------------------------------*
+*       注文番号取得編集処理
+*----------------------------------------------------------------------*
+*       --> PA_KUBUN      データ区分
+*       --> PA_BSTKD      得意先発注番号
+*       <-- PA_BSTKD2     注文番号
+*----------------------------------------------------------------------*
+FORM GET_BSTKDNO USING PA_KUBUN
+PA_BSTKD
+PA_BSTKD2.
+
+DATA:W_STRNO LIKE YK150-P_STRNO_U,
+W_ENDNO LIKE YK150-P_STRNO_U.
+
+IF PA_KUBUN = '検収'.
+* 照合条件：得意先発注番号開始桁_検収
+* 照合条件：得意先発注番号終了桁_検収
+SELECT SINGLE P_STRNO_K P_ENDNO_K
+INTO (W_STRNO,W_ENDNO)
+FROM YK150
+WHERE BUKRS = I_ANMATI_1-BUKRS
+AND KUNNR = I_ANMATI_1-KUNNR
+AND VKORG = I_ANMATI_1-VKORG
+AND VTWEG = I_ANMATI_1-VTWEG
+AND SPART = I_ANMATI_1-SPART.
+ELSE.
+* 照合条件：得意先発注番号開始桁_売上
+* 照合条件：得意先発注番号終了桁_売上
+SELECT SINGLE P_STRNO_U P_ENDNO_U
+INTO (W_STRNO,W_ENDNO)
+FROM YK150
+WHERE BUKRS = I_ANMATI_2-BUKRS
+AND KUNNR = I_ANMATI_2-KUNNR
+AND VKORG = I_ANMATI_2-VKORG
+AND VTWEG = I_ANMATI_2-VTWEG
+AND SPART = I_ANMATI_2-SPART.
+ENDIF.
+
+IF SY-SUBRC = 0.
+W_STRNO = W_STRNO - 1.                  "得意先発注番号開始桁編集
+W_ENDNO = W_ENDNO - W_STRNO.            "得意先発注番号終了桁編集
+PA_BSTKD2 = PA_BSTKD+W_STRNO(W_ENDNO).  "注文番号格納
+ELSE.
+PA_BSTKD2 = SPACE.          "YK150が取得できない場合、注文番号は空白
+ENDIF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  GET_EIGYO_GROUP
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM GET_EIGYO_GROUP.
+
+DATA W_KUNNR LIKE KNVV-KUNNR.
+
+*内部形式への変換
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = I_ANMATI_3-KUNNR
+IMPORTING
+OUTPUT = W_KUNNR.
+
+SELECT SINGLE VKGRP
+FROM KNVV
+INTO I_ANMATI_3-VKGRP
+WHERE KUNNR = W_KUNNR
+AND VKORG = P_VKORG
+AND VTWEG = P_VTWEG
+AND SPART = P_SPART.
+
+ENDFORM.                    " GET_EIGYO_GROUP

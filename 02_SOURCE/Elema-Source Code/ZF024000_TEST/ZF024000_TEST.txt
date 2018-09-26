@@ -1,0 +1,1738 @@
+*&---------------------------------------------------------------------*
+*& Report  ZF024000
+*&         本PGは、「YF000120：仕訳日記帳作成(管理会計対応)」Ver0
+*&         のリネームプログラムである
+*&---------------------------------------------------------------------*
+*&  機能     ： 仕訳日記帳作成
+*&  作成日   ： 2012/11/19
+*&  作成者   ： GSL
+*&---------------------------------------------------------------------*
+*&  変更履歴 ： 2012/12/03
+*&  変更内容 ： 選択画面で入力された為替差損勘定を集計対象とする
+*&　　　　　　　※決済伝票ありの場合　　
+*&---------------------------------------------------------------------*
+*&  変更履歴 ： 2012/12/06
+*&  変更内容 ： 文字列操作のバグ対応
+*&---------------------------------------------------------------------*
+*&  変更履歴 ： 2012/12/07
+*&  変更内容 ： 貸借フラグの修正
+*&---------------------------------------------------------------------*
+*&↓は「YF000120」の変更履歴　※ソース上の履歴は削除
+************************************************************************
+*             財務会計システム（ＦＩ）
+*             仕訳日記帳
+*             ＰＲＯＧＲＡＭ－ＩＤ：ＹＦ０００１００
+*
+*         変更１：URD22       1999/01/22
+*         変更２：URD37       1999/02/25 事業領域による選択
+*         変更３：            2000/01/13 伝票通貨でなく国内通貨に修正
+*                                        該当データ無し時に通知
+*                                        選択画面の項目の必須化
+*                                        勘定科目名を(短)に修正
+*         変更４：            2000/03/03 レイアウト変更切替えボタン装備
+*                                        単位を国内通貨単位に変更
+*                                        T001の読込回数の削減
+*         変更５:             2000/03/13 摘要にソートキーを追加
+*                                         下線時の改ページバグを修正
+*         変更６:             2000/06/01 新規選択項目をラジオボタン化
+*         変更７:             2000/06/29 TOP-OF-PAGE導入
+*         変更８:STTD42       2000/06/29 選択画面の初期値をユーザ値に
+*         変更９:STTD42       2000/08/25 帳票に原価&利益センタ関連追加
+*         変更10:STTD42       2000/08/28 選択画面に原価&利益センタ追加
+*                                        ページヘッダ機能拡張(all or 1)
+*         変更11:STTD42       2000/10/05 税コードバグ対応
+*         変更12:STTD42       2000/10/18 原価センタ、利益センタ抽出を
+*                                        明細単位/伝票単位に選択可能
+************************************************************************
+REPORT ZF024000  MESSAGE-ID Y1
+NO STANDARD PAGE HEADING.
+TABLES: BSEG, SKAT, TGSBT.
+TABLES: BKPF, T001.
+TABLES: CEPCT,TKA02,CSKT.
+
+*   insert 2012/11/19 C.MARUTA DMW4632{
+*&---------------------------------------------------------------------*
+*& 構造定義                                                            *
+*&---------------------------------------------------------------------*
+TYPES:
+* 決済伝票検索用(FOR ALL ENTRIES用)
+BEGIN OF T_S_BKPF_SC,
+BUKRS         TYPE BUKRS,      "会社コード
+BELNR         TYPE BELNR_D,    "決済伝票番号
+AUGJAHR       TYPE GJAHR,      "決済伝票年度
+END   OF T_S_BKPF_SC,
+T_I_BKPF_SC     TYPE TABLE OF T_S_BKPF_SC,    "内部テーブル定義
+
+* 会計伝票ヘッダ情報格納用
+BEGIN OF T_S_CLBKPF,
+BUKRS         TYPE BUKRS,      "会社コード
+BELNR         TYPE BELNR_D,    "決済伝票番号
+GJAHR         TYPE GJAHR,      "決済伝票年度
+BUDAT         TYPE BUDAT,      "伝票の転記日付
+WAERS         TYPE WAERS,      "通貨
+CKBEL         TYPE BELNR_D,    "チェック伝票
+CKGJA         TYPE GJAHR,      "チェック年度
+END   OF T_S_CLBKPF,
+T_I_CLBKPF      TYPE TABLE OF T_S_CLBKPF,    "内部テーブル定義
+
+* 決済伝票明細情報格納用
+BEGIN OF T_S_CLBSEG,
+BUKRS         TYPE BUKRS,      "会社コード
+BELNR         TYPE BELNR_D,    "決済伝票番号
+GJAHR         TYPE GJAHR,      "決済伝票年度
+BUZEI         TYPE BUZEI,      "会計伝票内の明細番号
+AUGBL         TYPE AUGBL,      "決済伝票番号
+KOART         TYPE KOART,      "勘定タイプ
+SHKZG         TYPE SHKZG,      "借方/貸方フラグ
+MWSKZ         TYPE MWSKZ,      "税
+DMBTR         TYPE DMBTR,      "国内通貨額
+WRBTR         TYPE WRBTR,      "伝票通貨額
+ZUONR         TYPE DZUONR,     "ソートキー
+SGTXT         TYPE SGTXT,      "明細テキスト
+KOSTL         TYPE KOSTL,      "原価センタ
+SAKNR         TYPE SAKNR,      "G/L 勘定コード
+HKONT         TYPE HKONT,      "総勘定元帳勘定
+KUNNR         TYPE KUNNR,      "得意先コード
+LIFNR         TYPE LIFNR,      "仕入先コード
+ZFBDT         TYPE DZFBDT,     "支払基準日
+END   OF T_S_CLBSEG,
+T_I_CLBSEG      TYPE TABLE OF T_S_CLBSEG,    "内部テーブル定義
+
+* 得意先・仕入先名称取得用
+BEGIN OF T_S_LFKN_TXT,
+CODE(10)      TYPE C,           "仕入先/得意先コード
+NAME1         TYPE NAME1_GP,    "名称
+END   OF T_S_LFKN_TXT,
+T_I_LFKN_TXT    TYPE TABLE OF T_S_LFKN_TXT,  "内部テーブル定義
+
+* 伝票番号格納用(決済伝票選択時)
+BEGIN OF T_S_BELNR,
+BELNR      TYPE BSEG-BELNR,
+BELNR_CL   TYPE BSEG-BELNR,
+SORT       TYPE C,
+END OF T_S_BELNR,
+T_I_BELNR      TYPE TABLE OF T_S_BELNR,  "内部テーブル定義
+
+* T_BSEGと同じ構造
+BEGIN OF T_S_T_BSEG,
+BELNR_SORT TYPE BSEG-BELNR,
+BELNR_KEY LIKE BSEG-BELNR,
+BUDAT_KEY LIKE BKPF-BUDAT,
+BUKRS     TYPE BUKRS,      "会社コード
+BELNR     TYPE BELNR_D,    "決済伝票番号
+GJAHR     TYPE GJAHR,      "決済伝票年度
+BUZEI     TYPE BUZEI,      "会計伝票内の明細番号
+AUGDT     TYPE AUGDT,      "決済日付
+AUGBL     TYPE AUGBL,      "決済伝票番号
+KOART     TYPE KOART,      "勘定タイプ
+SHKZG     TYPE SHKZG,      "借方/貸方フラグ
+MWSKZ     TYPE MWSKZ,      "税
+DMBTR     TYPE DMBTR,      "国内通貨額
+WRBTR     TYPE WRBTR,      "伝票通貨額
+ZUONR     TYPE DZUONR,     "ソートキー
+SGTXT     TYPE SGTXT,      "明細テキスト
+KOSTL     TYPE KOSTL,      "原価センタ
+SAKNR     TYPE SAKNR,      "G/L 勘定コード
+HKONT     TYPE HKONT,      "総勘定元帳勘定
+KUNNR     TYPE KUNNR,      "得意先コード
+LIFNR     TYPE LIFNR,      "仕入先コード
+ZFBDT     TYPE DZFBDT,     "支払基準日
+AUGJAHR   TYPE BSEG-GJAHR, "決済伝票年の格納用
+WAERS     TYPE WAERS,      "通貨コード(ヘッダ)
+CODE      TYPE KUNNR,      "得意先/仕入先格納用
+SORT      TYPE C,          "ソート順
+END OF T_S_T_BSEG,
+T_I_T_BSEG    TYPE TABLE OF T_S_T_BSEG.  "内部テーブル定義
+
+*----------------------------------------------------------------------*
+*       レンジ定義                                                     *
+*----------------------------------------------------------------------*
+DATA:
+GR_BLART TYPE RANGE OF BKPF-BLART.
+* } insert 2012/11/19 C.MARUTA DMW4632
+
+PARAMETERS:
+P_GJH(4)      TYPE N OBLIGATORY,     "会計年度
+P_BUKRS(4)    TYPE C OBLIGATORY MEMORY ID BUK,     "会社コード
+P_FROM        TYPE D OBLIGATORY,     "対象年月日・自
+P_TO          TYPE D OBLIGATORY.     "対象年月日・至
+SELECT-OPTIONS:
+S_GSBER FOR BSEG-GSBER.              "事業領域
+SELECT-OPTIONS: S_KOSTL FOR BSEG-KOSTL. "原価センタ
+SELECT-OPTIONS: S_PRCTR FOR BSEG-PRCTR. "利益センタ
+SELECT-OPTIONS: S_BELNR FOR BKPF-BELNR. "伝票番号
+*   insert 2012/11/19 C.MARUTA DMW4632{
+SELECT-OPTIONS:S_BLART FOR BKPF-BLART.  "伝票タイプ
+SELECT-OPTIONS:S_WAERS FOR BKPF-WAERS.  "通貨
+SELECT-OPTIONS:S_USNAM FOR BKPF-USNAM.  "ユーザ名
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(12) TEXT-013.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_EXIST RADIOBUTTON GROUP GR05."決済伝票あり
+SELECTION-SCREEN COMMENT 37(04) TEXT-002.
+SELECTION-SCREEN POSITION 47.
+PARAMETERS: P_NEXST RADIOBUTTON GROUP GR05 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 49(06) TEXT-003.
+SELECTION-SCREEN END   OF LINE.
+SELECT-OPTIONS:S_KBLART FOR BKPF-BLART.  "決済伝票タイプ
+SELECT-OPTIONS:S_HKONT  FOR BSEG-HKONT.  "為替差損勘定
+SELECTION-SCREEN SKIP.
+* } insert 2012/11/19 C.MARUTA DMW4632
+DATA: ZFRP6010-NAME(30)  TYPE C.
+DATA: ZFRP6010-GTEXT(10) TYPE C.
+DATA: ZFRP6010-TEXT(34)  TYPE C.
+*   modify 2012/11/19 C.MARUTA DMW4632{
+DATA: ZFRP6010-TEXTL(30)  TYPE C.
+* } modify 2012/11/19 C.MARUTA DMW4632
+DATA W_SGTXT(69) TYPE C.
+DATA W_MOJIC TYPE I VALUE 0.
+DATA W_CHAR(2).
+DATA: W_GJH(4)          TYPE N.
+DATA: W_MNT(3)          TYPE N.
+DATA: W_FROM(4)         TYPE N.
+DATA: W_TO(4)           TYPE N.
+DATA: W_BLART(2)        TYPE C   VALUE 'ZZ'.
+DATA: W_R_TXT           LIKE CEPCT-KTEXT."利益センタ名称
+DATA: W_G_TXT           LIKE CSKT-KTEXT. "原価センタ名称
+DATA: W_B_TXT           LIKE TGSBT-GTEXT."部門名称
+DATA: W_PAGE_OUT       TYPE C."ページ出力フラグ
+DATA: W_DMBTR TYPE P.
+DATA: W_RECFLG TYPE C.
+DATA W_LINE_CNT LIKE SY-LINNO.
+DATA W_FLG(1) TYPE N.                  "1999/02/25 ADD
+DATA BEGIN OF T_BSEG OCCURS 10.        "1999/02/25 ADD
+*   modify 2012/11/19 C.MARUTA DMW4632{
+*DATA: BELNR_KEY LIKE BSEG-BELNR.
+*DATA: BUDAT_KEY LIKE BKPF-BUDAT.
+*        INCLUDE STRUCTURE BSEG.
+DATA: BELNR_SORT TYPE BSEG-BELNR,
+BELNR_KEY LIKE BSEG-BELNR,
+BUDAT_KEY LIKE BKPF-BUDAT,
+BUKRS     TYPE BUKRS,      "会社コード
+BELNR     TYPE BELNR_D,    "決済伝票番号
+GJAHR     TYPE GJAHR,      "決済伝票年度
+BUZEI     TYPE BUZEI,      "会計伝票内の明細番号
+AUGDT     TYPE AUGDT,      "決済日付
+AUGBL     TYPE AUGBL,      "決済伝票番号
+KOART     TYPE KOART,      "勘定タイプ
+SHKZG     TYPE SHKZG,      "借方/貸方フラグ
+MWSKZ     TYPE MWSKZ,      "税
+DMBTR     TYPE DMBTR,      "国内通貨額
+WRBTR     TYPE WRBTR,      "伝票通貨額
+ZUONR     TYPE DZUONR,     "ソートキー
+SGTXT     TYPE SGTXT,      "明細テキスト
+KOSTL     TYPE KOSTL,      "原価センタ
+SAKNR     TYPE SAKNR,      "G/L 勘定コード
+HKONT     TYPE HKONT,      "総勘定元帳勘定
+KUNNR     TYPE KUNNR,      "得意先コード
+LIFNR     TYPE LIFNR,      "仕入先コード
+ZFBDT     TYPE DZFBDT,     "支払基準日
+AUGJAHR   TYPE BSEG-GJAHR, "決済伝票年の格納用
+WAERS     TYPE WAERS,      "通貨コード(ヘッダ)
+CODE      TYPE KUNNR,      "得意先/仕入先格納用
+SORT      TYPE C.          "ソート順
+* } modify 2012/11/19 C.MARUTA DMW4632
+DATA END OF T_BSEG.
+
+
+*--  INCLUDE OF INTERNAL SUBROUTINE
+INCLUDE YF01NUMC.
+INCLUDE YF01CCUT.
+*
+TABLES TCURT.                          "通貨テキスト
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(08) TEXT-001.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_LINE RADIOBUTTON GROUP GR01 DEFAULT 'X'."下線表示FLG(ON)
+SELECTION-SCREEN COMMENT 37(04) TEXT-002.
+SELECTION-SCREEN POSITION 47.
+PARAMETERS: P_LINE2 RADIOBUTTON GROUP GR01.
+SELECTION-SCREEN COMMENT 49(06) TEXT-003.
+SELECTION-SCREEN END   OF LINE.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(08) TEXT-007.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_HEAD RADIOBUTTON GROUP GR03 DEFAULT 'X'."下線表示FLG(ON)
+SELECTION-SCREEN COMMENT 37(08) TEXT-008.
+SELECTION-SCREEN POSITION 47.
+PARAMETERS: P_HEAD2 RADIOBUTTON GROUP GR03.
+SELECTION-SCREEN COMMENT 49(12) TEXT-009.
+SELECTION-SCREEN END   OF LINE.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(08) TEXT-004.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_LONG RADIOBUTTON GROUP GR02 DEFAULT 'X'."摘要表示FLG(LONG)
+SELECTION-SCREEN COMMENT 37(04) TEXT-005.
+SELECTION-SCREEN POSITION 47.
+PARAMETERS: P_LONG2 RADIOBUTTON GROUP GR02.
+SELECTION-SCREEN COMMENT 49(06) TEXT-006.
+SELECTION-SCREEN END   OF LINE.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(24) TEXT-010.            "原価&利益センタ
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_GR RADIOBUTTON GROUP GR04 DEFAULT 'X'."明細単位抽出
+SELECTION-SCREEN COMMENT 37(08) TEXT-011.
+SELECTION-SCREEN POSITION 47.
+PARAMETERS: P_GR2 RADIOBUTTON GROUP GR04.           "伝票単位抽出
+SELECTION-SCREEN COMMENT 49(08) TEXT-012.
+SELECTION-SCREEN END   OF LINE.
+DATA W_GFLG LIKE W_FLG.                        "原価センタ存在チェック用
+DATA W_RFLG LIKE W_FLG.                        "利益センタ存在チェック用
+DATA W_OLD_NO LIKE BSEG-BELNR.  "前明細の伝票番号
+DATA W_OLD_DAT(8)  TYPE C.      "前明細の年月日
+DATA W_TUKA    LIKE  BKPF-WAERS.
+
+*   insert 2012/11/19 C.MARUTA DMW4632{
+* 内部テーブル定義
+DATA:
+GT_BKPF_SC TYPE  T_I_BKPF_SC,      "内部TBL:決済伝票SERCH用
+GT_BKPF    TYPE  T_I_CLBKPF,       "内部TBL:会計伝票ヘッダ格納用
+GT_CLBKPF  TYPE  T_I_CLBKPF,       "内部TBL:決済伝票ヘッダ格納用
+GT_CLBSEG  TYPE  T_I_CLBSEG,       "内部TBL:決済伝票明細格納用
+GT_LFA1_SC TYPE  T_I_LFKN_TXT,     "内部TBL:仕入先名称検索用
+GT_KNA1_SC TYPE  T_I_LFKN_TXT,     "内部TBL:得意先名称検索用
+GT_LFA1    TYPE  T_I_LFKN_TXT,     "内部TBL:仕入先名称格納用
+GT_KNA1    TYPE  T_I_LFKN_TXT.     "内部TBL:得意先名称格納用
+
+* 構造定義
+DATA:
+GS_BSEG    LIKE  T_BSEG,           "構造:会計伝票明細格納用
+GS_LFA1_SC TYPE  T_S_LFKN_TXT,     "構造:仕入先名称検索用
+GS_KNA1_SC TYPE  T_S_LFKN_TXT,     "構造:得意先名称検索用
+GS_BKPF_SC TYPE  T_S_BKPF_SC,      "構造:決済伝票SERCH用
+GS_BKPF    TYPE  T_S_CLBKPF.       "構造:会計伝票ヘッダ格納用
+
+************************************************************************
+INITIALIZATION.
+************************************************************************
+
+* 日付決定
+PERFORM GET_DATE.
+* } insert 2012/11/19 C.MARUTA DMW4632
+************************************************************************
+START-OF-SELECTION.
+CLEAR W_PAGE_OUT.
+*   modify 2012/11/19 C.MARUTA DMW4632{
+*  IF P_LONG = 'X'.
+*    NEW-PAGE LINE-SIZE 255
+*             LINE-COUNT 65.
+*  ELSE.
+*    NEW-PAGE LINE-SIZE 170
+*             LINE-COUNT 58.
+*  ENDIF.
+NEW-PAGE LINE-SIZE 170
+LINE-COUNT 58.
+* } modify 2012/11/19 C.MARUTA DMW4632
+**-- 対象年月日のチェック  ---*
+*  CALL FUNCTION 'FI_PERIOD_DETERMINE'
+*       EXPORTING
+*            I_BUDAT        = P_FROM
+*            I_BUKRS        = P_BUKRS
+*       IMPORTING
+*            E_GJAHR        = W_FROM
+*       EXCEPTIONS
+*            FISCAL_YEAR    = 1
+*            PERIOD         = 2
+*            PERIOD_VERSION = 3
+*            POSTING_PERIOD = 4
+*            SPECIAL_PERIOD = 5
+*            VERSION        = 6
+*            POSTING_DATE   = 7
+*            OTHERS         = 8.
+*
+*  IF SY-SUBRC <> 0.
+*    MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+*    EXIT.
+*  ENDIF.
+*
+*  CALL FUNCTION 'FI_PERIOD_DETERMINE'
+*       EXPORTING
+*            I_BUDAT        = P_TO
+*            I_BUKRS        = P_BUKRS
+*       IMPORTING
+*            E_GJAHR        = W_TO
+*       EXCEPTIONS
+*            FISCAL_YEAR    = 1
+*            PERIOD         = 2
+*            PERIOD_VERSION = 3
+*            POSTING_PERIOD = 4
+*            SPECIAL_PERIOD = 5
+*            VERSION        = 6
+*            POSTING_DATE   = 7
+*            OTHERS         = 8.
+*
+*  IF SY-SUBRC <> 0.
+*    MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+*    EXIT.
+*  ENDIF.
+*
+*  IF  W_FROM <> W_TO.
+*    MESSAGE A301 WITH P_FROM P_TO.
+*  ENDIF.
+*-- START OF MAIN CONTROL ---*
+
+CLEAR W_TUKA.                                             "2000/03/03
+SELECT SINGLE * FROM  T001                                "2000/03/03
+WHERE  BUKRS  = P_BUKRS.                                 "2000/03/03
+W_TUKA = T001-WAERS.                                      "2000/03/03
+
+* 管理領域の取得
+SELECT SINGLE * FROM TKA02
+WHERE BUKRS = P_BUKRS
+AND GSBER = SPACE.
+
+*   insert 2012/11/19 C.MARUTA DMW4632{
+*  伝票タイプの決定
+IF P_EXIST = 'X'.     "決済伝票ありの場合
+*     選択画面-決済伝票タイプ
+GR_BLART[] = S_KBLART[].
+ELSE.
+*     選択画面-伝票タイプ
+GR_BLART[] = S_BLART[].
+ENDIF.
+* } insert 2012/11/19 C.MARUTA DMW4632
+
+SELECT * FROM BKPF                   "会計伝票ヘッダー読込 (MAIN-LOOP)
+WHERE BUKRS =  P_BUKRS
+AND GJAHR =  P_GJH
+*     AND GJAHR =  W_FROM
+*   insert 2012/11/19 C.MARUTA DMW4632{
+AND BLART IN GR_BLART         "伝票タイプ
+* } insert 2012/11/19 C.MARUTA DMW4632
+AND ( BUDAT >= P_FROM   AND
+BUDAT <= P_TO )
+*   insert 2012/11/19 C.MARUTA DMW4632{
+AND USNAM IN S_USNAM          "登録者
+AND WAERS IN S_WAERS          "通貨
+* } insert 2012/11/19 C.MARUTA DMW4632
+AND BSTAT = SPACE
+AND BELNR IN S_BELNR
+ORDER BY BUDAT  BELNR.
+
+*   modify 2012/11/19 C.MARUTA DMW4632{
+*   REFRESH T_BSEG.                    "1999/02/25 ADD
+CLEAR: GS_BSEG.
+* } modify 2012/11/19 C.MARUTA DMW4632
+CLEAR W_FLG.                       "1999/02/25 ADD
+CLEAR: W_RFLG, W_GFLG.             "原価センタ&利益センタチェック
+
+*   insert 2012/11/19 C.MARUTA DMW4632{
+CHECK BKPF-BLART IN S_BLART.
+* } insert 2012/11/19 C.MARUTA DMW4632
+
+SELECT * FROM BSEG                 "会計伝票明細読込 (SUB-LOOP)
+WHERE BUKRS = P_BUKRS
+AND BELNR = BKPF-BELNR
+AND GJAHR = P_GJH.
+*       AND GJAHR = W_FROM.
+IF BSEG-GSBER IN S_GSBER.        "1999/02/25 ADD ↓
+W_FLG = 1.
+ENDIF.
+CLEAR T_BSEG.
+MOVE-CORRESPONDING BSEG TO T_BSEG.
+T_BSEG-BELNR_KEY = BKPF-BELNR.
+T_BSEG-BUDAT_KEY = BKPF-BUDAT.
+*   insert 2012/11/19 C.MARUTA DMW4632{
+T_BSEG-BELNR_SORT = BKPF-BELNR.
+T_BSEG-WAERS      = BKPF-WAERS.
+IF BSEG-SHKZG = 'H'.
+T_BSEG-DMBTR     = BSEG-DMBTR * - 1.
+T_BSEG-WRBTR     = BSEG-WRBTR * - 1.
+ENDIF.
+CLEAR:GS_LFA1_SC,GS_KNA1_SC.
+IF BSEG-KOART = 'K'.
+T_BSEG-CODE     = T_BSEG-LIFNR.
+*       検索用に仕入先退避
+GS_LFA1_SC-CODE  = T_BSEG-LIFNR.
+COLLECT GS_LFA1_SC INTO GT_LFA1_SC.
+ELSEIF BSEG-KOART = 'D'.
+T_BSEG-CODE     = T_BSEG-KUNNR.
+*       検索用に得意先退避
+GS_KNA1_SC-CODE  = T_BSEG-KUNNR.
+COLLECT GS_KNA1_SC INTO GT_KNA1_SC.
+ENDIF.
+IF NOT T_BSEG-AUGDT IS INITIAL.
+*       決済伝票の会計年度の取得
+PERFORM GET_AUGJAHR.
+*       決済伝票検索用構造に退避
+CLEAR:GS_BKPF_SC.
+GS_BKPF_SC-BELNR   = T_BSEG-AUGBL.    "決済伝票番号
+GS_BKPF_SC-BUKRS   = T_BSEG-BUKRS.    "会社コード
+GS_BKPF_SC-AUGJAHR = T_BSEG-AUGJAHR.  "決済伝票年
+ENDIF.
+* } insert 2012/11/19 C.MARUTA DMW4632
+IF BSEG-KOSTL IN S_KOSTL.       "原価センタ存在確認
+W_GFLG = 1.
+ENDIF.
+IF BSEG-PRCTR IN S_PRCTR.       "利益センタ存在確認
+W_RFLG = 1.
+ENDIF.
+IF BSEG-KOSTL IN S_KOSTL AND BSEG-PRCTR IN S_PRCTR AND
+P_GR = 'X'.
+APPEND T_BSEG.                 "検索された明細は内部テーブルへ
+*   insert 2012/11/19 C.MARUTA DMW4632{
+*       決済伝票検索用内部TBLに退避
+COLLECT GS_BKPF_SC INTO GT_BKPF_SC.
+* } insert 2012/11/19 C.MARUTA DMW4632
+ELSEIF P_GR2 = 'X'.
+APPEND T_BSEG.                 "検索された明細は内部テーブルへ
+*   insert 2012/11/19 C.MARUTA DMW4632{
+*       決済伝票検索用内部TBLに退避
+COLLECT GS_BKPF_SC INTO GT_BKPF_SC.
+* } insert 2012/11/19 C.MARUTA DMW4632
+ENDIF.
+ENDSELECT.
+IF W_FLG = 0.                      "事業領域が合わない場合は
+REFRESH T_BSEG.                  "テーブルをクリア
+ENDIF.                             "1999/02/25 ADD ↑
+IF W_GFLG = 0 OR W_RFLG = 0.       "利益、原価フラグが合わない場合
+REFRESH T_BSEG.
+ENDIF.
+*   delete 2012/11/19 C.MARUTA DMW4632{
+*    LOOP AT T_BSEG.                    "1999/02/25 ADD
+*      "SELECTループから変更
+*      "各PERFORMも使用項目を変更
+**伝票Noと年月日のクリア
+*      AT NEW BUDAT_KEY.
+*        W_OLD_NO = BKPF-BELNR.
+*        W_OLD_DAT = BKPF-BUDAT.
+*      ENDAT.
+*      PERFORM SKAT_SELECT.             "総勘定元帳マスタ読込
+*      PERFORM TGSBT_SELECT.            "事業領域名テーブル読込
+*
+*      IF P_LONG <> 'X'.
+*        PERFORM EDIT_OUTPUT.
+*      ELSE.
+*        PERFORM EDIT_OUTPUT_L.
+*      ENDIF.
+*
+*      AT END OF BUDAT_KEY.               "アンダーライン表示
+*        IF P_LINE ='X' .
+*          ULINE.
+*        ENDIF.
+*      ENDAT.
+*    ENDLOOP.                           "1999/02/25 ADD
+* } delete 2012/11/19 C.MARUTA DMW4632
+*   insert 2012/11/19 C.MARUTA DMW4632{
+*   会計伝票退避
+CLEAR:GS_BKPF.
+GS_BKPF-BUKRS = BKPF-BUKRS.
+GS_BKPF-BELNR = BKPF-BELNR.
+GS_BKPF-GJAHR = BKPF-GJAHR.
+GS_BKPF-BUDAT = BKPF-BUDAT.
+GS_BKPF-WAERS = BKPF-WAERS.
+APPEND GS_BKPF TO GT_BKPF.
+* } insert 2012/11/19 C.MARUTA DMW4632
+ENDSELECT.
+*   delete 2012/11/19 C.MARUTA DMW4632{
+*  IF W_RECFLG <> 'X'.
+*    WRITE: /1 '該当データが存在しません'.
+*  ENDIF.
+* } delete 2012/11/19 C.MARUTA DMW4632
+*   insert 2012/11/19 C.MARUTA DMW4632{
+*   決済伝票ありの場合
+IF P_EXIST = 'X'.
+*   決済伝票の取得
+PERFORM GET_CLEARING_DATA.
+*   通貨チェック
+PERFORM CHECK_CURRENCY.
+*   決済伝票の合算処理
+PERFORM MAKE_CLEARING_DATA.
+ENDIF.
+
+* 得意先・仕入先の名称取得
+PERFORM GET_MST_NAME.
+
+* マスタ取得.出力処理
+PERFORM EDN_PROC.
+
+IF W_RECFLG <> 'X'.
+WRITE: /1 '該当データが存在しません'.
+ENDIF.
+* } insert 2012/11/19 C.MARUTA DMW4632
+
+*-- END OF MAIN CONTROL ---*
+END-OF-SELECTION.
+*----------------------------------------------------------------------*
+TOP-OF-PAGE.
+
+IF P_HEAD2 <> 'X' OR W_PAGE_OUT = ''.
+*   modify 2012/11/19 C.MARUTA DMW4632{
+*    IF P_LONG <> 'X'.
+*      PERFORM HEADER_WRITE.
+*    ELSE.
+*      PERFORM HEADER_WRITE_L.
+*    ENDIF.
+PERFORM HEADER_WRITE_L.
+* } modify 2012/11/19 C.MARUTA DMW4632
+ENDIF.
+W_PAGE_OUT = 'X'.
+*---------------------------------------------------------------------*
+*       総勘定元帳マスタ読込                                           *
+*---------------------------------------------------------------------*
+FORM SKAT_SELECT.
+SELECT * FROM SKAT
+WHERE SPRAS = 'J'
+AND KTOPL = T001-KTOPL
+AND SAKNR = T_BSEG-HKONT.         "1999/02/25 MOD
+ENDSELECT.
+ENDFORM.
+*   delete 2012/11/19 C.MARUTA DMW4632{
+**---------------------------------------------------------------------*
+**       事業領域名テーブル読込
+**
+**---------------------------------------------------------------------*
+*FORM TGSBT_SELECT.
+*  SELECT * FROM TGSBT
+*   WHERE SPRAS = 'J'
+*     AND GSBER = T_BSEG-GSBER.         "1999/02/25 MOD
+*  ENDSELECT.
+*ENDFORM.
+* } delete 2012/11/19 C.MARUTA DMW4632
+*---------------------------------------------------------------------*
+*       FORM HEADER1  帳票見出し出力                                   *
+*---------------------------------------------------------------------*
+FORM HEADER_WRITE.
+
+WRITE:  161 'ページ',
+168 SY-PAGNO.
+WRITE:  /11 W_FROM NO-ZERO,                               "97.3.5
+15 '年度',
+77 '仕  訳  日  記  帳',
+138 '作成年月日',
+148 SY-DATUM(4) NO-ZERO,
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+164 SY-UZEIT(2),
+166 ':',
+167 SY-UZEIT+2(2).
+WRITE:    /77 '==================',
+158 '単位:'.
+WRITE:  165 W_TUKA.
+WRITE:  /71 '(',
+72 P_FROM(4) NO-ZERO,                            "97.3.5
+76 '年',
+78 P_FROM+4(2) NO-ZERO,                          "97.3.5
+80 '月',
+82 P_FROM+6(2) NO-ZERO,                          "97.3.5
+84 '日～',
+88 P_TO(4) NO-ZERO,                              "97.3.5
+92 '年',
+94 P_TO+4(2) NO-ZERO,                            "97.3.5
+96 '月',
+98 P_TO+6(2) NO-ZERO,                            "97.3.5
+100 '日)'.
+SKIP.
+WRITE:   /1 '伝票NO',
+12 '年月日',
+21 '勘定科目',              "1999/01/22追加
+32 '勘定科目名',            "1999/01/22追加
+53 '部門',                  "1999/01/22追加
+58 '原価ｾﾝﾀ',
+69 '利益ｾﾝﾀ',
+80 '利益ｾﾝﾀﾃｷｽﾄ',
+104 '借方金額',
+113 '借税',
+124 '貸方金額',
+133 '貸税',
+138 '摘      要'.
+ULINE.
+ENDFORM .
+*   delete 2012/11/19 C.MARUTA DMW4632{
+**---------------------------------------------------------------------*
+**       明細行の編集・出力
+**
+**---------------------------------------------------------------------*
+*FORM EDIT_OUTPUT.
+*
+*  W_RECFLG = 'X'.
+*
+*  MOVE SKAT-TXT20 TO IN_CHAR.
+*
+*  PERFORM YF01CCUT USING IN_CHAR 20.   "1999/01/22追加
+*  MOVE OUT_CHAR TO ZFRP6010-NAME.
+**
+*  MOVE T_BSEG-SGTXT TO IN_CHAR.
+*  PERFORM YF01CCUT USING IN_CHAR 32.
+*  MOVE OUT_CHAR TO ZFRP6010-TEXT.
+**
+*  W_DMBTR = T_BSEG-DMBTR * 100.
+*  PERFORM YF01NUMC USING W_DMBTR 15 0.
+**
+*  PERFORM GET_KTEXT. "利益センタ,原価センタ名称の取得
+*  MOVE W_R_TXT TO IN_CHAR.
+*  PERFORM YF01CCUT USING IN_CHAR 16.
+*  MOVE OUT_CHAR TO W_R_TXT.
+*  WRITE: /1  W_OLD_NO,
+*          12 W_OLD_DAT(4),
+*          16 W_OLD_DAT+4(4),
+*          21 T_BSEG-HKONT,           "1999/02/25 MOD
+*          32 ZFRP6010-NAME,          "1999/01/22追加
+*          53 T_BSEG-GSBER,           "1999/02/25 MOD
+*          58 T_BSEG-KOSTL,
+*          69 T_BSEG-PRCTR,
+*          80 W_R_TXT.
+*  IF  T_BSEG-SHKZG = 'S'.
+*    WRITE:   97 O_NUM USING EDIT MASK 'RR_______________',
+*            114 T_BSEG-MWSKZ.
+*  ELSE.
+*    WRITE:  116 O_NUM USING EDIT MASK 'RR_______________',
+*            134 T_BSEG-MWSKZ.
+*  ENDIF.
+*  WRITE:   138 ZFRP6010-TEXT.
+*
+**伝票Noと年月日のクリア
+*  IF P_LINE = 'X'.
+*    CLEAR: W_OLD_NO, W_OLD_DAT.
+*  ENDIF.
+*
+*ENDFORM.
+* } delete 2012/11/19 C.MARUTA DMW4632
+*&---------------------------------------------------------------------*
+*&      Form  HEADER_WRITE_L 2000/03/03 ADD
+*&---------------------------------------------------------------------*
+*       摘要ロングバージョンのヘッダレイアウト
+*----------------------------------------------------------------------*
+FORM HEADER_WRITE_L.
+
+*   modify 2012/11/19 C.MARUTA DMW4632{
+*  WRITE:  241 'ページ',
+*          248 SY-PAGNO.
+*  WRITE:  /11 W_FROM NO-ZERO,                               "97.3.5
+*           15 '年度',
+*          118 '仕  訳  日  記  帳',
+*          221 '作成年月日',
+*          231 SY-DATUM(4) NO-ZERO,
+*          235 '年',
+*          237 SY-DATUM+4(2) NO-ZERO,                        "97.3.5
+*          239 '月',
+*          241 SY-DATUM+6(2) NO-ZERO,                        "97.3.5
+*          243 '日',
+*          247 SY-UZEIT(2),
+*          249 ':',
+*          250 SY-UZEIT+2(2).
+*  WRITE:  /118 '=================='.
+**           243 '単位:'.
+**  WRITE:   248 W_TUKA.
+*  WRITE:  /112 '(',
+*           113 P_FROM(4) NO-ZERO,                           "97.3.5
+*           117 '年',
+*           119 P_FROM+4(2) NO-ZERO,                         "97.3.5
+*           121 '月',
+*           123 P_FROM+6(2) NO-ZERO,                         "97.3.5
+*           125 '日～',
+*           129 P_TO(4) NO-ZERO,                             "97.3.5
+*           133 '年',
+*           135 P_TO+4(2) NO-ZERO,                           "97.3.5
+*           137 '月',
+*           139 P_TO+6(2) NO-ZERO,                           "97.3.5
+*           141 '日)'.
+*  SKIP.
+*  WRITE:   /1 '伝票NO',
+*           12 '年月日',
+*           21 '勘定科目',
+*           32 '勘定科目名',
+*           53 '部門',
+*          58 '部門ﾃｷｽﾄ',
+*          89 '原価ｾﾝﾀ',
+*         100 '原価ｾﾝﾀﾃｷｽﾄ',
+*         121 '利益ｾﾝﾀ',
+*         132 '利益ｾﾝﾀﾃｷｽﾄ',
+*         160 '借方金額',
+*         170 '借税',
+*         182 '貸方金額',
+*         192 '貸税',
+*         203 '摘      要'.
+*  ULINE.
+WRITE:  161 'ページ',
+168 SY-PAGNO.
+WRITE:  /11 W_FROM NO-ZERO,                               "97.3.5
+15 '年度',
+77 '仕  訳  日  記  帳',
+138 '作成年月日',
+148 SY-DATUM(4) NO-ZERO,
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+164 SY-UZEIT(2),
+166 ':',
+167 SY-UZEIT+2(2).
+WRITE:    /77 '=================='.
+WRITE:  /71 '(',
+72 P_FROM(4) NO-ZERO,                            "97.3.5
+76 '年',
+78 P_FROM+4(2) NO-ZERO,                          "97.3.5
+80 '月',
+82 P_FROM+6(2) NO-ZERO,                          "97.3.5
+84 '日～',
+88 P_TO(4) NO-ZERO,                              "97.3.5
+92 '年',
+94 P_TO+4(2) NO-ZERO,                            "97.3.5
+96 '月',
+98 P_TO+6(2) NO-ZERO,                            "97.3.5
+100 '日)'.
+SKIP.
+WRITE:   /001 '伝票NO',
+011 SY-VLINE,
+012 '転記日付',
+020 SY-VLINE,
+021 'GL勘定',
+029 'GL勘定テキスト',
+045 SY-VLINE,
+046 '勘定',
+054 '勘定テキスト',
+070 SY-VLINE,
+071 '原C',
+075 '原ﾃｷｽﾄ',
+083 SY-VLINE,
+084 '支払基準',
+092 SY-VLINE,
+093 '通',
+096 SY-VLINE,
+097 '      伝票通貨額',
+113 SY-VLINE,
+114 '      国内通貨額',
+130 SY-VLINE,
+131 '税',
+133 SY-VLINE,
+134 'レート',
+140 SY-VLINE,
+141 '摘      要'.
+ULINE.
+* } modify 2012/11/19 C.MARUTA DMW4632
+
+ENDFORM.                    " HEADER_WRITE_L
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_OUTPUT_L  2000/03/03 ADD
+*&---------------------------------------------------------------------*
+*       摘要ロングバージョンの明細レイアウト
+*----------------------------------------------------------------------*
+FORM EDIT_OUTPUT_L
+*   insert 2012/11/19 C.MARUTA DMW4632{
+USING PS_LFA1 TYPE  T_S_LFKN_TXT
+PS_KNA1 TYPE  T_S_LFKN_TXT.
+DATA:
+LW_ROUND(3)  TYPE C,    "小数点以下切り捨て用(JPY)
+LW_DATE(8)   TYPE C,    "支払基準日格納
+LW_RATE_C(6) TYPE C,    "変換後レート
+LW_WRBTR_P(16) TYPE P DECIMALS 2, "伝票通貨額格納
+LW_RATE(4)   TYPE P DECIMALS 2,
+LW_KTEXT(8)  TYPE C,    "原価センタテキスト
+LW_DMBTR(16) TYPE C,    "国内通貨額格納
+LW_WRBTR(16) TYPE C,    "伝票通貨額格納
+LW_NAME1(16) TYPE C.    "仕入先・得意先名称
+* } insert 2012/11/19 C.MARUTA DMW4632
+
+*   modify 2012/11/19 C.MARUTA DMW4632{
+*  W_RECFLG = 'X'.
+*  MOVE SKAT-TXT20 TO IN_CHAR.
+*  PERFORM YF01CCUT USING IN_CHAR 20.
+*  MOVE OUT_CHAR TO ZFRP6010-NAME.
+*  CONCATENATE T_BSEG-ZUONR '/' T_BSEG-SGTXT INTO W_SGTXT.
+*  W_CHAR = W_SGTXT+49(2).
+*  W_MOJIC = CHARLEN( W_CHAR ).
+*  IF W_MOJIC = 2.
+*    MOVE W_SGTXT(49) TO ZFRP6010-TEXTL.
+*  ELSE.
+*    MOVE W_SGTXT(50) TO ZFRP6010-TEXTL.
+*  ENDIF.
+*  PERFORM GET_KTEXT. "原価,利益センタ名称の取得
+*  W_DMBTR = T_BSEG-DMBTR * 100.
+*  PERFORM YF01NUMC USING W_DMBTR 15 0.
+*  WRITE: /1  W_OLD_NO,
+*          12 W_OLD_DAT(4),
+*          16 W_OLD_DAT+4(4),
+*            21 T_BSEG-HKONT,
+*            32 ZFRP6010-NAME,
+*            53 T_BSEG-GSBER,
+*            58 W_B_TXT,
+*            89 T_BSEG-KOSTL,
+*           100 W_G_TXT,
+*           121 T_BSEG-PRCTR,
+*           132 W_R_TXT.
+*  IF  T_BSEG-SHKZG = 'S'.
+*    WRITE: 153 O_NUM USING EDIT MASK 'RR_______________',
+*           171 T_BSEG-MWSKZ.
+*  ELSE.
+*    WRITE: 175 O_NUM USING EDIT MASK 'RR_______________',
+*           193 T_BSEG-MWSKZ.
+*  ENDIF.
+
+CLEAR :W_SGTXT.
+
+W_RECFLG = 'X'.
+MOVE SKAT-TXT20 TO IN_CHAR.
+PERFORM YF01CCUT USING IN_CHAR 16.
+MOVE OUT_CHAR TO ZFRP6010-NAME.
+
+* 勘定タイプ
+IF T_BSEG-KOART = 'K'.
+*   仕入先名称の設定
+MOVE PS_LFA1-NAME1 TO IN_CHAR.
+PERFORM YF01CCUT USING IN_CHAR 16.
+MOVE OUT_CHAR TO LW_NAME1.
+ELSEIF  T_BSEG-KOART = 'D'.
+*   得意先名称の設定
+MOVE PS_KNA1-NAME1 TO IN_CHAR.
+PERFORM YF01CCUT USING IN_CHAR 16.
+MOVE OUT_CHAR TO LW_NAME1.
+ENDIF.
+
+* 摘要の設定
+*   insert 2012/12/06 C.MARUTA DMW4632{
+CLEAR:W_SGTXT,ZFRP6010-TEXTL.
+* } insert 2012/12/06 C.MARUTA DMW4632
+IF P_LONG <> 'X'.
+MOVE T_BSEG-SGTXT TO IN_CHAR.
+PERFORM YF01CCUT USING IN_CHAR 30.
+MOVE OUT_CHAR TO ZFRP6010-TEXTL.
+ELSEIF P_LONG = 'X'.
+IF T_BSEG-ZUONR IS INITIAL
+AND T_BSEG-SGTXT IS INITIAL.
+ELSE.
+CONCATENATE T_BSEG-ZUONR '/' T_BSEG-SGTXT INTO W_SGTXT.
+*   insert 2012/12/06 C.MARUTA DMW4632{
+MOVE W_SGTXT TO IN_CHAR.
+PERFORM YF01CCUT USING IN_CHAR 30.
+MOVE OUT_CHAR TO ZFRP6010-TEXTL.
+* } insert 2012/12/06 C.MARUTA DMW4632
+ENDIF.
+ENDIF.
+*   delete 2012/12/06 C.MARUTA DMW4632{
+*  W_CHAR = W_SGTXT+49(2).
+*  W_MOJIC = CHARLEN( W_CHAR ).
+*  IF W_MOJIC = 2.
+*    MOVE W_SGTXT(49) TO ZFRP6010-TEXTL.
+*  ELSE.
+*    MOVE W_SGTXT(50) TO ZFRP6010-TEXTL.
+*  ENDIF.
+* } delete 2012/12/06 C.MARUTA DMW4632
+PERFORM GET_KTEXT. "原価,利益センタ名称の取得
+
+* 支払基準日
+IF NOT T_BSEG-ZFBDT IS INITIAL.
+LW_DATE =  T_BSEG-ZFBDT.
+ELSE.
+CLEAR:LW_DATE.
+ENDIF.
+
+* 原価センタテキスト
+MOVE W_G_TXT TO IN_CHAR.
+*   modify 2012/12/06 C.MARUTA DMW4632{
+*  PERFORM YF01CCUT USING IN_CHAR 16.
+PERFORM YF01CCUT USING IN_CHAR 8.
+* } modify 2012/12/06 C.MARUTA DMW4632
+MOVE OUT_CHAR TO LW_KTEXT.
+
+* 国内通貨変換
+W_DMBTR = T_BSEG-DMBTR * 100.
+PERFORM YF01NUMC USING W_DMBTR 16 0.
+LW_DMBTR = O_NUM.
+* 伝票通貨額
+IF T_BSEG-WAERS <> 'JPY'.
+LW_WRBTR_P = T_BSEG-WRBTR.
+PERFORM YF01NUMC USING LW_WRBTR_P 16 2.
+LW_WRBTR = O_NUM.
+ELSE.
+W_DMBTR = T_BSEG-WRBTR * 100.
+PERFORM YF01NUMC USING W_DMBTR 16 2.
+LW_WRBTR = O_NUM.
+SPLIT LW_WRBTR AT '.'
+INTO LW_WRBTR
+LW_ROUND.
+ENDIF.
+
+* 換算レート
+CLEAR:LW_RATE_C.
+IF T_BSEG-WAERS <> 'JPY'
+AND NOT T_BSEG-WRBTR IS INITIAL
+AND NOT T_BSEG-DMBTR IS INITIAL.
+*   国内通貨/伝票通貨
+CATCH SYSTEM-EXCEPTIONS ARITHMETIC_ERRORS = 5.
+LW_RATE = ( T_BSEG-DMBTR * 100 )  / T_BSEG-WRBTR.
+ENDCATCH.
+IF SY-SUBRC = 0.
+PERFORM YF01NUMC USING LW_RATE 16 2.
+LW_RATE_C = O_NUM.
+ENDIF.
+ENDIF.
+
+* GL勘定なしの場合(伝票番号のみのレコードの場合)
+IF T_BSEG-HKONT IS INITIAL.
+*   国内通貨・伝票通貨の初期化
+CLEAR:LW_WRBTR,LW_DMBTR.
+ENDIF.
+
+WRITE: /001  W_OLD_NO,          "伝票NO
+011 SY-VLINE,
+012 W_OLD_DAT(4),       "転記日
+016 W_OLD_DAT+4(4),     "転記日
+020 SY-VLINE,
+021 T_BSEG-HKONT,       "GL勘定
+029 ZFRP6010-NAME,      "GL勘定TEXT
+045 SY-VLINE,
+046 T_BSEG-CODE,        "統制勘定
+054 LW_NAME1,           "名称
+070 SY-VLINE,
+071 T_BSEG-KOSTL,       "原価センタ
+075 LW_KTEXT,           "原価センタ-名称
+083 SY-VLINE,
+084 LW_DATE,            "支払基準日
+092 SY-VLINE,
+093 T_BSEG-WAERS,       "通貨
+096 SY-VLINE.
+WRITE: 097  LW_WRBTR    "伝票通貨額
+USING EDIT MASK 'RR________________'.
+WRITE: 113 SY-VLINE.
+WRITE: 114  LW_DMBTR    "国内通貨額
+USING EDIT MASK 'RR________________'.
+WRITE: 130 SY-VLINE.
+WRITE: 131 T_BSEG-MWSKZ,       "税コード
+133 SY-VLINE.
+WRITE: 134  LW_RATE_C    "算出レート
+USING EDIT MASK 'RR______'.
+WRITE: 140 SY-VLINE.
+* } modify 2012/11/19 C.MARUTA DMW4632
+WRITE   141 ZFRP6010-TEXTL.
+IF P_LINE = 'X'.
+CLEAR: W_OLD_NO, W_OLD_DAT.
+ENDIF.
+
+ENDFORM.                    " EDIT_OUTPUT_L
+*&---------------------------------------------------------------------*
+*&      Form  GET_KTEXT
+*&---------------------------------------------------------------------*
+*       利益センタ名称の取得
+*----------------------------------------------------------------------*
+FORM GET_KTEXT.
+CLEAR:W_R_TXT,W_G_TXT.
+*   delete 2012/11/19 C.MARUTA DMW4632{
+*  IF T_BSEG-PRCTR IS INITIAL.                     "利益センタ名称
+*  ELSE.
+*    SELECT SINGLE KTEXT INTO W_R_TXT FROM CEPCT
+*    WHERE SPRAS =  SY-LANGU
+*      AND PRCTR =  T_BSEG-PRCTR
+*      AND DATBI => T_BSEG-BUDAT_KEY
+*      AND KOKRS =  TKA02-KOKRS.
+*  ENDIF.
+* } delete 2012/11/19 C.MARUTA DMW4632
+IF T_BSEG-KOSTL IS INITIAL OR P_LONG IS INITIAL. "原価センタ名称
+ELSE.
+SELECT SINGLE KTEXT INTO W_G_TXT FROM CSKT
+WHERE SPRAS =  SY-LANGU
+AND KOKRS =  TKA02-KOKRS
+AND KOSTL =  T_BSEG-KOSTL
+AND DATBI => T_BSEG-BUDAT_KEY.
+ENDIF.
+ENDFORM.                    " GET_KTEXT
+*   insert 2012/11/19 C.MARUTA DMW4632{
+*&---------------------------------------------------------------------*
+*&      Form  GET_AUGJAHR
+*&---------------------------------------------------------------------*
+*       text  決済伝票の会計年度の取得
+*----------------------------------------------------------------------*
+FORM GET_AUGJAHR.
+
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = T_BSEG-AUGDT
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = T_BSEG-AUGJAHR
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+EXIT.
+ENDIF.
+
+ENDFORM.                    " GET_AUGJAHR
+*&---------------------------------------------------------------------*
+*&      Form  GET_CLEARING_DATA
+*&---------------------------------------------------------------------*
+*       text  決済伝票の取得
+*----------------------------------------------------------------------*
+FORM GET_CLEARING_DATA.
+
+*  検索用
+CHECK NOT GT_BKPF_SC IS INITIAL.
+
+*  決済伝票のヘッダ情報取得
+SELECT BUKRS        "会社コード
+BELNR        "決済伝票番号
+GJAHR        "決済伝票年度
+BUDAT        "伝票の転記日付
+WAERS        "通貨
+INTO TABLE GT_CLBKPF
+FROM BKPF
+FOR ALL ENTRIES IN GT_BKPF_SC
+WHERE BUKRS = GT_BKPF_SC-BUKRS       "会社コード
+AND BELNR = GT_BKPF_SC-BELNR       "決済伝票番号
+AND GJAHR = GT_BKPF_SC-AUGJAHR.    "決済伝票年度
+
+CHECK SY-SUBRC = 0.
+
+*  決済伝票の明細情報取得
+SELECT BUKRS        "会社コード
+BELNR        "伝票番号
+GJAHR        "伝票年度
+BUZEI        "会計伝票内の明細番号
+AUGBL        "決済伝票番号
+KOART        "勘定タイプ
+SHKZG        "借方/貸方フラグ
+MWSKZ        "税
+DMBTR        "国内通貨額
+WRBTR        "伝票通貨額
+ZUONR        "ソートキー
+SGTXT        "明細テキスト
+KOSTL        "原価センタ
+SAKNR        "G/L 勘定コード
+HKONT        "総勘定元帳勘定
+KUNNR        "得意先コード
+LIFNR        "仕入先コード
+ZFBDT        "支払基準日
+INTO TABLE GT_CLBSEG
+FROM BSEG
+FOR ALL ENTRIES IN GT_CLBKPF
+WHERE BUKRS = GT_CLBKPF-BUKRS       "会社コード
+AND BELNR = GT_CLBKPF-BELNR       "決済伝票番号
+AND GJAHR = GT_CLBKPF-GJAHR.    "決済伝票年度
+
+REFRESH GT_BKPF_SC.
+
+ENDFORM.                    " GET_CLEARING_DATA
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_CURRENCY
+*&---------------------------------------------------------------------*
+*       text　通貨チェック
+*----------------------------------------------------------------------*
+FORM CHECK_CURRENCY.
+
+FIELD-SYMBOLS:
+<LFS_BKPF>    TYPE  T_S_CLBKPF,   "構造：入金/支払伝票ヘッダ
+<LFS_CLBKPF>  TYPE  T_S_CLBKPF,   "構造：決済伝票ヘッダ
+<LFS_BSEG>    LIKE  T_BSEG.       "構造：会計伝票明細
+
+DATA:
+LT_BSEG       TYPE  T_I_T_BSEG,   "内部：一時格納用(全伝票)
+LT_BSEG_W     TYPE  T_I_T_BSEG,   "内部：一時格納用(伝票単位)
+LW_CHECK_F    TYPE  C.            "伝票単位の通貨チェック
+
+* 入金/支払伝票ヘッダのSORT
+SORT GT_BKPF BY BUKRS    "会社コード
+BELNR    "会計伝票番号
+GJAHR.   "会計年度
+
+* 決済伝票ヘッダのSORT
+SORT GT_CLBKPF BY BUKRS    "会社コード
+BELNR    "会計伝票番号
+GJAHR.   "会計年度
+
+* 明細のLOOP(T_BSEG)
+LOOP AT T_BSEG ASSIGNING <LFS_BSEG>.
+
+AT NEW BUDAT_KEY.
+CLEAR: LW_CHECK_F,LT_BSEG_W.
+ENDAT.
+
+READ TABLE GT_CLBKPF
+ASSIGNING <LFS_CLBKPF>
+WITH KEY BUKRS   = <LFS_BSEG>-BUKRS    "会社コード
+BELNR   = <LFS_BSEG>-AUGBL    "決済伝票番号
+GJAHR   = <LFS_BSEG>-AUGJAHR  "決済伝票会計年度
+BINARY SEARCH.
+*   通貨チェック
+IF SY-SUBRC = 0
+AND  <LFS_BSEG>-WAERS <> <LFS_CLBKPF>-WAERS.
+*     等しくない場合 NGフラグON
+LW_CHECK_F = 'X'.
+ENDIF.
+*   内部TBLに一時格納
+APPEND <LFS_BSEG> TO LT_BSEG_W.
+
+*   伝票単位の通貨チェック
+AT END OF BUDAT_KEY.
+IF LW_CHECK_F <> 'X'.    "通貨チェックOK
+APPEND LINES OF LT_BSEG_W  TO LT_BSEG.
+ENDIF.
+ENDAT.
+ENDLOOP.
+REFRESH T_BSEG.
+APPEND LINES OF LT_BSEG  TO T_BSEG.
+
+ENDFORM.                    " CHECK_CURRENCY
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_CLEARING_DATA
+*&---------------------------------------------------------------------*
+*       text  データの合算処理
+*----------------------------------------------------------------------*
+FORM MAKE_CLEARING_DATA.
+
+FIELD-SYMBOLS:
+<LFS_BSEG>    LIKE  T_BSEG,            "構造：会計伝票明細
+<LFS_BSEG_W>  LIKE  T_BSEG,            "構造：会計伝票明細
+<LFS_CLBSEG>  TYPE  T_S_CLBSEG,        "構造：決済伝票明細
+<LFS_CLBKPF>  TYPE  T_S_CLBKPF.        "構造：決済伝票ヘッダ(取得)
+DATA:
+LT_BELNR      TYPE  T_I_BELNR,         "内部；伝票番号一時格納用
+LT_BSEG_W     TYPE  T_I_T_BSEG,        "内部：伝票単位一時格納用
+*   insert 2012/12/03 C.MARUTA DMW4632{
+LT_BSEG_EX    TYPE  T_I_T_BSEG,        "内部：為替差損勘定一時格納用
+* } insert 2012/12/03 C.MARUTA DMW4632
+LT_BSEG_KD    TYPE  T_I_T_BSEG,        "内部：統制データ一時格納用
+LT_BSEG_S     TYPE  T_I_T_BSEG,        "内部：一般データ一時格納用
+LW_BELCNT     TYPE  I,                 "変数：伝票番号内部TBLｶｳﾝﾄ
+LW_ITCNT      TYPE  I,                 "変数：明細内部TBLｶｳﾝﾄ
+LW_IDXCNT     TYPE  I,                 "変数：INDEXカウント
+LW_SUBRC      TYPE  SY-SUBRC,          "変数：処理結果(決済伝票H)
+LW_BELNR_KEY  TYPE  BKPF-BELNR,        "変数：伝票番号一時格納用
+LW_GJAHR      TYPE  BKPF-GJAHR,        "変数：年度一時格納用
+LW_BUKRS      TYPE  BKPF-BUKRS,        "変数：会社一時格納用
+LS_BSEG_W     LIKE  T_BSEG,            "構造：会計伝票明細
+LS_BELNR      TYPE  T_S_BELNR,         "構造：伝票番号一時格納用
+LS_LFA1_SC    TYPE  T_S_LFKN_TXT,      "構造：仕入先検索格納用
+LS_KNA1_SC    TYPE  T_S_LFKN_TXT,      "構造：得意先検索格納用
+LS_BSEG       TYPE  T_S_T_BSEG,        "構造：会計伝票明細
+LS_CLBKPF     TYPE  T_S_CLBKPF.        "構造：決済伝票ヘッダ(格納)
+
+* 決済伝票明細のSORT
+SORT GT_CLBSEG BY BUKRS    "会社コード
+BELNR    "会計伝票番号
+GJAHR.   "決済伝票会計年度
+
+* 明細のLOOP(T_BSEG)
+LOOP AT T_BSEG ASSIGNING <LFS_BSEG>.
+
+CLEAR: LW_BELNR_KEY, LS_CLBKPF,LW_GJAHR, LW_BUKRS,
+LW_SUBRC,LS_BELNR.
+
+*   決済伝票ヘッダの読込
+READ TABLE GT_CLBKPF
+ASSIGNING <LFS_CLBKPF>
+WITH KEY BUKRS   = <LFS_BSEG>-BUKRS    "会社コード
+BELNR   = <LFS_BSEG>-AUGBL    "決済伝票番号
+GJAHR   = <LFS_BSEG>-AUGJAHR  "決済伝票会計年度
+BINARY SEARCH.
+
+*   取得結果格納(決済伝票なしと明細なし転記判定のため)
+LW_SUBRC = SY-SUBRC.
+IF LW_SUBRC = 0.
+LS_CLBKPF =  <LFS_CLBKPF>.
+ELSE.
+CLEAR:LS_CLBKPF.
+ENDIF.
+
+*   決済伝票の多重読込防止
+IF LS_CLBKPF-CKBEL <> <LFS_BSEG>-BELNR
+OR LS_CLBKPF-CKGJA <> <LFS_BSEG>-GJAHR.
+*     決済伝票LOOP
+LOOP AT GT_CLBSEG ASSIGNING <LFS_CLBSEG>
+WHERE BUKRS = <LFS_BSEG>-BUKRS
+AND BELNR = <LFS_BSEG>-AUGBL
+AND GJAHR = <LFS_BSEG>-AUGJAHR.
+
+CHECK <LFS_BSEG>-BELNR <> <LFS_CLBSEG>-BELNR.
+
+*       初期化
+CLEAR:LS_BSEG,LS_LFA1_SC,LS_KNA1_SC.
+
+LS_BSEG-BUKRS      = <LFS_BSEG>-BUKRS.       "入金/支払-会社
+LS_BSEG-BELNR_SORT = <LFS_BSEG>-BELNR.       "入金/支払伝票
+LS_BSEG-BUDAT_KEY  = <LFS_BSEG>-BUDAT_KEY.   "入金/支払転記日
+LS_BSEG-HKONT      = <LFS_CLBSEG>-HKONT.     "決済明細の勘定
+
+*       統制勘定の場合
+IF <LFS_CLBSEG>-KOART = 'K'
+OR <LFS_CLBSEG>-KOART = 'D'
+*          選択画面-為替差損勘定の場合
+*   insert 2012/12/03 C.MARUTA DMW4632{
+OR ( <LFS_CLBSEG>-HKONT IN S_HKONT
+AND NOT S_HKONT IS INITIAL ) .
+* } insert 2012/12/03 C.MARUTA DMW4632
+LS_BSEG-BUKRS      = <LFS_BSEG>-BUKRS.      "会社コード
+LS_BSEG-BELNR_KEY  = <LFS_BSEG>-BELNR_KEY.  "伝票番号
+LS_BSEG-BELNR      = <LFS_BSEG>-BELNR_KEY.  "伝票番号
+LS_BSEG-GJAHR      = <LFS_BSEG>-GJAHR.      "年度
+
+*         勘定タイプ
+IF <LFS_CLBSEG>-KOART = 'K'.
+LS_BSEG-CODE    = <LFS_CLBSEG>-LIFNR.   "決済明細-仕入先
+*           検索用構造に仕入先退避
+LS_LFA1_SC-CODE  = <LFS_CLBSEG>-LIFNR.   "決済明細-仕入先
+ELSE.
+LS_BSEG-CODE = <LFS_CLBSEG>-KUNNR.      "決済明細-得意先
+*           検索用構造に得意先退避
+LS_KNA1_SC-CODE  = <LFS_CLBSEG>-KUNNR.   "決済明細-得意先
+ENDIF.
+LS_BSEG-WAERS   = <LFS_BSEG>-WAERS.        "入金/支払伝票-通貨
+*         貸借チェック
+IF <LFS_CLBSEG>-SHKZG = 'H'.
+LS_BSEG-DMBTR = <LFS_CLBSEG>-DMBTR * -1.
+LS_BSEG-WRBTR = <LFS_CLBSEG>-WRBTR * -1.
+ELSE.
+LS_BSEG-DMBTR = <LFS_CLBSEG>-DMBTR.       "決済明細-国内通貨
+LS_BSEG-WRBTR = <LFS_CLBSEG>-WRBTR.       "決済明細-伝票通貨
+ENDIF.
+LS_BSEG-KOART = <LFS_CLBSEG>-KOART.        "決済明細-勘定TYP
+
+*         統制データ格納
+IF <LFS_CLBSEG>-KOART = 'K' OR <LFS_CLBSEG>-KOART = 'D'.
+COLLECT LS_BSEG INTO LT_BSEG_KD.
+*         為替差損データ格納
+ELSE.
+COLLECT LS_BSEG INTO LT_BSEG_EX.
+ENDIF.
+
+*   　  総勘定元帳勘定の場合
+ELSE.
+LS_BSEG-BELNR_KEY = <LFS_BSEG>-BELNR.      "入金/支払伝票
+LS_BSEG-BELNR     = <LFS_CLBSEG>-BELNR.    "決済伝票番号
+LS_BSEG-BUKRS     = <LFS_CLBSEG>-BUKRS.    "決済伝票-会社
+LS_BSEG-GJAHR     = <LFS_CLBSEG>-GJAHR.    "決済伝票-年度
+LS_BSEG-HKONT     = <LFS_CLBSEG>-HKONT.    "決済明細の勘定
+LS_BSEG-WAERS     = <LFS_BSEG>-WAERS.      "入金/支払伝票-通貨
+LS_BSEG-SGTXT     = <LFS_CLBSEG>-SGTXT.    "明細テキスト
+LS_BSEG-ZUONR     = <LFS_CLBSEG>-ZUONR.    "ソートキー
+LS_BSEG-KOSTL     = <LFS_CLBSEG>-KOSTL.    "決済明細-原価C
+LS_BSEG-KOART     = <LFS_CLBSEG>-KOART.    "決済明細-勘定TYP
+*        貸借チェック
+IF <LFS_CLBSEG>-SHKZG = 'H'.
+LS_BSEG-DMBTR = <LFS_CLBSEG>-DMBTR * -1.
+LS_BSEG-WRBTR = <LFS_CLBSEG>-WRBTR * -1.
+ELSE.
+LS_BSEG-DMBTR = <LFS_CLBSEG>-DMBTR.      "決済明細-国内通貨
+LS_BSEG-WRBTR = <LFS_CLBSEG>-WRBTR.      "決済明細-伝票通貨
+ENDIF.
+LS_BSEG-MWSKZ = <LFS_CLBSEG>-MWSKZ.        "決済明細-税コード
+LS_BSEG-ZFBDT = <LFS_CLBSEG>-ZFBDT.        "支払基準日
+LS_BSEG-SHKZG = <LFS_CLBSEG>-SHKZG.        "貸借
+APPEND LS_BSEG TO LT_BSEG_S.
+ENDIF.
+*       伝票番号退避
+LS_BELNR-BELNR    = <LFS_BSEG>-BELNR.        "入金/支払伝票
+LS_BELNR-BELNR_CL = <LFS_CLBSEG>-BELNR.      "決済伝票番号
+LS_BELNR-SORT     = '1'.                     "SORT番号
+COLLECT LS_BELNR INTO LT_BELNR.
+*       検索用内部TBL退避
+COLLECT LS_LFA1_SC INTO GT_LFA1_SC.
+COLLECT LS_KNA1_SC INTO GT_KNA1_SC.
+ENDLOOP.
+ENDIF.
+*   明細なし転記の場合
+IF SY-SUBRC <> 0 AND LW_SUBRC = 0.
+LS_BELNR-BELNR    = <LFS_BSEG>-BELNR.      "入金/支払伝票
+LS_BELNR-BELNR_CL = LS_CLBKPF-BELNR.       "決済伝票
+LS_BELNR-SORT     = '1'.                   "SORT番号
+COLLECT LS_BELNR INTO LT_BELNR.
+ENDIF.
+*   初期化
+CLEAR:LS_BSEG,LS_LFA1_SC,LS_KNA1_SC,LS_BELNR.
+
+LS_BSEG-BELNR_SORT = <LFS_BSEG>-BELNR.        "入金/支払伝票
+LS_BSEG-BUDAT_KEY  = <LFS_BSEG>-BUDAT_KEY.    "入金/支払転記日伝票
+LS_BSEG-HKONT      = <LFS_BSEG>-HKONT.        "入金/支払伝票の勘定
+
+*   統制勘定の場合
+IF <LFS_BSEG>-KOART = 'K'
+OR <LFS_BSEG>-KOART = 'D'
+*   insert 2012/12/03 C.MARUTA DMW4632{
+*   選択画面-為替差損勘定の場合
+OR ( <LFS_BSEG>-HKONT IN S_HKONT
+AND NOT S_HKONT IS INITIAL ) .
+* } insert 2012/12/03 C.MARUTA DMW4632
+LS_BSEG-BUKRS      = <LFS_BSEG>-BUKRS.      "会社コード
+LS_BSEG-BELNR_KEY  = <LFS_BSEG>-BELNR_KEY.  "伝票番号
+LS_BSEG-BELNR      = <LFS_BSEG>-BELNR_KEY.  "伝票番号
+LS_BSEG-GJAHR      = <LFS_BSEG>-GJAHR.      "年度
+
+*     勘定タイプ
+IF <LFS_BSEG>-KOART = 'K'.
+LS_BSEG-CODE     = <LFS_BSEG>-LIFNR.     "入金/支払-仕入先
+*       検索用構造に仕入先退避
+LS_LFA1_SC-CODE  = <LFS_BSEG>-LIFNR.     "入金/支払-仕入先
+ELSE.
+LS_BSEG-CODE     = <LFS_BSEG>-KUNNR.     "入金/支払-得意先
+*       検索用構造に得意先退避
+LS_KNA1_SC-CODE  = <LFS_BSEG>-KUNNR.     "入金/支払-仕入先
+ENDIF.
+LS_BSEG-WAERS      = <LFS_BSEG>-WAERS.     "入金/支払-通貨
+LS_BSEG-DMBTR      = <LFS_BSEG>-DMBTR.     "入金/支払-国内通貨
+LS_BSEG-WRBTR      = <LFS_BSEG>-WRBTR.     "入金/支払-伝票通貨
+LS_BSEG-KOART      = <LFS_BSEG>-KOART.     "入金/支払-勘定TYP
+*     統制データ格納
+IF <LFS_BSEG>-KOART = 'K' OR <LFS_BSEG>-KOART = 'D'.
+COLLECT LS_BSEG INTO LT_BSEG_KD.
+*     為替差損データ格納
+ELSE.
+COLLECT LS_BSEG INTO LT_BSEG_EX.
+ENDIF.
+*   総勘定元帳勘定の場合
+ELSE.
+LS_BSEG-BELNR_KEY = <LFS_BSEG>-BELNR_KEY.  "伝票番号
+LS_BSEG-BELNR     = <LFS_BSEG>-BELNR_KEY.  "伝票番号
+LS_BSEG-BUKRS     = <LFS_BSEG>-BUKRS.      "会社コード
+LS_BSEG-GJAHR     = <LFS_BSEG>-GJAHR.      "年度
+LS_BSEG-WAERS     = <LFS_BSEG>-WAERS.      "入金/支払伝票-通貨
+LS_BSEG-KOSTL     = <LFS_BSEG>-KOSTL.      "入金/支払-原価センタ
+LS_BSEG-DMBTR     = <LFS_BSEG>-DMBTR.      "入金/支払-国内通貨
+LS_BSEG-WRBTR     = <LFS_BSEG>-WRBTR.      "入金/支払-伝票通貨
+LS_BSEG-MWSKZ     = <LFS_BSEG>-MWSKZ.      "入金/支払-税コード
+LS_BSEG-SGTXT     = <LFS_BSEG>-SGTXT.      "明細テキスト
+LS_BSEG-ZUONR     = <LFS_BSEG>-ZUONR.      "ソートキー
+LS_BSEG-ZFBDT     = <LFS_BSEG>-ZFBDT.      "支払基準日
+LS_BSEG-KOART     = <LFS_BSEG>-KOART.      "入金/支払-勘定TYP
+LS_BSEG-SHKZG     = <LFS_BSEG>-SHKZG.      "貸借
+APPEND LS_BSEG TO LT_BSEG_S.
+ENDIF.
+*   決済伝票読込成功時、多重読込チェック
+IF LW_SUBRC = 0.
+<LFS_CLBKPF>-CKBEL  =  <LFS_BSEG>-BELNR.    "入金/支払伝票
+<LFS_CLBKPF>-CKGJA  =  <LFS_BSEG>-GJAHR.    "会計年度
+ENDIF.
+*   伝票番号退避
+LS_BELNR-BELNR    = <LFS_BSEG>-BELNR.        "入金/支払伝票
+LS_BELNR-BELNR_CL = <LFS_BSEG>-BELNR.        "入金/支払伝票
+LS_BELNR-SORT     = '2'.                     "SORT番号
+COLLECT LS_BELNR INTO LT_BELNR.
+*   仕入先・得意先検索用内部TBL退避
+COLLECT LS_LFA1_SC INTO GT_LFA1_SC.
+COLLECT LS_KNA1_SC INTO GT_KNA1_SC.
+
+*   転記日付キー
+AT END OF BUDAT_KEY.
+*     初期化
+CLEAR:LS_BELNR,LW_BELCNT,LW_ITCNT,LW_IDXCNT.
+*     決済伝票と入金/支伝番号のSORT
+SORT LT_BELNR BY BELNR
+SORT
+BELNR_CL.
+*   insert 2012/12/03 C.MARUTA DMW4632{
+LOOP AT LT_BSEG_EX ASSIGNING <LFS_BSEG_W>.
+*       貸借の決定
+IF <LFS_BSEG_W>-DMBTR < 0.
+*   modify 2012/12/07 C.MARUTA DMW4632{
+*          <LFS_BSEG_W>-SHKZG = 'h'.
+<LFS_BSEG_W>-SHKZG = 'H'.
+* } modify 2012/12/07 C.MARUTA DMW4632
+ELSE.
+*   modify 2012/12/07 C.MARUTA DMW4632{
+*          <LFS_BSEG_W>-SHKZG = 's'.
+<LFS_BSEG_W>-SHKZG = 'S'.
+* } modify 2012/12/07 C.MARUTA DMW4632
+ENDIF.
+ENDLOOP.
+*     伝票単位で為替差損と一般をマージ
+APPEND LINES OF LT_BSEG_EX TO LT_BSEG_S.
+* } insert 2012/12/03 C.MARUTA DMW4632
+*     為替差損のLOOP
+LOOP AT LT_BSEG_KD ASSIGNING <LFS_BSEG_W>.
+*       貸借の決定
+IF <LFS_BSEG_W>-DMBTR < 0.
+*   modify 2012/12/07 C.MARUTA DMW4632{
+*          <LFS_BSEG_W>-SHKZG = 'h'.
+<LFS_BSEG_W>-SHKZG = 'H'.
+* } modify 2012/12/07 C.MARUTA DMW4632
+ELSE.
+*   modify 2012/12/07 C.MARUTA DMW4632{
+*          <LFS_BSEG_W>-SHKZG = 's'.
+<LFS_BSEG_W>-SHKZG = 'S'.
+* } modify 2012/12/07 C.MARUTA DMW4632
+ENDIF.
+ENDLOOP.
+*     一般勘定のSORT
+SORT LT_BSEG_S BY SHKZG
+HKONT.
+*     統制勘定のSORT
+SORT LT_BSEG_KD BY KOART
+SAKNR
+SHKZG
+HKONT
+CODE.
+
+*     伝票単位で統制と一般をマージ
+APPEND LINES OF LT_BSEG_S TO LT_BSEG_KD.
+*     内部TBLのカウント
+DESCRIBE TABLE LT_BSEG_KD LINES LW_ITCNT.
+DESCRIBE TABLE LT_BELNR   LINES LW_BELCNT.
+*     マージ後の明細データLOOP
+LOOP AT LT_BSEG_KD ASSIGNING <LFS_BSEG_W>.
+LW_IDXCNT =  LW_IDXCNT + 1.
+READ TABLE LT_BELNR
+INTO LS_BELNR INDEX LW_IDXCNT.
+*       伝票番号が存在した場合
+IF SY-SUBRC = 0.
+<LFS_BSEG_W>-BELNR_KEY = LS_BELNR-BELNR_CL.
+*       存在しない場合
+ELSE.
+<LFS_BSEG_W>-BELNR_KEY = <LFS_BSEG_W>-BELNR_SORT.
+ENDIF.
+*       決済伝票と入金/支払伝票が等しい場合
+IF <LFS_BSEG_W>-BELNR_KEY = <LFS_BSEG_W>-BELNR_SORT.
+<LFS_BSEG_W>-SORT = '2'.
+ELSE.
+<LFS_BSEG_W>-SORT = '1'.
+ENDIF.
+*       T_BSEG に溜めこむための一時内部TBLへ
+APPEND <LFS_BSEG_W> TO  LT_BSEG_W.
+ENDLOOP.
+*     明細数より伝票数の方が多い場合
+IF LW_BELCNT >  LW_ITCNT.
+*       伝票の数だけカウントアップ
+WHILE LW_IDXCNT <>  LW_BELCNT.
+CLEAR :LS_BSEG_W.
+LW_IDXCNT =  LW_IDXCNT + 1.
+READ TABLE LT_BELNR
+INTO LS_BELNR INDEX LW_IDXCNT.
+LS_BSEG_W-BELNR_SORT = <LFS_BSEG>-BELNR.    "入金/支払伝票
+LS_BSEG_W-BELNR_KEY  = LS_BELNR-BELNR_CL.
+LS_BSEG_W-BUDAT_KEY  = <LFS_BSEG>-BUDAT_KEY."入金/支払転記
+LS_BSEG_W-SORT = '3'.
+APPEND LS_BSEG_W TO  LT_BSEG_W.
+ENDWHILE.
+ENDIF.
+CLEAR:LT_BSEG_KD,LT_BELNR,LT_BSEG_S,LT_BSEG_EX.
+ENDAT.
+ENDLOOP.
+
+REFRESH T_BSEG.
+APPEND LINES OF LT_BSEG_W  TO T_BSEG.
+REFRESH GT_CLBSEG.
+
+ENDFORM.                    " MAKE_CLEARING_DATA
+*&---------------------------------------------------------------------*
+*&      Form  EDN_PROC
+*&---------------------------------------------------------------------*
+*       text  マスタ取得・出力処理
+*----------------------------------------------------------------------*
+FORM EDN_PROC.
+
+DATA:
+LW_BUDAT        TYPE  BUDAT,             "転記日格納用
+LW_DMBTR_S(16)  TYPE  P,                 "借方合計
+LW_DMBTR_H(16)  TYPE  P,                 "貸方合計
+LW_DMBTR_SC(16) TYPE  C,                 "借方合計（文字列）
+LW_DMBTR_HC(16) TYPE  C,                 "貸方合計（文字列）
+LS_BKPF         TYPE  T_S_CLBKPF,        "構造：会計伝票ヘッダ
+LS_LFA1         TYPE  T_S_LFKN_TXT,      "構造：仕入先格納用
+LS_KNA1         TYPE  T_S_LFKN_TXT.      "構造：得意先格納用
+
+* SORT処理
+SORT GT_BKPF BY BUKRS    "会社コード
+BELNR    "会計伝票番号
+GJAHR.   "会計年度
+
+*  SORT T_BSEG  BY BELNR_SORT     "会計伝票番号
+*                  BUDAT_KEY      "転記日付
+*                  SORT           "ソート順
+*                  KOART          "勘定タイプ
+*                  SAKNR          "統制勘定
+*                  BELNR_KEY      "会計伝票番号
+*                  SHKZG          "貸借
+*                  CODE           "仕入先/得意先
+*                  HKONT.         "GL勘定
+SORT T_BSEG  BY BUDAT_KEY      "転記日付
+BELNR_SORT     "会計伝票番号
+SORT           "ソート順
+KOART          "勘定タイプ
+SAKNR          "統制勘定
+BELNR_KEY      "会計伝票番号
+SHKZG          "貸借
+CODE           "仕入先/得意先
+HKONT.         "GL勘定
+
+LOOP AT T_BSEG.
+
+CLEAR: LS_LFA1,LS_KNA1,LS_BKPF,LW_BUDAT,SKAT.
+
+*   決済伝票なしの場合
+IF P_EXIST <> 'X'.
+*     伝票Noと年月日のクリア
+AT NEW BUDAT_KEY.
+*      AT NEW BELNR_SORT.
+W_OLD_NO  = T_BSEG-BELNR_KEY.
+W_OLD_DAT = T_BSEG-BUDAT_KEY.
+ENDAT.
+ELSE.
+LW_BUDAT =  T_BSEG-BUDAT_KEY.
+*     伝票Noのクリア
+AT NEW BELNR_SORT.
+W_OLD_DAT = LW_BUDAT.
+ENDAT.
+*     年月日のクリア
+AT NEW BUDAT_KEY.
+W_OLD_NO  = T_BSEG-BELNR_KEY.
+ENDAT.
+ENDIF.
+PERFORM SKAT_SELECT.             "総勘定元帳マスタ読込
+PERFORM KNA1_LFA1_SELECT         "得意先・仕入先マスタ読込
+CHANGING LS_LFA1
+LS_KNA1.
+
+*   国内通貨額合計
+IF T_BSEG-DMBTR > 0.
+LW_DMBTR_S = LW_DMBTR_S + ( T_BSEG-DMBTR * 100 ).
+ELSEIF T_BSEG-DMBTR < 0.
+LW_DMBTR_H = LW_DMBTR_H + ( T_BSEG-DMBTR * 100 ).
+ENDIF.
+
+*   出力処理
+PERFORM EDIT_OUTPUT_L
+USING LS_LFA1
+LS_KNA1.
+
+*   決済伝票なしの場合
+IF P_EXIST <> 'X'.
+AT END OF BUDAT_KEY.               "アンダーライン表示
+IF P_LINE ='X' .
+ULINE.
+ENDIF.
+ENDAT.
+ELSE.
+AT END OF BELNR_SORT.               "アンダーライン表示
+IF P_LINE ='X' .
+ULINE.
+ENDIF.
+ENDAT.
+ENDIF.
+AT LAST.
+*     国内通貨変換
+PERFORM YF01NUMC USING LW_DMBTR_S  16 0.
+LW_DMBTR_SC = O_NUM.
+PERFORM YF01NUMC USING LW_DMBTR_H  16 0.
+LW_DMBTR_HC = O_NUM.
+WRITE:/105 '貸方合計',
+114 LW_DMBTR_HC    "国内通貨額-貸方
+USING EDIT MASK 'RR________________'.
+WRITE:/105 '借方合計',
+114 LW_DMBTR_SC    "国内通貨額-借方
+USING EDIT MASK 'RR________________'.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " EDN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  KNA1_LFA1_SELECT
+*&---------------------------------------------------------------------*
+*       text  仕入先・得意先名称の取得
+*----------------------------------------------------------------------*
+FORM KNA1_LFA1_SELECT CHANGING PS_LFA1 TYPE  T_S_LFKN_TXT
+PS_KNA1 TYPE  T_S_LFKN_TXT.
+
+IF T_BSEG-KOART = 'K'.
+*   仕入先名称の取得
+READ TABLE GT_LFA1
+INTO PS_LFA1
+WITH KEY CODE = T_BSEG-CODE
+BINARY SEARCH.
+
+ELSEIF T_BSEG-KOART = 'D'.
+
+*   得意先名称の取得
+READ TABLE GT_KNA1
+INTO PS_KNA1
+WITH KEY CODE = T_BSEG-CODE
+BINARY SEARCH.
+ENDIF.
+
+ENDFORM.                    " KNA1_LFA1_SELECT
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATE
+*&---------------------------------------------------------------------*
+*       text  選択画面の日付決定
+*----------------------------------------------------------------------*
+FORM GET_DATE.
+
+DATA:
+LW_DAT TYPE SY-DATUM.
+
+* 会計年度
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = SY-DATUM
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = P_GJH
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+EXIT.
+ENDIF.
+
+* 対象年月日・自の決定
+LW_DAT = SY-DATUM.
+LW_DAT+6(2) = '01'.
+CALL FUNCTION 'MONTH_PLUS_DETERMINE'
+EXPORTING
+MONTHS  = -1
+OLDDATE = LW_DAT
+IMPORTING
+NEWDATE = P_FROM.
+
+* 対象年月日・至の決定
+CALL FUNCTION 'HR_PSD_DATES_ADD_MONTHS'
+EXPORTING
+V_DATE       = SY-DATUM
+V_MONTHS     = 1
+IMPORTING
+E_DATE       = P_TO
+EXCEPTIONS
+NOT_POSITIVE = 1
+OTHERS       = 2.
+IF SY-SUBRC <> 0.
+ENDIF.
+
+ENDFORM.                    " GET_DATE
+* } insert 2012/11/19 C.MARUTA DMW4632
+*&---------------------------------------------------------------------*
+*&      Form  GET_MST_NAME
+*&---------------------------------------------------------------------*
+*       text  得意先・仕入先の名称取得
+*----------------------------------------------------------------------*
+FORM GET_MST_NAME.
+
+IF NOT GT_LFA1_SC IS INITIAL.
+
+SELECT LIFNR
+NAME1
+INTO TABLE GT_LFA1
+FROM LFA1
+FOR ALL ENTRIES IN GT_LFA1_SC
+WHERE LIFNR = GT_LFA1_SC-CODE.
+
+SORT GT_LFA1 BY CODE.
+ENDIF.
+IF NOT GT_KNA1_SC IS INITIAL.
+
+SELECT KUNNR
+NAME1
+INTO TABLE GT_KNA1
+FROM KNA1
+FOR ALL ENTRIES IN GT_KNA1_SC
+WHERE KUNNR = GT_KNA1_SC-CODE.
+SORT GT_KNA1 BY CODE.
+ENDIF.
+
+ENDFORM.                    " GET_MST_NAME

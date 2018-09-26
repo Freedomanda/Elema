@@ -1,0 +1,1828 @@
+*INCLUDE ZN090200 .
+*----------------------------------------------------------------------*
+*   構造/テーブル定義
+*----------------------------------------------------------------------*
+*入金データ用
+TYPES:BEGIN OF TYP_NYUKIN,
+CEL       TYPE CHAR1,          "行選択ボタン
+DAY       TYPE AUGDT,          "入金日
+KINGAKU   TYPE WRBTR,          "入金金額
+KUNNR     TYPE KUNNR,          "得意先コード
+BELNR     TYPE BELNR_D,        "会計伝票番号
+SGTXT     TYPE SGTXT,          "明細テキスト
+GJAHR     TYPE GJAHR,          "会計年度【非表示】
+BUZEI     TYPE BUZEI,          "明細番号【非表示】
+END   OF TYP_NYUKIN,
+*    テーブルデータ型
+T_TYP_NYUKIN   TYPE STANDARD TABLE OF TYP_NYUKIN.
+
+* ＢＤＣ　会計伝票データ
+TYPES:BEGIN OF TYP_BSID,
+GJAHR      TYPE GJAHR,      "会計年度
+BELNR      TYPE BELNR_D,    "会計伝票番号
+BUZEI      TYPE BUZEI,      "明細番号
+BUDAT      TYPE BUDAT,      "転記日付
+END   OF TYP_BSID,
+T_TYP_BSID  TYPE STANDARD TABLE OF TYP_BSID.
+
+* ＢＤＣ差額/調整/雑損雑益
+TYPES:BEGIN OF TYP_SAGAKU,
+KUNNR      TYPE KUNNR,      "得意先コード(KEY)
+CZFBDT     TYPE ZNECZFBDT,  "照合締日(KEY)
+SAKNR      TYPE SAKNR,      "勘定コード
+KINGAKU    TYPE CHAR20,     "金額(文字列)
+NEWBS      TYPE NEWBS,      "転記キー
+MWSKZ      TYPE MWSKZ,      "税コード
+KOSTL      TYPE KOSTL,      "原価センタ
+ZUONR      TYPE DZUONR,     "ソートキー
+SGTXT      TYPE SGTXT,      "明細テキスト
+ZTERM      TYPE DZTERM,     "支払条件キー
+ZFBDT      TYPE DZFBDT,     "支払基準日
+END   OF TYP_SAGAKU,
+T_TYP_SAGAKU TYPE STANDARD TABLE OF TYP_SAGAKU.
+
+TYPES:T_TYP_YN110 TYPE STANDARD TABLE OF YN110,
+T_TYP_YN120 TYPE STANDARD TABLE OF YN120,
+T_TYP_ZN005 TYPE STANDARD TABLE OF ZN005.
+
+*       自社データのBSIDデータ
+TYPES:BEGIN OF TYP_YN120_BSID,
+KUNNR      TYPE KUNNR,     "得意先コード
+GJAHR      TYPE GJAHR,     "会計年度
+BELNR      TYPE BELNR_D,   "会計伝票番号
+BUZEI      TYPE BUZEI,     "明細番号
+BUDAT      TYPE BUDAT,     "転記日付
+WAERS      TYPE WAERS,     "通貨コード
+SHKZG      TYPE SHKZG,     "借方/貸方フラグ
+DMBTR      TYPE DMBTR,     "国内通貨額
+WRBTR      TYPE WRBTR,     "伝票通貨額
+ZUONR      TYPE DZUONR,    "ソートキー(決済済検索時に取得)
+SGTXT      TYPE SGTXT,     "明細テキスト(決済済検索時に取得)
+ZTERM      TYPE DZTERM,    "支払条件キー
+ZFBDT      TYPE DZFBDT,    "期日計算の支払基準日
+END   OF TYP_YN120_BSID,
+T_TYP_YN120_BSID TYPE STANDARD TABLE OF TYP_YN120_BSID.
+TYPES:T_TYP_BDC TYPE STANDARD TABLE OF BDCDATA.
+*----------------------------------------------------------------------*
+*   内部テーブル定義
+*----------------------------------------------------------------------*
+DATA:
+* 消込対象の入金予定データ取得用
+T_TARGET_ZN005 TYPE STANDARD TABLE OF ZN005,
+* 入金データ
+T_NYUKIN       TYPE T_TYP_NYUKIN,
+W_NYUKIN       TYPE TYP_NYUKIN.
+
+* BDCメッセージ
+DATA:T_RETURN   TYPE STANDARD TABLE OF BDCMSGCOLL,
+W_RETURN   TYPE BDCMSGCOLL.
+*----------------------------------------------------------------------*
+*   変数定義
+*----------------------------------------------------------------------*
+DATA:
+* 処理タイプ
+W_TYPE          TYPE CHAR1,      "処理タイプ(SPACE:マニュアル)
+W_NG_DBUPLOD(1) TYPE C,          "DB更新エラー
+
+* 決済伝票番号
+W_BELNR       TYPE BELNR_D,              "登録された伝票番号
+* 選択画面項目とその他ワークエリア
+W_YEAR           TYPE GJAHR,             "画面転記日付の会計年度
+W_PERIOD         TYPE MONAT,             "画面転記日付の会計期間
+W_ERR_FLG        TYPE CHAR1,             "エラーフラグ
+W_KOSTL          TYPE KOSTL,             "原価センタ
+W_BLART          TYPE BLART,             "伝票タイプ
+W_BLDAT          TYPE BLDAT,             "伝票日付
+W_BUDAT          TYPE BUDAT,             "転記日付
+W_TXT            TYPE CHAR20,            "伝票ヘッダTXT
+W_HKONTA         TYPE HKONT,             "雑収勘定
+W_HKONTB         TYPE HKONT,             "雑損勘定
+W_MWSKZA         TYPE MWSKZ,             "雑収税コード
+W_MWSKZB         TYPE MWSKZ,             "雑損税コード
+*
+G_BUKRS          TYPE BUKRS,             "会社コード
+G_BUDAT          TYPE BUDAT,             "転記日付
+G_WAERS          TYPE WAERS,             "通貨コード
+G_SAKNR_1        TYPE SAKNR,             "勘定コード１行目
+G_WRBTR_1        TYPE WRBTR,             "金額１行目
+G_SHKZG_1        TYPE SHKZG,             "貸借フラグ１行目
+G_MWSKZ_1        TYPE MWSKZ,             "税コード１行目
+G_KOSTL_1        TYPE KOSTL,             "原価センタ１行目
+G_SAKNR_2        TYPE SAKNR,             "勘定コード２行目
+G_WRBTR_2        TYPE WRBTR,             "金額２行目
+G_SHKZG_2        TYPE SHKZG,             "貸借フラグ２行目
+G_MWSKZ_2        TYPE MWSKZ,             "税コード２行目
+G_KOSTL_2        TYPE KOSTL,             "原価センタ２行目
+G_SAKNR_3        TYPE SAKNR,             "勘定コード３行目
+G_WRBTR_3        TYPE WRBTR,             "金額３行目
+G_SHKZG_3        TYPE SHKZG,             "貸借フラグ３行目
+G_MWSKZ_3        TYPE MWSKZ,             "税コード３行目
+G_KOSTL_3        TYPE KOSTL,             "原価センタ３行目
+G_SAKNR_4        TYPE SAKNR,             "勘定コード４行目
+G_WRBTR_4        TYPE WRBTR,             "金額４行目
+G_SHKZG_4        TYPE SHKZG,             "貸借フラグ４行目
+G_MWSKZ_4        TYPE MWSKZ,             "税コード４行目
+G_KOSTL_4        TYPE KOSTL.             "原価センタ４行目
+
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_ON         TYPE C          VALUE 'X',
+C_WAERS_JP   TYPE WAERS      VALUE 'JPY'.  "日本の通貨コード
+
+CONSTANTS:
+C_SAVE(1)    TYPE C     VALUE 'A',         " SAVE機能ON
+C_SIGN       TYPE CHAR1 VALUE 'I',
+C_OPTION     TYPE CHAR2 VALUE 'EQ'.
+*----------------------------------------------------------------------*
+*  処理部
+*----------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  CLEAR_DOCUMENT
+*&---------------------------------------------------------------------*
+*       消込処理
+*----------------------------------------------------------------------*
+FORM CLEAR_DOCUMENT.
+
+DATA:LT_YN120       TYPE T_TYP_YN120,     "自社データ(売上)
+LT_YN120_MI    TYPE T_TYP_YN120,
+LT_YN120_BSID  TYPE T_TYP_YN120_BSID, "自社データのBSID
+LT_YN120_BSAD  TYPE T_TYP_YN120_BSID, "自社データのBSID
+LT_ZUMI_BSID   TYPE T_TYP_YN120_BSID, "入金予定決済済分のBSID
+LT_ZN005_MI    TYPE T_TYP_ZN005,     "入金予定データ
+LT_ZN005_ZUMI  TYPE T_TYP_ZN005,     "入金予定データ
+LT_TARGET_COPY TYPE T_TYP_ZN005,     "処理対象コピー
+LW_FLG_CHANGE  TYPE CHAR1,           "得意先/照合締日ブレイク
+LW_IWRBTR      TYPE ZNEIWRBTR,       "入金予定対象分の金額
+LT_BDC_BELNR   TYPE T_TYP_BSID,      "決済する会計伝票番号
+LT_BDC_SAGAKU  TYPE T_TYP_SAGAKU,    "差額/調整/雑損雑収
+LW_TARGET_ZN005 TYPE ZN005,
+LT_BDC         TYPE T_TYP_BDC,
+LW_BELNR_CNT   TYPE I,               "会計伝票番号件数
+LW_EXCH_AMOUNT(10) TYPE P DECIMALS 3. "レート換算後
+
+** 得意先/照合締日の同じ外部データを取得
+*  PERFORM GET_YN110 CHANGING LT_YN110.
+
+* 得意先/照合締日の同じ自社データを取得
+PERFORM GET_YN120 CHANGING LT_YN120.
+
+* 取得した自社データのうち、未消込データを取得
+PERFORM CHOICE_BSID    USING LT_YN120
+CHANGING LT_YN120_MI
+LT_YN120_BSID
+LT_YN120_BSAD.
+
+* 得意先/照合締日の同じで
+* 未処理の入金予定データと処理済のデータを取得
+PERFORM GET_ZN005_ALL CHANGING LT_ZN005_MI
+LT_ZN005_ZUMI
+LT_ZUMI_BSID.
+
+* 入金データの会計伝票を、BDC用内部テーブルに格納
+PERFORM SET_BDC_NYUKIN  CHANGING LT_BDC_BELNR.
+
+* 調整データを、BDC用内部テーブルに格納
+PERFORM SET_BDC_TYOSEI  CHANGING LT_BDC_SAGAKU.
+
+* 処理対象となった入金予定データをループし
+* 決済する会計伝票番号/差額/雑損雑益データを退避する
+LOOP AT T_TARGET_ZN005 INTO LW_TARGET_ZN005.
+CLEAR:LW_FLG_CHANGE.
+AT END OF CZFBDT.
+LW_FLG_CHANGE = C_ON.
+ENDAT.
+*   金額合算
+IF G_WAERS = LW_TARGET_ZN005-WAERS.
+LW_IWRBTR = LW_IWRBTR + LW_TARGET_ZN005-IWRBTR.
+ELSE.
+PERFORM GET_EXCH_RATE    USING LW_TARGET_ZN005-WAERS   "変換前通貨
+LW_TARGET_ZN005-IWRBTR  "変換前金額
+G_WAERS                 "変換後通貨
+CHANGING LW_EXCH_AMOUNT.
+LW_IWRBTR = LW_IWRBTR + LW_EXCH_AMOUNT.
+ENDIF.
+APPEND LW_TARGET_ZN005 TO LT_TARGET_COPY.
+
+*   次から得意先/照合締日が変わる場合
+IF LW_FLG_CHANGE = C_ON.
+*     合算した金額の会計伝票を取得する
+PERFORM SET_BDC_BELNR    USING LW_TARGET_ZN005-KUNNR
+LW_TARGET_ZN005-CZFBDT
+LW_IWRBTR       "消込金額
+LT_YN120_MI     "未消込自社データ
+LT_YN120        "全自社データ
+LT_YN120_BSID   "自社:会計データ
+LT_ZN005_ZUMI   "決済済入金予定
+LT_ZUMI_BSID    "決済済入金予定BSID
+CHANGING LT_BDC_BELNR    "会計伝票
+LT_BDC_SAGAKU.  "金額調整
+*     入金予定データ最終チェック
+PERFORM CHECK_NYUKIN_LAST USING    LT_TARGET_COPY
+LT_YN120_MI   "未消込自社データ
+LT_YN120_BSID
+LT_ZN005_MI
+CHANGING LT_BDC_BELNR    "会計伝票
+LT_BDC_SAGAKU. "金額調整
+CLEAR:LW_FLG_CHANGE, LW_IWRBTR, LT_TARGET_COPY.
+ENDIF.
+
+ENDLOOP.
+
+* BDCデータ作成
+* 会計伝票番号件数
+DESCRIBE TABLE LT_BDC_BELNR LINES LW_BELNR_CNT.
+IF LW_BELNR_CNT = 0.
+PERFORM MAKE_BDC_RECORD_0 USING LT_BDC_SAGAKU
+CHANGING LT_BDC.
+ELSE.
+PERFORM MAKE_BDC_RECORD   USING LT_BDC_BELNR
+LT_BDC_SAGAKU
+CHANGING LT_BDC.
+ENDIF.
+* BDC実行
+CLEAR:W_BELNR.     "2012/07/31 ADD 伝票番号クリア漏れ
+PERFORM CALL_BDC   USING LT_BDC
+CHANGING W_BELNR.
+* データ更新
+IF NOT W_BELNR IS INITIAL.
+* 2012/03/19 MOD START
+*    PERFORM UPDATE_ZN005  USING W_BELNR.
+PERFORM UPDATE_ZN005  USING W_BELNR SPACE SPACE.
+* 2012/03/19 MOD END
+ENDIF.
+
+ENDFORM.                    " CLEAR_DOCUMENT
+*&---------------------------------------------------------------------*
+*&      Form  GET_YN110
+*&---------------------------------------------------------------------*
+*       得意先/照合締日の同じ外部データを取得
+*----------------------------------------------------------------------*
+*      <--P_T_YN110    外部データ(売上)
+*----------------------------------------------------------------------*
+*FORM GET_YN110 CHANGING P_T_YN110 TYPE T_TYP_YN110.
+*  DATA:LT_ZN005  TYPE STANDARD TABLE OF ZN005.
+*
+*  LT_ZN005[] = T_TARGET_ZN005[].
+*  SORT LT_ZN005 BY KUNNR CZFBDT.
+*  DELETE ADJACENT DUPLICATES FROM LT_ZN005
+*         COMPARING KUNNR CZFBDT.
+*
+*  CHECK NOT T_TARGET_ZN005 IS INITIAL.
+*  SELECT *
+*    INTO TABLE P_T_YN110
+*    FROM YN110
+*         FOR ALL ENTRIES IN LT_ZN005
+*   WHERE VRFCTON = LT_ZN005-KUNNR
+*     AND CZFBDT  = LT_ZN005-CZFBDT
+*     AND DELFLG  = SPACE.
+*
+*ENDFORM.                    " GET_YN110
+*&---------------------------------------------------------------------*
+*&      Form  GET_YN120
+*&---------------------------------------------------------------------*
+*       得意先/照合締日の同じ自社データを取得
+*----------------------------------------------------------------------*
+*      <--P_T_YN120     自社データ(売上)
+*----------------------------------------------------------------------*
+FORM GET_YN120 CHANGING P_T_YN120 TYPE T_TYP_YN120.
+DATA:LT_ZN005  TYPE STANDARD TABLE OF ZN005.
+
+LT_ZN005[] = T_TARGET_ZN005[].
+SORT LT_ZN005 BY KUNNR CZFBDT.
+DELETE ADJACENT DUPLICATES FROM LT_ZN005
+COMPARING KUNNR CZFBDT.
+
+CHECK NOT T_TARGET_ZN005 IS INITIAL.
+SELECT *
+INTO TABLE P_T_YN120
+FROM YN120
+FOR ALL ENTRIES IN LT_ZN005
+* 2012/03/27 MOD インデックス対応 START
+*   WHERE VRFCTON = LT_ZN005-KUNNR
+*     AND CZFBDT  = LT_ZN005-CZFBDT.
+WHERE BUKRS = G_BUKRS
+AND CZFBDT  = LT_ZN005-CZFBDT
+AND VRFCTON = LT_ZN005-KUNNR.
+* 2012/03/27 MOD インデックス対応 END
+IF SY-SUBRC = 0.
+SORT P_T_YN120 BY VRFCTON
+CZFBDT
+YNGJAHR DESCENDING
+BELNR   DESCENDING
+BUZEI   DESCENDING.
+ENDIF.
+ENDFORM.                    " GET_YN120
+*&---------------------------------------------------------------------*
+*&      Form  CHOICE_BSID
+*&---------------------------------------------------------------------*
+*       取得した自社データのうち、未消込データを取得
+*----------------------------------------------------------------------*
+*      -->P_T_YN120        自社データ
+*      <--P_T_YN120_MI     自社データのうち未消込分
+*----------------------------------------------------------------------*
+FORM CHOICE_BSID     USING P_T_YN120    TYPE T_TYP_YN120
+CHANGING P_T_YN120_MI TYPE T_TYP_YN120
+P_T_YN120_BSID TYPE T_TYP_YN120_BSID
+P_T_YN120_BSAD TYPE T_TYP_YN120_BSID.
+DATA:LW_BSID      TYPE TYP_YN120_BSID,  "BSID構造
+LW_YN120     TYPE YN120,           "取得したYN120データループ用
+LT_YN120_BUF TYPE T_TYP_YN120.
+
+CHECK NOT P_T_YN120 IS INITIAL.
+* 取得した自社データの会計伝票を検索
+* BSIDデータ取得
+SELECT KUNNR       "得意先コード "2012/07/31 ADD
+GJAHR       "会計年度
+BELNR       "会計伝票番号
+BUZEI       "明細番号
+BUDAT       "転記日付
+WAERS       "通貨コード
+SHKZG       "借方/貸方フラグ
+DMBTR       "国内通貨額
+WRBTR       "伝票通貨額
+ZUONR       "ソートキー
+SGTXT       "明細テキスト
+ZTERM       "支払条件キー
+ZFBDT       "期日計算の支払基準日
+INTO TABLE P_T_YN120_BSID
+FROM BSID
+FOR ALL ENTRIES IN P_T_YN120
+WHERE KUNNR = P_T_YN120-VRFCTON
+AND GJAHR = P_T_YN120-YNGJAHR
+AND BELNR = P_T_YN120-BELNR
+AND BUZEI = P_T_YN120-BUZEI.
+
+* 転記日の古い順に処理していく
+SORT P_T_YN120_BSID BY BUDAT GJAHR BELNR BUZEI.
+LT_YN120_BUF[] = P_T_YN120[].
+SORT LT_YN120_BUF BY YNGJAHR BELNR BUZEI.
+* 自社データをループし、BSIDデータを検索
+LOOP AT P_T_YN120_BSID INTO LW_BSID.
+*   自社データをBSIDの得意先/会計年度/伝票/明細で検索
+READ TABLE LT_YN120_BUF INTO LW_YN120
+WITH KEY YNGJAHR = LW_BSID-GJAHR  "会計年度
+BELNR   = LW_BSID-BELNR  "会計伝票
+BUZEI   = LW_BSID-BUZEI  "明細番号
+BINARY SEARCH.
+*   存在する場合は消込対象
+IF SY-SUBRC = 0.
+*     元ねたの自社データ1件：BSID1件
+*     (自社データ分の金額はBSIDの金額を取得するため)
+APPEND LW_YN120 TO P_T_YN120_MI.
+ENDIF.
+ENDLOOP.
+
+* BSIDデータ取得
+SELECT KUNNR       "得意先コード "2012/07/31 ADD
+GJAHR       "会計年度
+BELNR       "会計伝票番号
+BUZEI       "明細番号
+BUDAT       "転記日付
+WAERS       "通貨コード
+SHKZG       "借方/貸方フラグ
+DMBTR       "国内通貨額
+WRBTR       "伝票通貨額
+ZUONR       "ソートキー
+SGTXT       "明細テキスト
+ZTERM       "支払条件キー
+ZFBDT       "期日計算の支払基準日
+INTO TABLE P_T_YN120_BSAD
+FROM BSAD
+FOR ALL ENTRIES IN P_T_YN120
+WHERE KUNNR = P_T_YN120-VRFCTON
+AND GJAHR = P_T_YN120-YNGJAHR
+AND BELNR = P_T_YN120-BELNR
+AND BUZEI = P_T_YN120-BUZEI.
+
+IF SY-SUBRC = 0.
+SORT P_T_YN120_BSAD BY GJAHR BELNR BUZEI.
+ENDIF.
+
+ENDFORM.                    " CHOICE_BSID
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN005_ALL
+*&---------------------------------------------------------------------*
+*       得意先/照合締日の同じで未処理の入金予定データを取得
+*----------------------------------------------------------------------*
+*      <--P_T_ZN005_MI   未処理の入金予定データ
+*----------------------------------------------------------------------*
+FORM GET_ZN005_ALL CHANGING P_T_ZN005_MI   TYPE T_TYP_ZN005
+P_T_ZN005_ZUMI TYPE T_TYP_ZN005
+P_T_ZUMI_BSID  TYPE T_TYP_YN120_BSID.
+DATA:LT_ZN005  TYPE STANDARD TABLE OF ZN005,
+LW_ZN005  TYPE ZN005,
+LT_ZN005_ALL TYPE STANDARD TABLE OF ZN005.
+
+* 重複削除
+LT_ZN005[] = T_TARGET_ZN005[].
+SORT LT_ZN005 BY KUNNR CZFBDT.
+DELETE ADJACENT DUPLICATES FROM LT_ZN005
+COMPARING KUNNR CZFBDT.
+
+CHECK NOT T_TARGET_ZN005 IS INITIAL.
+SELECT *
+INTO TABLE LT_ZN005_ALL
+FROM ZN005
+FOR ALL ENTRIES IN LT_ZN005
+WHERE KUNNR   = LT_ZN005-KUNNR
+AND CZFBDT  = LT_ZN005-CZFBDT.
+
+IF SY-SUBRC = 0.
+SORT LT_ZN005_ALL.
+LOOP AT LT_ZN005_ALL INTO LW_ZN005.
+*     決済フラグが初期値のものは未決済
+IF LW_ZN005-AUFLG = SPACE.
+APPEND LW_ZN005 TO P_T_ZN005_MI.
+*     決済フラグが'X'の場合は決済済
+ELSE.
+APPEND LW_ZN005 TO P_T_ZN005_ZUMI.
+ENDIF.
+ENDLOOP.
+ENDIF.
+SORT P_T_ZN005_ZUMI BY KUNNR   ASCENDING   "昇順
+CZFBDT  ASCENDING   "昇順
+IGJAHR  DESCENDING  "降順
+IBELNER DESCENDING. "降順
+* 最後に決済処理されたデータ以外を削除
+DELETE ADJACENT DUPLICATES FROM P_T_ZN005_ZUMI
+COMPARING KUNNR CZFBDT.
+CHECK NOT P_T_ZN005_ZUMI[] IS INITIAL.
+* 最後に決済された入金予定データのBSIDデータを取得
+SELECT KUNNR       "得意先コード "2012/07/31 ADD
+GJAHR       "会計年度
+BELNR       "会計伝票番号
+BUZEI       "明細番号
+BUDAT       "転記日付
+WAERS       "通貨コード
+SHKZG       "借方/貸方フラグ
+DMBTR       "国内通貨額
+WRBTR       "伝票通貨額
+ZUONR       "ソートキー
+SGTXT       "明細テキスト
+ZTERM       "支払条件キー
+ZFBDT       "期日計算の支払基準日
+INTO TABLE P_T_ZUMI_BSID
+FROM BSID
+FOR ALL ENTRIES IN P_T_ZN005_ZUMI
+WHERE KUNNR = P_T_ZN005_ZUMI-KUNNR
+AND GJAHR = P_T_ZN005_ZUMI-IGJAHR
+AND BELNR = P_T_ZN005_ZUMI-IBELNER.
+
+ENDFORM.                    " GET_ZN005_ALL
+*&---------------------------------------------------------------------*
+*&      Form  SET_BDC_NYUKIN
+*&---------------------------------------------------------------------*
+*        入金データの会計伝票を、BDC用内部テーブルに格納
+*----------------------------------------------------------------------*
+*      <--P_T_BDC_BELNR    ＢＤＣ用会計伝票
+*----------------------------------------------------------------------*
+FORM SET_BDC_NYUKIN CHANGING P_T_BDC_BELNR TYPE T_TYP_BSID.
+DATA:LW_NYUKIN    TYPE TYP_NYUKIN,   "画面9000の入金TBL構造
+LW_BDC_BELNR TYPE TYP_BSID.     "BDC用会計伝票内部TBL構造
+
+* 画面9000の入金データのうち、行選択されているデータのみループ
+LOOP AT T_NYUKIN INTO LW_NYUKIN
+WHERE CEL = C_ON.
+*   会計伝票番号を退避
+LW_BDC_BELNR-GJAHR = LW_NYUKIN-GJAHR.
+LW_BDC_BELNR-BELNR = LW_NYUKIN-BELNR.
+LW_BDC_BELNR-BUZEI = LW_NYUKIN-BUZEI.
+APPEND LW_BDC_BELNR TO P_T_BDC_BELNR.
+ENDLOOP.
+
+ENDFORM.                    " SET_BDC_NYUKIN
+*&---------------------------------------------------------------------*
+*&      Form  SET_BDC_TYOSEI
+*&---------------------------------------------------------------------*
+*       調整データを、BDC用内部テーブルに格納
+*----------------------------------------------------------------------*
+*      <--P_T_BDC_SAGAKU    差額/調整/雑損雑益
+*----------------------------------------------------------------------*
+FORM SET_BDC_TYOSEI CHANGING P_T_BDC_SAGAKU TYPE T_TYP_SAGAKU.
+DATA:LW_BDC_SAGAKU   TYPE TYP_SAGAKU.
+
+* 差額転記１行目
+IF NOT G_SAKNR_1 IS INITIAL.
+LW_BDC_SAGAKU-SAKNR   = G_SAKNR_1.
+WRITE G_WRBTR_1  TO LW_BDC_SAGAKU-KINGAKU
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+IF G_SHKZG_1 = 'S'.
+LW_BDC_SAGAKU-NEWBS   = '40'.  "借の場合は40
+ELSE.
+LW_BDC_SAGAKU-NEWBS   = '50'.  "貸の場合は50
+ENDIF.
+LW_BDC_SAGAKU-MWSKZ   = G_MWSKZ_1.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-KOSTL   = G_KOSTL_1.
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+ENDIF.
+CLEAR:LW_BDC_SAGAKU.
+
+* 差額転記２行目
+IF NOT G_SAKNR_2 IS INITIAL.
+LW_BDC_SAGAKU-SAKNR   = G_SAKNR_2.
+WRITE G_WRBTR_2 TO LW_BDC_SAGAKU-KINGAKU
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+IF G_SHKZG_2 = 'S'.
+LW_BDC_SAGAKU-NEWBS   = '40'.  "借の場合は40
+ELSE.
+LW_BDC_SAGAKU-NEWBS   = '50'.  "貸の場合は50
+ENDIF.
+LW_BDC_SAGAKU-MWSKZ   = G_MWSKZ_2.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-KOSTL   = G_KOSTL_2.
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+ENDIF.
+CLEAR:LW_BDC_SAGAKU.
+
+* 差額転記３行目
+IF NOT G_SAKNR_3 IS INITIAL.
+LW_BDC_SAGAKU-SAKNR   = G_SAKNR_3.
+WRITE G_WRBTR_3 TO LW_BDC_SAGAKU-KINGAKU
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+IF G_SHKZG_3 = 'S'.
+LW_BDC_SAGAKU-NEWBS   = '40'.  "借の場合は40
+ELSE.
+LW_BDC_SAGAKU-NEWBS   = '50'.  "貸の場合は50
+ENDIF.
+LW_BDC_SAGAKU-MWSKZ   = G_MWSKZ_3.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-KOSTL   = G_KOSTL_3.
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+ENDIF.
+CLEAR:LW_BDC_SAGAKU.
+
+* 差額転記４行目
+IF NOT G_SAKNR_4 IS INITIAL.
+LW_BDC_SAGAKU-SAKNR   = G_SAKNR_4.
+WRITE G_WRBTR_4 TO LW_BDC_SAGAKU-KINGAKU
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+IF G_SHKZG_4 = 'S'.
+LW_BDC_SAGAKU-NEWBS   = '40'.  "借の場合は40
+ELSE.
+LW_BDC_SAGAKU-NEWBS   = '50'.  "貸の場合は50
+ENDIF.
+LW_BDC_SAGAKU-MWSKZ   = G_MWSKZ_4.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-KOSTL   = G_KOSTL_4.
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+ENDIF.
+CLEAR:LW_BDC_SAGAKU.
+
+ENDFORM.                    " SET_BDC_TYOSEI
+*&---------------------------------------------------------------------*
+*&      Form  SET_BDC_BELNR
+*&---------------------------------------------------------------------*
+*       合算した金額の会計伝票を取得する
+*----------------------------------------------------------------------*
+*      -->P_KUNNR          決済する得意先
+*      -->P_CZFBDT         決済する照合締日
+*      -->P_IWRBTR         決済する金額
+*      -->P_T_YN120        未消込分の自社データ
+*      -->P_T_YN120_ALL    全自社データ
+*      -->P_T_YN120_BSID   未消込分の自社データの会計データ
+*      -->P_T_ZN005_ZUMI   消込済みの入金予定データ
+*      -->P_T_ZUMI_BSID    消込済みの入金予定データのBSID
+*      <--P_T_BDC_BELNR    決済する会計伝票
+*      <--P_T_BDC_SAGAKU   金額調整
+*----------------------------------------------------------------------*
+FORM SET_BDC_BELNR USING    P_KUNNR         TYPE YNKUNNR
+P_CZFBDT        TYPE ZNECZFBDT
+P_IWRBTR        TYPE ZNEIWRBTR
+P_T_YN120       TYPE T_TYP_YN120
+P_T_YN120_ALL   TYPE T_TYP_YN120
+P_T_YN120_BSID  TYPE T_TYP_YN120_BSID
+P_T_ZN005_ZUMI  TYPE T_TYP_ZN005
+P_T_ZUMI_BSID   TYPE T_TYP_YN120_BSID
+CHANGING P_T_BDC_BELNR   TYPE T_TYP_BSID
+P_T_BDC_SAGAKU  TYPE T_TYP_SAGAKU.
+DATA:LW_YN120      TYPE YN120,
+LW_BSID       TYPE TYP_YN120_BSID, "会計データ
+LW_BDC_SAGAKU TYPE TYP_SAGAKU,
+LW_AMOUNT_SUM TYPE BAPI_BNOMS,
+LW_IWRBTR     TYPE BAPI_BNOMS,   "入金予定金額合計(属性変更)
+LW_SAGAKU     TYPE DMBTR,        "差額
+LW_END_FLG    TYPE CHAR1,        "処理終了フラグ
+LW_SAGAKU_FLG TYPE CHAR1,        "差額フラグ
+LW_CHECK      TYPE CHAR1,        "未決済ありフラグ
+LW_YN120_ALL  TYPE YN120,        "決済済YN120
+LW_SGTXT      TYPE SGTXT.            "BSAD検索条件
+
+*--- 金額項目属性変更
+LW_IWRBTR = P_IWRBTR.
+
+*--- 前回の残金を検索
+PERFORM GET_ZUMI_BSID USING    P_KUNNR
+P_CZFBDT
+P_T_ZN005_ZUMI
+P_T_ZUMI_BSID
+CHANGING LW_BSID.
+* 前回の決済残がある場合
+IF NOT LW_BSID IS INITIAL.
+LW_CHECK = C_ON.        "未決済ありフラグをON
+*   金額調整とデータ作成
+PERFORM AMOUNT_SUM    USING LW_BSID
+LW_BSID-GJAHR
+LW_BSID-BELNR
+LW_BSID-BUZEI
+LW_IWRBTR        "入金予定の金額合計
+CHANGING P_T_BDC_BELNR
+LW_AMOUNT_SUM    "自社の金額合計
+LW_END_FLG
+LW_SAGAKU_FLG.
+*   金額が達して、差額が発生している場合
+IF  LW_SAGAKU_FLG = C_ON.
+LW_SAGAKU = LW_AMOUNT_SUM - LW_IWRBTR.
+* 2012/07/20 ADD START マイナス差額対応
+IF LW_SAGAKU < 0.
+LW_BDC_SAGAKU-NEWBS  = '17'.          "転記キー
+LW_SAGAKU = LW_SAGAKU * -1.
+ELSE.
+LW_BDC_SAGAKU-NEWBS  = '07'.          "転記キー
+ENDIF.
+* 2012/07/20 ADD END
+WRITE LW_SAGAKU TO LW_BDC_SAGAKU-KINGAKU       "金額(文字列)
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-KUNNR  = P_KUNNR.       "得意先(KEY)
+LW_BDC_SAGAKU-CZFBDT = P_CZFBDT.      "照合締日(KEY)
+LW_BDC_SAGAKU-SAKNR  = P_KUNNR.       "勘定コード
+*      LW_BDC_SAGAKU-NEWBS  = '07'.          "転記キー "2012/07/20 DEL
+LW_BDC_SAGAKU-MWSKZ  = SPACE.         "税コード
+LW_BDC_SAGAKU-KOSTL  = SPACE.         "原価センタ
+LW_BDC_SAGAKU-ZUONR  = LW_BSID-ZUONR. "ソートキー
+LW_BDC_SAGAKU-SGTXT  = LW_BSID-SGTXT. "明細テキスト
+LW_BDC_SAGAKU-ZTERM  = LW_BSID-ZTERM. "支払条件
+LW_BDC_SAGAKU-ZFBDT  = LW_BSID-ZFBDT. "支払基準日
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+ENDIF.
+ENDIF.
+
+CHECK LW_END_FLG IS INITIAL.
+
+*--- 自社データをループし金額を合算していく
+LOOP AT P_T_YN120 INTO LW_YN120
+WHERE VRFCTON = P_KUNNR
+AND CZFBDT  = P_CZFBDT.
+LW_CHECK = C_ON.        "未決済ありフラグをON
+*   BSIDを検索
+CLEAR:LW_BSID.
+READ TABLE P_T_YN120_BSID INTO LW_BSID
+WITH KEY GJAHR = LW_YN120-YNGJAHR
+BELNR = LW_YN120-BELNR
+BUZEI = LW_YN120-BUZEI.
+*               BINARY SEARCH. "2012/08/31 DELソートされていないTBL
+
+*   会計伝票データが取得できない自社データは対象外
+IF SY-SUBRC <> 0.
+CONTINUE.
+ENDIF.
+
+*   金額合算と自社分金額が入金予定金額に達したかどうかチェック
+PERFORM AMOUNT_SUM    USING LW_BSID
+LW_YN120-YNGJAHR
+LW_YN120-BELNR
+LW_YN120-BUZEI
+LW_IWRBTR        "入金予定の金額合計
+CHANGING P_T_BDC_BELNR
+LW_AMOUNT_SUM    "自社の金額合計
+LW_END_FLG
+LW_SAGAKU_FLG.
+*   終了フラグがONになったらループを終了
+IF LW_END_FLG = C_ON.
+LW_SAGAKU = LW_AMOUNT_SUM - LW_IWRBTR.
+*     差額が発生している場合は差額データ作成
+IF LW_SAGAKU <> 0.
+* 2012/07/20 ADD START マイナス差額対応
+IF LW_SAGAKU < 0.
+LW_BDC_SAGAKU-NEWBS  = '17'.          "転記キー
+LW_SAGAKU = LW_SAGAKU * -1.
+ELSE.
+LW_BDC_SAGAKU-NEWBS  = '07'.          "転記キー
+ENDIF.
+* 2012/07/20 ADD END
+LW_BDC_SAGAKU-SAKNR   = P_KUNNR.          "勘定コード
+WRITE LW_SAGAKU TO LW_BDC_SAGAKU-KINGAKU       "金額(文字列)
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-KUNNR  = P_KUNNR.       "得意先(KEY)
+LW_BDC_SAGAKU-CZFBDT = P_CZFBDT.      "照合締日(KEY)
+*       LW_BDC_SAGAKU-NEWBS   = '07'.          "転記キー "2012/07/20 DEL
+LW_BDC_SAGAKU-MWSKZ   = SPACE.         "税コード
+LW_BDC_SAGAKU-KOSTL   = SPACE.         "原価センタ
+CONCATENATE LW_BSID-GJAHR              "自社データの会計年度
+LW_BSID-BELNR              "自社データの会計伝票
+LW_BSID-BUZEI              "自社データの会計明細
+INTO LW_BDC_SAGAKU-ZUONR.       "ソートキー
+CONCATENATE P_CZFBDT '消込残'
+INTO LW_BDC_SAGAKU-SGTXT.       "明細テキスト
+LW_BDC_SAGAKU-ZTERM  = LW_BSID-ZTERM. "支払条件
+LW_BDC_SAGAKU-ZFBDT  = LW_BSID-ZFBDT. "支払基準日
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+EXIT.
+ELSE.
+EXIT.
+ENDIF.
+ENDIF.
+
+ENDLOOP.
+
+*--- 自社データをすべてループしても金額が満たされない場合
+IF LW_END_FLG IS INITIAL.
+IF LW_CHECK = SPACE.
+*     全自社データのうち、得意先/照合締日で一番新しい会計伝票を取得
+READ TABLE P_T_YN120_ALL INTO LW_YN120_ALL
+WITH KEY VRFCTON = P_KUNNR
+CZFBDT  = P_CZFBDT.
+IF SY-SUBRC = 0.
+*       未決済のデータが無かった場合
+CONCATENATE P_CZFBDT '%'
+INTO LW_SGTXT.
+*       BSIDデータが取得できないので、BSADデータを取得する
+SELECT KUNNR       "得意先コード　"2012/07/31 ADD
+GJAHR       "会計年度
+BELNR       "会計伝票番号
+BUZEI       "明細番号
+BUDAT       "転記日付
+WAERS       "通貨コード
+SHKZG       "借方/貸方フラグ
+DMBTR       "国内通貨額
+WRBTR       "伝票通貨額
+ZUONR       "ソートキー
+SGTXT       "明細テキスト
+ZTERM       "支払条件キー
+ZFBDT       "期日計算の支払基準日
+INTO LW_BSID
+FROM BSAD
+UP TO 1 ROWS
+WHERE BUKRS = G_BUKRS
+AND KUNNR = P_KUNNR
+AND GJAHR = LW_YN120_ALL-YNGJAHR
+AND BELNR = LW_YN120_ALL-BELNR
+AND BUZEI = LW_YN120_ALL-BUZEI.
+ENDSELECT.
+ENDIF.
+ENDIF.
+
+*   金額が少ない分を調整
+LW_SAGAKU = LW_IWRBTR - LW_AMOUNT_SUM.
+* 2012/07/20 ADD START マイナス差額対応
+IF LW_SAGAKU < 0.
+LW_BDC_SAGAKU-NEWBS  = '07'.          "転記キー
+LW_SAGAKU = LW_SAGAKU * -1.
+ELSE.
+LW_BDC_SAGAKU-NEWBS  = '17'.          "転記キー
+ENDIF.
+* 2012/07/20 ADD END
+
+LW_BDC_SAGAKU-SAKNR   = P_KUNNR.      "勘定コード
+WRITE LW_SAGAKU TO LW_BDC_SAGAKU-KINGAKU       "金額(文字列)
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-KUNNR  = P_KUNNR.       "得意先(KEY)
+LW_BDC_SAGAKU-CZFBDT = P_CZFBDT.      "照合締日(KEY)
+*    LW_BDC_SAGAKU-NEWBS   = '17'.           "転記キー "2012/07/20 DEL
+LW_BDC_SAGAKU-MWSKZ   = SPACE.          "税コード
+LW_BDC_SAGAKU-KOSTL   = SPACE.          "原価センタ
+CONCATENATE LW_BSID-GJAHR               "自社データの会計年度
+LW_BSID-BELNR               "自社データの会計伝票
+LW_BSID-BUZEI               "自社データの会計明細
+INTO LW_BDC_SAGAKU-ZUONR.        "ソートキー
+CONCATENATE P_CZFBDT '消込残'
+INTO LW_BDC_SAGAKU-SGTXT.         "明細テキスト
+LW_BDC_SAGAKU-ZTERM  = LW_BSID-ZTERM. "支払条件
+LW_BDC_SAGAKU-ZFBDT  = LW_BSID-ZFBDT. "支払基準日
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+ENDIF.
+
+ENDFORM.                    " SET_BDC_BELNR
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZUMI_BSID
+*&---------------------------------------------------------------------*
+*       前回の残金を検索
+*----------------------------------------------------------------------*
+*      -->P_KUNNR          対象の得意先
+*      -->P_CZFBDT         対象の照合締日
+*      -->P_T_ZN005_ZUMI   決済済みの入金予定データ
+*      <--P_BSID           前回決済た決済残のBSIDデータ
+*----------------------------------------------------------------------*
+FORM GET_ZUMI_BSID USING    P_KUNNR        TYPE YNKUNNR
+P_CZFBDT       TYPE ZNECZFBDT
+P_T_ZN005_ZUMI TYPE T_TYP_ZN005
+P_T_ZUMI_BSID  TYPE T_TYP_YN120_BSID
+CHANGING P_BSID         TYPE TYP_YN120_BSID.
+DATA:LW_ZN005      TYPE ZN005.
+*       LT_BSID_ZUMI  TYPE T_TYP_YN120_BSID.
+
+CLEAR:P_BSID.
+
+* 最後に登録された会計伝票番号を取得
+READ TABLE P_T_ZN005_ZUMI INTO LW_ZN005
+WITH KEY KUNNR  = P_KUNNR
+CZFBDT = P_CZFBDT
+BINARY SEARCH.
+CHECK SY-SUBRC = 0.
+
+* 照合締日が設定されているデータを検索
+READ TABLE P_T_ZUMI_BSID INTO P_BSID
+WITH KEY KUNNR      = LW_ZN005-KUNNR  "得意先コード"2012/07/31ADD
+GJAHR      = LW_ZN005-IGJAHR  "会計年度
+BELNR      = LW_ZN005-IBELNER "会計伝票
+SGTXT+0(8) = P_CZFBDT.        "照合締日
+
+ENDFORM.                    " GET_ZUMI_BSID
+*&---------------------------------------------------------------------*
+*&      Form  AMOUNT_SUM
+*&---------------------------------------------------------------------*
+*       金額調整とデータ作成
+*----------------------------------------------------------------------*
+*      -->P_BSID         BSIDデータ
+*      -->P_GJAHR        決済対象の会計年度
+*      -->P_BELNR        決済対象の会計伝票番号
+*      -->P_BUZEI        決済対象の会計伝票明細
+*      -->P_IWRBTR       入金予定金額
+*      <--P_T_BDC_BELNR  決済する会計伝票
+*      <--P_AMOUNT_SUM   自社データ(BSID)金額合算値
+*      <--P_END_FLG      終了フラグ
+*      <--P_SAGAKU_FLG   差額ありフラグ
+*----------------------------------------------------------------------*
+FORM AMOUNT_SUM USING    P_BSID         TYPE TYP_YN120_BSID
+P_GJAHR        TYPE GJAHR
+P_BELNR        TYPE ANY
+P_BUZEI        TYPE BUZEI
+P_IWRBTR       TYPE BAPI_BNOMS
+CHANGING P_T_BDC_BELNR  TYPE T_TYP_BSID
+P_AMOUNT_SUM   TYPE BAPI_BNOMS
+P_END_FLG      TYPE CHAR1
+P_SAGAKU_FLG   TYPE CHAR1.
+DATA:LW_AMOUNT     TYPE BAPI_BNOMS,
+LW_BDC_BELNR  TYPE TYP_BSID.
+
+* 画面の通貨コードと一致する場合
+IF  P_BSID-WAERS = G_WAERS.
+LW_AMOUNT = P_BSID-WRBTR.      "伝票通貨額
+* 取得した通貨コードと画面の通貨コードが異なる場合
+ELSE.
+*   金額変換
+PERFORM GET_EXCH_RATE   USING  P_BSID-WAERS    "伝票通貨コード
+P_BSID-WRBTR    "伝票通貨額
+G_WAERS         "画面通貨
+CHANGING LW_AMOUNT.
+ENDIF.
+
+*--- 合算
+IF P_BSID-SHKZG = 'H'.        "借方プラス、貸方マイナス
+P_AMOUNT_SUM = P_AMOUNT_SUM + ( LW_AMOUNT * -1 ).
+ELSE.
+P_AMOUNT_SUM = P_AMOUNT_SUM + LW_AMOUNT.
+ENDIF.
+*--- 合算したデータは決済対象とする
+LW_BDC_BELNR-GJAHR = P_GJAHR.
+LW_BDC_BELNR-BELNR = P_BELNR.
+LW_BDC_BELNR-BUZEI = P_BUZEI.
+APPEND LW_BDC_BELNR TO P_T_BDC_BELNR.
+
+*--- 金額のチェック
+IF P_AMOUNT_SUM >= P_IWRBTR.
+P_END_FLG = C_ON.
+*   合計値が一致するなら終了
+IF P_AMOUNT_SUM = P_IWRBTR.
+EXIT.
+*   金額差異が発生している場合差額フラグON
+ELSE.
+P_SAGAKU_FLG = C_ON.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " AMOUNT_SUM
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_NYUKIN_LAST
+*&---------------------------------------------------------------------*
+*       入金予定データ最終チェック
+*----------------------------------------------------------------------*
+*      -->P_T_TARGET_COPY    処理対象の入金予定(得意先/締日単位)
+*      -->P_T_YN110          得意先/締日の全外部データ
+*      -->P_T_YN120          得意先/締日の全自社データ
+*      -->P_T_YN120_BSID     自社データのBSID
+*      -->P_T_ZN005_MI       未決済の入金予定データ
+*      <--P_T_BDC_BELNR      決済する会計伝票
+*      <--P_T_BDC_SAGAKU     差額/調整/雑損雑益
+*----------------------------------------------------------------------*
+FORM CHECK_NYUKIN_LAST USING    P_T_TARGET_COPY   TYPE T_TYP_ZN005
+P_T_YN120_MI      TYPE T_TYP_YN120
+P_T_YN120_BSID    TYPE T_TYP_YN120_BSID
+P_T_ZN005_MI      TYPE T_TYP_ZN005
+CHANGING P_T_BDC_BELNR     TYPE T_TYP_BSID
+P_T_BDC_SAGAKU    TYPE T_TYP_SAGAKU.
+DATA:LW_ZN005          TYPE ZN005,
+LW_TARGET         TYPE ZN005,          "処理対象データ
+LW_FLG_CONTINUE   TYPE CHAR1,          "最終ではないフラグ
+LW_YN120          TYPE YN120,          "自社データ構造
+LW_BDC_BELNR      TYPE TYP_BSID,       "
+LW_BDC_SAGAKU     TYPE TYP_SAGAKU,     "差額構造
+LW_ADD_FLG       TYPE CHAR1,
+LW_KINGAKU       TYPE DMBTR.
+* 2012/04/17 ADD START
+DATA:L_W_YN120_BSID         TYPE TYP_YN120_BSID,
+LW_AMOUNT              TYPE BAPI_BNOMS,
+LW_SAGAKU_K            TYPE BAPICURR_D,
+LW_SAGAKU_INTERNAL(10) TYPE P DECIMALS 3. "レート換算後
+* 2012/04/17 ADD END
+
+FIELD-SYMBOLS:<LW_SAGAKU>   TYPE TYP_SAGAKU.
+
+READ TABLE P_T_TARGET_COPY INTO LW_TARGET INDEX 1.
+*--- 最後のデータかどうかチェック
+LOOP AT P_T_ZN005_MI INTO LW_ZN005    "未決済の入金予定
+WHERE KUNNR = LW_TARGET-KUNNR
+AND CZFBDT = LW_TARGET-CZFBDT.
+*   未決済分の入金予定内部テーブルにデータがあり
+*   今回処理対象内部テーブルにデータが無ければ
+*   まだ最終ではない
+READ TABLE P_T_TARGET_COPY TRANSPORTING NO FIELDS
+WITH KEY KUNNR = LW_ZN005-KUNNR
+CZFBDT = LW_ZN005-CZFBDT
+SEQ    = LW_ZN005-SEQ.
+IF SY-SUBRC <> 0.
+LW_FLG_CONTINUE = C_ON.
+EXIT.
+ENDIF.
+ENDLOOP.
+
+*--- 最後ではない場合はここで終了
+IF LW_FLG_CONTINUE = C_ON.
+EXIT.
+ENDIF.
+
+*--- 最終の場合
+* 2012/04/17 ADD START
+CLEAR:LW_SAGAKU_K.
+* 2012/04/17 ADD END
+
+* 作成した差額データを雑損雑益データに変更する
+LOOP AT P_T_BDC_SAGAKU ASSIGNING <LW_SAGAKU>.
+IF  <LW_SAGAKU>-KUNNR = LW_TARGET-KUNNR
+AND <LW_SAGAKU>-CZFBDT = LW_TARGET-CZFBDT.
+*      自社が多い場合
+IF <LW_SAGAKU>-NEWBS = '07'.
+* 2012/04/17 DEL START
+*         <LW_SAGAKU>-KUNNR = SPACE.       "得意先
+*         <LW_SAGAKU>-CZFBDT = SPACE.      "照合締日
+* 2012/04/17 DEL END
+<LW_SAGAKU>-SAKNR = W_HKONTB.    "勘定コード
+<LW_SAGAKU>-NEWBS = '40'.        "転記キー
+<LW_SAGAKU>-MWSKZ = W_MWSKZB.    "税コード
+<LW_SAGAKU>-KOSTL = W_KOSTL.     "原価センタ
+<LW_SAGAKU>-ZUONR = SPACE.       "ソートキー
+<LW_SAGAKU>-SGTXT = SPACE.       "明細テキスト
+<LW_SAGAKU>-ZTERM = SPACE.       "支払条件
+<LW_SAGAKU>-ZFBDT = SPACE.       "支払基準日
+* 2012/04/17 ADD START
+LW_SAGAKU_K = LW_SAGAKU_K + <LW_SAGAKU>-KINGAKU.
+* 2012/04/17 ADD END
+*      入金予定金額が多い場合
+ELSE.
+* 2012/04/17 DEL START
+*         <LW_SAGAKU>-KUNNR = SPACE.       "得意先
+*         <LW_SAGAKU>-CZFBDT = SPACE.      "照合締日
+* 2012/04/17 DEL END
+<LW_SAGAKU>-SAKNR = W_HKONTA.    "勘定コード
+<LW_SAGAKU>-NEWBS = '50'.        "転記キー
+<LW_SAGAKU>-MWSKZ = W_MWSKZA.    "税コード
+<LW_SAGAKU>-KOSTL = W_KOSTL.     "原価センタ
+<LW_SAGAKU>-ZUONR = SPACE.       "ソートキー
+<LW_SAGAKU>-SGTXT = SPACE.       "明細テキスト
+<LW_SAGAKU>-ZTERM = SPACE.       "支払条件
+<LW_SAGAKU>-ZFBDT = SPACE.       "支払基準日
+* 2012/04/17 ADD START
+LW_SAGAKU_K = LW_SAGAKU_K - <LW_SAGAKU>-KINGAKU.
+* 2012/04/17 ADD END
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+
+* 2012/04/17 ADD START
+*  LW_KINGAKU = LW_SAGAKU_K.
+* LW_SAGAKU_Kは通貨で外部書式に変換されているので、内部に戻す。
+CLEAR:LW_SAGAKU_INTERNAL,
+LW_KINGAKU.
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_INTERNAL'
+EXPORTING
+CURRENCY                   = G_WAERS        "画面の通貨コード
+AMOUNT_EXTERNAL            = LW_SAGAKU_K
+MAX_NUMBER_OF_DIGITS       = 11
+IMPORTING
+AMOUNT_INTERNAL            = LW_SAGAKU_INTERNAL.
+
+LW_KINGAKU = LW_SAGAKU_INTERNAL.
+
+* 2012/04/17 ADD END
+
+*--- 未決済自社データの処理済みチェック
+LOOP AT P_T_YN120_MI INTO LW_YN120
+WHERE VRFCTON = LW_TARGET-KUNNR
+AND CZFBDT  = LW_TARGET-CZFBDT.
+READ TABLE P_T_BDC_BELNR TRANSPORTING NO FIELDS
+WITH KEY GJAHR = LW_YN120-YNGJAHR
+BELNR = LW_YN120-BELNR
+BUZEI = LW_YN120-BUZEI.
+IF SY-SUBRC <> 0.
+LW_ADD_FLG         = C_ON.
+LW_BDC_BELNR-GJAHR = LW_YN120-YNGJAHR.
+LW_BDC_BELNR-BELNR = LW_YN120-BELNR.
+LW_BDC_BELNR-BUZEI = LW_YN120-BUZEI.
+APPEND LW_BDC_BELNR TO P_T_BDC_BELNR.
+* 2012/04/17 MOD START
+*      LW_KINGAKU = LW_KINGAKU + LW_YN120-KNETXAMT.
+*-- BSIDから金額読込
+CLEAR:L_W_YN120_BSID,LW_AMOUNT.
+READ TABLE P_T_YN120_BSID INTO L_W_YN120_BSID
+WITH KEY GJAHR = LW_YN120-YNGJAHR
+BELNR = LW_YN120-BELNR
+BUZEI = LW_YN120-BUZEI.
+IF SY-SUBRC = 0.
+* 画面の通貨コードと一致する場合
+IF  L_W_YN120_BSID-WAERS = G_WAERS.
+LW_AMOUNT = L_W_YN120_BSID-WRBTR.      "伝票通貨額
+* 取得した通貨コードと画面の通貨コードが異なる場合
+ELSE.
+*    金額変換
+PERFORM GET_EXCH_RATE   USING  L_W_YN120_BSID-WAERS
+L_W_YN120_BSID-WRBTR
+G_WAERS         "画面通貨
+CHANGING LW_AMOUNT.
+ENDIF.
+
+IF  L_W_YN120_BSID-SHKZG = 'S'.
+LW_KINGAKU = LW_KINGAKU + LW_AMOUNT.
+ELSE.
+LW_KINGAKU = LW_KINGAKU - LW_AMOUNT.
+ENDIF.
+ENDIF.
+* 2012/04/17 MOD END
+ENDIF.
+ENDLOOP.
+
+* 2012/04/17 ADD START
+IF LW_ADD_FLG  = C_ON.
+DELETE P_T_BDC_SAGAKU
+WHERE KUNNR  = LW_TARGET-KUNNR  "ブランクなので条件無意味
+AND CZFBDT = LW_TARGET-CZFBDT.
+ENDIF.
+* 2012/04/17 ADD END
+
+* 会計伝票の追加があった場合
+IF LW_ADD_FLG  = C_ON
+AND LW_KINGAKU <> 0.
+*   プラスの場合は、雑損データを作成する
+IF LW_KINGAKU > 0.
+WRITE LW_KINGAKU TO LW_BDC_SAGAKU-KINGAKU  "金額
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-SAKNR  = W_HKONTB.    "勘定コード
+LW_BDC_SAGAKU-NEWBS  = '40'.        "転記キー
+LW_BDC_SAGAKU-MWSKZ  = W_MWSKZB.    "税コード
+LW_BDC_SAGAKU-KOSTL  = W_KOSTL.     "原価センタ
+LW_BDC_SAGAKU-ZUONR  = SPACE.       "ソートキー
+LW_BDC_SAGAKU-SGTXT  = SPACE.       "明細テキスト
+LW_BDC_SAGAKU-ZTERM  = SPACE.       "支払条件
+LW_BDC_SAGAKU-ZFBDT  = SPACE.       "支払基準日
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+*   マイナスの場合は、雑益データを作成する
+ELSE.
+WRITE LW_KINGAKU TO LW_BDC_SAGAKU-KINGAKU  "金額
+NO-GROUPING      "2012/04/17 ADD
+CURRENCY G_WAERS.
+TRANSLATE LW_BDC_SAGAKU-KINGAKU USING '- '.
+CONDENSE LW_BDC_SAGAKU-KINGAKU NO-GAPS.
+LW_BDC_SAGAKU-SAKNR = W_HKONTA.    "勘定コード
+LW_BDC_SAGAKU-NEWBS = '50'.        "転記キー
+LW_BDC_SAGAKU-MWSKZ = W_MWSKZA.    "税コード
+LW_BDC_SAGAKU-KOSTL = W_KOSTL.     "原価センタ
+LW_BDC_SAGAKU-ZUONR = SPACE.       "ソートキー
+LW_BDC_SAGAKU-SGTXT = SPACE.       "明細テキスト
+LW_BDC_SAGAKU-ZTERM = SPACE.       "支払条件
+LW_BDC_SAGAKU-ZFBDT = SPACE.       "支払基準日
+APPEND LW_BDC_SAGAKU TO P_T_BDC_SAGAKU.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CHECK_NYUKIN_LAST
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BDC_RECORD_0
+*&---------------------------------------------------------------------*
+*       会計伝票入力無しBDCレコード作成
+*----------------------------------------------------------------------*
+*      -->P_T_BDC_SAGAKU    差額/調整/雑損雑益
+*      <--P_T_BDC           ＢＤＣレコード
+*----------------------------------------------------------------------*
+FORM MAKE_BDC_RECORD_0 USING    P_T_BDC_SAGAKU  TYPE T_TYP_SAGAKU
+CHANGING P_T_BDC         TYPE T_TYP_BDC.
+DATA:LW_BDC_SAGAKU TYPE TYP_SAGAKU,
+
+LW_VALUE      TYPE BDC_FVAL,
+LW_SCREEN     TYPE BDC_FVAL,
+LW_SAGAKU_CNT TYPE I,         "差額/調整/雑損雑益件数
+LW_CNT        TYPE I.         "差額/調整/雑損雑益処理カウンタ
+* 差額/調整/雑損雑益件数
+DESCRIBE TABLE P_T_BDC_SAGAKU LINES LW_SAGAKU_CNT.
+* 第一画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0122'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'/00'         "Enter
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "伝票タイプ
+'BKPF-BLART'
+W_BLART
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "会社コード
+'BKPF-BUKRS'
+G_BUKRS
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "伝票日付
+'BKPF-BLDAT'
+W_BLDAT
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "転記日付
+'BKPF-BUDAT'
+W_BUDAT
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "会計期間
+'BKPF-MONAT'
+W_PERIOD
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "通貨コード
+'BKPF-WAERS'
+G_WAERS
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "ヘッダText
+'BKPF-BKTXT'
+W_TXT
+CHANGING P_T_BDC.
+
+* 差額/調整/雑損雑益内部テーブルループ
+LOOP AT P_T_BDC_SAGAKU INTO LW_BDC_SAGAKU.
+LW_CNT = LW_CNT + 1.
+IF LW_CNT = LW_SAGAKU_CNT.
+LW_VALUE = '=BU'.        "保存ボタン
+ELSE.
+LW_VALUE = '/00'.        "Enterボタン
+ENDIF.
+
+* 2012/07/20 DEL START "画面番号は前転記を引き継ぐ
+** 2012/04/17 MOD START
+**    IF LW_BDC_SAGAKU-KUNNR IS INITIAL.
+*    IF LW_BDC_SAGAKU-NEWBS = '40'
+*    OR LW_BDC_SAGAKU-NEWBS = '50'.
+** 2012/04/17 MOD END
+*      LW_SCREEN = '0300'.
+*    ELSE.
+*      LW_SCREEN = '0301'.
+*    ENDIF.
+* 2012/07/20 DEL END
+
+*   転記キー/勘定コード入力
+IF LW_CNT > 1.
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+LW_SCREEN
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+LW_VALUE
+CHANGING P_T_BDC.
+ENDIF.
+PERFORM BDC_RECORD     USING SPACE         "転記キー
+'RF05A-NEWBS'
+LW_BDC_SAGAKU-NEWBS
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "勘定
+'RF05A-NEWKO'
+LW_BDC_SAGAKU-SAKNR
+CHANGING P_T_BDC.
+IF LW_CNT > 1.
+PERFORM BDC_RECORD     USING C_ON
+'SAPLKACB'
+'0002'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=ENTE'
+CHANGING P_T_BDC.
+ENDIF.
+
+* 2012/07/20 ADD START "画面は詳細入力に切替るときに決定
+IF LW_BDC_SAGAKU-NEWBS = '40'
+OR LW_BDC_SAGAKU-NEWBS = '50'.
+LW_SCREEN = '0300'.
+ELSE.
+LW_SCREEN = '0301'.
+ENDIF.
+* 2012/07/20 ADD END
+
+*   金額/税入力
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+LW_SCREEN
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+LW_VALUE
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "金額
+'BSEG-WRBTR'
+LW_BDC_SAGAKU-KINGAKU
+CHANGING P_T_BDC.
+IF NOT LW_BDC_SAGAKU-MWSKZ IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "税
+'BSEG-MWSKZ'
+LW_BDC_SAGAKU-MWSKZ
+CHANGING P_T_BDC.
+ENDIF.
+IF NOT LW_BDC_SAGAKU-ZUONR IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "ソートキー
+'BSEG-ZUONR'
+LW_BDC_SAGAKU-ZUONR
+CHANGING P_T_BDC.
+ENDIF.
+IF NOT LW_BDC_SAGAKU-SGTXT IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "明細テキスト
+'BSEG-SGTXT'
+LW_BDC_SAGAKU-SGTXT
+CHANGING P_T_BDC.
+ENDIF.
+*    IF LW_CNT = 1.
+*      PERFORM BDC_RECORD     USING SPACE       "税自動計算
+*                                   'BSEG-XMWST'
+*                                   'X'
+*                          CHANGING P_T_BDC.
+*
+*    ENDIF.
+IF NOT LW_BDC_SAGAKU-ZTERM IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "支払条件
+'BSEG-ZTERM'
+LW_BDC_SAGAKU-ZTERM
+CHANGING P_T_BDC.
+ENDIF.
+IF NOT LW_BDC_SAGAKU-ZFBDT IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "支払基準日
+'BSEG-ZFBDT'
+LW_BDC_SAGAKU-ZFBDT
+CHANGING P_T_BDC.
+ENDIF.
+*   利益センタ入力のポップアップ
+* 2012/04/17 MOD START
+*    IF LW_BDC_SAGAKU-KUNNR IS INITIAL.
+IF LW_BDC_SAGAKU-NEWBS = '40'
+OR LW_BDC_SAGAKU-NEWBS = '50'.
+* 2012/04/17 MOD END
+PERFORM BDC_RECORD     USING C_ON
+'SAPLKACB'
+'0002'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=ENTE'
+CHANGING P_T_BDC.
+IF NOT LW_BDC_SAGAKU-KOSTL IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE         "原価センタ
+'COBL-KOSTL'
+LW_BDC_SAGAKU-KOSTL
+CHANGING P_T_BDC.
+ENDIF.
+ENDIF.
+ENDLOOP.
+* 未決済明細処理画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPDF05X'
+'3100'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=BU'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING C_ON
+'SAPLKACB'
+'0002'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=ENTE'
+CHANGING P_T_BDC.
+
+ENDFORM.                    " MAKE_BDC_RECORD_0
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BDC_RECORD
+*&---------------------------------------------------------------------*
+*       BDCレコード作成
+*----------------------------------------------------------------------*
+*      -->P_T_BDC_BELNR     決済の会計伝票
+*      -->P_T_BDC_SAGAKU    差額/調整/雑損雑益
+*      <--P_T_BDC           ＢＤＣレコード
+*----------------------------------------------------------------------*
+FORM MAKE_BDC_RECORD USING    P_T_BDC_BELNR   TYPE T_TYP_BSID
+P_T_BDC_SAGAKU  TYPE T_TYP_SAGAKU
+CHANGING P_T_BDC         TYPE T_TYP_BDC.
+DATA:LW_BDC_BELNR  TYPE TYP_BSID,
+LW_BDC_SAGAKU TYPE TYP_SAGAKU,
+LW_VALUE      TYPE BDC_FVAL,
+LW_SCREEN     TYPE BDC_FVAL,
+LW_SAGAKU_CNT TYPE I,         "差額/調整/雑損雑益件数
+LW_CNT        TYPE I.         "差額/調整/雑損雑益処理カウンタ
+
+* 差額/調整/雑損雑益件数
+DESCRIBE TABLE P_T_BDC_SAGAKU LINES LW_SAGAKU_CNT.
+
+* 第一画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0122'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=SL'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "伝票タイプ
+'BKPF-BLART'
+W_BLART
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "会社コード
+'BKPF-BUKRS'
+G_BUKRS
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "転記日付
+'BKPF-BLDAT'
+W_BLDAT
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "伝票日付
+'BKPF-BUDAT'
+W_BUDAT
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "会計期間
+'BKPF-MONAT'
+W_PERIOD
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "通貨コード
+'BKPF-WAERS'
+G_WAERS
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "ヘッダText
+'BKPF-BKTXT'
+W_TXT
+CHANGING P_T_BDC.
+* 第二画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0710'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=SLB'        "/05入力
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "勘定タイプ
+'RF05A-AGKOA'
+'D'
+CHANGING P_T_BDC.
+* 会計伝票番号入力
+LOOP AT P_T_BDC_BELNR INTO LW_BDC_BELNR.
+*   伝票番号+会計年度+明細番号 編集
+CONCATENATE LW_BDC_BELNR-BELNR
+LW_BDC_BELNR-GJAHR
+LW_BDC_BELNR-BUZEI
+INTO LW_VALUE.
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0733'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "入力
+'RF05A-FELDN(01)'
+'BELNR'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "入力
+'RF05A-SEL01(01)'
+LW_VALUE
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=SLB'
+CHANGING P_T_BDC.
+ENDLOOP.
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0733'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=PA'         "未決済明細処理ボタン
+CHANGING P_T_BDC.
+* 未決済明細処理画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPDF05X'
+'3100'
+CHANGING P_T_BDC.
+
+* 差額/調整/雑損雑益が無い場合
+IF LW_SAGAKU_CNT = 0.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=BU'         "保存ボタン
+CHANGING P_T_BDC.
+EXIT.   "処理終了
+ENDIF.
+
+* 差額/調整/雑損雑益 入力
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=AB'         "明細概要ボタン
+CHANGING P_T_BDC.
+
+LOOP AT P_T_BDC_SAGAKU INTO LW_BDC_SAGAKU.
+LW_CNT = LW_CNT + 1.
+IF LW_CNT = LW_SAGAKU_CNT.
+LW_VALUE = '=PA'.        "未決済明細処理ボタン
+ELSE.
+LW_VALUE = '=AB'.        "明細概要ボタン
+ENDIF.
+* 2012/04/17 MOD START
+*    IF LW_BDC_SAGAKU-KUNNR IS INITIAL.
+IF LW_BDC_SAGAKU-NEWBS = '40'
+OR LW_BDC_SAGAKU-NEWBS = '50'.
+* 2012/04/17 MOD END
+LW_SCREEN = '0300'.
+ELSE.
+LW_SCREEN = '0301'.
+ENDIF.
+
+*   転記キー/勘定コード入力
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+'0700'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'/00'         "Enter
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "転記キー
+'RF05A-NEWBS'
+LW_BDC_SAGAKU-NEWBS
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "勘定
+'RF05A-NEWKO'
+LW_BDC_SAGAKU-SAKNR
+CHANGING P_T_BDC.
+*   金額/税入力
+PERFORM BDC_RECORD     USING C_ON
+'SAPMF05A'
+LW_SCREEN
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+LW_VALUE
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "金額
+'BSEG-WRBTR'
+LW_BDC_SAGAKU-KINGAKU
+CHANGING P_T_BDC.
+IF NOT LW_BDC_SAGAKU-MWSKZ IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "税
+'BSEG-MWSKZ'
+LW_BDC_SAGAKU-MWSKZ
+CHANGING P_T_BDC.
+ENDIF.
+IF NOT LW_BDC_SAGAKU-ZUONR IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "ソートキー
+'BSEG-ZUONR'
+LW_BDC_SAGAKU-ZUONR
+CHANGING P_T_BDC.
+ENDIF.
+IF NOT LW_BDC_SAGAKU-SGTXT IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "明細テキスト
+'BSEG-SGTXT'
+LW_BDC_SAGAKU-SGTXT
+CHANGING P_T_BDC.
+ENDIF.
+IF LW_CNT = 1.
+PERFORM BDC_RECORD     USING SPACE       "税自動計算
+'BKPF-XMWST'
+'X'
+CHANGING P_T_BDC.
+
+ENDIF.
+IF NOT LW_BDC_SAGAKU-ZTERM IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "支払条件
+'BSEG-ZTERM'
+LW_BDC_SAGAKU-ZTERM
+CHANGING P_T_BDC.
+ENDIF.
+IF NOT LW_BDC_SAGAKU-ZFBDT IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "支払基準日
+'BSEG-ZFBDT'
+LW_BDC_SAGAKU-ZFBDT
+CHANGING P_T_BDC.
+ENDIF.
+*   原価センタ入力のポップアップ
+* 2012/04/17 MOD START
+*    IF LW_BDC_SAGAKU-KUNNR IS INITIAL.
+IF LW_BDC_SAGAKU-NEWBS = '40'
+OR LW_BDC_SAGAKU-NEWBS = '50'.
+* 2012/04/17 MOD END
+PERFORM BDC_RECORD     USING C_ON
+'SAPLKACB'
+'0002'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=ENTE'
+CHANGING P_T_BDC.
+IF NOT LW_BDC_SAGAKU-KOSTL IS INITIAL.
+PERFORM BDC_RECORD     USING SPACE       "原価センタ
+'COBL-KOSTL'
+LW_BDC_SAGAKU-KOSTL
+CHANGING P_T_BDC.
+ENDIF.
+ENDIF.
+ENDLOOP.
+* 未決済明細処理画面
+PERFORM BDC_RECORD     USING C_ON
+'SAPDF05X'
+'3100'
+CHANGING P_T_BDC.
+PERFORM BDC_RECORD     USING SPACE         "OK CODE
+'BDC_OKCODE'
+'=BU'
+CHANGING P_T_BDC.
+
+ENDFORM.                    " MAKE_BDC_RECORD
+*&---------------------------------------------------------------------*
+*&      Form  BDC_RECORD
+*&---------------------------------------------------------------------*
+*       BDCレコードの作製
+*----------------------------------------------------------------------*
+*      -->P_SCREEN      'X'=画面/SPACE=項目値
+*      -->P_VALUE1      PGID/項目名
+*      -->P_VALUE2      SCREEN番号/項目値
+*      <--P_T_BDC       BDCレコードテーブル
+*----------------------------------------------------------------------*
+FORM BDC_RECORD USING    P_SCREEN    TYPE CHAR1
+P_VALUE1    TYPE ANY
+P_VALUE2    TYPE ANY
+CHANGING P_T_BDC     TYPE T_TYP_BDC.
+DATA:LW_BDC    TYPE BDCDATA.
+
+* 画面定義の場合
+IF P_SCREEN = C_ON.
+LW_BDC-PROGRAM  = P_VALUE1.
+LW_BDC-DYNPRO   = P_VALUE2.
+LW_BDC-DYNBEGIN = C_ON.
+* 項目定義の場合
+ELSE.
+LW_BDC-FNAM = P_VALUE1.
+LW_BDC-FVAL = P_VALUE2.
+ENDIF.
+
+* 内部テーブルに格納
+APPEND LW_BDC TO P_T_BDC.
+
+ENDFORM.                    " BDC_RECORD
+*&---------------------------------------------------------------------*
+*&      Form  CALL_BDC
+*&---------------------------------------------------------------------*
+*       ＢＤＣ実行
+*----------------------------------------------------------------------*
+*      -->P_T_BDC      BDCレコード
+*      <--P_BELNR      登録された伝票番号
+*----------------------------------------------------------------------*
+FORM CALL_BDC USING    P_T_BDC     TYPE T_TYP_BDC
+CHANGING P_BELNR     TYPE BELNR_D.
+DATA:LW_OPTION   TYPE CTU_PARAMS,
+LT_RETURN   TYPE STANDARD TABLE OF BDCMSGCOLL,
+LW_RETURN   TYPE BDCMSGCOLL.
+
+LW_OPTION-DISMODE = 'N'.
+LW_OPTION-UPDMODE = 'S'.
+* 実行
+CALL TRANSACTION 'F-30'  USING P_T_BDC
+OPTIONS FROM LW_OPTION
+MESSAGES INTO LT_RETURN.
+
+WAIT UP TO 1 SECONDS.   "2012/07/31 ADD 一秒待機
+
+* 正常終了メッセージを検索
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'S'
+MSGID  = 'F5'
+MSGNR  = '312'.
+IF SY-SUBRC = 0.
+P_BELNR = LW_RETURN-MSGV1.
+* エラーの場合
+ELSE.
+* 2012/03/10 START
+IF W_TYPE = '1'."自動照合
+T_RETURN[] = LT_RETURN[].
+EXIT.
+ENDIF.
+* 2012/03/10 START
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'A'.
+IF SY-SUBRC <> 0.
+READ TABLE LT_RETURN INTO LW_RETURN
+WITH KEY MSGTYP = 'E'.
+ENDIF.
+IF LW_RETURN-MSGID IS INITIAL.
+MESSAGE E999(YN01) WITH '消込エラーが発生しました'.
+ELSE.
+MESSAGE ID     LW_RETURN-MSGID
+TYPE   'E'
+NUMBER LW_RETURN-MSGNR
+WITH   LW_RETURN-MSGV1
+LW_RETURN-MSGV2
+LW_RETURN-MSGV3
+LW_RETURN-MSGV4.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " CALL_BDC
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_ZN005
+*&---------------------------------------------------------------------*
+*       データ更新
+*----------------------------------------------------------------------*
+*      -->P_BELNR      登録された伝票番号
+*----------------------------------------------------------------------*
+* 2012/03/19 MOD START 決済伝票のときは、決済伝票番号を出力
+*FORM UPDATE_ZN005 USING    P_BELNR  TYPE BELNR_D.
+FORM UPDATE_ZN005 USING    P_BELNR   TYPE BELNR_D
+P_BELNR2  TYPE BELNR_D
+P_BUKRS   TYPE BUKRS.
+* 2012/03/19 MOD END
+DATA:LT_ZN005   TYPE T_TYP_ZN005,   "更新データ
+LW_ZN005   TYPE ZN005,
+LW_BELNR   TYPE BELNR_D,       "前ゼロ埋め用
+LW_DATE    TYPE SYDATUM,       "処理日付
+LW_TIME    TYPE SYUZEIT.       "処理時刻
+
+* 会計伝票番号が初期値の場合は取消処理時更新
+IF  P_BELNR = SPACE.
+LOOP AT T_TARGET_ZN005 INTO LW_ZN005.
+*     対象データの決済情報をクリア
+* 2012/04/11 ADD START　"支払方法クリア（相殺）
+LW_ZN005-IZLSCH  = SPACE.     "支払方法
+LW_ZN005-ILIFNR  = SPACE.     "相殺先
+* 2012/04/11 ADD END
+LW_ZN005-AUFLG   = SPACE.     "入金消込
+LW_ZN005-AUDAT   = LW_DATE.   "入金消込日
+LW_ZN005-AUTIM   = LW_TIME.   "入金消込時刻
+LW_ZN005-AUUSR   = SPACE.     "入金消込ユーザ
+LW_ZN005-IBELNER = SPACE.     "決済伝票番号
+LW_ZN005-IGJAHR  = SPACE.     "決済会計年度
+LW_ZN005-IBUDAT  = LW_DATE.   "決済転記日
+APPEND LW_ZN005 TO LT_ZN005.
+ENDLOOP.
+
+* 会計伝票番号が設定されている場合は消込処理更新
+ELSE.
+*   処理日付/時刻を退避
+LW_DATE = SY-DATUM.
+LW_TIME = SY-UZEIT.
+
+*   値編集
+*   前ゼロ編集
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = P_BELNR
+IMPORTING
+OUTPUT        = LW_BELNR.
+LOOP AT T_TARGET_ZN005 INTO LW_ZN005.
+LW_ZN005-AUFLG   = C_ON.      "入金消込
+LW_ZN005-AUDAT   = LW_DATE.   "入金消込日
+LW_ZN005-AUTIM   = LW_TIME.   "入金消込時刻
+LW_ZN005-AUUSR   = SY-UNAME.  "入金消込ユーザ
+LW_ZN005-IBELNER = LW_BELNR.  "決済伝票番号
+LW_ZN005-IGJAHR  = W_YEAR.    "決済会計年度
+LW_ZN005-IBUDAT  = W_BUDAT.   "決済転記日
+APPEND LW_ZN005 TO LT_ZN005.
+ENDLOOP.
+ENDIF.
+
+* データ更新
+UPDATE ZN005 FROM TABLE LT_ZN005.
+IF SY-SUBRC = 0.
+COMMIT WORK AND WAIT.
+* 2012/03/19 MOD START 決済伝票のときは、決済伝票番号を出力
+*   MESSAGE S312(F5) WITH P_BELNR G_BUKRS.
+IF P_BELNR = SPACE. "取消
+*      MESSAGE S312(F5) WITH P_BELNR2 P_BUKRS.
+MESSAGE S539(F5) WITH P_BELNR2.
+ELSE.               "消込
+MESSAGE S312(F5) WITH P_BELNR G_BUKRS.
+ENDIF.
+* 2012/03/19 MOD END
+ELSE.
+ROLLBACK WORK.
+IF W_TYPE = '1'.        "自動消消込はお持ち帰り
+W_NG_DBUPLOD = C_ON.
+EXIT.
+ELSE.
+MESSAGE E758(YN01) WITH 'ZN005'.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " UPDATE_ZN005
+*&---------------------------------------------------------------------*
+*&      Form  GET_EXCH_RATE
+*&---------------------------------------------------------------------*
+*       金額の換算処理
+*----------------------------------------------------------------------*
+*      -->P_WK_WARES        換算前通貨コード
+*      -->P_WK_AMOUNT       換算前金額
+*      -->P_EXC_WAERS       換算後通貨コード
+*      <--P_EXCH_AMOUNT     換算後金額
+*      <--P_W_ERR_FLG       エラーフラグ
+*----------------------------------------------------------------------*
+FORM GET_EXCH_RATE USING    P_WK_WAERS      TYPE WAERS
+P_WK_AMOUNT     TYPE ANY
+P_EXC_WAERS     TYPE WAERS
+CHANGING P_EXCH_AMOUNT   TYPE ANY.
+DATA:LW_EXCH_AMOUNT(20)  TYPE C,
+LW_AMOUNT           TYPE BAPICURR_D,
+LW_AMOUNT_F(10)     TYPE P DECIMALS 2,
+LW_MESSAGE          TYPE TEXT20.
+
+* 日本円に換算する場合
+IF P_EXC_WAERS = C_WAERS_JP.
+CLEAR:LW_EXCH_AMOUNT.
+CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+EXPORTING
+DATE                    = W_BUDAT
+FOREIGN_AMOUNT          = P_WK_AMOUNT
+FOREIGN_CURRENCY        = P_WK_WAERS   "換算前
+LOCAL_CURRENCY          = P_EXC_WAERS
+IMPORTING
+LOCAL_AMOUNT            = LW_EXCH_AMOUNT
+EXCEPTIONS
+NO_RATE_FOUND           = 1
+OVERFLOW                = 2
+NO_FACTORS_FOUND        = 3
+NO_SPREAD_FOUND         = 4
+DERIVED_2_TIMES         = 5
+OTHERS                  = 6.
+*   日本円に換算した場合は、内部換算する
+IF SY-SUBRC = 0.
+LW_AMOUNT = LW_EXCH_AMOUNT.
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_INTERNAL'
+EXPORTING
+CURRENCY                   = C_WAERS_JP
+AMOUNT_EXTERNAL            = LW_AMOUNT
+MAX_NUMBER_OF_DIGITS       = 11
+IMPORTING
+AMOUNT_INTERNAL            = P_EXCH_AMOUNT.
+*   エラーの場合は処理中止
+ELSE.
+LW_MESSAGE = SY-SUBRC.
+CONDENSE LW_MESSAGE NO-GAPS.
+MESSAGE E802(YN01) WITH 'CONVERT_TO_LOCAL_CURRENCY' LW_MESSAGE.
+ENDIF.
+
+* 日本円以外に換算する場合
+ELSE.
+CALL FUNCTION 'CONVERT_TO_FOREIGN_CURRENCY'
+EXPORTING
+DATE                    = W_BUDAT
+FOREIGN_CURRENCY        = P_EXC_WAERS
+LOCAL_AMOUNT            = P_WK_AMOUNT
+LOCAL_CURRENCY          = P_WK_WAERS   "換算前
+IMPORTING
+FOREIGN_AMOUNT          = LW_AMOUNT_F  "小数2桁
+EXCEPTIONS
+NO_RATE_FOUND           = 1
+OVERFLOW                = 2
+NO_FACTORS_FOUND        = 3
+NO_SPREAD_FOUND         = 4
+DERIVED_2_TIMES         = 5
+OTHERS                  = 6.
+*   エラーの場合は処理中止
+IF SY-SUBRC = 0.
+P_EXCH_AMOUNT = LW_AMOUNT_F.
+ELSE.
+LW_MESSAGE = SY-SUBRC.
+CONDENSE LW_MESSAGE NO-GAPS.
+MESSAGE E802(YN01) WITH 'CONVERT_TO_FOREIGN_CURRENCY' LW_MESSAGE.
+ENDIF.
+ENDIF.
+
+ENDFORM.                    " GET_EXCH_RATE

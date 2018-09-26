@@ -1,0 +1,354 @@
+REPORT ZZMIKAMI_006 MESSAGE-ID Z1.
+
+TABLES: GLT0,
+BKPF,
+BSEG.
+
+*** 選択パラメータ ***
+PARAMETERS    : P_KTOPL  TYPE SKAT-KTOPL DEFAULT 'C001'
+OBLIGATORY.
+
+PARAMETERS    : P_BUKRS  TYPE BKPF-BUKRS DEFAULT 'C001'
+OBLIGATORY.
+PARAMETERS    : P_GJAHR  TYPE BKPF-GJAHR OBLIGATORY.
+SELECT-OPTIONS: S_HKONT  FOR  BSEG-HKONT.
+PARAMETERS    : P_FILE   TYPE RLGRAP-FILENAME LOWER CASE
+OBLIGATORY.
+PARAMETERS    : P_GNAME  TYPE GRPNAME OBLIGATORY.
+
+*** 構造 ***
+* テキスト項目設定用マスタ
+TYPES:BEGIN OF TYP_TEXT,
+KUBUN_C   TYPE SETNAMENEW,       "科目区分(コード)
+KUBUN_T   TYPE SETTEXT,          "科目区分(テキスト)
+HYOJI_C   TYPE SETNAMENEW,       "表示項目(コード)
+HYOJI_T   TYPE SETTEXT,          "表示項目(テキスト)
+FROM      TYPE SETVALMIN,        "値(from)
+TO        TYPE SETVALMAX,        "値(to)
+END   OF TYP_TEXT.
+
+* 集計
+TYPES:BEGIN OF TYP_CALC,
+KISYU         TYPE GLT0-HSLVT,        "期首残高
+KIMAT         TYPE GLT0-HSLVT,        "期末残高
+END   OF TYP_CALC.
+
+* ファイル
+TYPES:BEGIN OF TYP_FILE,
+HKONT_C(30)   TYPE C,        "科目コード
+TXT20(20)     TYPE C,        "科目名
+KISYU(15)     TYPE C,        "期首残高
+KIMAT(15)     TYPE C,        "期末残高
+KUBUN_T(40)   TYPE C,        "科目区分
+HYOJI_T(40)   TYPE C,        "表示項目
+END   OF TYP_FILE.
+
+*** 内部テーブル ***
+DATA: GT_GLT0           TYPE TABLE OF GLT0.
+DATA: GT_SKAT           TYPE TABLE OF SKAT.
+DATA: GT_TEXT           TYPE TABLE OF TYP_TEXT.
+DATA: GT_FILE           TYPE TABLE OF TYP_FILE.
+
+DATA: GT_SET_HIER_DMY   TYPE TABLE OF SETHIER.
+DATA: GT_SET_VALUES_DMY TYPE TABLE OF SETVALUES.
+
+*** 変数 ***
+DATA: GV_CNT      TYPE I.
+DATA: GV_GOUKEI_S TYPE GLT0-HSLVT.
+DATA: GV_GOUKEI_M TYPE GLT0-HSLVT.
+
+
+INITIALIZATION.
+
+START-OF-SELECTION.
+
+PERFORM GET_DATA.
+PERFORM MAKE_RECORD.
+
+END-OF-SELECTION.
+
+PERFORM WRITE_RECORD.
+PERFORM WRITE_LOG.
+
+*&---------------------------------------------------------------------*
+*&      Form  get_data
+*&---------------------------------------------------------------------*
+*       ファイル作成元データの取得
+*----------------------------------------------------------------------*
+FORM GET_DATA.
+
+SELECT * FROM GLT0 INTO TABLE GT_GLT0
+WHERE BUKRS = P_BUKRS
+AND RYEAR  = P_GJAHR
+AND RACCT IN S_HKONT.
+
+SELECT * FROM SKAT INTO TABLE GT_SKAT
+WHERE KTOPL = P_KTOPL.
+
+PERFORM MAKE_TXTTAB.
+
+ENDFORM.                    " get_data
+
+*&---------------------------------------------------------------------*
+*&      Form  make_txttab
+*&---------------------------------------------------------------------*
+*       テキスト項目内部テーブル作成
+*----------------------------------------------------------------------*
+FORM MAKE_TXTTAB.
+
+
+DATA: LT_SET_HIER      TYPE TABLE OF SETHIER.
+DATA: LT_SET_VALUES    TYPE TABLE OF SETVALUES.
+
+DATA: LT_SET_HDMY      TYPE TABLE OF SETHIER.
+DATA: LT_SET_VDMY      TYPE TABLE OF SETVALUES.
+
+DATA: LW_SET_HIER      TYPE SETHIER.
+DATA: LW_SET_VALUES    TYPE SETVALUES.
+DATA: LW_TEXT          TYPE TYP_TEXT.
+
+DATA: LV_SETID         TYPE SETHIER-SETID.
+
+
+* セット名を作成し、グループ以下の階層を全て取得する
+* ※レベル２まで対応
+CONCATENATE '0109' P_KTOPL P_GNAME INTO LV_SETID.
+
+PERFORM GET_SET_TREE USING LV_SETID
+'2'
+CHANGING LT_SET_HIER
+LT_SET_VDMY.
+
+LOOP AT LT_SET_HIER INTO LW_SET_HIER WHERE LEVEL > 0.
+CASE LW_SET_HIER-LEVEL.
+*     レベル１を科目区分に設定
+WHEN 1.
+CLEAR: LW_TEXT.
+LW_TEXT-KUBUN_C = LW_SET_HIER-SHORTNAME.
+LW_TEXT-KUBUN_T = LW_SET_HIER-DESCRIPT.
+*     レベル２を表示項目に設定
+WHEN 2.
+LW_TEXT-HYOJI_C = LW_SET_HIER-SHORTNAME.
+LW_TEXT-HYOJI_T = LW_SET_HIER-DESCRIPT.
+*       表示項目毎に値の範囲を取得
+CLEAR: LV_SETID.
+CONCATENATE '0109' P_KTOPL LW_TEXT-HYOJI_C INTO LV_SETID.
+PERFORM GET_SET_TREE USING LV_SETID
+'1'
+CHANGING LT_SET_HDMY
+LT_SET_VALUES.
+
+LOOP AT LT_SET_VALUES INTO LW_SET_VALUES.
+LW_TEXT-FROM = LW_SET_VALUES-FROM.
+LW_TEXT-TO   = LW_SET_VALUES-TO.
+APPEND LW_TEXT TO GT_TEXT.
+ENDLOOP.
+CLEAR: LW_TEXT-HYOJI_C.
+CLEAR: LW_TEXT-HYOJI_T.
+WHEN OTHERS.
+ENDCASE.
+ENDLOOP.
+
+ENDFORM.                    " make_txttab
+
+*&--------------------------------------------------------------------*
+*&      Form  GET_SET_TREE
+*&--------------------------------------------------------------------*
+*       勘定グループ階層構造取得処理
+*---------------------------------------------------------------------*
+*      -->PV_SETID     =     セット名
+*      -->PV_MAXLV     =     取得最大レベル
+*      <--PT_HIER      =     階層構造データ
+*      <--PT_VALUES    =     原価要素データ
+*---------------------------------------------------------------------*
+FORM GET_SET_TREE USING VALUE(PV_SETID)  TYPE SETHIER-SETID
+VALUE(PV_MAXLV)  TYPE I
+CHANGING VALUE(PT_HIER)   LIKE GT_SET_HIER_DMY[]
+VALUE(PT_VALUES) LIKE GT_SET_VALUES_DMY[].
+
+REFRESH: PT_HIER, PT_VALUES.
+
+CALL FUNCTION 'G_SET_TREE_IMPORT'
+EXPORTING
+SETID                     = PV_SETID
+MAX_HIER_LEVEL            = PV_MAXLV
+TABLES
+SET_HIERARCHY             = PT_HIER[]
+SET_VALUES                = PT_VALUES[]
+EXCEPTIONS
+SET_NOT_FOUND             = 1
+ILLEGAL_FIELD_REPLACEMENT = 2
+ILLEGAL_TABLE_REPLACEMENT = 3
+SET_IS_DAMAGED            = 4
+OTHERS                    = 5.
+
+IF SY-SUBRC <> 0.
+MESSAGE S400(Z1) WITH '勘定グループが未登録です'.
+STOP.
+ENDIF.
+
+ENDFORM.                    "GET_SET_TREE
+*&---------------------------------------------------------------------*
+*&      Form  make_record
+*&---------------------------------------------------------------------*
+*       レコードの作成
+*----------------------------------------------------------------------*
+FORM MAKE_RECORD.
+
+DATA: LW_GLT0    TYPE GLT0.
+DATA: LW_CALC    TYPE TYP_CALC.
+DATA: LW_FILE    TYPE TYP_FILE.
+DATA: LV_KISYU   TYPE TYP_FILE-KISYU.
+DATA: LV_KIMAT   TYPE TYP_FILE-KIMAT.
+
+SORT GT_GLT0 BY RACCT.
+
+LOOP AT GT_GLT0 INTO LW_GLT0.
+AT NEW RACCT.
+CLEAR: LW_FILE, LW_CALC, LV_KISYU, LV_KIMAT.
+*   勘定コード
+LW_FILE-HKONT_C = LW_GLT0-RACCT.
+PERFORM SET_TEXT CHANGING LW_FILE.
+ENDAT.
+
+*   期首残高
+LW_CALC-KISYU = LW_CALC-KISYU + LW_GLT0-HSLVT.
+*   期末残高
+LW_CALC-KIMAT = LW_CALC-KIMAT + LW_GLT0-HSLVT +
+LW_GLT0-HSL01 + LW_GLT0-HSL02 +
+LW_GLT0-HSL03 + LW_GLT0-HSL04 +
+LW_GLT0-HSL05 + LW_GLT0-HSL06 +
+LW_GLT0-HSL07 + LW_GLT0-HSL08 +
+LW_GLT0-HSL09 + LW_GLT0-HSL10 +
+LW_GLT0-HSL11 + LW_GLT0-HSL12 +
+LW_GLT0-HSL13 + LW_GLT0-HSL14 +
+LW_GLT0-HSL15 + LW_GLT0-HSL16 .
+
+AT END OF RACCT.
+WRITE LW_CALC-KISYU TO LV_KISYU CURRENCY 'JPY' NO-GROUPING.
+WRITE LW_CALC-KIMAT TO LV_KIMAT CURRENCY 'JPY' NO-GROUPING.
+PERFORM EDIT_MINUS USING LV_KISYU
+CHANGING LW_FILE-KISYU.
+PERFORM EDIT_MINUS USING LV_KIMAT
+CHANGING LW_FILE-KIMAT.
+GV_GOUKEI_S = GV_GOUKEI_S + LW_CALC-KISYU.
+GV_GOUKEI_M = GV_GOUKEI_M + LW_CALC-KIMAT.
+APPEND LW_FILE TO GT_FILE.
+CLEAR: LW_FILE, LW_CALC, LV_KISYU, LV_KIMAT.
+ENDAT.
+
+ENDLOOP.
+
+
+ENDFORM.                    " make_record
+
+*&---------------------------------------------------------------------*
+*&      Form  SET_TEXT
+*&---------------------------------------------------------------------*
+*       テキスト項目の設定
+*----------------------------------------------------------------------*
+FORM SET_TEXT CHANGING VALUE(PW_FILE) TYPE TYP_FILE.
+
+DATA: LW_TEXT TYPE TYP_TEXT.
+DATA: LW_SKAT TYPE SKAT.
+
+* 勘定テキスト
+READ TABLE GT_SKAT INTO LW_SKAT WITH KEY SAKNR = PW_FILE-HKONT_C.
+PW_FILE-TXT20 = LW_SKAT-TXT20.
+
+
+LOOP AT GT_TEXT INTO LW_TEXT WHERE FROM <= PW_FILE-HKONT_C(10)
+AND TO   >= PW_FILE-HKONT_C(10).
+EXIT.
+ENDLOOP.
+
+* 科目区分
+PW_FILE-KUBUN_T = LW_TEXT-KUBUN_T.
+* 表示項目
+PW_FILE-HYOJI_T = LW_TEXT-HYOJI_T.
+
+ENDFORM.                    " SET_TEXT
+
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_MINUS
+*&---------------------------------------------------------------------*
+*       マイナス編集
+*----------------------------------------------------------------------*
+FORM EDIT_MINUS USING VALUE(PV_BEFORE) TYPE TYP_FILE-KISYU
+CHANGING VALUE(PV_AFTER)  TYPE TYP_FILE-KISYU.
+
+DATA: LV_LEN     TYPE I.
+DATA: LV_SHIFT     TYPE I.
+
+CONDENSE PV_BEFORE NO-GAPS.
+LV_LEN   = STRLEN( PV_BEFORE ).
+LV_SHIFT = LV_LEN - 1.
+
+IF PV_BEFORE+LV_SHIFT  = '-'.
+PV_AFTER(01)         = '-'.
+PV_AFTER+1(LV_SHIFT) = PV_BEFORE(LV_SHIFT).
+ELSE.
+PV_AFTER             = PV_BEFORE.
+ENDIF.
+
+ENDFORM.                    " EDIT_MINUS
+
+*&---------------------------------------------------------------------*
+*&      Form  write_log
+*&---------------------------------------------------------------------*
+*       ログ出力
+*----------------------------------------------------------------------*
+FORM WRITE_LOG.
+
+DATA: LV_GOUKEI_S(15)   TYPE C.
+DATA: LV_GOUKEI_M(15)   TYPE C.
+DATA: LV_KENSUU(15)     TYPE C.
+
+WRITE GV_GOUKEI_S TO LV_GOUKEI_S CURRENCY 'JPY'.
+WRITE GV_GOUKEI_M TO LV_GOUKEI_M CURRENCY 'JPY'.
+LV_KENSUU = GV_CNT.
+
+WRITE: /    'レコード件数：',
+20 LV_KENSUU,
+35 '件'.
+WRITE: /    '期首残高合計：',
+20 LV_GOUKEI_S,
+35 '円'.
+WRITE: /    '期末残高合計：',
+20 LV_GOUKEI_M,
+35 '円'.
+
+ENDFORM.                    " write_log
+*
+*&---------------------------------------------------------------------*
+*&      Form  write_record
+*&---------------------------------------------------------------------*
+*       レコードの書き出し
+*----------------------------------------------------------------------*
+FORM WRITE_RECORD.
+
+DATA: LV_LINE(1000)  TYPE C.
+DATA: LW_FILE TYPE TYP_FILE.
+
+** テキストモードでファイルをオープン
+*  OPEN DATASET P_FILE FOR OUTPUT IN TEXT MODE.
+
+LOOP AT GT_FILE INTO LW_FILE.
+CLEAR: LV_LINE.
+CONCATENATE LW_FILE-HKONT_C       "科目
+LW_FILE-TXT20         "科目テキスト
+LW_FILE-KISYU         "期首残高
+LW_FILE-KIMAT         "期末残高
+LW_FILE-KUBUN_T       "科目区分
+LW_FILE-HYOJI_T       "表示項目
+INTO LV_LINE SEPARATED BY ','.
+**   レコードの書き出し
+*    TRANSFER LV_LINE TO P_FILE.
+write: / LV_LINE.
+GV_CNT = GV_CNT + 1.
+ENDLOOP.
+
+** ファイルをクローズ
+*  CLOSE DATASET P_FILE.
+
+ENDFORM.                    " write_record

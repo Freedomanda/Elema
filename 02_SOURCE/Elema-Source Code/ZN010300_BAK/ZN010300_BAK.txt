@@ -1,0 +1,3272 @@
+*&---------------------------------------------------------------------*
+*&  REPORT ZN010300                                                    *
+*&         支払予定振替（仕入）                                        *
+*&---------------------------------------------------------------------*
+*&  機能：支払予定に対する締日の買掛金明細の消込を行い、
+*&　　　  支払仮勘定で伝票起票する。
+*&  作成日   : 2012/02/20
+*&  作成者   : SOLFIS
+*&  変更履歴 : 2012/03/22 H.KOMIYAMA(solfis)
+*&  変更内容 : レイアウトF4ヘルプ形式変更
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/03/27 K.KAJISA(SOLFIS)                             *
+*&  変更内容 : インデックス対応                                        *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/04/11 K.FURUYA(SOLFIS)                             *
+*&  変更内容 : 取消レコード取得条件変更/相殺チェック追加               *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/05/28 K.FURUYA(SOLFIS)                             *
+*&  変更内容 : 支払仮勘定明細のソートキーに設定                        *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/06/22 K.FURUYA(SOLFIS)                             *
+*&  変更内容 : 取消用判別をSAPメモリへエクスポート                     *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2012/09/25 K.FURUYA(SOLFIS)                             *
+*&  変更内容 : 自動支払プログラムの為にマイナス明細の参照請求書設定    *
+*&---------------------------------------------------------------------*
+*&  変更履歴 : 2013/01/24 S.MIKAMI(GSL)                                *
+*&  変更内容 : DMW4989対応                                             *
+*&             最新消込明細の抽出条件を変更(伝票No.⇒処理日時)         *
+*&---------------------------------------------------------------------*
+*&[改定履歴]
+*& YYYY/MM/DD  Programar         Description
+*& 2012/11/07  ISID              ES-UP
+*&---------------------------------------------------------------------*
+REPORT ZN010300
+NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58
+MESSAGE-ID YN01.
+INCLUDE <ICON>.
+
+TABLES:ZN002,LFB1.
+*----------------------------------------------------------------------*
+*   定数定義
+*----------------------------------------------------------------------*
+CONSTANTS:
+C_ON(1)         TYPE C VALUE 'X',
+C_X(1)          TYPE C VALUE 'X',
+C_S(1)          TYPE C VALUE 'S',
+C_E(1)          TYPE C VALUE 'E',
+C_A(1)          TYPE C VALUE 'A',
+C_N(1)          TYPE C VALUE 'N',
+C_STGRD_01      TYPE RF05R-STGRD VALUE '01',
+C_STGRD_02      TYPE RF05R-STGRD VALUE '02',
+C_0001(4)       TYPE C VALUE '0001',
+C_JPY           TYPE BKPF-WAERS VALUE 'JPY',
+C_TAXJP         TYPE T005-KALSM VALUE 'TAXJP',
+C_ZNDPZLSCH     TYPE DDOBJNAME VALUE  'ZNDPZLSCH',
+C_H(1)          TYPE C VALUE 'H'.
+DATA:
+GW_PROG_STOP(1)   TYPE C,  "プログラム強制終了する
+GW_PROG_SKIP(1)   TYPE C,  "次の処理単位までスキップする
+GW_FBRA_MODE(1)   TYPE C,  "再登録、反対仕訳MODE
+GW_F-30_MODE(1)   TYPE C,  "決済転記MODE
+GW_CNT-INPUT      TYPE I,  "対象件数
+GW_CNT-OK         TYPE I,  "更新件数
+GW_CNT-ERR        TYPE I,  "エラー件数
+GW_KTOPL          TYPE T001-KTOPL,
+GW_KOKRS          TYPE TKA02-KOKRS,
+GW_GJAHR          TYPE BSIK-GJAHR,   "会計年度
+GW_PGID           TYPE SYCPROG,
+GW_SUBRC          TYPE SY-SUBRC,
+GW_DATUM          TYPE SY-DATUM,   "日付
+GW_UZEIT          TYPE SY-UZEIT,   "時刻
+GW_UNAME          TYPE SY-UNAME,   "ユーザ
+GW_ZN002_INDEX    TYPE SY-TABIX,
+GW_YN220_INDEX    TYPE SY-TABIX,
+GW_ZN002_EOF(1)   TYPE C,
+GW_YN220_EOF(1)   TYPE C,
+GW_PZLSCH_TXT(20) TYPE C,
+GW_AKONT          TYPE LFB1-AKONT, "総勘定元帳の統制勘定
+GW_WAERS          TYPE BSIK-WAERS, "通貨コード
+GW_WAERS_TXT(100) TYPE C,
+GW_F30_LIFNR      TYPE BSIK-LIFNR,      "振替済請求先
+GW_F30_GJAHR      TYPE BSIK-GJAHR,      "振替済会計年度
+GW_F30_BELNR      TYPE BSIK-BELNR,      "振替済会計伝票番号
+GW_F30_CZFBDT     TYPE ZN002-CZFBDT,    "振替済照合締日
+GW_F30_BUZEI      TYPE BSIK-BUZEI,      "振替済会計伝票内の明細番号
+GW_Z002_PWRBTR    TYPE ZN002-PWRBTR,    "支払予定額
+GW_YN220_KNETXAMT TYPE YN220-KNETXAMT,  "税込金額
+GW_SAGAKU         TYPE YN220-KNETXAMT,  "差額
+GW_RF05A_SEL01    TYPE RF05A-SEL01,     "未決済明細選択基準の入力項目
+GW_NEWBS          TYPE RF05A-NEWBS,     "次明細の転記キー
+GW_NEWKO          TYPE RF05A-NEWKO,     "次明細の勘定またはマッチコード
+GW_STGRD          TYPE RF05R-STGRD.     "反対仕訳理由
+*
+*----------------------------------------------------------------------*
+*   構造/テーブル定義
+*----------------------------------------------------------------------*
+*----------------------------------------------------------------------*
+*  支払予定
+*----------------------------------------------------------------------*
+TYPES:
+BEGIN OF TY_ZN002_KEY,
+LIFNR  TYPE ZN002-LIFNR,  "請求先
+CZFBDT TYPE ZN002-CZFBDT, "照合締日
+NAME1  TYPE LFA1-NAME1,   "名称１
+AKONT  TYPE LFB1-AKONT,   "総勘定元帳の統制勘定
+END   OF TY_ZN002_KEY.
+DATA: GT_ZN002_KEY TYPE STANDARD TABLE OF TY_ZN002_KEY,
+GW_ZN002_KEY TYPE TY_ZN002_KEY.
+*
+DATA: GT_ZN002 TYPE SORTED TABLE OF ZN002
+WITH UNIQUE KEY BUKRS LIFNR CZFBDT SEQ,
+GW_ZN002 TYPE ZN002.
+*
+DATA: GT_ZN002_I TYPE SORTED TABLE OF ZN002
+WITH UNIQUE KEY BUKRS LIFNR CZFBDT SEQ,
+GW_ZN002_I TYPE ZN002.
+*
+DATA: GT_ZN002_D TYPE STANDARD TABLE OF ZN002,
+GW_ZN002_D TYPE ZN002.
+*
+DATA: GT_ZN002_NOW TYPE SORTED TABLE OF ZN002
+WITH UNIQUE KEY LIFNR CZFBDT SEQ,
+GW_ZN002_NOW TYPE ZN002.
+*
+DATA: GT_ZN002_D_NOW TYPE SORTED TABLE OF ZN002
+WITH UNIQUE KEY LIFNR CZFBDT SEQ,
+GW_ZN002_D_NOW TYPE ZN002.
+*
+TYPES:
+BEGIN OF TY_ZN002_FBRA,
+LIFNR  TYPE ZN002-LIFNR,  "請求先
+CZFBDT TYPE ZN002-CZFBDT, "照合締日
+SEQ    TYPE ZN002-SEQ,    "SEQ
+BELNR  TYPE ZN002-BELNR,  "会計伝票番号
+GJAHR  TYPE ZN002-GJAHR,  "会計年度
+BUDAT  TYPE ZN002-BUDAT,  "伝票の転記日付
+NAME1  TYPE LFA1-NAME1,   "名称１
+END   OF TY_ZN002_FBRA.
+DATA: GT_ZN002_FBRA TYPE STANDARD TABLE OF TY_ZN002_FBRA,
+GW_ZN002_FBRA TYPE TY_ZN002_FBRA.
+DATA: GT_ZN002_FBRA_I TYPE STANDARD TABLE OF ZN002,
+GW_ZN002_FBRA_I TYPE ZN002.
+*----------------------------------------------------------------------*
+*  自社データ
+*----------------------------------------------------------------------*
+DATA: GT_YN220 TYPE STANDARD TABLE OF YN220,
+GW_YN220 TYPE YN220.
+TYPES:
+BEGIN OF TY_YN220_NEW,
+VRFCTON TYPE YN220-VRFCTON,   "仕入先コード(請求先)
+CZFBDT TYPE YN220-CZFBDT,     "照合締日
+LDATE1 TYPE YN220-LDATE1,     "入庫日
+YNGJAHR TYPE YN220-YNGJAHR,   "会計伝票会計年度
+BELNR TYPE YN220-BELNR,       "会計伝票番号
+BUZEI TYPE YN220-BUZEI,       "会計伝票明細番号
+KNETXAMT TYPE YN220-KNETXAMT, "税込金額
+WAERS    TYPE YN220-WAERS,    "通貨コード
+ZTERM    TYPE BSIK-ZTERM,     "支払条件キー
+ZFBDT    TYPE BSIK-ZFBDT,     "期日計算の支払基準日
+ZLSCH    TYPE BSIK-ZLSCH,     "支払方法
+ZLSPR    TYPE BSIK-ZLSPR,     "支払保留
+END   OF TY_YN220_NEW.
+DATA: GT_YN220_NEW TYPE STANDARD TABLE OF TY_YN220_NEW,
+GW_YN220_NEW TYPE TY_YN220_NEW.
+DATA: GT_YN220_NOW TYPE STANDARD TABLE OF TY_YN220_NEW,
+GW_YN220_NOW TYPE TY_YN220_NEW.
+DATA: GT_YN220_DEL TYPE STANDARD TABLE OF TY_YN220_NEW,
+GW_YN220_DEL TYPE TY_YN220_NEW.
+DATA: GT_YN220_DEL_NOW TYPE STANDARD TABLE OF TY_YN220_NEW,
+GW_YN220_DEL_NOW TYPE TY_YN220_NEW.
+DATA: GW_YN220_NOW_BACKUP TYPE TY_YN220_NEW.
+
+*----------------------------------------------------------------------*
+*  外部データ
+*----------------------------------------------------------------------*
+TYPES:
+BEGIN OF TY_YN210,
+GJAHR    TYPE YN210-GJAHR,    "外部会計年度
+SLPDOC   TYPE YN210-SLPDOC,   "外部番号
+DTLDOC   TYPE YN210-DTLDOC,   "外部明細番号
+VRFCTON  TYPE YN210-VRFCTON,  "仕入先コード(請求先)
+BUKRS    TYPE YN210-BUKRS,    "会社コード
+KNETXAMT TYPE YN210-KNETXAMT, "税込金額
+CZFBDT   TYPE YN210-CZFBDT,   "照合締日
+END   OF TY_YN210.
+
+DATA: GT_YN210 TYPE STANDARD TABLE OF TY_YN210,
+GW_YN210 TYPE TY_YN210.
+*
+TYPES:
+BEGIN OF TY_ZN002_SUM,      "支払予定（仕入）
+LIFNR  TYPE ZN002-LIFNR,  "請求先
+CZFBDT TYPE ZN002-CZFBDT, "照合締日
+PWRBTR TYPE ZN002-PWRBTR, "支払予定額
+WAERS  TYPE ZN002-WAERS,  "通貨コード
+NAME1  TYPE LFA1-NAME1,   "名称１
+AKONT  TYPE LFB1-AKONT,   "総勘定元帳の統制勘定
+END   OF TY_ZN002_SUM.
+DATA: GT_ZN002_SUM TYPE STANDARD TABLE OF TY_ZN002_SUM,
+GW_ZN002_SUM TYPE TY_ZN002_SUM.
+TYPES:
+BEGIN OF TY_ZN002_CNT,      "支払予定（仕入）
+LIFNR  TYPE ZN002-LIFNR,  "請求先
+CZFBDT TYPE ZN002-CZFBDT, "照合締日
+SYORI_CNT   TYPE I,       "今回処理件数
+SUMI_CNT    TYPE I,       "振替済件数
+MISYORI_CNT TYPE I,       "未処理件数
+YN220_CNT   TYPE I,       "自社データ件数
+END   OF TY_ZN002_CNT.
+DATA: GT_ZN002_CNT TYPE STANDARD TABLE OF TY_ZN002_CNT,
+GW_ZN002_CNT TYPE TY_ZN002_CNT.
+*
+TYPES:
+BEGIN OF TY_YN220_SUM,          "自社データ(仕入)
+VRFCTON  TYPE YN220-VRFCTON,  "請求先
+CZFBDT   TYPE YN220-CZFBDT,   "照合締日
+KNETXAMT TYPE YN220-KNETXAMT, "税込金額
+END   OF TY_YN220_SUM.
+DATA: GT_YN220_SUM TYPE STANDARD TABLE OF TY_YN220_SUM,
+GW_YN220_SUM TYPE TY_YN220_SUM.
+*
+TYPES:
+BEGIN OF TY_YN210_SUM,          "外部データ(仕入)
+VRFCTON  TYPE YN210-VRFCTON,  "請求先
+CZFBDT   TYPE YN210-CZFBDT,   "照合締日
+KNETXAMT TYPE YN210-KNETXAMT, "税込金額
+END   OF TY_YN210_SUM.
+DATA: GT_YN210_SUM TYPE STANDARD TABLE OF TY_YN210_SUM,
+GW_YN210_SUM TYPE TY_YN210_SUM.
+*----------------------------------------------------------------------*
+*  ＢＤＣ用
+*----------------------------------------------------------------------*
+TYPES:
+BEGIN OF TY_BELNR_TBL,
+BELNR TYPE BSIK-BELNR, "会計伝票番号
+GJAHR TYPE BSIK-GJAHR, "会計年度
+BUZEI TYPE BSIK-BUZEI, "会計伝票内の明細番号
+END   OF TY_BELNR_TBL.
+DATA: GT_BELNR_TBL TYPE STANDARD TABLE OF TY_BELNR_TBL,
+GW_BELNR_TBL TYPE TY_BELNR_TBL.
+DATA:
+GT_BDC_DATA TYPE TABLE OF BDCDATA,
+GW_BDC_DATA TYPE BDCDATA,
+GT_BDC_MSG  TYPE TABLE OF BDCMSGCOLL,
+GW_BDC_MSG  TYPE BDCMSGCOLL.
+*----------------------------------------------------------------------*
+* ALV出力データ用
+*----------------------------------------------------------------------*
+TYPE-POOLS SLIS.
+TYPES:
+BEGIN OF TY_ALV_LIST,         "出力用構造
+* Mod ES-UP 2012/11/07 -->
+*    ICON      TYPE ICON,        "信号機
+ICON      TYPE ICON-id,        "信号機
+* Mod ES-UP 2012/11/07 <--
+KEKA(200) TYPE C,           "処理結果
+NAME1     TYPE LFA1-NAME1.  "仕入先名称
+INCLUDE STRUCTURE ZN002.  "支払予定データ
+TYPES:END   OF TY_ALV_LIST.
+
+DATA: GT_ALV_LIST TYPE STANDARD TABLE OF TY_ALV_LIST,
+GW_ALV_LIST TYPE  TY_ALV_LIST.
+
+DATA: GW_LAYOUT      TYPE SLIS_LAYOUT_ALV,     "ALV出力レイアウト
+GW_FIELDCAT    TYPE SLIS_FIELDCAT_ALV,   "ALV出力項目設定
+GT_FIELDCAT    TYPE SLIS_T_FIELDCAT_ALV, "ALV出力項目設定
+GW_REPID       TYPE SY-REPID,            "ALV出力用：プログラムID
+GW_EDISVARIANT TYPE DISVARIANT,          "ALV出力バリアント
+GX_VARIANT     TYPE DISVARIANT,
+GT_EVENT       TYPE SLIS_T_EVENT,        "イベント
+GW_EVENT       LIKE LINE OF GT_EVENT,
+GT_HEAD        TYPE SLIS_T_LISTHEADER,   "ヘッダ
+GW_HEAD        LIKE LINE OF GT_HEAD,
+GW_PRINT       TYPE SLIS_PRINT_ALV,
+GW_SETTINGS    TYPE LVC_S_GLAY.
+
+*---------------------------------------------------------------------*
+*　選択画面
+*---------------------------------------------------------------------+
+*データ選択
+SELECTION-SCREEN BEGIN OF BLOCK BK1 WITH FRAME TITLE TEXT-S01.
+PARAMETERS:
+P_BUKRS TYPE ZN002-BUKRS OBLIGATORY MEMORY ID BUK, "会社コード
+P_PZFBDT TYPE ZN002-PZFBDT OBLIGATORY.             "支払日
+SELECT-OPTIONS:
+S_PZLSCH FOR  ZN002-PZLSCH NO INTERVALS,           "支払方法
+S_WAERS  FOR  ZN002-WAERS NO INTERVALS.             "通貨コード
+SELECT-OPTIONS:
+S_LIFNR FOR ZN002-LIFNR,                       "仕入先コード(請求先)
+S_KVERM FOR LFB1-KVERM NO INTERVALS            "コメント(仕入先マスタ)
+NO-EXTENSION.
+SELECTION-SCREEN END OF BLOCK BK1.
+*処理オプション
+SELECTION-SCREEN BEGIN OF BLOCK BK2 WITH FRAME TITLE TEXT-S02.
+PARAMETERS:
+P_TEST AS CHECKBOX DEFAULT 'X'.                "テスト実行
+SELECTION-SCREEN BEGIN OF BLOCK BK21 WITH FRAME.
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:
+P_F-30 RADIOBUTTON GROUP RAD1 DEFAULT 'X'.
+SELECTION-SCREEN COMMENT 4(18) TEXT-S04.       "振替
+SELECTION-SCREEN END   OF LINE.
+PARAMETERS:
+P_BLART TYPE BKPF-BLART, "伝票タイプ
+P_BLDAT TYPE BKPF-BLDAT, "伝票日付
+P_BUDAT TYPE BKPF-BUDAT, "転記日付
+P_BKTXT TYPE BKPF-BKTXT. "伝票ヘッダText
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS:
+P_FBRA RADIOBUTTON GROUP RAD1.
+SELECTION-SCREEN COMMENT 4(18) TEXT-S05.          " 取消
+SELECTION-SCREEN END   OF LINE.
+PARAMETERS:
+P_AUGBL TYPE BSAK-AUGBL,  "決済伝票
+P_GJAHR TYPE BSAK-GJAHR,  "会計年度
+P_BUDATT TYPE BSAK-BUDAT. "転記日付
+SELECTION-SCREEN END OF BLOCK BK21.
+PARAMETERS:
+P_VARI   TYPE SLIS_VARI.                         "レイアウト
+SELECTION-SCREEN END OF BLOCK BK2.
+*システム項目
+SELECTION-SCREEN BEGIN OF BLOCK BK3 WITH FRAME TITLE TEXT-S03.
+PARAMETERS:
+P_EKORG TYPE LFM1-EKORG OBLIGATORY, "購買組織
+*-雑収入勘定
+P_HKONTA  TYPE BSAK-HKONT OBLIGATORY MATCHCODE OBJECT SAKO,
+P_MWSKZA  TYPE BSAK-MWSKZ OBLIGATORY,
+*-雑損失勘定
+P_HKONTB  TYPE BSAK-HKONT OBLIGATORY MATCHCODE OBJECT SAKO,
+P_MWSKZB  TYPE BSAK-MWSKZ OBLIGATORY,
+*-原価センタ
+P_KOSTL   TYPE BSAK-KOSTL OBLIGATORY MATCHCODE OBJECT KOST.
+SELECTION-SCREEN END OF BLOCK BK3.
+*----------------------------------------------------------------------*
+*   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VARI
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_VARI.
+*** 2012/03/22 MOD START ***
+*  DATA:LW_VARI   TYPE SLIS_VARI.  "属性変換用
+*
+*  GW_PGID = SY-REPID.
+** ALVバリアントの検索ヘルプ
+*  CALL FUNCTION 'HR_F4_FOR_ALV_VARIANT'
+*    EXPORTING
+*      CURRENT_REPORT       = GW_PGID
+*    IMPORTING
+*      VARIANT              = LW_VARI.
+** ヘルプ画面より選択されたバリアント名を画面項目に設定
+*  IF NOT LW_VARI IS INITIAL.
+*    P_VARI = LW_VARI.
+*  ENDIF.
+DATA:
+LW_DISVARIANT TYPE DISVARIANT.
+
+CLEAR:
+LW_DISVARIANT,
+P_VARI.
+
+LW_DISVARIANT-REPORT = SY-REPID.
+
+CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+EXPORTING
+IS_VARIANT         = LW_DISVARIANT
+I_SAVE             = 'A'
+I_DISPLAY_VIA_GRID = 'X'
+IMPORTING
+ES_VARIANT         = LW_DISVARIANT
+EXCEPTIONS
+NOT_FOUND          = 1
+PROGRAM_ERROR      = 2
+OTHERS             = 3.
+
+IF SY-SUBRC = 0.
+P_VARI = LW_DISVARIANT-VARIANT.
+ENDIF.
+*** 2012/03/22 MOD END   ***
+*&--------------------------------------------------------------------
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_MWSKZA
+*&--------------------------------------------------------------------
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_MWSKZA.
+PERFORM FI_F4_MWSKZ USING  P_MWSKZA.
+*&--------------------------------------------------------------------
+*&   Event AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_MWSKZB
+*&--------------------------------------------------------------------
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_MWSKZB.
+PERFORM FI_F4_MWSKZ USING  P_MWSKZB.
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+*会社コード
+PERFORM P_BUKRS_CHECK.
+*支払方法
+PERFORM S_ZLSCHL_CHECK.
+*通貨コード
+PERFORM S_WAERS_CHECK.
+*仕入先(請求先)
+PERFORM S_LIFNR_CHECK.
+*振替
+PERFORM P_F-30_CHECK.
+*取消
+PERFORM P_FBRA_CHECK.
+*システム項目
+PERFORM SYSTEM_CHECK.
+*&---------------------------------------------------------------------*
+*&   Event AT SELECTION-SCREEN
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+*初期処理
+PERFORM PGM_INIT.
+*データ取得
+PERFORM GET_DATA.
+*データ制御
+PERFORM MAIN_PROC.
+* ALVリスト出力
+PERFORM OUTPUT_ALV.
+*
+END-OF-SELECTION.
+*----------------------------------------------------------------------*
+*    ALVヘッダをつける場合
+*----------------------------------------------------------------------*
+TOP-OF-PAGE.
+PERFORM HEADER_WRITE.
+*&---------------------------------------------------------------------*
+*&      Form  P_BUKRS_CHECK
+*&---------------------------------------------------------------------*
+FORM P_BUKRS_CHECK.
+*
+SELECT SINGLE KTOPL INTO GW_KTOPL FROM T001 WHERE BUKRS = P_BUKRS.
+IF SY-SUBRC <> 0.
+*  会社コード & はありません
+SET CURSOR FIELD 'P_BUKRS'.
+MESSAGE E750 WITH P_BUKRS.
+ENDIF.
+*
+SELECT KOKRS INTO GW_KOKRS FROM TKA02 WHERE BUKRS = P_BUKRS.
+EXIT.
+ENDSELECT.
+*
+ENDFORM.                    " P_BUKRS_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  S_ZLSCHL_CHECK
+*&---------------------------------------------------------------------*
+FORM S_ZLSCHL_CHECK.
+DATA :
+LT_DD07V TYPE TABLE OF DD07V,
+LW_DD07V TYPE DD07V,
+L_OFF    TYPE I.
+*
+CLEAR:GW_PZLSCH_TXT,L_OFF.
+*
+IF NOT S_PZLSCH[] IS INITIAL.
+CALL FUNCTION 'DDUT_DOMVALUES_GET'
+EXPORTING
+NAME                = C_ZNDPZLSCH
+*       LANGU               = SY-LANGU
+*       TEXTS_ONLY          = ' '
+TABLES
+DD07V_TAB           = LT_DD07V
+EXCEPTIONS
+ILLEGAL_INPUT       = 1
+OTHERS              = 2
+.
+IF SY-SUBRC <> 0.
+*     汎用モジュールエラー &1  (SY-SUBRC=&2)
+MESSAGE E802 WITH TEXT-E01 'DDUT_DOMVALUES_GET' SY-SUBRC.
+ENDIF.
+*
+SORT LT_DD07V BY DOMVALUE_L.
+LOOP AT S_PZLSCH.
+IF S_PZLSCH-LOW <> SPACE.
+READ TABLE LT_DD07V WITH KEY DOMVALUE_L = S_PZLSCH-LOW
+BINARY SEARCH INTO LW_DD07V.
+IF SY-SUBRC <> 0.
+*         & が、存在しません
+SET CURSOR FIELD 'S_PZLSCH-LOW'.
+MESSAGE E814 WITH TEXT-E02. "支払方法
+ENDIF.
+ENDIF.
+MOVE  S_PZLSCH-LOW TO GW_PZLSCH_TXT+L_OFF(1).
+L_OFF = L_OFF + 2.
+ENDLOOP.
+ENDIF.
+*
+ENDFORM.                    " S_ZLSCHL_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  S_WAERS_CHECK
+*&---------------------------------------------------------------------*
+FORM S_WAERS_CHECK.
+DATA :
+L_OFF    TYPE I.
+
+*
+CLEAR:GW_WAERS_TXT,L_OFF.
+*
+IF NOT S_WAERS[] IS INITIAL.
+SELECT COUNT(*) FROM TCURC WHERE WAERS IN S_WAERS.
+IF SY-SUBRC <> 0.
+*    & が、存在しません
+SET CURSOR FIELD 'S_WAERS-LOW'.
+MESSAGE E814 WITH TEXT-E03. "通貨コード
+ELSE.
+LOOP AT S_WAERS.
+SELECT SINGLE COUNT(*) FROM TCURC WHERE WAERS = S_WAERS-LOW.
+IF SY-SUBRC = 0.
+MOVE  S_WAERS-LOW TO GW_WAERS_TXT+L_OFF(5).
+L_OFF = L_OFF + 6.
+ENDIF.
+ENDLOOP.
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " S_WAERS_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  S_LIFNR_CHECK
+*&---------------------------------------------------------------------*
+FORM S_LIFNR_CHECK.
+*
+IF NOT S_LIFNR[] IS INITIAL.
+SELECT COUNT(*)
+FROM LFB1
+JOIN LFM1 ON LFM1~LIFNR = LFB1~LIFNR
+WHERE LFB1~LIFNR IN S_LIFNR
+AND   LFB1~BUKRS = P_BUKRS
+AND   LFM1~EKORG = P_EKORG.
+IF SY-SUBRC <> 0.
+*    & が、存在しません
+SET CURSOR FIELD 'S_LIFNR-LOW'.
+MESSAGE E814 WITH TEXT-E04. "請求先
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " S_LIFNR_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  P_F-30_CHECK
+*&---------------------------------------------------------------------*
+FORM P_F-30_CHECK.
+DATA :
+L_SUBRC TYPE SY-SUBRC,
+L_FISCAL_YEAR LIKE BAPI0002_4-FISCAL_YEAR,
+L_MONAT  LIKE T001B-FRPE1.
+*
+CHECK NOT P_F-30 IS INITIAL.
+CHECK P_TEST IS INITIAL.
+*伝票タイプ
+IF P_BLART IS INITIAL.
+*   &1 を入力してください
+SET CURSOR FIELD 'P_BLART'.
+MESSAGE E901 WITH TEXT-E05. "伝票タイプ
+ELSE.
+SELECT SINGLE COUNT(*) FROM T003 WHERE BLART = P_BLART.
+IF SY-SUBRC <> 0.
+*    & が、存在しません
+SET CURSOR FIELD 'P_BLART'.
+MESSAGE E814 WITH TEXT-E05. "伝票タイプ
+ENDIF.
+ENDIF.
+* 伝票日付
+IF P_BLDAT IS INITIAL.
+*   &1 を入力してください
+SET CURSOR FIELD 'P_BLDAT'.
+MESSAGE E901 WITH TEXT-E06. "伝票日付
+ENDIF.
+*転記日付
+IF P_BUDAT IS INITIAL.
+*   &1 を入力してください
+SET CURSOR FIELD 'P_BUDAT'.
+MESSAGE E901 WITH TEXT-E07. "転記日付
+ELSE.
+PERFORM F_BUDAT_CHECK USING P_BUDAT L_SUBRC L_MONAT L_FISCAL_YEAR.
+IF L_SUBRC <> 0.
+*会計期間 & & は開始されていません
+SET CURSOR FIELD 'P_BUDAT'.
+MESSAGE E201(F5) WITH L_MONAT L_FISCAL_YEAR.
+ENDIF.
+ENDIF.
+*伝票ヘッダText
+IF P_BKTXT IS INITIAL.
+*   &1 を入力してください
+SET CURSOR FIELD 'P_BKTXT'.
+MESSAGE E901 WITH TEXT-E08. "伝票ヘッダText
+ENDIF.
+*
+ENDFORM.                    " P_F-30_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  P_FBRA_CHECK
+*&---------------------------------------------------------------------*
+FORM P_FBRA_CHECK.
+DATA :
+L_SUBRC TYPE SY-SUBRC,
+L_FISCAL_YEAR LIKE BAPI0002_4-FISCAL_YEAR,
+L_MONAT  LIKE T001B-FRPE1.
+
+*
+CHECK NOT P_FBRA IS INITIAL.
+*決済伝票
+IF P_AUGBL IS INITIAL.
+*   &1 を入力してください
+SET CURSOR FIELD 'P_AUGBL'.
+MESSAGE E901 WITH TEXT-E09. "決済伝票
+ENDIF.
+*会計年度
+IF P_GJAHR IS INITIAL.
+*   &1 を入力してください
+SET CURSOR FIELD 'P_GJAHR'.
+MESSAGE E901 WITH TEXT-E10. "会計年度
+ENDIF.
+CHECK P_TEST IS INITIAL.
+*転記日付
+IF P_BUDATT IS INITIAL.
+*   &1 を入力してください
+SET CURSOR FIELD 'P_BUDATT'.
+MESSAGE E901 WITH TEXT-E07. "転記日付
+ELSE.
+PERFORM F_BUDAT_CHECK USING P_BUDATT L_SUBRC L_MONAT L_FISCAL_YEAR.
+IF L_SUBRC <> 0.
+*会計期間 & & は開始されていません
+SET CURSOR FIELD 'P_BUDATT'.
+MESSAGE E201(F5) WITH L_MONAT L_FISCAL_YEAR.
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " P_FBRA_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  FI_F4_MWSKZ
+*&---------------------------------------------------------------------*
+FORM FI_F4_MWSKZ USING P_MWSKZ.
+DATA :
+L_MWSKZ LIKE  BSET-MWSKZ.
+*
+CALL FUNCTION 'FI_F4_MWSKZ'
+EXPORTING
+I_KALSM       = C_TAXJP
+*     I_STBUK       = ' '
+*     I_XSHOW       = ' '
+*     I_LSTML       = ' '
+*     I_CONCT       =
+*     I_GENER       =
+*     I_GLVOR       =
+IMPORTING
+E_MWSKZ       = L_MWSKZ.
+
+IF NOT L_MWSKZ IS INITIAL.
+P_MWSKZ = L_MWSKZ.
+ENDIF.
+*
+ENDFORM.                    " FI_F4_MWSKZ
+*&---------------------------------------------------------------------*
+*&      Form  SYSTEM_CHECK
+*&---------------------------------------------------------------------*
+FORM SYSTEM_CHECK.
+DATA :
+L_SUBRC TYPE SY-SUBRC.
+*購買組織
+SELECT SINGLE COUNT(*) FROM T024E WHERE EKORG = P_EKORG.
+IF SY-SUBRC <> 0.
+*    & が、存在しません
+SET CURSOR FIELD 'P_EKORG'.
+MESSAGE E814 WITH TEXT-E11. "購買組織
+ENDIF.
+*
+CHECK NOT P_F-30 IS INITIAL.
+CHECK P_TEST IS INITIAL.
+*雑収入勘定
+PERFORM GET_SKA1 USING P_HKONTA L_SUBRC.
+IF L_SUBRC <> 0.
+*   & が、存在しません
+SET CURSOR FIELD 'P_HKONTA'.
+MESSAGE E814 WITH TEXT-E12. "雑収入勘定
+ENDIF.
+*税コード(雑収入勘定)
+PERFORM GET_T007A USING P_MWSKZA L_SUBRC.
+IF L_SUBRC <> 0.
+*   & が、存在しません
+SET CURSOR FIELD 'P_MWSKZA'.
+MESSAGE E814 WITH TEXT-E13. "税コード(雑収入勘定)
+ENDIF.
+*雑損失勘定
+PERFORM GET_SKA1 USING P_HKONTB L_SUBRC.
+IF L_SUBRC <> 0.
+*   & が、存在しません
+SET CURSOR FIELD 'P_HKONTB'.
+MESSAGE E814 WITH TEXT-E14. "雑損失勘定
+ENDIF.
+*税コード(雑損失勘定)
+PERFORM GET_T007A USING P_MWSKZB L_SUBRC.
+IF L_SUBRC <> 0.
+*   & が、存在しません
+SET CURSOR FIELD 'P_MWSKZB'.
+MESSAGE E814 WITH TEXT-E15. "税コード(雑損失勘定)
+ENDIF.
+*原価センタ
+SELECT COUNT(*) FROM CSKS WHERE KOKRS = GW_KOKRS
+AND   KOSTL = P_KOSTL
+AND   DATBI >= P_BUDAT
+AND   DATAB <= P_BUDAT.
+
+IF SY-SUBRC <> 0.
+*   原価センタ &/& は & に登録されていません
+SET CURSOR FIELD 'P_KOSTL'.
+MESSAGE E222(KI) WITH P_BUKRS P_KOSTL P_BUDAT. "原価センタ
+ENDIF.
+*
+ENDFORM.                    " SYSTEM_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  F_BUDAT_CHECK
+*&---------------------------------------------------------------------*
+FORM F_BUDAT_CHECK USING P_DATE L_SUBRC L_MONAT L_FISCAL_YEAR.
+DATA:
+* L_FISCAL_YEAR LIKE BAPI0002_4-FISCAL_YEAR,
+L_FISCAL_PERIOD LIKE BAPI0002_4-FISCAL_PERIOD,
+L_RETURN LIKE BAPIRETURN1.
+* L_MONAT  LIKE T001B-FRPE1.
+*
+CLEAR:L_SUBRC.
+CALL FUNCTION 'BAPI_COMPANYCODE_GET_PERIOD'
+EXPORTING
+COMPANYCODEID      = P_BUKRS
+POSTING_DATE       = P_DATE
+IMPORTING
+FISCAL_YEAR         = L_FISCAL_YEAR
+FISCAL_PERIOD       = L_FISCAL_PERIOD
+RETURN              = L_RETURN.
+*
+L_MONAT = L_FISCAL_PERIOD.
+*
+CALL FUNCTION 'FI_PERIOD_CHECK'
+EXPORTING
+I_BUKRS                = P_BUKRS
+I_GJAHR                = L_FISCAL_YEAR
+I_KOART                = 'K'
+I_MONAT                = L_MONAT
+EXCEPTIONS
+ERROR_PERIOD           = 1
+ERROR_PERIOD_ACC       = 2
+OTHERS                 = 3.
+IF SY-SUBRC <> 0.
+L_SUBRC = SY-SUBRC.
+ELSE.
+GW_GJAHR = L_FISCAL_YEAR.
+ENDIF.
+*
+ENDFORM.                    " F_BUDAT_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  GET_T007A
+*&---------------------------------------------------------------------*
+FORM GET_T007A USING L_MWSKZ L_SUBRC.
+*
+SELECT SINGLE COUNT(*) FROM T007A WHERE KALSM = C_TAXJP
+AND   MWSKZ = L_MWSKZ.
+L_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " GET_T007A
+*&---------------------------------------------------------------------*
+*&      Form  GET_SKA1
+*&---------------------------------------------------------------------*
+FORM GET_SKA1 USING  L_HKONT P_SUBRC.
+*
+SELECT SINGLE COUNT(*)  FROM SKA1 WHERE KTOPL = GW_KTOPL
+AND   SAKNR = L_HKONT.
+P_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " GET_SKA1
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA
+*&---------------------------------------------------------------------*
+FORM GET_DATA.
+*振替
+IF NOT P_F-30 IS INITIAL.
+*処理データ抽出
+PERFORM GET_F-30_DATA.
+ENDIF.
+*取消
+IF NOT P_FBRA IS INITIAL.
+PERFORM GET_FBRA_DATA.
+ENDIF.
+*
+ENDFORM.                    " GET_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_F-30_DATA
+*&---------------------------------------------------------------------*
+FORM GET_F-30_DATA.
+*
+PERFORM GET_ZN002_PRE.  "振替データ
+PERFORM GET_ZN002_F-30. "支払予定(仕入)
+PERFORM GET_YN220.      "自社データ(仕入)
+PERFORM GET_YN210.      "外部データ(仕入)
+*
+ENDFORM.                    " GET_F-30_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN002_PRE
+*&---------------------------------------------------------------------*
+FORM GET_ZN002_PRE.
+*
+REFRESH GT_ZN002_KEY.
+*
+SELECT ZN002~LIFNR
+ZN002~CZFBDT
+LFA1~NAME1
+LFB1~AKONT
+INTO TABLE GT_ZN002_KEY
+FROM ZN002
+JOIN LFB1 ON LFB1~LIFNR  = ZN002~LIFNR
+AND LFB1~BUKRS = ZN002~BUKRS
+JOIN LFA1 ON LFA1~LIFNR = ZN002~LIFNR
+JOIN LFM1 ON LFM1~LIFNR = ZN002~LIFNR
+WHERE ZN002~BUKRS = P_BUKRS
+AND   ZN002~LIFNR IN S_LIFNR
+AND   ZN002~PZFBDT = P_PZFBDT
+AND   ZN002~PZLSCH IN S_PZLSCH
+AND   ZN002~PSTFLG = SPACE
+AND   ZN002~WAERS IN S_WAERS
+AND   LFB1~KVERM IN S_KVERM
+AND   LFM1~EKORG = P_EKORG.
+IF SY-SUBRC <> 0.
+*対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ELSE.
+SORT GT_ZN002_KEY BY LIFNR CZFBDT.
+DELETE ADJACENT DUPLICATES FROM GT_ZN002_KEY.
+ENDIF.
+*
+ENDFORM.                    " GET_ZN002_PRE
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ALV
+*&---------------------------------------------------------------------*
+FORM OUTPUT_ALV.
+*
+* 項目属性編集
+PERFORM ALV_SET_FIELDCAT.
+* その他編集
+PERFORM ALV_LAYOUT.
+* ALV一覧出力
+PERFORM ALV_CALL.
+*
+ENDFORM.                    " OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*&      Form  ALV_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+FORM ALV_SET_FIELDCAT.
+DATA:L_CNT TYPE I,
+L_T_FIELDCAT    TYPE SLIS_T_FIELDCAT_ALV. "ALV出力項目設定
+
+CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+EXPORTING
+*     I_PROGRAM_NAME               =
+*     I_INTERNAL_TABNAME           =
+I_STRUCTURE_NAME             = 'ZN002'
+*     I_CLIENT_NEVER_DISPLAY       = 'X'
+*     I_INCLNAME                   =
+*     I_BYPASSING_BUFFER           =
+*     I_BUFFER_ACTIVE              =
+CHANGING
+CT_FIELDCAT                  = L_T_FIELDCAT
+EXCEPTIONS
+INCONSISTENT_INTERFACE       = 1
+PROGRAM_ERROR                = 2
+OTHERS                       = 3.
+IF SY-SUBRC = 0.
+L_CNT = L_CNT + 1.
+PERFORM U_FIELDCAT USING :
+'ICON' 4 'ICON' '' '' '' '' '' L_CNT.
+
+L_CNT = L_CNT + 1.
+PERFORM U_FIELDCAT USING :
+'KEKA' 200 'CHAR' '処理結果' '処理結果' '処理結果' '' '' L_CNT.
+
+L_CNT = L_CNT + 1.
+PERFORM U_FIELDCAT USING :
+'NAME1' 35 'CHAR' '名称' '名称' '名称' '' '' L_CNT.
+
+LOOP AT L_T_FIELDCAT INTO GW_FIELDCAT.
+L_CNT = L_CNT + 1.
+GW_FIELDCAT-COL_POS = L_CNT.
+APPEND GW_FIELDCAT TO GT_FIELDCAT.
+ENDLOOP.
+ENDIF.
+
+ENDFORM.                    " ALV_SET_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_LAYOUT
+*&---------------------------------------------------------------------*
+FORM ALV_LAYOUT.
+
+* プログラムID取得
+GW_REPID = SY-REPID.
+* レイアウト設定
+GW_LAYOUT-COLWIDTH_OPTIMIZE    = 'X'.  "ALV コントロール: 列幅の最適化
+GW_LAYOUT-DETAIL_INITIAL_LINES = 'X'.
+GW_LAYOUT-ZEBRA                = 'X'.
+
+GW_LAYOUT-GROUP_CHANGE_EDIT = 'X'.
+
+* バリアント
+IF NOT P_VARI IS INITIAL.
+GW_EDISVARIANT-REPORT  = GW_PGID.
+GW_EDISVARIANT-VARIANT = P_VARI.
+ENDIF.
+
+* ALV印刷時用 設定項目
+GW_PRINT-NO_PRINT_LISTINFOS = 'X'.
+
+* 印刷プレビュー設定
+GW_SETTINGS-NO_COLWOPT = C_ON.  "自動最適化禁止
+
+* 処理イベントの取得
+CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+EXPORTING
+I_LIST_TYPE           = 0
+IMPORTING
+ET_EVENTS             = GT_EVENT.
+
+* イベント時にコールされるFORM名を設定
+CLEAR GW_EVENT.
+READ TABLE GT_EVENT INTO GW_EVENT WITH KEY NAME = 'TOP_OF_PAGE'.
+IF SY-SUBRC = 0.
+GW_EVENT-FORM = 'HEADER_WRITE'.
+MODIFY GT_EVENT INDEX SY-TABIX FROM GW_EVENT.
+ENDIF.
+
+
+ENDFORM.                    " ALV_LAYOUT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_CALL
+*&---------------------------------------------------------------------*
+FORM ALV_CALL.
+*
+CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+EXPORTING
+I_CALLBACK_PROGRAM      = GW_REPID     "プログラム名
+I_GRID_SETTINGS         = GW_SETTINGS  "グリッド設定
+IS_LAYOUT               = GW_LAYOUT    "レイアウト定義
+IS_PRINT                = GW_PRINT
+IT_FIELDCAT             = GT_FIELDCAT  "構造定義
+I_DEFAULT               = 'X'
+I_SAVE                  = 'A'
+IS_VARIANT              = GW_EDISVARIANT
+IT_EVENTS               = GT_EVENT
+TABLES
+T_OUTTAB                = GT_ALV_LIST     "出力データ
+EXCEPTIONS
+PROGRAM_ERROR           = 1
+OTHERS                  = 2.
+
+IF SY-SUBRC <> 0.
+MESSAGE S400(Y1) WITH 'システムエラーが発生しました'.
+STOP.
+ENDIF.
+*
+ENDFORM.                    " ALV_CALL
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_PROC
+*&---------------------------------------------------------------------*
+FORM MAIN_PROC.
+*振替
+IF NOT P_F-30 IS INITIAL.
+PERFORM MAIN_F-30.
+ENDIF.
+*取消
+IF NOT P_FBRA IS INITIAL.
+PERFORM MAIN_FBRA.
+ENDIF.
+*
+ENDFORM.                    " MAIN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN002_F-30
+*&---------------------------------------------------------------------*
+FORM GET_ZN002_F-30.
+*
+REFRESH:GT_ZN002,GT_ZN002_SUM.
+*
+SELECT * INTO TABLE GT_ZN002
+FROM ZN002
+FOR ALL ENTRIES IN GT_ZN002_KEY
+WHERE BUKRS  = P_BUKRS
+AND   LIFNR  = GT_ZN002_KEY-LIFNR
+AND   CZFBDT = GT_ZN002_KEY-CZFBDT
+AND   WAERS  IN S_WAERS.
+*
+LOOP AT GT_ZN002 INTO GW_ZN002.
+*
+GW_ZN002_SUM-LIFNR  = GW_ZN002-LIFNR.  "請求先
+GW_ZN002_SUM-CZFBDT = GW_ZN002-CZFBDT. "照合締日
+GW_ZN002_SUM-PWRBTR = GW_ZN002-PWRBTR. "支払予定額
+GW_ZN002_SUM-WAERS  = GW_ZN002-WAERS.  "通貨コード
+READ TABLE GT_ZN002_KEY WITH KEY LIFNR  = GW_ZN002-LIFNR
+CZFBDT = GW_ZN002-CZFBDT
+BINARY SEARCH INTO GW_ZN002_KEY.
+GW_ZN002_SUM-NAME1 = GW_ZN002_KEY-NAME1.
+GW_ZN002_SUM-AKONT = GW_ZN002_KEY-AKONT.
+COLLECT GW_ZN002_SUM INTO GT_ZN002_SUM.
+*
+CLEAR:GW_ZN002_CNT.
+GW_ZN002_CNT-LIFNR  = GW_ZN002-LIFNR.  "請求先
+GW_ZN002_CNT-CZFBDT = GW_ZN002-CZFBDT. "照合締日
+IF GW_ZN002-PSTFLG <> SPACE. "会計振替
+GW_ZN002_CNT-SUMI_CNT = 1.  "振替済
+APPEND GW_ZN002 TO GT_ZN002_D.
+ELSE.
+IF GW_ZN002-PZLSCH IN S_PZLSCH. "支払方法
+IF GW_ZN002-PZFBDT = P_PZFBDT.
+GW_ZN002_CNT-SYORI_CNT = 1.  "今回処理
+APPEND GW_ZN002 TO GT_ZN002_I.
+GW_CNT-INPUT = GW_CNT-INPUT + 1.  "対象件数
+ELSE.
+GW_ZN002_CNT-MISYORI_CNT = 1. "今回未処理
+ENDIF.
+ELSE.
+GW_ZN002_CNT-MISYORI_CNT = 1. "今回未処理
+ENDIF.
+ENDIF.
+COLLECT GW_ZN002_CNT INTO GT_ZN002_CNT.
+*
+ENDLOOP.
+*
+ENDFORM.                    " GET_ZN002_F-30
+*&---------------------------------------------------------------------*
+*&      自社データ(仕入)
+*&---------------------------------------------------------------------*
+FORM GET_YN220.
+DATA :
+L_SUBRC TYPE SY-SUBRC.
+*
+REFRESH:GT_YN220,GT_YN220_SUM,GT_YN220_NEW.
+*
+SELECT * INTO TABLE GT_YN220
+FROM YN220
+FOR ALL ENTRIES IN GT_ZN002_KEY
+* 2012/03/27 MOD インデックス対応 START
+*        WHERE VRFCTON  = GT_ZN002_KEY-LIFNR
+*        AND   BUKRS    = P_BUKRS
+*        AND   CZFBDT   = GT_ZN002_KEY-CZFBDT
+WHERE  BUKRS    = P_BUKRS
+AND   CZFBDT   = GT_ZN002_KEY-CZFBDT
+AND   VRFCTON  = GT_ZN002_KEY-LIFNR
+* 2012/03/27 MOD インデックス対応 END
+AND   WAERS    IN S_WAERS.
+
+*自社データを会計伝票で集合
+LOOP AT GT_YN220 INTO GW_YN220.
+GW_YN220_NEW-VRFCTON  = GW_YN220-VRFCTON.    "仕入先コード(請求先)
+GW_YN220_NEW-CZFBDT   = GW_YN220-CZFBDT.     "照合締日
+GW_YN220_NEW-LDATE1   = GW_YN220-LDATE1.     "入庫日
+GW_YN220_NEW-YNGJAHR  = GW_YN220-YNGJAHR.    "会計伝票会計年度
+GW_YN220_NEW-BELNR    = GW_YN220-BELNR.      "会計伝票番号
+GW_YN220_NEW-BUZEI    = GW_YN220-BUZEI.      "会計伝票明細番号
+GW_YN220_NEW-KNETXAMT = GW_YN220-KNETXAMT.   "税込金額
+GW_YN220_NEW-WAERS    = GW_YN220-WAERS.      "通貨コード
+COLLECT GW_YN220_NEW INTO GT_YN220_NEW.
+ENDLOOP.
+*振替済自社データの削除
+LOOP AT GT_YN220_NEW INTO GW_YN220_NEW.
+PERFORM GET_BSIK_YN220 USING GW_YN220_NEW-VRFCTON
+GW_YN220_NEW-YNGJAHR
+GW_YN220_NEW-BELNR
+GW_YN220_NEW-BUZEI
+L_SUBRC
+GW_YN220_NEW-ZTERM
+GW_YN220_NEW-ZFBDT.
+
+IF L_SUBRC = 0.
+MODIFY GT_YN220_NEW FROM GW_YN220_NEW
+TRANSPORTING ZTERM ZFBDT.
+
+ELSE.
+PERFORM GET_BSAK_YN220 USING GW_YN220_NEW-VRFCTON
+GW_YN220_NEW-YNGJAHR
+GW_YN220_NEW-BELNR
+GW_YN220_NEW-BUZEI
+L_SUBRC
+GW_YN220_NEW-ZTERM
+GW_YN220_NEW-ZFBDT.
+
+APPEND GW_YN220_NEW TO GT_YN220_DEL.
+DELETE GT_YN220_NEW.
+ENDIF.
+ENDLOOP.
+*
+FREE GT_YN220.
+*
+ENDFORM.                    " GET_YN220
+*&---------------------------------------------------------------------*
+*&      Form  GET_YN210
+*&---------------------------------------------------------------------*
+FORM GET_YN210.
+*
+REFRESH:GT_YN210,GT_YN210_SUM.
+*
+SELECT GJAHR    "外部会計年度
+SLPDOC   "外部番号
+DTLDOC   "外部明細番号
+VRFCTON  "仕入先コード(請求先)
+BUKRS    "会社コード
+KNETXAMT "税込金額
+CZFBDT   "照合締日
+*
+INTO TABLE GT_YN210
+FROM YN210
+FOR ALL ENTRIES IN GT_ZN002_KEY
+* 2012/03/27 MOD インデックス対応 START
+*        WHERE VRFCTON  = GT_ZN002_KEY-LIFNR
+*        AND   BUKRS    = P_BUKRS
+*        AND   CZFBDT   = GT_ZN002_KEY-CZFBDT
+WHERE BUKRS    = P_BUKRS
+AND   CZFBDT   = GT_ZN002_KEY-CZFBDT
+AND   VRFCTON  = GT_ZN002_KEY-LIFNR
+* 2012/03/27 MOD インデックス対応 END
+AND   WAERS    IN S_WAERS
+AND   DELFLG   = SPACE.
+*
+LOOP AT GT_YN210 INTO GW_YN210.
+GW_YN210_SUM-VRFCTON  = GW_YN210-VRFCTON.  "請求先
+GW_YN210_SUM-CZFBDT   = GW_YN210-CZFBDT.   "照合締日
+GW_YN210_SUM-KNETXAMT = GW_YN210-KNETXAMT. "税込金額
+COLLECT GW_YN210_SUM INTO GT_YN210_SUM.
+ENDLOOP.
+*
+FREE GT_YN210.
+*
+ENDFORM.                    " GET_YN210
+*&---------------------------------------------------------------------*
+*&      支払予定消込
+*&---------------------------------------------------------------------*
+FORM MAIN_F-30.
+DATA :
+L_SUBRC   TYPE SY-SUBRC,
+L_USER    TYPE SY-MSGV1,
+L_MSGTEXT TYPE STRING.
+*
+SORT GT_ZN002_SUM BY LIFNR CZFBDT.
+SORT GT_YN210_SUM BY VRFCTON CZFBDT.
+*支払予定の振替済、処理、未処理件数
+SORT GT_ZN002_CNT BY LIFNR CZFBDT.
+*支払予定の振替済データ
+SORT GT_ZN002_D BY BUKRS LIFNR CZFBDT
+GJAHR DESCENDING
+BELNR DESCENDING.
+DELETE ADJACENT DUPLICATES FROM GT_ZN002_D
+COMPARING BUKRS LIFNR CZFBDT.
+*
+LOOP AT GT_ZN002_SUM INTO GW_ZN002_SUM.
+*
+CLEAR:GW_PROG_STOP,   "プログラム強制終了する
+GW_PROG_SKIP.  "次の処理単位までスキップする
+
+*統制勘定
+GW_AKONT = GW_ZN002_SUM-AKONT.
+*通貨コード
+GW_WAERS = GW_ZN002_SUM-WAERS.
+*支払予定抽出
+PERFORM GET_ZN002_NOW USING GW_ZN002_SUM-LIFNR
+GW_ZN002_SUM-CZFBDT.
+*支払予定ロック
+PERFORM LOCK_ZN002 USING GW_ZN002_SUM-LIFNR
+GW_ZN002_SUM-CZFBDT
+GW_SUBRC L_USER.
+IF GW_SUBRC <> 0.
+MESSAGE I756 WITH TEXT-M01 L_USER INTO L_MSGTEXT.
+LOOP AT GT_ZN002_NOW INTO GW_ZN002_NOW.
+*        & ロックエラー & がロックしています
+GW_CNT-ERR = GW_CNT-ERR + 1.
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING GW_ZN002_NOW
+L_MSGTEXT GW_ZN002_SUM-NAME1
+L_SUBRC.
+ENDLOOP.
+CONTINUE.
+ENDIF.
+*外部データ取得
+READ TABLE GT_YN210_SUM WITH KEY VRFCTON = GW_ZN002_SUM-LIFNR
+CZFBDT  = GW_ZN002_SUM-CZFBDT
+BINARY SEARCH INTO GW_YN210_SUM.
+IF SY-SUBRC <> 0.
+LOOP AT GT_ZN002_NOW INTO GW_ZN002_NOW.
+GW_CNT-ERR = GW_CNT-ERR + 1.
+*   支払依頼額と予定額が不一致
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING GW_ZN002_NOW
+TEXT-B01 GW_ZN002_SUM-NAME1
+L_SUBRC.
+ENDLOOP.
+ELSE.
+IF GW_YN210_SUM-KNETXAMT = GW_ZN002_SUM-PWRBTR.
+*
+IF P_TEST IS INITIAL.
+*
+*振替処理
+*
+PERFORM F_F-30_CNTL.
+ELSE.
+*
+*テスト実行
+*
+LOOP AT GT_ZN002_NOW INTO GW_ZN002_NOW.
+*           振替可能です
+L_SUBRC = 0.
+PERFORM ALV_LISTOUT USING GW_ZN002_NOW TEXT-B02
+GW_ZN002_SUM-NAME1 L_SUBRC.
+ENDLOOP.
+ENDIF.
+ELSE.
+*   支払依頼額と予定額が不一致
+LOOP AT GT_ZN002_NOW INTO GW_ZN002_NOW.
+GW_CNT-ERR = GW_CNT-ERR + 1.
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING GW_ZN002_NOW
+TEXT-B01 GW_ZN002_SUM-NAME1
+L_SUBRC.
+ENDLOOP.
+ENDIF.
+ENDIF.
+*
+*支払予定アンロック
+PERFORM UNL0CK_Z002  USING GW_ZN002_SUM-LIFNR
+GW_ZN002_SUM-CZFBDT.
+
+IF GW_PROG_STOP = C_ON.
+EXIT.
+ENDIF.
+
+ENDLOOP.
+*
+ENDFORM.                    " MAIN_F-30
+*&---------------------------------------------------------------------*
+*&      Form  LOCK_ZN002
+*&---------------------------------------------------------------------*
+FORM LOCK_ZN002 USING L_LIFNR L_CZFBDT L_SUBRC L_USER.
+*
+CALL FUNCTION 'ENQUEUE_EZN002'
+EXPORTING
+MODE_ZN002           = 'E'
+MANDT                = SY-MANDT
+BUKRS                = P_BUKRS
+LIFNR                = L_LIFNR
+CZFBDT               = L_CZFBDT
+*     SEQ                  =
+*     X_BUKRS              = ' '
+*     X_LIFNR              = ' '
+*     X_CZFBDT             = ' '
+*     X_SEQ                = ' '
+*     _SCOPE               = '2'
+*     _WAIT                = ' '
+*     _COLLECT             = ' '
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3.
+L_SUBRC = SY-SUBRC.
+IF SY-SUBRC = 1.
+L_USER = SY-MSGV1.
+ELSE.
+CLEAR: L_USER.
+ENDIF.
+*
+ENDFORM.                    " LOCK_ZN002
+*&---------------------------------------------------------------------*
+*&      Form  HEADER_WRITE
+*&---------------------------------------------------------------------*
+FORM HEADER_WRITE.
+DATA:LW_WORK   TYPE CHAR100,
+LW_PAGNO(4) TYPE C.
+
+* ヘッダに出力させたい文言を設定
+* 見出し
+PERFORM SET_HEADER USING 'H' TEXT-L01  SPACE.
+
+*--- ページ
+CLEAR: LW_WORK,LW_PAGNO.
+LW_PAGNO = SY-PAGNO.
+CONDENSE LW_PAGNO.
+CONCATENATE 'ページ　：'
+LW_PAGNO
+INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+*--- 処理日付
+CLEAR LW_WORK.
+CONCATENATE '処理日付：'
+SY-DATUM+0(4) '/'
+SY-DATUM+4(2) '/'
+SY-DATUM+6(2)
+INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+*--- 処理時刻
+CLEAR LW_WORK.
+CONCATENATE '処理時刻：'
+SY-UZEIT+0(2) ':'
+SY-UZEIT+2(2) ':'
+SY-UZEIT+4(2)
+INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+*--- ユーザID
+CLEAR LW_WORK.
+CONCATENATE 'ユーザID：' SY-UNAME INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' SPACE LW_WORK.
+
+**--- (選択画面の画面表示されているデータをヘッダに出力)
+**会社コード
+*   CLEAR:LW_WORK.
+*   WRITE P_BUKRS TO LW_WORK.
+*   CONCATENATE TEXT-L09 LW_WORK INTO LW_WORK.
+*   PERFORM SET_HEADER USING 'S' LW_WORK '<<実行条件>>'.
+*支払日
+CLEAR:LW_WORK.
+WRITE P_PZFBDT TO LW_WORK.
+CONCATENATE TEXT-L10 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK '<<実行条件>>'.
+*支払方法
+CLEAR:LW_WORK.
+WRITE GW_PZLSCH_TXT TO LW_WORK.
+CONCATENATE TEXT-L11 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*通貨コード
+CLEAR:LW_WORK.
+*   WRITE P_WAERS TO LW_WORK.
+WRITE GW_WAERS_TXT TO LW_WORK.
+CONCATENATE TEXT-L12 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*コメント(仕入先マスタ)
+CLEAR:LW_WORK.
+WRITE S_KVERM-LOW TO LW_WORK.
+CONCATENATE TEXT-L13 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*--- 処理区分
+CLEAR:LW_WORK.
+IF P_F-30 = C_ON.
+CONCATENATE TEXT-L03 TEXT-L04 INTO LW_WORK. "振替
+ELSE.
+CONCATENATE TEXT-L03 TEXT-L05 INTO LW_WORK. "取消
+ENDIF.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*
+IF P_F-30 = C_ON.
+**伝票タイプ
+*   CLEAR:LW_WORK.
+*   WRITE P_BLART TO LW_WORK.
+*   CONCATENATE TEXT-L14 LW_WORK INTO LW_WORK.
+*   PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+**伝票日付
+*   CLEAR:LW_WORK.
+*   WRITE P_BLDAT TO LW_WORK.
+*   CONCATENATE TEXT-L15 LW_WORK INTO LW_WORK.
+*   PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*転記日付
+CLEAR:LW_WORK.
+WRITE P_BUDAT TO LW_WORK.
+CONCATENATE TEXT-L16 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*伝票ヘッダText
+CLEAR:LW_WORK.
+WRITE P_BKTXT TO LW_WORK.
+CONCATENATE TEXT-L17 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+ELSE.
+*決済伝票
+CLEAR:LW_WORK.
+WRITE P_AUGBL TO LW_WORK.
+CONCATENATE TEXT-L18 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*会計年度
+CLEAR:LW_WORK.
+WRITE P_GJAHR TO LW_WORK.
+CONCATENATE TEXT-L19 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*転記日付
+CLEAR:LW_WORK.
+WRITE P_BUDATT TO LW_WORK.
+CONCATENATE TEXT-L20 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*
+ENDIF.
+* テスト実行
+CLEAR:LW_WORK.
+IF P_TEST = C_ON.
+LW_WORK = TEXT-L02.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+ENDIF.
+*
+*--- 対象件数
+CLEAR:LW_WORK.
+WRITE GW_CNT-INPUT TO LW_WORK.
+CONDENSE LW_WORK NO-GAPS.
+CONCATENATE TEXT-L06 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK '<<実行結果>>'.
+*
+*--- 更新件数
+CLEAR:LW_WORK.
+WRITE GW_CNT-OK TO LW_WORK.
+CONDENSE LW_WORK NO-GAPS.
+CONCATENATE TEXT-L07 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+*
+*--- エラー件数
+CLEAR:LW_WORK.
+WRITE GW_CNT-ERR TO LW_WORK.
+CONDENSE LW_WORK NO-GAPS.
+CONCATENATE TEXT-L08 LW_WORK INTO LW_WORK.
+PERFORM SET_HEADER USING 'S' LW_WORK SPACE.
+
+* ヘッダ出力
+CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+EXPORTING
+IT_LIST_COMMENTARY       = GT_HEAD.
+
+CLEAR:GT_HEAD.
+
+
+ENDFORM.                    " HEADER_WRITE
+*&---------------------------------------------------------------------*
+*&      Form  SET_HEADER
+*&---------------------------------------------------------------------*
+FORM SET_HEADER USING    L_TYP
+L_INFO
+L_KEY.
+CLEAR GW_HEAD.
+GW_HEAD-TYP  = L_TYP.
+GW_HEAD-INFO = L_INFO.
+GW_HEAD-KEY = L_KEY.
+APPEND GW_HEAD TO GT_HEAD.
+*
+ENDFORM.                    " SET_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  U_FIELDCAT
+*&---------------------------------------------------------------------*
+FORM U_FIELDCAT USING P_FLDNM    TYPE SLIS_FIELDCAT_ALV-FIELDNAME
+P_LEN      TYPE SLIS_FIELDCAT_ALV-OUTPUTLEN
+P_TYPE     TYPE SLIS_FIELDCAT_ALV-DATATYPE
+P_STEXT    TYPE SLIS_FIELDCAT_ALV-SELTEXT_S
+P_MTEXT    TYPE SLIS_FIELDCAT_ALV-SELTEXT_M
+P_LTEXT    TYPE SLIS_FIELDCAT_ALV-SELTEXT_L
+P_CFIELD   TYPE SLIS_FIELDCAT_ALV-CFIELDNAME
+P_QFIELD   TYPE SLIS_FIELDCAT_ALV-QFIELDNAME
+P_COL_POS  TYPE SY-CUCOL.
+* ローカル変数
+DATA L_FIELDCAT TYPE SLIS_FIELDCAT_ALV.
+L_FIELDCAT-COL_POS   = P_COL_POS.
+L_FIELDCAT-FIELDNAME = P_FLDNM.
+L_FIELDCAT-OUTPUTLEN = P_LEN.
+L_FIELDCAT-DATATYPE  = P_TYPE.
+L_FIELDCAT-SELTEXT_S = P_STEXT.
+L_FIELDCAT-SELTEXT_M = P_MTEXT.
+L_FIELDCAT-SELTEXT_L = P_LTEXT.
+L_FIELDCAT-CFIELDNAME = P_CFIELD.
+L_FIELDCAT-QFIELDNAME = P_QFIELD.
+APPEND L_FIELDCAT TO GT_FIELDCAT.
+
+ENDFORM.                    " U_FIELDCAT
+*&---------------------------------------------------------------------*
+*&      Form  ALV_LISTOUT
+*&---------------------------------------------------------------------*
+FORM ALV_LISTOUT USING  L_DATA STRUCTURE ZN002
+L_KEKA L_NAME1 L_SUBRC.
+*
+CLEAR:GW_ALV_LIST.
+MOVE-CORRESPONDING L_DATA TO GW_ALV_LIST.
+GW_ALV_LIST-KEKA  = L_KEKA.
+GW_ALV_LIST-NAME1 = L_NAME1.
+CASE L_SUBRC.
+WHEN 0.
+WRITE ICON_GREEN_LIGHT AS ICON TO GW_ALV_LIST-ICON. "青信号
+WHEN OTHERS.
+WRITE ICON_RED_LIGHT AS ICON TO GW_ALV_LIST-ICON.   "赤信号
+ENDCASE.
+APPEND GW_ALV_LIST TO GT_ALV_LIST.
+*
+ENDFORM.                    " ALV_LISTOUT
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN002_NOW
+*&---------------------------------------------------------------------*
+FORM GET_ZN002_NOW USING L_LIFNR L_CZFBDT.
+*
+REFRESH:GT_ZN002_NOW.
+LOOP AT GT_ZN002_I INTO GW_ZN002_I WHERE BUKRS  = P_BUKRS
+AND   LIFNR  = L_LIFNR
+AND   CZFBDT = L_CZFBDT.
+APPEND GW_ZN002_I TO GT_ZN002_NOW.
+ENDLOOP.
+*
+ENDFORM.                    " GET_ZN002_NOW
+*&---------------------------------------------------------------------*
+*&      会計管理: 仕入先の二次索引
+*&---------------------------------------------------------------------*
+FORM GET_BSIK_YN220 USING L_LIFNR L_GJAHR L_BELNR L_BUZEI
+L_SUBRC
+L_ZTERM L_ZFBDT.
+*
+SELECT ZTERM ZFBDT
+INTO (L_ZTERM, L_ZFBDT ) UP TO 1 ROWS
+FROM BSIK
+WHERE LIFNR = L_LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = L_GJAHR
+AND   BELNR = L_BELNR
+AND   BUZEI = L_BUZEI.
+ENDSELECT.
+*
+L_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " GET_BSIK_YN220
+*&---------------------------------------------------------------------*
+*&      Form  GET_YN220_NOW
+*&---------------------------------------------------------------------*
+FORM GET_YN220_NOW USING L_VRFCTON  L_CZFBDT.
+*
+REFRESH:GT_YN220_NOW.
+CLEAR:GW_YN220_NEW.
+LOOP AT GT_YN220_NEW INTO GW_YN220_NEW WHERE VRFCTON  = L_VRFCTON
+AND  CZFBDT   = L_CZFBDT.
+APPEND GW_YN220_NEW TO GT_YN220_NOW.
+ENDLOOP.
+*
+ENDFORM.                    " GET_YN220_NOW
+*&---------------------------------------------------------------------*
+*&      Form  F_F-30_CNTL
+*&---------------------------------------------------------------------*
+FORM F_F-30_CNTL.
+DATA :
+L_WRBTR  TYPE BSIK-WRBTR,
+L_TOP(1) TYPE C,
+L_SUBRC  TYPE SY-SUBRC,
+L_GJAHR  TYPE BSIK-GJAHR,
+L_BELNR  TYPE BSIK-BELNR,
+L_BUZEI  TYPE BSIK-BUZEI,
+L_WRBTR_ZN002 TYPE BSIK-WRBTR,
+L_WRBTR_YN220 TYPE BSIK-WRBTR.
+*初期処理
+CLEAR:GW_ZN002_EOF,
+GW_YN220_EOF,
+GW_YN220_INDEX,
+GW_ZN002_INDEX,
+GW_YN220_NOW_BACKUP.
+*
+REFRESH:GT_BELNR_TBL.  "消込用(自社データ、決済買掛金)
+CLEAR:GW_F30_LIFNR,GW_F30_GJAHR,GW_F30_BELNR.
+*
+*自社データ抽出
+PERFORM GET_YN220_NOW USING GW_ZN002_SUM-LIFNR
+GW_ZN002_SUM-CZFBDT.
+*自社データ処理済み取得
+PERFORM GET_YN220_DEL_NOW USING GW_ZN002_SUM-LIFNR
+GW_ZN002_SUM-CZFBDT.
+
+*支払予定件数取得
+READ TABLE GT_ZN002_CNT WITH KEY LIFNR  = GW_ZN002_SUM-LIFNR
+CZFBDT = GW_ZN002_SUM-CZFBDT
+BINARY SEARCH
+INTO  GW_ZN002_CNT.
+*自社データ件数
+DESCRIBE TABLE GT_YN220_NOW LINES GW_ZN002_CNT-YN220_CNT.
+*自社データの処理順ソート
+SORT GT_YN220_NOW BY   LDATE1   "入庫日
+YNGJAHR  "会計伝票会計年度
+BELNR    "会計伝票番号
+BUZEI.   "会計伝票明細番号
+*振替済の継続チェック
+CLEAR:GW_YN220_KNETXAMT.
+IF GW_ZN002_CNT-SUMI_CNT <> 0. "振替済みあり
+READ TABLE GT_ZN002_D  WITH KEY BUKRS  = P_BUKRS
+LIFNR  = GW_ZN002_SUM-LIFNR
+CZFBDT = GW_ZN002_SUM-CZFBDT
+BINARY SEARCH INTO GW_ZN002_D.
+IF SY-SUBRC = 0.
+GW_F30_LIFNR  = GW_ZN002_D-LIFNR.
+GW_F30_GJAHR  = GW_ZN002_D-GJAHR.
+GW_F30_BELNR  = GW_ZN002_D-BELNR.
+GW_F30_CZFBDT = GW_ZN002_D-CZFBDT.
+ELSE.
+CLEAR:GW_F30_LIFNR,GW_F30_GJAHR,GW_F30_BELNR,
+GW_F30_CZFBDT.
+ENDIF.
+ENDIF.
+*
+*支払予定データ制御
+*
+DO.
+*   支払予定データ読込
+PERFORM F_READ_ZN002.
+IF GW_ZN002_EOF = C_X.
+EXIT.
+ENDIF.
+*   振替済買掛金残取得
+PERFORM GET_ZENZAN.
+*   自社データコントロール
+IF GW_ZN002_CNT-SYORI_CNT
+= GW_ZN002_INDEX AND             "支払予定最終レコード
+GW_ZN002_CNT-MISYORI_CNT = 0.  "未処理件数 = 0
+*自社データをすべて使用する
+PERFORM READ_YN220_ALL.
+ELSE.
+*
+DO.
+IF NOT ( GT_BELNR_TBL[] IS INITIAL )  AND
+GW_ZN002_NOW-PWRBTR <= GW_YN220_KNETXAMT.
+
+*         差額 =　支払予定 - 前回買掛金
+GW_SAGAKU = GW_ZN002_NOW-PWRBTR - GW_YN220_KNETXAMT.
+PERFORM F_CALL_TRN_F-30.
+EXIT.
+ELSE.
+PERFORM F_READ_YN220.
+IF GW_YN220_INDEX = GW_ZN002_CNT-YN220_CNT OR
+GW_YN220_EOF = C_X.
+IF GW_YN220_EOF <> C_X.
+PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+GW_YN220_NOW-BELNR
+GW_YN220_NOW-BUZEI.
+GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
++ GW_YN220_NOW-KNETXAMT.
+ENDIF.
+*           差額 =　支払予定 - 前回買掛金
+GW_SAGAKU = GW_ZN002_NOW-PWRBTR - GW_YN220_KNETXAMT.
+PERFORM F_CALL_TRN_F-30.
+EXIT.
+ELSE.
+PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+GW_YN220_NOW-BELNR
+GW_YN220_NOW-BUZEI.
+GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
++ GW_YN220_NOW-KNETXAMT.
+ENDIF.
+ENDIF.
+
+IF GW_PROG_STOP = C_ON.
+EXIT.
+ENDIF.
+
+ENDDO.
+
+ENDIF.
+*
+*----------------
+*
+*    IF GW_ZN002_CNT-YN220_CNT > 0 AND
+*       GW_ZN002_CNT-SYORI_CNT <= GW_ZN002_INDEX.
+*      DO.
+*         PERFORM F_READ_YN220.
+*         IF GW_YN220_INDEX = GW_ZN002_CNT-YN220_CNT OR
+*            GW_YN220_EOF = C_X.
+*           IF GW_YN220_EOF <> C_X.
+*             PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+*                                            GW_YN220_NOW-BELNR
+*                                            GW_YN220_NOW-BUZEI.
+*             GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
+*                               + GW_YN220_NOW-KNETXAMT.
+*           ENDIF.
+**          差額 =　支払予定 - 前回買掛金
+*           GW_SAGAKU = GW_ZN002_NOW-PWRBTR - GW_YN220_KNETXAMT.
+*           PERFORM F_CALL_TRN_F-30.
+*           EXIT.
+*         ELSE.
+*           PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+*                                          GW_YN220_NOW-BELNR
+*                                          GW_YN220_NOW-BUZEI.
+*            GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
+*                              + GW_YN220_NOW-KNETXAMT.
+*         ENDIF.
+*      ENDDO.
+*    ELSE.
+*       PERFORM F_YN220_CNTL.
+*    ENDIF.
+*
+IF GW_PROG_STOP = C_ON OR
+GW_PROG_SKIP = C_ON.
+EXIT.
+ENDIF.
+
+ENDDO.
+*
+ENDFORM.                    " F_F-30_CNTL
+*&---------------------------------------------------------------------*
+*&      Form  F_PS
+*&---------------------------------------------------------------------*
+FORM F_PSTFLG_CHECK USING L_LIFNR L_GJAHR L_BELNR L_CZFBDT
+L_WRBTR L_BUZEI L_SUBRC.
+DATA :
+L_SHKZG TYPE BSIK-SHKZG.
+*
+PERFORM GET_BSIK_PSTFLG USING L_LIFNR
+L_GJAHR
+L_BELNR
+L_CZFBDT
+L_SUBRC
+L_WRBTR
+L_SHKZG
+L_BUZEI.
+CHECK L_SUBRC = 0.
+*
+IF L_SHKZG = C_S.
+L_WRBTR = L_WRBTR *  -1  .
+ENDIF.
+*
+ENDFORM.                    " F_PSTFLG_CHECK
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSIK_PSTFLG
+*&---------------------------------------------------------------------*
+FORM GET_BSIK_PSTFLG USING L_LIFNR L_GJAHR L_BELNR L_CZFBDT
+L_SUBRC
+L_WRBTR L_SHKZG L_BUZEI.
+DATA :
+L_SGTXT TYPE BSIK-SGTXT. "明細テキスト
+*
+CONCATENATE L_CZFBDT '消込残' INTO L_SGTXT.
+*
+SELECT WRBTR SHKZG BUZEI
+INTO (L_WRBTR, L_SHKZG, L_BUZEI )
+FROM BSIK
+WHERE LIFNR = L_LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = L_GJAHR
+AND   BELNR = L_BELNR
+AND   HKONT = GW_AKONT
+AND   SGTXT = L_SGTXT.
+EXIT.
+ENDSELECT.
+*
+L_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " GET_BSIK_PSTFLG
+*&---------------------------------------------------------------------*
+*&      Form  F_READ_GT_ZN002_NOW
+*&---------------------------------------------------------------------*
+FORM F_READ_GT_ZN002_NOW USING L_SUBRC.
+*
+GW_ZN002_INDEX = GW_ZN002_INDEX + 1.
+READ TABLE GT_ZN002_NOW INDEX GW_ZN002_INDEX
+INTO  GW_ZN002_NOW.
+L_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " F_READ_GT_ZN002_NOW
+*&---------------------------------------------------------------------*
+*&      Form  F_READ_GT_YN220_NOW
+*&---------------------------------------------------------------------*
+FORM F_READ_GT_YN220_NOW USING L_SUBRC.
+*
+GW_YN220_INDEX = GW_YN220_INDEX + 1.
+READ TABLE GT_YN220_NOW INDEX GW_YN220_INDEX
+INTO  GW_YN220_NOW.
+L_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " F_READ_GT_YN220_NOW
+*&---------------------------------------------------------------------*
+*&      Form  F_READ_YN220
+*&---------------------------------------------------------------------*
+FORM F_READ_YN220.
+DATA :
+L_CNT TYPE I.
+*
+GW_YN220_INDEX = GW_YN220_INDEX + 1.
+CLEAR:GW_YN220_NOW.
+READ TABLE GT_YN220_NOW INDEX GW_YN220_INDEX
+INTO  GW_YN220_NOW.
+IF SY-SUBRC <> 0.
+GW_YN220_EOF = C_X.
+IF GW_YN220_NOW_BACKUP-BELNR IS INITIAL.
+*       PERFORM F_BSIK_BSAK_DEL_NOW_GET.
+**
+*       GW_YN220_NOW_BACKUP = GW_YN220_NOW.
+
+SORT GT_YN220_DEL_NOW BY LDATE1    "入庫日
+YNGJAHR   "会計伝票会計年度
+BELNR     "会計伝票番号
+BUZEI.    "会計伝票明細番号
+DESCRIBE TABLE GT_YN220_DEL_NOW
+LINES L_CNT.
+
+READ TABLE GT_YN220_DEL_NOW INDEX L_CNT
+INTO  GW_YN220_NOW.
+GW_YN220_NOW_BACKUP = GW_YN220_NOW.
+ELSE.
+GW_YN220_NOW = GW_YN220_NOW_BACKUP.
+ENDIF.
+ELSE.
+GW_YN220_NOW_BACKUP = GW_YN220_NOW.
+ENDIF.
+*
+ENDFORM.                    " F_READ_YN220
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_TRN_F-30
+*&---------------------------------------------------------------------*
+FORM F_CALL_TRN_F-30.
+DATA :
+L_MSGTEXT     TYPE STRING,
+L_SUBRC       TYPE SY-SUBRC,
+L_BELNR       TYPE ZN002-BELNR,  "会計伝票番号
+L_RF05A_SEL01 TYPE RF05A-SEL01,
+L_NEWBS       TYPE RF05A-NEWBS, "次明細の転記キー
+L_NEWKO       TYPE RF05A-NEWKO. "次明細の勘定またはマッチコード
+DATA :
+L_MODE(1) TYPE C.
+*ＢＤＣ編集
+REFRESH:GT_BDC_DATA,GT_BDC_MSG.
+*
+PERFORM F_BDC_DATA.
+*
+L_MODE = GW_F-30_MODE.
+CALL TRANSACTION 'F-30' USING GT_BDC_DATA
+MODE L_MODE
+UPDATE C_S
+MESSAGES INTO GT_BDC_MSG.
+*
+READ TABLE GT_BDC_MSG WITH KEY MSGID = 'F5'
+MSGNR = '312'
+INTO GW_BDC_MSG.
+IF SY-SUBRC = 0.
+*正常
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = GW_BDC_MSG-MSGV1(10)
+IMPORTING
+OUTPUT        = L_BELNR.
+*
+PERFORM GET_BSAK_BSIK USING GW_ZN002_NOW-LIFNR "請求先
+L_BELNR            "伝票番号
+GW_GJAHR.          "会計年度
+
+*振替済買掛金
+IF GW_ZN002_CNT-MISYORI_CNT = 0  AND
+GW_ZN002_CNT-SYORI_CNT = GW_ZN002_INDEX.
+CLEAR: GW_F30_LIFNR,                  "振替済請求先
+GW_F30_GJAHR,                  "振替済会計年度
+GW_F30_BELNR,                  "振替済会計伝票番号
+GW_F30_CZFBDT.                 "振替済照合締日
+ELSE.
+IF GW_SAGAKU <> 0.
+GW_F30_LIFNR  = GW_ZN002_NOW-LIFNR.  "振替済請求先
+GW_F30_GJAHR  = GW_GJAHR.            "振替済会計年度
+GW_F30_BELNR  = L_BELNR.             "振替済会計伝票番号
+GW_F30_CZFBDT = GW_ZN002_NOW-CZFBDT. "振替済照合締日
+ENDIF.
+ENDIF.
+*
+PERFORM F_ZN002_UPDATE USING L_BELNR L_SUBRC .  "決済伝票
+*
+IF L_SUBRC = 0.
+GW_ZN002_NOW-PSTFLG = C_X.       "会計振替
+GW_ZN002_NOW-PSTDT  = GW_DATUM.  "会計振替日
+GW_ZN002_NOW-PSTTM  = GW_UZEIT.  "会計振替時刻
+GW_ZN002_NOW-PSTUSR = GW_UNAME.  "会計振替ユーザ
+GW_ZN002_NOW-BELNR  = L_BELNR.   "会計伝票番号
+GW_ZN002_NOW-GJAHR  = GW_GJAHR.  "会計年度
+GW_ZN002_NOW-BUDAT  = P_BUDAT.   "伝票の転記日付
+*     伝票 & が会社コード & に転記されました
+GW_CNT-OK = GW_CNT-OK + 1.
+MESSAGE I312(F5) WITH GW_BDC_MSG-MSGV1 GW_BDC_MSG-MSGV2
+INTO L_MSGTEXT.
+L_SUBRC = 0.
+PERFORM ALV_LISTOUT USING GW_ZN002_NOW
+L_MSGTEXT GW_ZN002_SUM-NAME1
+L_SUBRC.
+ELSE.
+*     支払予定(ZN002)の更新に失敗しました。決済転記 & を取消してください
+GW_CNT-ERR = GW_CNT-ERR + 1.
+MESSAGE I803 WITH GW_BDC_MSG-MSGV1 INTO L_MSGTEXT.
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING GW_ZN002_NOW
+L_MSGTEXT GW_ZN002_SUM-NAME1
+L_SUBRC.
+GW_PROG_STOP = C_ON.
+*
+ENDIF.
+*
+ELSE.
+*エラー
+LOOP AT GT_BDC_MSG INTO GW_BDC_MSG WHERE MSGTYP = C_A OR
+MSGTYP = C_E OR
+MSGTYP = C_S.
+MESSAGE ID   GW_BDC_MSG-MSGID
+TYPE 'I'
+NUMBER GW_BDC_MSG-MSGNR
+WITH GW_BDC_MSG-MSGV1
+GW_BDC_MSG-MSGV2
+GW_BDC_MSG-MSGV3
+GW_BDC_MSG-MSGV4
+INTO L_MSGTEXT.
+DO.
+L_SUBRC = 9.
+GW_CNT-ERR = GW_CNT-ERR + 1.
+PERFORM ALV_LISTOUT USING GW_ZN002_NOW
+L_MSGTEXT GW_ZN002_SUM-NAME1
+L_SUBRC.
+PERFORM F_READ_ZN002.
+IF GW_ZN002_EOF = C_X.
+EXIT.
+ENDIF.
+ENDDO.
+EXIT.
+ENDLOOP.
+GW_PROG_SKIP = C_ON.
+*　 リスト出力
+ENDIF.
+
+*ＢＤＣ処理の後処理
+REFRESH:GT_BELNR_TBL,
+GT_BDC_DATA,GT_BDC_MSG.
+CLEAR:GW_YN220_KNETXAMT,
+GW_SAGAKU.
+*
+ENDFORM.                    " F_CALL_TRN_F-30
+*&---------------------------------------------------------------------*
+*       ＢＤＣテーブルの設定
+*----------------------------------------------------------------------*
+FORM GEN_BDC USING L_DYNBEGIN  L_FNAM L_FVAL.
+*
+CLEAR GW_BDC_DATA.
+*   dynbeginがスペースの場合
+IF L_DYNBEGIN IS INITIAL.
+GW_BDC_DATA-FNAM      =  L_FNAM.
+GW_BDC_DATA-FVAL      =  L_FVAL.
+ELSE.
+*   dynbeginがスペース以外の場合
+GW_BDC_DATA-PROGRAM   =  L_FNAM.
+GW_BDC_DATA-DYNPRO    =  L_FVAL.
+GW_BDC_DATA-DYNBEGIN  =  C_X.
+ENDIF.
+*   ＢＤＣテーブルに追加
+APPEND GW_BDC_DATA TO GT_BDC_DATA.
+ENDFORM.                    " GEN_BDC
+*&---------------------------------------------------------------------*
+*&      Form  F_BELNR_TBL_MAKE
+*&---------------------------------------------------------------------*
+FORM F_BELNR_TBL_MAKE USING L_GJAHR L_BELNR L_BUZEI.
+*
+CLEAR:GW_BELNR_TBL.
+GW_BELNR_TBL-BELNR = L_BELNR. "会計伝票番号
+GW_BELNR_TBL-GJAHR = L_GJAHR. "会計年度
+GW_BELNR_TBL-BUZEI = L_BUZEI. "会計伝票内の明細番号
+APPEND GW_BELNR_TBL TO GT_BELNR_TBL.
+*
+ENDFORM.                    " F_BELNR_TBL_MAKE
+*&---------------------------------------------------------------------*
+*&      自社データコントロール
+*&---------------------------------------------------------------------*
+FORM F_YN220_CNTL.
+DATA :
+L_CNT TYPE I.
+*
+IF GW_ZN002_CNT-YN220_CNT = 0 OR   "自社データなし
+GW_YN220_EOF = C_X.
+IF GW_YN220_NOW_BACKUP-BELNR IS INITIAL.
+*
+PERFORM F_BSIK_BSAK_DEL_NOW_GET.
+*
+GW_YN220_NOW_BACKUP = GW_YN220_NOW.
+ENDIF.
+
+*   差額 =　支払予定 - 前回買掛金
+GW_SAGAKU = GW_ZN002_NOW-PWRBTR - GW_YN220_KNETXAMT.
+PERFORM F_CALL_TRN_F-30.
+ELSE.
+DO.
+IF NOT ( GT_BELNR_TBL[] IS INITIAL )  AND   "支払予定金額が
+GW_ZN002_NOW-PWRBTR <= GW_YN220_KNETXAMT.
+*       差額 =　支払予定 - 前回買掛金
+GW_SAGAKU = GW_ZN002_NOW-PWRBTR - GW_YN220_KNETXAMT.
+PERFORM F_CALL_TRN_F-30.
+EXIT.
+ELSE.
+PERFORM F_READ_YN220.
+IF GW_YN220_INDEX = GW_ZN002_CNT-YN220_CNT OR
+GW_YN220_EOF = C_X.
+IF GW_YN220_EOF <> C_X.
+PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+GW_YN220_NOW-BELNR
+GW_YN220_NOW-BUZEI.
+GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
++ GW_YN220_NOW-KNETXAMT.
+ENDIF.
+*         差額 =　支払予定 - 前回買掛金
+GW_SAGAKU = GW_ZN002_NOW-PWRBTR - GW_YN220_KNETXAMT.
+PERFORM F_CALL_TRN_F-30.
+EXIT.
+ELSE.
+PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+GW_YN220_NOW-BELNR
+GW_YN220_NOW-BUZEI.
+GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
++ GW_YN220_NOW-KNETXAMT.
+ENDIF.
+ENDIF.
+
+IF GW_PROG_STOP = C_ON.
+EXIT.
+ENDIF.
+
+ENDDO.
+ENDIF.
+*
+ENDFORM.                    " F_YN220_CNTL
+*&---------------------------------------------------------------------*
+*&      Form  F_SAPMF05A_0302
+*&---------------------------------------------------------------------*
+FORM F_SAPMF05A_0302.
+DATA :
+L_WRBTR_C(16) TYPE C,            "金額
+L_WRBTR       TYPE BSEG-WRBTR,   "金額
+L_ZTERM       TYPE BSEG-ZTERM,   "支払条件
+L_SGTXT       TYPE BSEG-SGTXT,   "明細テキスト
+L_ZLSCH       TYPE BSEG-ZLSCH,   "支払方法
+L_CZFBDT(8)   TYPE N,            "照合締日
+L_LIFNR(10)   TYPE C,            "請求先
+L_NEWBS       TYPE RF05A-NEWBS,  "次明細の転記キー
+L_NEWKO       TYPE RF05A-NEWKO,  "次明細の勘定またはマッチコード
+L_REBZG       TYPE BSEG-REBZG.   "参照請求書 "2012/09/25 ADD
+
+*金額
+L_WRBTR = ABS( GW_ZN002_NOW-PWRBTR ).
+WRITE L_WRBTR TO L_WRBTR_C CURRENCY GW_WAERS.
+* 2012/09/21 ADD START
+* 参照請求書に'V'を設定することで自動支払時の
+* 支払期日の計算がマイナスの場合も統一
+IF GW_ZN002_NOW-PWRBTR < 0.
+L_REBZG = 'V'.
+ELSE.
+CLEAR:L_REBZG.
+ENDIF.
+* 2012/09/21 ADD END
+
+*支払条件
+IF GW_ZN002_NOW-PZLSCH = 'T'. "振込
+IF NOT GW_ZN002_NOW-PZTERM_D IS INITIAL. "仕入割引条件
+L_ZTERM = GW_ZN002_NOW-PZTERM_D.
+ELSE.
+IF NOT GW_ZN002_NOW-PZTERM IS INITIAL.
+L_ZTERM = GW_ZN002_NOW-PZTERM. "サイト
+ELSE.
+L_ZTERM = C_0001.
+ENDIF.
+ENDIF.
+ELSE.
+IF GW_ZN002_NOW-PZTERM IS INITIAL.
+L_ZTERM = C_0001.
+ELSE.
+L_ZTERM = GW_ZN002_NOW-PZTERM.
+ENDIF.
+ENDIF.
+*明細テキスト
+L_CZFBDT = GW_ZN002_NOW-CZFBDT.       "照合締日
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = GW_ZN002_NOW-LIFNR
+IMPORTING
+OUTPUT        = L_LIFNR.
+CONCATENATE L_LIFNR L_CZFBDT
+INTO L_SGTXT.
+*支払方法
+IF GW_ZN002_NOW-PZLSCH = '9' OR  "その他
+GW_ZN002_NOW-PZLSCH = 'S'.    "相殺
+L_ZLSCH = SPACE.
+ELSE.
+L_ZLSCH = GW_ZN002_NOW-PZLSCH. "支払方法
+ENDIF.
+*次明細の転記キーと勘定
+IF GW_SAGAKU = 0.
+CLEAR:L_NEWBS,L_NEWKO.
+ELSE.
+IF GW_ZN002_CNT-SYORI_CNT = GW_ZN002_INDEX.
+IF GW_ZN002_CNT-MISYORI_CNT = 0.
+*雑
+IF GW_SAGAKU < 0.
+L_NEWBS = '50'.      "次明細の転記キー
+*         雑収入勘定
+L_NEWKO = P_HKONTA.  "次明細の勘定またはマッチコード
+ELSE.
+L_NEWBS = '40'.      "次明細の転記キー
+*         雑損失勘定
+L_NEWKO = P_HKONTB.  "次明細の勘定またはマッチコード
+ENDIF.
+ELSE.
+*買掛
+IF GW_SAGAKU < 0.
+L_NEWBS = '37'.      "次明細の転記キー
+ELSE.
+L_NEWBS = '27'.      "次明細の転記キー
+ENDIF.
+L_NEWKO = GW_ZN002_NOW-LIFNR.  "次明細の勘定またはマッチコード
+ENDIF.
+ELSE.
+*買掛
+IF GW_SAGAKU < 0.
+L_NEWBS = '37'.      "次明細の転記キー
+ELSE.
+L_NEWBS = '27'.      "次明細の転記キー
+ENDIF.
+L_NEWKO = GW_ZN002_NOW-LIFNR.  "次明細の勘定またはマッチコード
+ENDIF.
+ENDIF.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0302',
+' ' 'BSEG-HKONT'  GW_ZN002_NOW-PHKONT,     "勘定
+' ' 'BSEG-WRBTR'  L_WRBTR_C,               "金額
+' ' 'BKPF-XMWST'  'X',                     "税額計算
+' ' 'BSEG-ZTERM'  L_ZTERM,                 "支払条件
+' ' 'BSEG-ZFBDT'  GW_ZN002_NOW-PZFBDT,     "支払予定日
+' ' 'BSEG-ZUONR'  P_BKTXT,                 "ソートキー  "2012/05/28
+' ' 'BSEG-SGTXT'  L_SGTXT,                 "明細テキスト
+' ' 'BSEG-ZLSCH'  L_ZLSCH,                 "支払方法
+' ' 'BSEG-ZLSPR'  GW_ZN002_NOW-PZLSPR,     "支払保留
+* 2012/09/25 ADD START
+' ' 'BSEG-REBZG'  L_REBZG,                 "参照請求書
+* 2012/09/25 ADD END
+' ' 'RF05A-NEWBS' L_NEWBS,                "
+' ' 'RF05A-NEWKO' L_NEWKO.                "
+IF GW_SAGAKU = 0.
+PERFORM GEN_BDC USING :
+' ' 'BDC_OKCODE' '=BU'.               "
+ELSE.
+PERFORM GEN_BDC USING :
+' ' 'BDC_OKCODE' '=AB'.               "
+
+ENDIF.
+*
+ENDFORM.                    " F_SAPMF05A_0302
+*&---------------------------------------------------------------------*
+*&      Form  F_SAPMF05A_0300
+*&---------------------------------------------------------------------*
+FORM F_SAPMF05A_0300.
+DATA :
+L_WRBTR_C(16) TYPE C,            "金額
+L_WRBTR       TYPE BSEG-WRBTR,   "金額
+L_ZTERM       TYPE BSEG-ZTERM,   "支払条件
+L_SGTXT       TYPE BSEG-SGTXT,   "明細テキスト
+L_CZFBDT(8)   TYPE N,            "照合締日
+L_LIFNR(10)   TYPE C,            "請求先
+L_NEWBS       TYPE RF05A-NEWBS,  "次明細の転記キー
+L_NEWKO       TYPE RF05A-NEWKO.  "次明細の勘定またはマッチコード
+
+*金額
+L_WRBTR = ABS( GW_ZN002_NOW-PWRBTR ).
+WRITE L_WRBTR TO L_WRBTR_C CURRENCY GW_WAERS.
+*明細テキスト
+L_CZFBDT = GW_ZN002_NOW-CZFBDT.       "照合締日
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = GW_ZN002_NOW-LIFNR
+IMPORTING
+OUTPUT        = L_LIFNR.
+CONCATENATE L_LIFNR L_CZFBDT
+INTO L_SGTXT.
+*
+IF GW_SAGAKU = 0.
+CLEAR:L_NEWBS,L_NEWKO.
+ELSE.
+IF GW_ZN002_CNT-SYORI_CNT = GW_ZN002_INDEX.
+IF GW_ZN002_CNT-MISYORI_CNT = 0.
+*雑
+IF GW_SAGAKU < 0.
+L_NEWBS = '50'.      "次明細の転記キー
+*         雑収入勘定
+L_NEWKO = P_HKONTA.  "次明細の勘定またはマッチコード
+ELSE.
+L_NEWBS = '40'.      "次明細の転記キー
+*         雑損失勘定
+L_NEWKO = P_HKONTB.  "次明細の勘定またはマッチコード
+ENDIF.
+ELSE.
+*買掛
+IF GW_SAGAKU < 0.
+L_NEWBS = '37'.      "次明細の転記キー
+ELSE.
+L_NEWBS = '27'.      "次明細の転記キー
+ENDIF.
+L_NEWKO = GW_ZN002_NOW-LIFNR.  "次明細の勘定またはマッチコード
+ENDIF.
+ELSE.
+*買掛
+IF GW_SAGAKU < 0.
+L_NEWBS = '37'.      "次明細の転記キー
+ELSE.
+L_NEWBS = '27'.      "次明細の転記キー
+ENDIF.
+L_NEWKO = GW_ZN002_NOW-LIFNR.  "次明細の勘定またはマッチコード
+ENDIF.
+ENDIF.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0300',
+' ' 'BSEG-WRBTR'  L_WRBTR_C,               "金額
+' ' 'BKPF-XMWST'  'X',                     "税額計算
+' ' 'BSEG-ZFBDT'  GW_ZN002_NOW-PZFBDT,     "支払予定日
+' ' 'BSEG-ZUONR'  GW_ZN002_NOW-LIFNR,      "ソートキー
+' ' 'BSEG-SGTXT'  L_SGTXT,                 "明細テキスト
+' ' 'RF05A-NEWBS' L_NEWBS,                "
+' ' 'RF05A-NEWKO' L_NEWKO.                "
+IF GW_SAGAKU = 0.
+PERFORM GEN_BDC USING :
+' ' 'BDC_OKCODE' '=BU'.               "
+ELSE.
+PERFORM GEN_BDC USING :
+' ' 'BDC_OKCODE' '=AB'.               "
+ENDIF.
+PERFORM GEN_BDC USING : 'X' 'SAPLKACB' '0002',
+' ' 'BDC_OKCODE' '=ENTE'.               "
+
+*
+ENDFORM.                    " F_SAPMF05A_0300
+*&---------------------------------------------------------------------*
+*&      Form  F_SAPMF05A_0302_END
+*&---------------------------------------------------------------------*
+FORM F_SAPMF05A_0302_END.
+DATA :
+L_WRBTR_C(16) TYPE C,            "金額
+L_WRBTR       TYPE BSEG-WRBTR,   "金額
+L_SGTXT       TYPE BSEG-SGTXT,   "明細テキスト
+L_ZUONR       TYPE BSEG-ZUONR,   "ソートキー
+L_CZFBDT(8)   TYPE N,            "照合締日
+L_LIFNR(10)   TYPE C,            "請求先
+L_NEWBS       TYPE RF05A-NEWBS,  "次明細の転記キー
+L_NEWKO       TYPE RF05A-NEWKO.  "次明細の勘定またはマッチコード
+*2012/04/18 ADD START
+DATA :
+L_ZFBDT       TYPE BSIK-ZFBDT,   "支払基準日
+L_ZTERM       TYPE BSIK-ZTERM.   "支払条件
+*2012/04/18 ADD END
+
+
+
+*金額
+L_WRBTR = ABS( GW_SAGAKU ).
+WRITE L_WRBTR TO L_WRBTR_C CURRENCY GW_WAERS.
+
+*2012/04/18 MOD START "自社データがない場合は、最終明細を引継
+IF ( GW_YN220_NOW-BELNR IS INITIAL ).
+
+SELECT ZUONR ZFBDT ZTERM
+UP TO 1 ROWS
+INTO (L_ZUONR,L_ZFBDT,L_ZTERM)
+FROM BSIK
+WHERE LIFNR = GW_ZN002_SUM-LIFNR
+AND BUKRS = P_BUKRS
+AND GJAHR = GW_F30_GJAHR
+AND BELNR = GW_F30_BELNR
+AND BUZEI = GW_F30_BUZEI.
+ENDSELECT.
+
+IF ( SY-SUBRC <> 0 ).  "BDCエラー回避
+L_ZFBDT = GW_ZN002_SUM-CZFBDT.
+ENDIF.
+
+ELSE.
+CONCATENATE GW_YN220_NOW-YNGJAHR "会計伝票会計年度
+GW_YN220_NOW-BELNR   "会計伝票番号
+GW_YN220_NOW-BUZEI   "会計伝票明細番号
+INTO L_ZUONR. "ソートキー
+
+L_ZFBDT = GW_YN220_NOW-ZFBDT.   "支払基準日
+L_ZTERM = GW_YN220_NOW-ZTERM.   "支払条件
+ENDIF.
+
+CONCATENATE GW_ZN002_SUM-CZFBDT '消込残' INTO L_SGTXT.
+
+**ソートキー
+*  CONCATENATE GW_YN220_NOW-YNGJAHR "会計伝票会計年度
+*              GW_YN220_NOW-BELNR   "会計伝票番号
+*              GW_YN220_NOW-BUZEI   "会計伝票明細番号
+*           INTO L_ZUONR.
+**明細テキスト
+***照合締日を明細に反映
+*  CONCATENATE GW_YN220_NOW-CZFBDT '消込残' INTO L_SGTXT.
+*2012/04/18 MOD END
+
+
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0302',
+*   ' ' 'BSEG-HKONT'  C_HKONT_2102001,         "勘定
+' ' 'BSEG-WRBTR'  L_WRBTR_C,               "金額
+*    ' ' 'BSEG-ZTERM'  GW_YN220_NOW-ZTERM,      "支払条件
+' ' 'BSEG-ZTERM'  L_ZTERM,                  "支払条件
+*    ' ' 'BSEG-ZBD1T'  SPACE,                   "日数
+*    ' ' 'BSEG-ZFBDT'  GW_YN220_NOW-ZFBDT,      "支払基準日
+' ' 'BSEG-ZFBDT'  L_ZFBDT,                  "支払基準日
+' ' 'BSEG-ZUONR'  L_ZUONR,                 "ソートキー
+' ' 'BSEG-SGTXT'  L_SGTXT,                 "明細テキスト
+' ' 'BDC_OKCODE' '=BU'.                    "
+
+ENDFORM.                    " F_SAPMF05A_0302_END
+*&---------------------------------------------------------------------*
+*&      Form  F_SAPMF05A_0300_END
+*&---------------------------------------------------------------------*
+FORM F_SAPMF05A_0300_END.
+DATA :
+L_WRBTR_C(16) TYPE C,            "金額
+L_WRBTR       TYPE BSEG-WRBTR,   "金額
+L_SGTXT       TYPE BSEG-SGTXT,   "明細テキスト
+L_MWSKZ       TYPE BSEG-MWSKZ.   "税コード
+
+*金額
+L_WRBTR = ABS( GW_SAGAKU ).
+WRITE L_WRBTR TO L_WRBTR_C CURRENCY GW_WAERS.
+*明細テキスト
+L_SGTXT = '買掛差額'.
+*税コード
+IF GW_SAGAKU < 0.
+L_MWSKZ = P_MWSKZA. "雑収入勘定の税コード
+ELSE.
+L_MWSKZ = P_MWSKZB. "雑損失勘定の税コード
+ENDIF.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0300',
+' ' 'BSEG-WRBTR'  L_WRBTR_C,               "金額
+' ' 'BSEG-MWSKZ'  L_MWSKZ,                 "税コード
+' ' 'BSEG-SGTXT'  L_SGTXT,                 "明細テキスト
+' ' 'BDC_OKCODE' '=BU'.                    "
+PERFORM GEN_BDC USING : 'X' 'SAPLKACB' '0002',
+' ' 'COBL-KOSTL'  P_KOSTL  ,                 "原価センタ
+' ' 'BDC_OKCODE' '=ENTE'.                  "
+
+
+ENDFORM.                    " F_SAPMF05A_0300_END
+*&---------------------------------------------------------------------*
+*&      Form  F_BDC_DATA
+*&---------------------------------------------------------------------*
+FORM F_BDC_DATA.
+*
+IF GT_BELNR_TBL[] IS INITIAL.  "消込なし
+PERFORM F_F-30_TOP_1.
+ELSE.                          "消込あり
+PERFORM F_F-30_TOP_2.
+ENDIF.
+*
+ENDFORM.                    " F_BDC_DATA
+*&---------------------------------------------------------------------*
+*&      Form  F_ZN002_UPDATE
+*&---------------------------------------------------------------------*
+FORM F_ZN002_UPDATE USING L_BELNR L_SUBRC.
+*
+UPDATE ZN002
+SET PSTFLG = C_X        "会計振替
+PSTDT  = GW_DATUM   "会計振替日
+PSTTM  = GW_UZEIT   "会計振替時刻
+PSTUSR = GW_UNAME   "会計振替ユーザ
+BELNR  = L_BELNR    "会計伝票番号
+GJAHR  = GW_GJAHR   "会計年度
+BUDAT  = P_BUDAT    "伝票の転記日付
+WHERE BUKRS  = P_BUKRS
+AND   LIFNR  = GW_ZN002_NOW-LIFNR
+AND   CZFBDT = GW_ZN002_NOW-CZFBDT
+AND   SEQ    = GW_ZN002_NOW-SEQ.
+*
+L_SUBRC = SY-SUBRC.
+IF SY-SUBRC = 0.
+COMMIT WORK AND WAIT.
+ELSE.
+ROLLBACK WORK.
+ENDIF.
+*
+ENDFORM.                    " F_ZN002_UPDATE
+*&---------------------------------------------------------------------*
+*&      Form  F_READ_ZN002
+*&---------------------------------------------------------------------*
+FORM F_READ_ZN002.
+*
+GW_ZN002_INDEX = GW_ZN002_INDEX + 1.
+CLEAR:GW_ZN002_NOW.
+READ TABLE GT_ZN002_NOW INDEX GW_ZN002_INDEX
+INTO  GW_ZN002_NOW.
+IF SY-SUBRC <> 0.
+GW_ZN002_EOF = C_X.
+ENDIF.
+*
+ENDFORM.                    " F_READ_ZN002
+*&---------------------------------------------------------------------*
+*&      Form  F_F-30_TOP_2
+*&---------------------------------------------------------------------*
+FORM F_F-30_TOP_2.
+
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0122',
+' ' 'BKPF-BLDAT' P_BLDAT,              "伝票日付
+' ' 'BKPF-BLART' P_BLART,              "伝票タイプ
+' ' 'BKPF-BUKRS' P_BUKRS,              "会社コード
+' ' 'BKPF-BUDAT' P_BUDAT,              "転記日付
+' ' 'BKPF-WAERS' GW_WAERS,              "通貨
+' ' 'RF05A-XPOS1(04)' 'X',             "決済振替転記
+' ' 'BKPF-BKTXT' P_BKTXT,              "伝票ヘッダ Text
+' ' 'BDC_OKCODE' '=SL'.                "【未決済明細選択】
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0710',
+' ' 'RF05A-AGBUK' P_BUKRS,             "会社コード
+' ' 'RF05A-AGKON' GW_ZN002_NOW-LIFNR,  "請求先
+' ' 'RF05A-AGKOA' 'K',                 "仕入先
+' ' 'RF05A-XNOPS' 'X',                 "標準未決済明細
+' ' 'BDC_OKCODE' '=SLB'.               "
+*
+LOOP AT GT_BELNR_TBL INTO GW_BELNR_TBL.
+CONCATENATE GW_BELNR_TBL-BELNR
+GW_BELNR_TBL-GJAHR
+GW_BELNR_TBL-BUZEI
+INTO GW_RF05A_SEL01.
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0733',
+' ' 'RF05A-FELDN(01)' 'BELNR',       "項目
+' ' 'RF05A-SEL01(01)' GW_RF05A_SEL01,
+"未決済明細選択基準の入力項目
+' ' 'BDC_OKCODE' '/00'.
+AT LAST.
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0733',
+' ' 'BDC_OKCODE' '=PA'.             "
+PERFORM GEN_BDC USING : 'X' 'SAPDF05X' '3100',
+' ' 'BDC_OKCODE' '=AB'.               "
+ENDAT.
+ENDLOOP.
+*
+PERFORM F_SAPMF05A_0700.
+*
+IF GW_ZN002_NOW-PADVNC <> SPACE. "前渡済
+PERFORM F_SAPMF05A_0300.
+ELSE.
+PERFORM F_SAPMF05A_0302.
+ENDIF.
+*
+CHECK GW_SAGAKU <> 0.
+*
+IF GW_ZN002_CNT-SYORI_CNT = GW_ZN002_INDEX.
+IF GW_ZN002_CNT-MISYORI_CNT = 0.
+*雑収入、雑損益
+PERFORM F_SAPMF05A_0300_END.
+ELSE.
+*買掛金
+PERFORM F_SAPMF05A_0302_END.
+ENDIF.
+ELSE.
+*買掛金
+PERFORM F_SAPMF05A_0302_END.
+ENDIF.
+*
+
+ENDFORM.                    " F_F-30_TOP_2
+*&---------------------------------------------------------------------*
+*&      Form  F_SAPMF05A_0700
+*&---------------------------------------------------------------------*
+FORM F_SAPMF05A_0700.
+*転記キー
+IF GW_ZN002_NOW-PADVNC <> SPACE.  "前渡済
+*
+IF GW_ZN002_NOW-PWRBTR < 0.
+GW_NEWBS = '40'.
+ELSE.
+GW_NEWBS = '50'.
+ENDIF.
+*
+ELSE.
+IF GW_ZN002_NOW-PWRBTR < 0.
+GW_NEWBS = '27'.
+ELSE.
+GW_NEWBS = '37'.
+ENDIF.
+ENDIF.
+*勘定コード
+IF GW_ZN002_NOW-PADVNC <> SPACE.  "前渡済
+GW_NEWKO = GW_ZN002_NOW-PHKONT.    "振替勘定
+ELSE.
+IF GW_ZN002_NOW-PLIFNR <> SPACE.   "振替仕入先
+GW_NEWKO = GW_ZN002_NOW-PLIFNR.  "振替仕入先
+ELSE.
+GW_NEWKO = GW_ZN002_NOW-LIFNR.    "請求先
+ENDIF.
+ENDIF.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0700',
+' ' 'RF05A-NEWBS' GW_NEWBS,     "次明細の転記キー
+' ' 'RF05A-NEWKO' GW_NEWKO,     "次明細の勘定またはマッチコード
+' ' 'BDC_OKCODE' '/00'.                    "
+*
+ENDFORM.                    " F_SAPMF05A_0700
+*&---------------------------------------------------------------------*
+*&      Form  F_F-30_TOP_1
+*&---------------------------------------------------------------------*
+FORM F_F-30_TOP_1.
+*
+PERFORM F_SAPMF05A_0122.
+*
+* PERFORM F_SAPMF05A_0700.
+*
+IF GW_ZN002_NOW-PADVNC <> SPACE. "前渡済
+PERFORM F_SAPMF05A_0300.
+ELSE.
+PERFORM F_SAPMF05A_0302.
+ENDIF.
+*
+CHECK GW_SAGAKU <> 0.
+*
+IF GW_ZN002_CNT-SYORI_CNT = GW_ZN002_INDEX.
+IF GW_ZN002_CNT-MISYORI_CNT = 0.
+*雑収入、雑損益
+PERFORM F_SAPMF05A_0300_END.
+ELSE.
+*買掛金
+PERFORM F_SAPMF05A_0302_END.
+ENDIF.
+ELSE.
+*買掛金
+PERFORM F_SAPMF05A_0302_END.
+ENDIF.
+*
+ENDFORM.                    " F_F-30_TOP_1
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSAK_BSIK
+*&---------------------------------------------------------------------*
+FORM GET_BSAK_BSIK USING L_LIFNR  "請求先
+L_AUGBL  "決済伝票番号
+L_GJAHR. "会計年度
+*
+DATA:
+L_DB_WAIT_CNT TYPE I,
+L_BUZEI       TYPE BSEG-BUZEI.
+*
+CLEAR:L_DB_WAIT_CNT.
+DO.
+SELECT COUNT(*)
+FROM BSAK
+WHERE LIFNR = L_LIFNR
+AND   BUKRS = P_BUKRS
+AND   AUGBL = L_AUGBL.
+IF SY-SUBRC = 0.
+EXIT.
+ELSE.
+SELECT COUNT(*)
+FROM BSIK
+WHERE LIFNR = L_LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = L_GJAHR
+AND   BELNR = L_AUGBL.
+IF SY-SUBRC = 0.
+EXIT.
+ELSE.
+CLEAR:L_BUZEI.
+L_BUZEI =  1.
+SELECT SINGLE COUNT(*)
+FROM BSEG
+WHERE BUKRS = P_BUKRS
+AND   BELNR = L_AUGBL
+AND   GJAHR = L_GJAHR
+AND   BUZEI = L_BUZEI.
+IF SY-SUBRC = 0.
+EXIT.
+ELSE.
+WAIT UP TO 1 SECONDS.
+L_DB_WAIT_CNT = L_DB_WAIT_CNT + 1.
+IF L_DB_WAIT_CNT > 300.
+*プログラムに例外が発生しました BSAK,BSIKの決済伝票取得エラー
+MESSAGE E806 WITH TEXT-E18.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDDO.
+*
+ENDFORM.                    " GET_BSAK_BSIK
+*&---------------------------------------------------------------------*
+*&      Form  GET_FBRA_DATA
+*&---------------------------------------------------------------------*
+FORM GET_FBRA_DATA.
+*
+PERFORM GET_ZN002_FBRA.
+*
+ENDFORM.                    " GET_FBRA_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZN002_FBRA
+*&---------------------------------------------------------------------*
+FORM GET_ZN002_FBRA.
+*
+REFRESH GT_ZN002_FBRA.
+*
+SELECT ZN002~LIFNR
+ZN002~CZFBDT
+ZN002~SEQ
+ZN002~BELNR
+ZN002~GJAHR
+ZN002~BUDAT
+LFA1~NAME1
+INTO TABLE GT_ZN002_FBRA
+FROM ZN002
+JOIN LFB1 ON LFB1~LIFNR  = ZN002~LIFNR
+AND LFB1~BUKRS = ZN002~BUKRS
+JOIN LFA1 ON LFA1~LIFNR = ZN002~LIFNR
+JOIN LFM1 ON LFM1~LIFNR = ZN002~LIFNR
+WHERE ZN002~BUKRS = P_BUKRS
+* 2012/04/11 MOD START "取消条件取得条件変更
+AND   ZN002~PSTFLG <> SPACE
+AND   ZN002~BELNR = P_AUGBL  "選択画面の決済伝票
+AND   ZN002~GJAHR = P_GJAHR  "選択画面の会計年度
+AND   LFM1~EKORG = P_EKORG
+*       AND   ZN002~LIFNR IN S_LIFNR
+*       AND   ZN002~PZFBDT = P_PZFBDT
+*       AND   ZN002~PZLSCH IN S_PZLSCH
+*       AND   ZN002~PSTFLG <> SPACE
+*       AND   ZN002~WAERS IN S_WAERS
+*       AND   ZN002~BELNR = P_AUGBL  "選択画面の決済伝票
+*       AND   ZN002~GJAHR = P_GJAHR  "選択画面の会計年度
+*       AND   LFB1~KVERM IN S_KVERM
+*       AND   LFM1~EKORG = P_EKORG
+* 2012/04/11 MOD END.
+.
+
+IF SY-SUBRC <> 0.
+*対象データがありません
+MESSAGE S762.
+LEAVE LIST-PROCESSING.
+ELSE.
+* 2012/04/11 ADD START 入金予定取消チェック
+*
+SELECT COUNT(*)
+FROM ZN005
+WHERE IBELNER = P_AUGBL   "決済伝票番号
+AND IGJAHR  = P_GJAHR.  "決済会計年度
+IF ( SY-SUBRC = 0 ).
+*     相殺反映は入金マニュアル消込で取消て下さい
+MESSAGE S811.
+LEAVE LIST-PROCESSING.
+ENDIF.
+* 2012/04/11 ADD END
+DESCRIBE TABLE GT_ZN002_FBRA LINES GW_CNT-INPUT.
+ENDIF.
+
+*
+ENDFORM.                    " GET_ZN002_FBRA
+*&---------------------------------------------------------------------*
+*&      再登録
+*&---------------------------------------------------------------------*
+FORM MAIN_FBRA.
+DATA :
+L_MSGTEXT TYPE STRING,
+L_USER    TYPE SY-MSGV1,
+L_SUBRC   TYPE SY-SUBRC.
+*
+LOOP AT GT_ZN002_FBRA INTO GW_ZN002_FBRA.
+*
+SELECT SINGLE * FROM ZN002
+WHERE BUKRS  = P_BUKRS
+AND   LIFNR  = GW_ZN002_FBRA-LIFNR
+AND   CZFBDT = GW_ZN002_FBRA-CZFBDT
+AND   SEQ    = GW_ZN002_FBRA-SEQ.
+*
+*支払予定ロック
+PERFORM LOCK_ZN002 USING GW_ZN002_FBRA-LIFNR
+GW_ZN002_FBRA-CZFBDT
+GW_SUBRC L_USER.
+IF GW_SUBRC <> 0.
+GW_CNT-ERR = GW_CNT-ERR + 1.
+MESSAGE I756 WITH TEXT-M01 L_USER INTO L_MSGTEXT.
+*        & ロックエラー & がロックしています
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING ZN002
+L_MSGTEXT GW_ZN002_FBRA-NAME1
+L_SUBRC.
+CONTINUE.
+ENDIF.
+*
+SELECT *
+INTO TABLE GT_ZN002_FBRA_I
+FROM ZN002
+WHERE BUKRS  = P_BUKRS
+AND   LIFNR  = GW_ZN002_FBRA-LIFNR
+AND   CZFBDT = GW_ZN002_FBRA-CZFBDT
+AND   PSTFLG <> SPACE.
+*
+*   modify 2013/01/24 S.MIKAMI DMW4989 {
+SORT GT_ZN002_FBRA_I BY GJAHR DESCENDING  "会計年度
+BELNR DESCENDING. "会計伝票番号
+*    SORT GT_ZN002_FBRA_I BY PSTDT DESCENDING  "会計振替日
+*                            PSTTM DESCENDING  "会計振替時刻
+*                            GJAHR DESCENDING  "会計年度
+*                            BELNR DESCENDING. "会計伝票番号
+* } modify 2013/01/24 S.MIKAMI DMW4989
+
+READ TABLE GT_ZN002_FBRA_I INDEX 1 INTO GW_ZN002_FBRA_I.
+IF SY-SUBRC <> 0.
+CLEAR:GW_ZN002_FBRA_I.
+ENDIF.
+*
+IF GW_ZN002_FBRA_I-BELNR = GW_ZN002_FBRA-BELNR.  "会計伝票番号
+GW_ZN002_FBRA_I-GJAHR = GW_ZN002_FBRA-GJAHR.  "会計年度
+IF GW_ZN002_FBRA-BUDAT <= P_BUDATT.
+IF P_TEST IS INITIAL.
+* 2012/06/22 ADD START
+* メモリーへPGID退避 (取消チェック用）
+EXPORT SY-REPID
+TO MEMORY
+ID 'ZN01XXXX'.
+* 2012/06/22 ADD END.
+PERFORM F_CALL_TRN_FBRA_FB08 USING GW_ZN002_FBRA-BELNR
+GW_ZN002_FBRA-GJAHR
+ZN002
+GW_ZN002_FBRA-NAME1.
+ELSE.
+*         取消可能です
+L_SUBRC = 0.
+PERFORM ALV_LISTOUT USING ZN002
+TEXT-B03 GW_ZN002_FBRA-NAME1
+L_SUBRC.
+ENDIF.
+ELSE.
+GW_CNT-ERR = GW_CNT-ERR + 1.
+*       転記日付は & 以降でなければなりません
+MESSAGE I362(F5) WITH GW_ZN002_FBRA_I-BUDAT INTO L_MSGTEXT.
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING ZN002
+L_MSGTEXT GW_ZN002_FBRA-NAME1
+L_SUBRC.
+ENDIF.
+ELSE.
+GW_CNT-ERR = GW_CNT-ERR + 1.
+
+*     直近の決済伝票が存在します & &
+MESSAGE I805 WITH GW_ZN002_FBRA_I-BELNR GW_ZN002_FBRA_I-GJAHR
+INTO L_MSGTEXT.
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING ZN002
+L_MSGTEXT GW_ZN002_FBRA-NAME1
+L_SUBRC.
+ENDIF.
+*支払予定アンロック
+PERFORM UNL0CK_Z002  USING GW_ZN002_FBRA-LIFNR
+GW_ZN002_FBRA-CZFBDT.
+*
+ENDLOOP.
+*
+ENDFORM.                    " MAIN_FBRA
+*&---------------------------------------------------------------------*
+*&      Form  UNL0CK_Z002
+*&---------------------------------------------------------------------*
+FORM UNL0CK_Z002 USING L_LIFNR L_CZFBDT.
+*
+CALL FUNCTION 'DEQUEUE_EZN002'
+EXPORTING
+*     MODE_ZN002       = 'E'
+*     MANDT            = SY-MANDT
+BUKRS            = P_BUKRS
+LIFNR            = L_LIFNR
+CZFBDT           = L_CZFBDT
+*     SEQ              =
+*     X_BUKRS          = ' '
+*     X_LIFNR          = ' '
+*     X_CZFBDT         = ' '
+*     X_SEQ            = ' '
+*     _SCOPE           = '3'
+*     _SYNCHRON        = ' '
+*     _COLLECT         = ' '
+.
+
+*
+ENDFORM.                    " UNL0CK_Z002
+*&---------------------------------------------------------------------*
+*&      Form  F_CALL_TRN_FBRA_FB08
+*&---------------------------------------------------------------------*
+FORM F_CALL_TRN_FBRA_FB08 USING L_AUGBL L_GJAHR L_ZN002 TYPE ZN002
+L_NAME1.
+DATA :
+L_MODE(1) TYPE C,
+L_MSGTEXT TYPE STRING,
+L_SUBRC   TYPE SY-SUBRC,
+L_PARAMS TYPE CTU_PARAMS.
+
+*
+REFRESH GT_BDC_DATA.
+*反対仕訳理由
+IF L_ZN002-BUDAT = P_BUDATT.
+GW_STGRD = C_STGRD_01. "当期の反対仕訳
+ELSE.
+GW_STGRD = C_STGRD_02. "決済済期間の反対仕訳
+ENDIF.
+*会計管理: 仕入先の二次索引 (決済明細)の存在チェック
+PERFORM F_CHECK_BSAK USING L_ZN002 L_SUBRC.
+*
+IF L_SUBRC = 0.
+PERFORM F_FBRA_CALL USING L_AUGBL L_GJAHR.
+READ TABLE GT_BDC_MSG WITH KEY MSGID = 'F5'
+MSGNR = '539'
+INTO GW_BDC_MSG.
+IF SY-SUBRC = 0.
+PERFORM F_CHECK_BSIK USING  L_ZN002 L_GJAHR.
+PERFORM F_FB08_CALL USING L_AUGBL L_GJAHR.
+READ TABLE GT_BDC_MSG WITH KEY MSGID = 'F5'
+MSGNR = '312'
+INTO GW_BDC_MSG.
+ENDIF.
+ELSE.
+PERFORM F_FB08_CALL USING L_AUGBL L_GJAHR.
+READ TABLE GT_BDC_MSG WITH KEY MSGID = 'F5'
+MSGNR = '312'
+INTO GW_BDC_MSG.
+ENDIF.
+*
+IF SY-SUBRC = 0.
+*
+PERFORM F_ZN002_UPDATE_FBRA USING L_ZN002 L_SUBRC.  "決済伝票
+*
+IF L_SUBRC = 0.
+CLEAR:
+L_ZN002-PSTFLG,   "会計振替
+L_ZN002-PSTDT,    "会計振替日
+L_ZN002-PSTTM,    "会計振替時刻
+L_ZN002-PSTUSR,   "会計振替ユーザ
+L_ZN002-BELNR,    "会計伝票番号
+L_ZN002-GJAHR,    "会計年度
+L_ZN002-BUDAT.    "伝票の転記日付
+GW_CNT-OK = GW_CNT-OK + 1.
+*     決済 & は再登録されました
+MESSAGE I539(F5) WITH GW_BDC_MSG-MSGV1 GW_BDC_MSG-MSGV2
+INTO L_MSGTEXT.
+L_SUBRC = 0.
+PERFORM ALV_LISTOUT USING L_ZN002
+L_MSGTEXT L_NAME1
+L_SUBRC.
+ELSE.
+GW_CNT-ERR = GW_CNT-ERR + 1.
+*     支払予定(ZN002)の更新に失敗しました。支払予定を更新してください
+MESSAGE I804 INTO L_MSGTEXT.
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING L_ZN002
+L_MSGTEXT L_NAME1
+L_SUBRC.
+ENDIF.
+ELSE.
+*エラー
+GW_CNT-ERR = GW_CNT-ERR + 1.
+LOOP AT GT_BDC_MSG INTO GW_BDC_MSG WHERE MSGTYP = C_A OR
+MSGTYP = C_E OR
+MSGTYP = C_S.
+MESSAGE ID   GW_BDC_MSG-MSGID
+TYPE 'I'
+NUMBER GW_BDC_MSG-MSGNR
+WITH GW_BDC_MSG-MSGV1
+GW_BDC_MSG-MSGV2
+GW_BDC_MSG-MSGV3
+GW_BDC_MSG-MSGV4
+INTO L_MSGTEXT.
+L_SUBRC = 9.
+PERFORM ALV_LISTOUT USING L_ZN002
+L_MSGTEXT L_NAME1
+L_SUBRC.
+EXIT.
+ENDLOOP.
+ENDIF.
+*
+ENDFORM.                    " F_CALL_TRN_FBRA_FB08
+*&---------------------------------------------------------------------*
+*&      Form  F_ZN002_UPDATE_FBRA
+*&---------------------------------------------------------------------*
+FORM F_ZN002_UPDATE_FBRA USING L_ZN002 TYPE ZN002 L_SUBRC.
+DATA :
+LW_ZN002 TYPE ZN002,
+W_ZN002  TYPE ZN002.
+MOVE-CORRESPONDING L_ZN002 TO W_ZN002.
+CLEAR:LW_ZN002.
+LW_ZN002-MANDT = W_ZN002-MANDT.
+LW_ZN002-BUKRS = W_ZN002-BUKRS.
+LW_ZN002-LIFNR = W_ZN002-LIFNR.
+LW_ZN002-CZFBDT = W_ZN002-CZFBDT.
+LW_ZN002-SEQ = W_ZN002-SEQ.
+LW_ZN002-PZFBDT = W_ZN002-PZFBDT.
+LW_ZN002-PZLSCH = W_ZN002-PZLSCH.
+LW_ZN002-PZTERM = W_ZN002-PZTERM.
+LW_ZN002-PHKONT = W_ZN002-PHKONT.
+LW_ZN002-WAERS = W_ZN002-WAERS.
+LW_ZN002-PWRBTR = W_ZN002-PWRBTR.
+LW_ZN002-PADVNC = W_ZN002-PADVNC.
+LW_ZN002-PLIFNR = W_ZN002-PLIFNR.
+LW_ZN002-PKUNNR = W_ZN002-PKUNNR.
+LW_ZN002-PZTERM_D = W_ZN002-PZTERM_D.
+LW_ZN002-PZLSPR = W_ZN002-PZLSPR.
+LW_ZN002-PMEMO = W_ZN002-PMEMO.
+LW_ZN002-INSDT = W_ZN002-INSDT.
+LW_ZN002-INSTM = W_ZN002-INSTM.
+LW_ZN002-INSUSR = W_ZN002-INSUSR.
+*
+UPDATE ZN002 FROM LW_ZN002.
+*
+L_SUBRC = SY-SUBRC.
+IF SY-SUBRC = 0.
+COMMIT WORK AND WAIT.
+ELSE.
+ROLLBACK WORK.
+ENDIF.
+*
+ENDFORM.                    " F_ZN002_UPDATE_FBRA
+*&---------------------------------------------------------------------*
+*&      Form  PGM_INIT
+*&---------------------------------------------------------------------*
+FORM PGM_INIT.
+*
+CLEAR:GW_PROG_STOP,GW_CNT-INPUT,GW_CNT-OK,GW_CNT-ERR,
+GW_ZN002_INDEX,GW_YN220_INDEX,GW_ZN002_EOF,GW_YN220_EOF.
+*BDC MODE
+GW_F-30_MODE = C_N.
+GW_FBRA_MODE = C_N.
+*
+GW_DATUM = SY-DATUM.   "日付
+GW_UZEIT = SY-UZEIT.   "時刻
+GW_UNAME = SY-UNAME.   "ユーザ
+*
+ENDFORM.                    " PGM_INIT
+*&---------------------------------------------------------------------*
+*&      Form  F_SAPMF05A_0122
+*&---------------------------------------------------------------------*
+FORM F_SAPMF05A_0122.
+*
+*転記キー
+IF GW_ZN002_NOW-PADVNC <> SPACE.  "前渡済
+*2012/3/6
+
+IF GW_ZN002_NOW-PWRBTR < 0.
+GW_NEWBS = '40'.
+ELSE.
+GW_NEWBS = '50'.
+ENDIF.
+*2012/3/6
+
+ELSE.
+IF GW_ZN002_NOW-PWRBTR < 0.
+GW_NEWBS = '27'.
+ELSE.
+GW_NEWBS = '37'.
+ENDIF.
+ENDIF.
+*勘定コード
+IF GW_ZN002_NOW-PADVNC <> SPACE.     "前渡済
+GW_NEWKO = GW_ZN002_NOW-PHKONT.    "振替勘定
+ELSE.
+IF GW_ZN002_NOW-PLIFNR <> SPACE.   "振替仕入先
+GW_NEWKO = GW_ZN002_NOW-PLIFNR.  "振替仕入先
+ELSE.
+GW_NEWKO = GW_ZN002_NOW-LIFNR.   "請求先
+ENDIF.
+ENDIF.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0122',
+' ' 'BKPF-BLDAT' P_BLDAT,              "伝票日付
+' ' 'BKPF-BLART' P_BLART,              "伝票タイプ
+' ' 'BKPF-BUKRS' P_BUKRS,              "会社コード
+' ' 'BKPF-BUDAT' P_BUDAT,              "転記日付
+' ' 'BKPF-WAERS' GW_WAERS,              "通貨
+' ' 'RF05A-XPOS1(04)' 'X',             "決済振替転記
+' ' 'BKPF-BKTXT' P_BKTXT,              "伝票ヘッダ Text
+' ' 'RF05A-NEWBS' GW_NEWBS,       "次明細の転記キー
+' ' 'RF05A-NEWKO' GW_NEWKO,       "次明細の勘定またはマッチコード
+' ' 'BDC_OKCODE' '/00'.                "
+*
+ENDFORM.                    " F_SAPMF05A_0122
+*&---------------------------------------------------------------------*
+*&      Form  GET_YN220_DEL_NOW
+*&---------------------------------------------------------------------*
+FORM GET_YN220_DEL_NOW USING  L_VRFCTON
+L_CZFBDT.
+REFRESH:GT_YN220_DEL_NOW.
+LOOP AT GT_YN220_DEL INTO GW_YN220_DEL WHERE VRFCTON  = L_VRFCTON
+AND  CZFBDT   = L_CZFBDT.
+APPEND GW_YN220_DEL TO GT_YN220_DEL_NOW.
+ENDLOOP.
+
+ENDFORM.                    " GET_YN220_DEL_NOW
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_BSAK
+*&---------------------------------------------------------------------*
+FORM F_CHECK_BSAK USING L_ZN002 TYPE ZN002
+L_SUBRC.
+*
+SELECT COUNT(*)
+FROM BSAK
+WHERE LIFNR = L_ZN002-LIFNR
+AND   BUKRS = P_BUKRS
+AND   AUGDT = L_ZN002-BUDAT
+AND   AUGBL = P_AUGBL.
+IF SY-SUBRC <> 0.
+SELECT COUNT(*)
+FROM BSAK
+WHERE LIFNR = L_ZN002-LIFNR
+AND   BUKRS = P_BUKRS
+AND   AUGDT > L_ZN002-BUDAT
+AND   AUGBL = P_AUGBL.
+ENDIF.
+*
+L_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " F_CHECK_BSAK
+*&---------------------------------------------------------------------*
+*&      Form  F_FBRA_CALL
+*&---------------------------------------------------------------------*
+FORM F_FBRA_CALL USING L_AUGBL L_GJAHR.
+DATA :
+L_MODE(1) TYPE C,
+L_MSGTEXT TYPE STRING,
+L_SUBRC   TYPE SY-SUBRC,
+L_PARAMS TYPE CTU_PARAMS.
+*
+REFRESH:GT_BDC_DATA,GT_BDC_MSG.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05R' '0100',
+' ' 'RF05R-AUGBL' L_AUGBL,              "決済伝票
+' ' 'RF05R-BUKRS' P_BUKRS,              "会社コード
+' ' 'RF05R-GJAHR' L_GJAHR,              "会計年度
+' ' 'BDC_OKCODE' '=RAGL'.               "決済明細再設定
+*  PERFORM GEN_BDC USING : 'X' 'SAPLSPO2' '0100',
+*    ' ' 'BDC_CURSOR' 'SPOP-VAROPTION2',     "再登録と反対仕訳
+*   ' ' 'BDC_OKCODE' '=OPT2'.
+*                "
+*  PERFORM GEN_BDC USING : 'X' 'SAPMF05R' '0300',
+*    ' ' 'RF05R-STGRD' GW_STGRD,            "反対仕訳理由
+*    ' ' 'RF05R-BUDAT' P_BUDATT,            "転記日付：選択画面の転記日
+*    ' ' 'RF05R-MONAT' SPACE,               "会計期間
+*    ' ' 'BDC_OKCODE' '/00'.                "
+*
+L_MODE = GW_FBRA_MODE.
+*CALL TRANSACTION USING... の処理モード
+L_PARAMS-DISMODE = L_MODE.
+*CALL TRANSACTION USING... 用更新モード
+L_PARAMS-UPDMODE = C_S.
+*CALL TRANSACTION USING... 用 CATT モード
+*   L_PARAMS-CATTMODE "
+*CALL TRANSACTION USING... のデフォルト Dynpro サイズ
+*   L_PARAMS-DEFSIZE "
+*CALL TRANSACTION USING... COMMIT によって完了しない
+*   L_PARAMS-RACOMMIT
+*CALL TRANSACTION USING... 用 SY-BINPT=SPACE
+*  L_PARAMS-NOBINPT = C_X.
+*CALL TRANSACTION USING... 後の SY-BINPT=SPACE
+*   L_PARAMS-NOBIEND
+*
+REFRESH GT_BDC_MSG.
+CALL TRANSACTION 'FBRA' USING GT_BDC_DATA
+OPTIONS FROM L_PARAMS
+MESSAGES INTO GT_BDC_MSG.
+*
+ENDFORM.                    " F_FBRA_CALL
+*&---------------------------------------------------------------------*
+*&      Form  F_FB08_CALL
+*&---------------------------------------------------------------------*
+FORM F_FB08_CALL USING L_AUGBL L_GJAHR.
+DATA :
+L_MODE(1) TYPE C.
+*
+REFRESH:GT_BDC_DATA,GT_BDC_MSG.
+*
+PERFORM GEN_BDC USING : 'X' 'SAPMF05A' '0105',
+' ' 'RF05A-BELNS' L_AUGBL,              "決済伝票
+' ' 'BKPF-BUKRS'  P_BUKRS,              "会社コード
+' ' 'RF05A-GJAHS' L_GJAHR,              "会計年度
+' ' 'UF05A-STGRD' GW_STGRD,             "反対仕訳理由
+' ' 'BSIS-BUDAT'  P_BUDATT,             "転記日
+' ' 'BSIS-MONAT'  SPACE,                "期間
+' ' 'BDC_OKCODE'  '=BU'.                "保存
+*
+L_MODE = GW_FBRA_MODE.
+CALL TRANSACTION 'FB08' USING GT_BDC_DATA
+MODE L_MODE
+UPDATE C_S
+MESSAGES INTO GT_BDC_MSG.
+*
+ENDFORM.                    " F_FB08_CALL
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_BSIK
+*&---------------------------------------------------------------------*
+FORM F_CHECK_BSIK USING L_ZN002 TYPE ZN002
+L_GJAHR.
+DATA :
+L_DB_WAIT_CNT TYPE I.
+*
+CLEAR:L_DB_WAIT_CNT.
+DO.
+SELECT COUNT(*)
+FROM BSIK
+WHERE LIFNR = L_ZN002-LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = L_GJAHR
+AND   BELNR = P_AUGBL.
+IF SY-SUBRC = 0.
+EXIT.
+ELSE.
+WAIT UP TO 1 SECONDS.
+L_DB_WAIT_CNT = L_DB_WAIT_CNT + 1.
+IF L_DB_WAIT_CNT > 300.
+*プログラムに例外が発生しました BSIKからの決済伝票取得エラー
+MESSAGE E806 WITH TEXT-E17.
+ENDIF.
+ENDIF.
+ENDDO.
+*
+ENDFORM.                    " F_CHECK_BSIK
+*&---------------------------------------------------------------------*
+*&      Form  F_BSIK_BSAK_DEL_NOW_GET
+*&---------------------------------------------------------------------*
+FORM F_BSIK_BSAK_DEL_NOW_GET.
+DATA :
+L_SUBRC  TYPE SY-SUBRC,
+L_ZTERM  TYPE BSIK-ZTERM, "支払条件キー
+L_ZFBDT  TYPE BSIK-ZFBDT, "期日計算の支払基準日
+L_ZUONR  TYPE BSIK-ZUONR, "ソートキー
+L_GJAHR  TYPE BSAK-GJAHR, "会計年度
+L_BELNR  TYPE BSAK-BELNR, "会計伝票番号
+L_BUZEI  TYPE BSAK-BUZEI, "会計伝票内の明細番号
+L_AUGBL  TYPE BSAK-AUGBL, "決済伝票番号
+L_ZLSCH  TYPE BSAK-ZLSCH, "支払方法
+L_ZLSPR  TYPE BSAK-ZLSPR, "支払保留
+L_SGTXT  TYPE BSIK-SGTXT, "明細テキスト
+L1_SGTXT TYPE BSIK-SGTXT. "明細テキスト
+
+*
+CLEAR:GW_YN220_NOW.
+*
+CONCATENATE GW_ZN002_SUM-CZFBDT '消込残' INTO L_SGTXT.
+*
+READ TABLE GT_ZN002_D  WITH KEY BUKRS  = P_BUKRS
+LIFNR  = GW_ZN002_SUM-LIFNR
+CZFBDT = GW_ZN002_SUM-CZFBDT
+BINARY SEARCH INTO GW_ZN002_D.
+IF SY-SUBRC = 0.
+SELECT ZTERM ZFBDT ZUONR ZLSCH ZLSPR
+INTO (L_ZTERM, L_ZFBDT, L_ZUONR,
+L_ZLSCH, L_ZLSPR )
+FROM BSIK
+WHERE LIFNR = GW_ZN002_D-LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = GW_ZN002_D-GJAHR
+AND   BELNR = GW_ZN002_D-BELNR
+AND   HKONT = GW_AKONT
+AND   SGTXT = L_SGTXT.
+EXIT.
+ENDSELECT.
+IF SY-SUBRC = 0.
+CLEAR:GW_YN220_NOW.
+GW_YN220_NOW-VRFCTON = GW_ZN002_SUM-LIFNR.   "仕入先コード(請求先)
+GW_YN220_NOW-CZFBDT  = GW_ZN002_SUM-CZFBDT.  "照合締日
+GW_YN220_NOW-YNGJAHR = L_ZUONR(4).           "会計伝票会計年度
+GW_YN220_NOW-BELNR   = L_ZUONR+4(10).        "会計伝票番号
+GW_YN220_NOW-BUZEI   = L_ZUONR+14(3).        "会計伝票明細番号
+GW_YN220_NOW-ZTERM   = L_ZTERM.              "支払条件キー
+GW_YN220_NOW-ZFBDT   = L_ZFBDT.              "期日計算の支払基準日
+GW_YN220_NOW-ZLSCH   = L_ZLSCH.              "支払方法
+GW_YN220_NOW-ZLSPR   = L_ZLSPR.              "支払保留
+ELSE.
+SELECT AUGBL ZUONR GJAHR BELNR BUZEI ZTERM ZFBDT
+ZLSCH ZLSPR SGTXT
+INTO (L_AUGBL, L_ZUONR,
+L_GJAHR, L_BELNR,
+L_BUZEI, L_ZTERM, L_ZFBDT,
+L_ZLSCH, L_ZLSPR, L1_SGTXT )
+FROM BSAK
+WHERE BUKRS = P_BUKRS
+AND   LIFNR = GW_ZN002_D-LIFNR
+AND   AUGBL = GW_ZN002_D-BELNR
+AND   ZUONR <> SPACE.
+IF L_AUGBL <> L_BELNR AND
+L1_SGTXT = L_SGTXT.
+CLEAR:GW_YN220_NOW.
+GW_YN220_NOW-VRFCTON =
+GW_ZN002_SUM-LIFNR.   "仕入先コード(請求先)
+GW_YN220_NOW-CZFBDT  = GW_ZN002_SUM-CZFBDT.  "照合締日
+GW_YN220_NOW-YNGJAHR = L_ZUONR(4).           "会計伝票会計年度
+GW_YN220_NOW-BELNR   = L_ZUONR+4(10).        "会計伝票番号
+GW_YN220_NOW-BUZEI   = L_ZUONR+14(3).        "会計伝票明細番号
+GW_YN220_NOW-ZTERM   = L_ZTERM.              "支払条件キー
+GW_YN220_NOW-ZFBDT   =
+L_ZFBDT.              "期日計算の支払基準日
+GW_YN220_NOW-ZLSCH   = L_ZLSCH.              "支払方法
+GW_YN220_NOW-ZLSPR   = L_ZLSPR.              "支払保留
+EXIT.
+ENDIF.
+ENDSELECT.
+IF SY-SUBRC <> 0.
+SELECT AUGBL ZUONR GJAHR BELNR BUZEI ZTERM ZFBDT
+ZLSCH ZLSPR SGTXT
+INTO (L_AUGBL, L_ZUONR,
+L_GJAHR, L_BELNR,
+L_BUZEI, L_ZTERM, L_ZFBDT,
+L_ZLSCH, L_ZLSPR, L1_SGTXT )
+FROM BSAK
+WHERE BUKRS = P_BUKRS
+AND   LIFNR = GW_ZN002_D-LIFNR
+AND   AUGBL = GW_ZN002_D-BELNR
+AND   ZUONR = SPACE.
+IF L_AUGBL <> L_BELNR AND
+L1_SGTXT = L_SGTXT.
+CLEAR:GW_YN220_NOW.
+GW_YN220_NOW-VRFCTON =
+GW_ZN002_SUM-LIFNR.                "仕入先コード(請求先)
+GW_YN220_NOW-CZFBDT  = GW_ZN002_SUM-CZFBDT.  "照合締日
+GW_YN220_NOW-YNGJAHR = L_GJAHR.    "会計伝 票会計年度
+GW_YN220_NOW-BELNR   = L_BELNR.    "会計伝票番号
+GW_YN220_NOW-BUZEI   = L_BUZEI.    "会計伝票明細番号
+GW_YN220_NOW-ZTERM   = L_ZTERM.    "支払条件キー
+GW_YN220_NOW-ZFBDT   =
+L_ZFBDT.              "期日計算の支払基準日
+GW_YN220_NOW-ZLSCH   = L_ZLSCH.     "支払方法
+GW_YN220_NOW-ZLSPR   = L_ZLSPR.     "支払保留
+ENDIF.
+ENDSELECT.
+
+ENDIF.
+
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " F_BSIK_BSAK_DEL_NOW_GET
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZENZAN
+*&---------------------------------------------------------------------*
+FORM GET_ZENZAN.
+DATA :
+L_SUBRC TYPE SY-SUBRC.
+*
+IF NOT GW_F30_BELNR IS INITIAL.
+PERFORM F_PSTFLG_CHECK USING GW_F30_LIFNR
+GW_F30_GJAHR
+GW_F30_BELNR
+GW_F30_CZFBDT
+GW_YN220_KNETXAMT
+GW_F30_BUZEI
+L_SUBRC.
+IF L_SUBRC = 0.
+PERFORM F_BELNR_TBL_MAKE USING GW_F30_GJAHR
+GW_F30_BELNR
+GW_F30_BUZEI.
+ELSE.
+CLEAR:GW_F30_LIFNR,GW_F30_GJAHR,GW_F30_BELNR,
+GW_F30_CZFBDT.
+ENDIF.
+ENDIF.
+*
+ENDFORM.                    " GET_ZENZAN
+*&---------------------------------------------------------------------*
+*&      Form  READ_YN220_ALL
+*&---------------------------------------------------------------------*
+FORM READ_YN220_ALL.
+*
+DO.
+PERFORM F_READ_YN220.
+IF GW_YN220_INDEX = GW_ZN002_CNT-YN220_CNT OR
+GW_YN220_EOF = C_X.
+IF GW_YN220_EOF <> C_X.
+PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+GW_YN220_NOW-BELNR
+GW_YN220_NOW-BUZEI.
+GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
++ GW_YN220_NOW-KNETXAMT.
+ENDIF.
+*       差額 =　支払予定 - 前回買掛金
+GW_SAGAKU = GW_ZN002_NOW-PWRBTR - GW_YN220_KNETXAMT.
+PERFORM F_CALL_TRN_F-30.
+EXIT.
+ELSE.
+PERFORM F_BELNR_TBL_MAKE USING GW_YN220_NOW-YNGJAHR
+GW_YN220_NOW-BELNR
+GW_YN220_NOW-BUZEI.
+GW_YN220_KNETXAMT = GW_YN220_KNETXAMT
++ GW_YN220_NOW-KNETXAMT.
+ENDIF.
+ENDDO.
+*
+ENDFORM.                    " READ_YN220_ALL
+*&---------------------------------------------------------------------*
+*&      Form  GET_BSAK_YN220
+*&---------------------------------------------------------------------*
+FORM GET_BSAK_YN220 USING L_LIFNR L_GJAHR L_BELNR L_BUZEI
+L_SUBRC
+L_ZTERM L_ZFBDT.
+*
+SELECT ZTERM ZFBDT
+INTO (L_ZTERM, L_ZFBDT ) UP TO 1 ROWS
+FROM BSAK
+WHERE LIFNR = L_LIFNR
+AND   BUKRS = P_BUKRS
+AND   GJAHR = L_GJAHR
+AND   BELNR = L_BELNR
+AND   BUZEI = L_BUZEI.
+ENDSELECT.
+*
+L_SUBRC = SY-SUBRC.
+*
+ENDFORM.                    " GET_BSAK_YN220

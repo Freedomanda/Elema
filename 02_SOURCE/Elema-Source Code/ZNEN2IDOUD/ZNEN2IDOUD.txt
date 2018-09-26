@@ -1,0 +1,867 @@
+*&---------------------------------------------------------------------*
+*&  プログラムＩＤ ： ZNEN2IDOUD
+*&  プログラム名称 ：【在庫年齢表】在庫評価額設定
+*&  処　理　概　要 ：
+*&
+*&  作　  成  　者 ： MIS
+*&  作　  成  　日 ： 2009.4.2
+*&---------------------------------------------------------------------*
+*& 【変更履歴】
+*&  更新日     管理番号     更新者               更新内容
+*& ----------  --------  ---------------  -----------------------------*
+*& 2010.02.09  DMW1475   MIS 新井         営業所・営業グループ設定
+*& 2014.09.17            ISID11           グローバル化の対応
+*& 2014.10.22            ISID11           営業所設定の改修
+*& 2015.03.16            ISID18           海外の場合、保管場所対応
+*& 2015.08.07            ISID REN         本社の場合、
+*&                                        ブランク保管場所処理対応
+*&---------------------------------------------------------------------*
+REPORT ZNEN2IDOUD.
+*----------------------------------------------------------------------*
+* TABLES 定義
+*----------------------------------------------------------------------*
+TABLES:
+ZNEN002,
+MBEW,
+EKBE,
+T001,
+EKPO,
+MARA,
+LIKP.
+
+*----------------------------------------------------------------------*
+* DATA 定義
+*----------------------------------------------------------------------*
+DATA:
+ZNEN002W    LIKE ZNEN002 OCCURS 0 WITH HEADER LINE,
+
+**** START ADD 2014/09/18 ISID11 ****
+A1F_WL_WERKS TYPE RANGE_T_WERKS,
+**** END ADD 2014/09/18 ISID11 ****
+
+KENSU(3)    TYPE P,
+NSURYO      LIKE ZNEN002-MENGE,
+NSURYO2     LIKE ZNEN002-MENGE,
+**** START ADD 2015/03/16 ISID18 ****
+A1F_WL_EKPO LIKE EKPO,
+**** END ADD 2015/03/16 ISID18 ****
+* 2010.05.07 DMW1827 MIS T.arai insert - start
+A1F_WL_EKKO LIKE EKKO,
+A1F_WL_MSEG LIKE MSEG.
+* 2010.05.07 DMW1827 MIS T.arai insert - E n d
+
+DATA:
+A1F_WG_VERPR TYPE MBEW-VERPR,        "移動平均原価/期間単位価格
+A1F_WG_AMT   TYPE BAPICURR-BAPICURR, "通貨換算後の金額
+ITANKA_C(16) TYPE C,
+**** START UPD 2015/03/16 ISID18 ****
+*  ITANKA_D(16) TYPE P DECIMALS 0.
+ITANKA_D     TYPE ZNEN002-ITANKA.
+**** END UPD 2015/03/16 ISID18 ****
+
+*----------------------------------------------------------------------*
+*  定数(CONSTANTS)定義
+*----------------------------------------------------------------------*
+* 汎用モジュール名
+CONSTANTS:
+CNS_BAPI_CURRENCY_EXTERNAL
+TYPE TFDIR-FUNCNAME VALUE 'BAPI_CURRENCY_CONV_TO_EXTERNAL',
+CNS_DATE_TO_PERIOD_CONVERT
+TYPE TFDIR-FUNCNAME VALUE 'DATE_TO_PERIOD_CONVERT',
+CNS_GETPERIODLIMITS
+TYPE TFDIR-FUNCNAME VALUE 'BAPI_COAREA_GETPERIODLIMITS'.
+
+* その他
+CONSTANTS:
+CNS_OK(2) TYPE C        VALUE '○',
+CNS_00    TYPE SY-MSGID VALUE '00',
+CNS_S(1)  TYPE C        VALUE 'S',    "成功メッセージ
+CNS_NO    TYPE SY-MSGNO VALUE '208'.
+
+
+*----------------------------------------------------------------------*
+* PARAMETER 定義
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK BLK01 WITH FRAME TITLE TEXT-B01.
+PARAMETERS:
+ZANDT LIKE SY-DATUM.              "勘定日付
+SELECT-OPTIONS:
+MATNR FOR ZNEN002-MATNR,          "品目コード
+WERKS FOR ZNEN002-WERKS,          "プラント
+LFART FOR LIKP-LFART.             "出荷伝票タイプ
+SELECTION-SCREEN END   OF BLOCK BLK01.
+**** START UPD 2014/09/18 ISID11 ****
+*PARAMETERS BUKRS LIKE T001-BUKRS.
+PARAMETERS BUKRS LIKE T001-BUKRS OBLIGATORY.
+**** END UPD 2014/09/18 ISID11 ****
+
+**** START ADD 2014/09/18 ISID11 ****
+*----------------------------------------------------------------------*
+* INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+GET PARAMETER ID 'BUK' FIELD BUKRS.  "取得初め会社
+
+*----------------------------------------------------------------------*
+* INITIALIZATION
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+* 会社コードとプラントチェック
+PERFORM CHK_BUKWRK_DETAIL.
+**** END ADD 2014/09/18 ISID11 ****
+
+*----------------------------------------------------------------------*
+* Start Of Selection
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+**** START ADD 2014/09/18 ISID11 ****
+DATA:
+A1F_WL_MSG TYPE CHAR128.
+**** END ADD 2014/09/18 ISID11 ****
+
+**** START DEL 2014/09/18 ISID11 ****
+*  SELECT SINGLE * FROM T001
+*   WHERE BUKRS = BUKRS.
+**** END DEL 2014/09/18 ISID11 ****
+
+* 指定年月の在庫年齢データを取得
+SELECT *
+INTO TABLE ZNEN002W
+FROM ZNEN002
+WHERE MATNR IN MATNR AND
+**** START UPD 2014/09/18 ISID11 ****
+*               WERKS IN WERKS AND
+WERKS IN A1F_WL_WERKS AND
+**** END UPD 2014/09/18 ISID11 ****
+ZANDT =  ZANDT.
+
+*--   在庫評価を抽出
+LOOP AT ZNEN002W.
+*       標準在庫移動評価
+SELECT SINGLE *
+FROM MBEW
+WHERE MATNR = ZNEN002W-MATNR AND
+BWKEY = ZNEN002W-WERKS AND
+BWTAR = SPACE.
+
+IF ( SY-SUBRC = 0 ).
+*           移動平均原価/価格単位を算出
+ZNEN002W-ITANKA = MBEW-VERPR.
+ZNEN002W-PEINH = MBEW-PEINH.
+
+SELECT SINGLE MATKL FROM MARA
+INTO ZNEN002W-MATKL
+WHERE MATNR = ZNEN002W-MATNR.
+
+CALL FUNCTION CNS_BAPI_CURRENCY_EXTERNAL
+EXPORTING
+CURRENCY        = T001-WAERS
+AMOUNT_INTERNAL = ZNEN002W-ITANKA
+IMPORTING
+AMOUNT_EXTERNAL = A1F_WG_AMT.
+
+ITANKA_D = A1F_WG_AMT.
+ZNEN002W-ZKINGAKU = ITANKA_D * ZNEN002W-MENGE / ZNEN002W-PEINH.
+
+* 在庫年齢テーブルへ値設定
+UPDATE ZNEN002
+SET ITANKA = ZNEN002W-ITANKA
+PEINH  = ZNEN002W-PEINH
+MATKL  = ZNEN002W-MATKL
+ZKINGAKU = ZNEN002W-ZKINGAKU
+WHERE MATNR  = ZNEN002W-MATNR AND
+WERKS  = ZNEN002W-WERKS AND
+ZANDT  = ZNEN002W-ZANDT AND
+ZZNO   = ZNEN002W-ZZNO  AND
+ZZPOS  = ZNEN002W-ZZPOS AND
+ZCOUNT = ZNEN002W-ZCOUNT.
+
+KENSU = KENSU  +  1.
+
+ENDIF.
+ENDLOOP.
+
+* 2010.02.09 DMW1457 MIS T.arai insert - start
+LOOP AT ZNEN002W.
+
+*営業所の再設定
+**** START ADD 2014/10/22 ISID11 ****
+IF BUKRS = 'C001'.
+**** END ADD 2014/10/22 ISID11 ****
+CONCATENATE ZNEN002W-WERKS+1(3) '0' INTO ZNEN002W-VKBUR.
+
+**** START ADD 2014/10/22 ISID11 ****
+ELSE.
+ZNEN002W-VKBUR = ZNEN002W-WERKS.
+ENDIF.
+**** END ADD 2014/10/22 ISID11 ****
+
+*営業グループの設定（品目マスタの購買グループ）
+SELECT SINGLE EKGRP
+INTO ZNEN002W-VKGRP
+FROM MARC
+WHERE MATNR = ZNEN002W-MATNR
+AND WERKS = ZNEN002W-WERKS.
+
+* 在庫年齢テーブルへ値設定
+UPDATE ZNEN002
+SET   VKBUR  = ZNEN002W-VKBUR
+VKGRP  = ZNEN002W-VKGRP
+WHERE MATNR  = ZNEN002W-MATNR AND
+WERKS  = ZNEN002W-WERKS AND
+ZANDT  = ZNEN002W-ZANDT AND
+ZZNO   = ZNEN002W-ZZNO  AND
+ZZPOS  = ZNEN002W-ZZPOS AND
+ZCOUNT = ZNEN002W-ZCOUNT.
+ENDLOOP.
+* 2010.02.09 DMW1457 MIS T.arai insert - e n d
+
+**** START UPD 2014/09/18 ISID11 ****
+*  WRITE: / KENSU,
+*           TEXT-S00.
+CLEAR A1F_WL_MSG.
+MESSAGE S139(Z3) WITH KENSU INTO A1F_WL_MSG.
+WRITE : / A1F_WL_MSG.
+**** END UPD 2014/09/18 ISID11 ****
+
+* 出庫実績データの検索
+PERFORM GET_DERIVERY_DATA.
+
+* 2010.05.07 DMW1827 MIS T.arai insert - start
+* ZZNOの番号を発注番号に置き換える
+LOOP AT ZNEN002W.
+
+CLEAR A1F_WL_EKKO.
+
+**** START UPD 2015/03/16 ISID18 ****
+*    SELECT SINGLE * FROM EKKO
+*      INTO A1F_WL_EKKO
+*     WHERE EBELN = ZNEN002W-ZZNO.
+SELECT SINGLE * FROM EKPO
+INTO A1F_WL_EKPO
+WHERE EBELN = ZNEN002W-ZZNO
+AND EBELP = ZNEN002W-ZZPOS.
+**** END UPD 2015/03/16 ISID18 ****
+
+*   発注伝票が検索できたらそのまま。出来なかったらMSEGへ
+IF SY-SUBRC NE 0.
+
+SELECT SINGLE * FROM MSEG
+INTO A1F_WL_MSEG
+WHERE MBLNR = ZNEN002W-ZZNO
+**** START ADD 2015/03/16 ISID18 ****
+AND ZEILE = ZNEN002W-ZZPOS+1(4).
+**** END ADD 2015/03/16 ISID18 ****
+
+*     MSEGで検索できて、発注番号に値がある場合のみ上書き
+IF SY-SUBRC = 0
+AND NOT A1F_WL_MSEG-EBELN IS INITIAL.
+
+UPDATE ZNEN002
+SET   ZZNO  = A1F_WL_MSEG-EBELN
+**** START ADD 2015/03/16 ISID18 ****
+ZZPOS = A1F_WL_MSEG-EBELP
+**** END ADD 2015/03/16 ISID18 ****
+WHERE MATNR  = ZNEN002W-MATNR AND
+WERKS  = ZNEN002W-WERKS AND
+**** START ADD 2015/03/16 ISID18 ****
+LGORT  = ZNEN002W-LGORT AND
+**** END ADD 2015/03/16 ISID18 ****
+ZANDT  = ZNEN002W-ZANDT AND
+ZZNO   = ZNEN002W-ZZNO  AND
+ZZPOS  = ZNEN002W-ZZPOS AND
+ZCOUNT = ZNEN002W-ZCOUNT.
+ENDIF.
+ENDIF.
+ENDLOOP.
+
+*&---------------------------------------------------------------------*
+*&      Form  tudo
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM TUDO.
+
+DATA:
+A1F_WL_ITANKA   TYPE  ZNEN002-ITANKA.
+* 変数初期化
+ZNEN002W-ITANKA = 0.
+NSURYO = 0.
+NSURYO2 = 0.
+
+SELECT SINGLE * FROM EKPO
+WHERE EBELN = ZNEN002W-ZZNO
+AND EBELP = ZNEN002W-ZZPOS.
+
+SELECT SINGLE * FROM MARA
+WHERE MATNR = ZNEN002W-MATNR.
+
+* EKBEテーブルより請求書照合済数量を取得する。
+SELECT *
+FROM EKBE
+WHERE EBELN = ZNEN002W-ZZNO  AND
+EBELP = ZNEN002W-ZZPOS AND
+BEWTP = 'Q'.
+
+* 発注単位より基本数量単位へ変換する。
+CALL FUNCTION 'MATERIAL_UNIT_CONVERSION'
+EXPORTING
+INPUT   = EKBE-MENGE
+KZMEINH = '+'
+MATNR   = ZNEN002W-MATNR
+MEINH   = EKPO-MEINS
+MEINS   = MARA-MEINS
+IMPORTING
+OUTPUT  = NSURYO2.
+
+* 照合済金額と数量の算出
+**** START UPD 2014/09/18 ISID11 ****
+*    ZNEN002W-ITANKA = ZNEN002W-ITANKA + EKBE-DMBTR * 100.
+*   通貨金額換算IO
+CLEAR A1F_WL_ITANKA.
+PERFORM GET_DMBTR_EXTERNAL USING EKBE-DMBTR
+CHANGING A1F_WL_ITANKA.
+ZNEN002W-ITANKA = ZNEN002W-ITANKA + A1F_WL_ITANKA.
+**** END UPD 2014/09/18 ISID11 ****
+NSURYO = NSURYO + NSURYO2.
+
+ENDSELECT.
+
+* もし請求書照合が済んでいない場合
+IF ( SY-SUBRC <> 0 ).
+
+* 入庫データより算出
+SELECT *
+FROM EKBE
+WHERE EBELN = ZNEN002W-ZZNO  AND
+EBELP = ZNEN002W-ZZPOS AND
+BEWTP = 'E'.
+
+* 発注単位より基本数量単位へ変換する。
+CALL FUNCTION 'MATERIAL_UNIT_CONVERSION'
+EXPORTING
+INPUT  = EKBE-MENGE
+MATNR  = ZNEN002W-MATNR
+MEINH  = MARA-MEINS
+MEINS  = EKPO-MEINS
+IMPORTING
+OUTPUT = NSURYO2.
+
+**** START UPD 2014/09/18 ISID11 ****
+*      ZNEN002W-ITANKA = ZNEN002W-ITANKA + EKBE-DMBTR * 100.
+*     通貨金額換算IO
+CLEAR A1F_WL_ITANKA.
+PERFORM GET_DMBTR_EXTERNAL USING EKBE-DMBTR
+CHANGING A1F_WL_ITANKA.
+ZNEN002W-ITANKA = ZNEN002W-ITANKA + A1F_WL_ITANKA.
+**** END UPD 2014/09/18 ISID11 ****
+
+NSURYO = NSURYO + NSURYO2.
+
+ENDSELECT.
+ENDIF.
+ZNEN002W-ITANKA = ZNEN002W-ITANKA / NSURYO.
+**** START UPD 2014/09/18 ISID11 ****
+*  ZNEN002W-ITANKA = ZNEN002W-ITANKA / 100.
+* 通貨金額換算OI
+PERFORM GET_DMBTR_INTERNAL CHANGING ZNEN002W-ITANKA.
+**** END UPD 2014/09/18 ISID11 ****
+ZNEN002W-PEINH = 1.
+
+ENDFORM.                    " tudo
+*&---------------------------------------------------------------------*
+*&      Form  GET_DERIVERY_DATA
+*&---------------------------------------------------------------------*
+*       出庫実績データの検索
+*----------------------------------------------------------------------*
+FORM GET_DERIVERY_DATA.
+* ローカルデータ宣言
+DATA:LW_FDAY        TYPE SY-DATUM,      "月初日付
+LW_LDAY        TYPE SY-DATUM,      "月末日付
+**** START ADD 2014/09/18 ISID11 ****
+LW_MSG         TYPE CHAR128,       "メッセージ
+**** END ADD 2014/09/18 ISID11 ****
+LCTR_DERIVERY  TYPE I.             "出庫データ数
+
+* 勘定日付当月の月初月末日を取得
+PERFORM GET_FIRST_LAST_DAY CHANGING LW_FDAY
+LW_LDAY.
+
+* 出荷伝票情報の検索
+PERFORM GET_LIKP_LISP USING    LW_FDAY
+LW_LDAY
+CHANGING LCTR_DERIVERY.
+
+**** START UPD 2014/09/18 ISID11 ****
+*  WRITE: / LCTR_DERIVERY,
+*           TEXT-S00.
+MESSAGE S139(Z3) WITH LCTR_DERIVERY INTO LW_MSG.
+WRITE: / LW_MSG.
+**** END UPD 2014/09/18 ISID11 ****
+
+ENDFORM.                    " GET_DERIVERY_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GET_FIRST_LAST_DAY
+*&---------------------------------------------------------------------*
+*       月末月初を取得
+*----------------------------------------------------------------------*
+*      <--O_FDAY  月初
+*      <--O_LDAY  月末
+*----------------------------------------------------------------------*
+FORM GET_FIRST_LAST_DAY CHANGING O_FDAY TYPE SY-DATUM
+O_LDAY TYPE SY-DATUM.
+* ローカルデータ宣言
+DATA:
+LW_KOKRS TYPE TKA02-KOKRS,
+LW_PERIV TYPE T001-PERIV,
+LW_GJAHR TYPE T009B-BDATJ,
+LW_POPER TYPE BAPI0002_4-FISCAL_PERIOD.
+
+* 会計年度バリアントの取得
+PERFORM GET_PERIV USING    BUKRS
+CHANGING LW_PERIV.
+
+* 管理領域取得
+PERFORM GET_KOKRS USING    BUKRS
+CHANGING LW_KOKRS.
+
+* 会計年度、会計期間の取得
+PERFORM GET_PERIOD USING    LW_PERIV
+CHANGING LW_GJAHR
+LW_POPER.
+
+* 対象期間の取得
+PERFORM GET_DAY USING    LW_KOKRS
+LW_POPER
+LW_GJAHR
+CHANGING O_FDAY
+O_LDAY.
+
+
+ENDFORM.                    " GET_FIRST_LAST_DAY
+*&---------------------------------------------------------------------*
+*       会計年度バリアントの取得
+*----------------------------------------------------------------------*
+*      -->I_BUKRS  会社コード
+*      <--O_PERIV  会計年度バリアント
+*----------------------------------------------------------------------*
+FORM GET_PERIV USING    I_BUKRS TYPE T001-BUKRS
+CHANGING O_PERIV TYPE T001-PERIV.
+
+SELECT SINGLE PERIV
+INTO   (O_PERIV)
+FROM   T001
+WHERE BUKRS = I_BUKRS.
+
+ENDFORM.                    " GET_PERIV
+*&---------------------------------------------------------------------*
+*       管理領域の取得
+*----------------------------------------------------------------------*
+*      -->I_BUKRS  会社コード
+*      <--O_KOKRS  管理領域
+*----------------------------------------------------------------------*
+FORM GET_KOKRS USING    I_BUKRS TYPE T001-BUKRS
+CHANGING O_KOKRS TYPE TKA02-KOKRS.
+
+SELECT SINGLE KOKRS
+INTO (O_KOKRS)
+FROM TKA02
+WHERE BUKRS = I_BUKRS
+AND GSBER = SPACE.
+
+ENDFORM.                    " GET_KOKRS
+*&---------------------------------------------------------------------*
+*&      Form  GET_GJAHR_MONAT
+*&---------------------------------------------------------------------*
+*       会計年度、期間の取得
+*----------------------------------------------------------------------*
+*      -->I_PERIV  会計年度バリアント
+*      <--O_GJAHR  会計年度
+*      <--O_POPER  会計期間
+*----------------------------------------------------------------------*
+FORM GET_PERIOD USING    I_PERIV TYPE T001-PERIV
+CHANGING O_GJAHR TYPE T009B-BDATJ
+O_POPER TYPE BAPI0002_4-FISCAL_PERIOD.
+
+* ローカルデータ宣言
+DATA:LW_BUPER TYPE T009B-POPER.
+
+CALL FUNCTION CNS_DATE_TO_PERIOD_CONVERT
+EXPORTING
+I_DATE   = ZANDT      "勘定日付
+*     I_MONMIT = 00
+I_PERIV  = I_PERIV
+IMPORTING
+E_BUPER  = LW_BUPER
+E_GJAHR  = O_GJAHR
+**** START ADD 2014/09/18 ISID11 ****
+EXCEPTIONS
+INPUT_FALSE          = 1
+T009_NOTFOUND        = 2
+T009B_NOTFOUND       = 3
+OTHERS               = 4.
+**** END ADD 2014/09/18 ISID11 ****
+
+IF SY-SUBRC = 0.
+O_POPER = LW_BUPER.
+ENDIF.
+
+ENDFORM.                    " GET_GJAHR_MONAT
+*&---------------------------------------------------------------------*
+*&      Form  GET_DAY
+*&---------------------------------------------------------------------*
+*       月初月末日取得
+*----------------------------------------------------------------------*
+*      -->I_KOKRS  管理領域
+*      -->I_POPER  会計期間
+*      -->I_GJAHR  会計年度
+*      <--O_FDAY   月初
+*      <--O_LDAY   月末
+*----------------------------------------------------------------------*
+FORM GET_DAY USING    I_KOKRS TYPE TKA02-KOKRS
+I_POPER TYPE BAPI0002_4-FISCAL_PERIOD
+I_GJAHR TYPE T009B-BDATJ
+CHANGING O_FDAY  TYPE SY-DATUM
+O_LDAY  TYPE SY-DATUM.
+
+CALL FUNCTION CNS_GETPERIODLIMITS
+EXPORTING
+CONTROLLINGAREAID   = I_KOKRS
+FISCAL_PERIOD       = I_POPER
+FISCAL_YEAR         = I_GJAHR
+IMPORTING
+FIRST_DAY_OF_PERIOD = O_FDAY       "月初日付
+LAST_DAY_OF_PERIOD  = O_LDAY       "月末日付
+*     LAST_NORMAL_PERIOD  =
+*     RETURN              =
+.
+
+ENDFORM.                    " GET_DAY
+*&---------------------------------------------------------------------*
+*&      Form  GET_LIKP_LISP
+*&---------------------------------------------------------------------*
+*       出荷伝票情報の取得
+*----------------------------------------------------------------------*
+*      -->I_FDAY           月初日付
+*      -->I_LDAY           月末日付
+*      <--O_LCTR_DERIVERY  出荷伝票情報データ数
+*----------------------------------------------------------------------*
+FORM GET_LIKP_LISP USING    I_FDAY          TYPE SY-DATUM
+I_LDAY          TYPE SY-DATUM
+CHANGING O_LCTR_DERIVERY TYPE I.
+
+* ローカルデータ宣言
+* ZNEN00データ格納用ローカル内部テーブル
+DATA:LTD_ZNEN002 TYPE TABLE OF ZNEN002,
+LST_ZNEN002 TYPE ZNEN002.
+* LIKPデータ取得用変数
+DATA:LW_VBELN TYPE LIKP-VBELN.
+
+TYPES:
+BEGIN OF TYP_LIPS,
+MATNR TYPE MARA-MATNR,        "品目コード
+WERKS TYPE LIPS-WERKS,        "プラント
+**** START ADD 2015/03/16 ISID18 ****
+LGORT TYPE LIPS-LGORT,        "保管場所
+KUNAG TYPE LIKP-KUNAG,        "受注先
+**** END ADD 2015/03/16 ISID18 ****
+END OF TYP_LIPS.
+DATA : A1F_TL_LIPS TYPE TABLE OF TYP_LIPS.
+DATA : A1F_WL_LIPS TYPE TYP_LIPS.
+
+**** START ADD 2015/03/16 ISID18 ****
+DATA: LTD_T001L TYPE STANDARD TABLE OF T001L,
+LTD_KNA1  TYPE STANDARD TABLE OF KNA1,
+LTD_LIPS  TYPE TABLE OF TYP_LIPS,
+LW_SUBRC  TYPE SY-SUBRC.
+
+LTD_ZNEN002[] = ZNEN002W[].
+SORT LTD_ZNEN002 BY WERKS.
+DELETE ADJACENT DUPLICATES FROM LTD_ZNEN002 COMPARING WERKS.
+
+IF LTD_ZNEN002[] IS NOT INITIAL.
+*  保管場所一括取得
+SELECT * FROM T001L
+INTO TABLE LTD_T001L
+FOR ALL ENTRIES IN LTD_ZNEN002
+WHERE WERKS = LTD_ZNEN002-WERKS.
+SORT LTD_T001L BY WERKS LGORT.
+ENDIF.
+
+LTD_ZNEN002[] = ZNEN002W[].
+SORT LTD_ZNEN002 BY LGORT.
+DELETE ADJACENT DUPLICATES FROM LTD_ZNEN002 COMPARING LGORT.
+
+IF LTD_ZNEN002[] IS NOT INITIAL.
+*   受注先一括取得
+SELECT * FROM KNA1
+INTO TABLE LTD_KNA1
+FOR ALL ENTRIES IN LTD_ZNEN002
+WHERE KUNNR = LTD_ZNEN002-LGORT.
+SORT LTD_KNA1 BY KUNNR.
+ENDIF.
+**** END ADD 2015/03/16 ISID18 ****
+
+SELECT LIPS~MATNR
+LIPS~WERKS
+**** START ADD 2015/03/16 ISID18 ****
+LIPS~LGORT
+LIKP~KUNAG
+**** END ADD 2015/03/16 ISID18 ****
+INTO TABLE A1F_TL_LIPS
+FROM LIKP
+INNER JOIN LIPS
+ON LIKP~VBELN = LIPS~VBELN
+WHERE LIKP~WADAT_IST >= I_FDAY
+AND LIKP~WADAT_IST <= I_LDAY
+**** START ADD 2014/09/18 ISID11 ****
+AND LIPS~WERKS     IN A1F_WL_WERKS
+**** END ADD 2014/09/18 ISID11 ****
+AND LIKP~LFART     IN LFART.
+
+**** START UPD 2015/03/16 ISID18 ****
+*  SORT A1F_TL_LIPS BY MATNR WERKS.
+*  DELETE ADJACENT DUPLICATES FROM A1F_TL_LIPS COMPARING ALL FIELDS.
+SORT A1F_TL_LIPS BY MATNR WERKS LGORT.
+DELETE ADJACENT DUPLICATES FROM A1F_TL_LIPS
+COMPARING MATNR WERKS LGORT.
+**** END UPD 2015/03/16 ISID18 ****
+
+**** START ADD 2015/03/16 ISID18 ****
+LTD_LIPS[] = A1F_TL_LIPS[].
+SORT LTD_LIPS BY MATNR WERKS KUNAG.
+DELETE ADJACENT DUPLICATES FROM LTD_LIPS
+COMPARING MATNR WERKS KUNAG.
+**** END ADD 2015/03/16 ISID18 ****
+LTD_ZNEN002[] = ZNEN002W[].
+LOOP AT LTD_ZNEN002 INTO LST_ZNEN002.
+
+**** START ADD 2015/03/16 ISID18 ****
+LW_SUBRC = 4.
+
+**** START ADD BY ISID 2015/08/07 ****
+IF LST_ZNEN002-LGORT IS INITIAL.
+READ TABLE A1F_TL_LIPS INTO A1F_WL_LIPS
+WITH KEY MATNR = LST_ZNEN002-MATNR
+WERKS = LST_ZNEN002-WERKS
+BINARY SEARCH.
+LW_SUBRC = SY-SUBRC.
+ELSE.
+**** END ADD BY ISID 2015/08/07 ****
+
+READ TABLE LTD_KNA1 TRANSPORTING NO FIELDS
+WITH KEY KUNNR = LST_ZNEN002-LGORT
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+READ TABLE LTD_LIPS INTO A1F_WL_LIPS
+WITH KEY MATNR = LST_ZNEN002-MATNR
+WERKS = LST_ZNEN002-WERKS
+KUNAG = LST_ZNEN002-LGORT
+BINARY SEARCH.
+LW_SUBRC = SY-SUBRC.
+ELSE.
+READ TABLE LTD_T001L TRANSPORTING NO FIELDS
+WITH KEY WERKS = LST_ZNEN002-WERKS
+LGORT = LST_ZNEN002-LGORT+0(4)
+BINARY SEARCH.
+IF SY-SUBRC = 0.
+**** END ADD 2015/03/16 ISID18 ****
+READ TABLE A1F_TL_LIPS INTO A1F_WL_LIPS
+WITH KEY MATNR = LST_ZNEN002-MATNR
+WERKS = LST_ZNEN002-WERKS
+**** START ADD 2015/03/16 ISID18 ****
+LGORT = LST_ZNEN002-LGORT+0(4)
+**** END ADD 2015/03/16 ISID18 ****
+BINARY SEARCH.
+**** START ADD 2015/03/16 ISID18 ****
+LW_SUBRC = SY-SUBRC.
+ENDIF.
+ENDIF.
+**** END ADD 2015/03/16 ISID18 ****
+
+**** START ADD BY ISID 2015/08/07 ****
+ENDIF.
+**** END ADD BY ISID 2015/08/07 ****
+
+**** START UPD 2015/03/16 ISID18 ****
+*    IF SY-SUBRC = 0.
+IF LW_SUBRC = 0.
+**** END UPD 2015/03/16 ISID18 ****
+* 在庫内訳テーブル更新
+UPDATE ZNEN002
+SET: ZSYUKKA = CNS_OK
+WHERE MATNR  = LST_ZNEN002-MATNR
+AND WERKS  = LST_ZNEN002-WERKS
+**** START ADD 2015/03/16 ISID18 ****
+AND LGORT  = LST_ZNEN002-LGORT
+**** END ADD 2015/03/16 ISID18 ****
+AND ZANDT  = LST_ZNEN002-ZANDT
+AND ZZNO   = LST_ZNEN002-ZZNO
+AND ZZPOS  = LST_ZNEN002-ZZPOS
+AND ZCOUNT = LST_ZNEN002-ZCOUNT.
+IF SY-SUBRC = 0.
+COMMIT WORK AND WAIT.
+O_LCTR_DERIVERY = O_LCTR_DERIVERY + 1.
+ELSE.
+ROLLBACK WORK.
+**** START UPD 2014/09/18 ISID11 ****
+*        MESSAGE ID CNS_00
+*                TYPE CNS_S
+*                NUMBER CNS_NO
+*                WITH TEXT-E00.
+MESSAGE S047(Z3).
+**** END UPD 2014/09/18 ISID11 ****
+*          'テーブルの更新に失敗しました。'.
+
+ENDIF.
+
+ELSE.
+* 在庫内訳テーブル更新
+UPDATE ZNEN002
+SET: ZSYUKKA = SPACE
+WHERE MATNR  = LST_ZNEN002-MATNR
+AND WERKS  = LST_ZNEN002-WERKS
+**** START ADD 2015/03/16 ISID18 ****
+AND LGORT  = LST_ZNEN002-LGORT
+**** END ADD 2015/03/16 ISID18 ****
+AND ZANDT  = LST_ZNEN002-ZANDT
+AND ZZNO   = LST_ZNEN002-ZZNO
+AND ZZPOS  = LST_ZNEN002-ZZPOS
+AND ZCOUNT = LST_ZNEN002-ZCOUNT.
+IF SY-SUBRC = 0.
+COMMIT WORK AND WAIT.
+O_LCTR_DERIVERY = O_LCTR_DERIVERY + 1.
+ELSE.
+ROLLBACK WORK.
+**** START UPD 2014/09/18 ISID11 ****
+*        MESSAGE ID CNS_00
+*                TYPE CNS_S
+*                NUMBER CNS_NO
+*                WITH TEXT-E00.
+MESSAGE S047(Z3).
+**** END UPD 2014/09/18 ISID11 ****
+*          'テーブルの更新に失敗しました。'.
+
+ENDIF.
+
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " GET_LIKP_LISP
+**** START ADD 2014/09/18 ISID11 ****
+*&---------------------------------------------------------------------*
+*&      Form  CHK_BUKWRK_DETAIL
+*&---------------------------------------------------------------------*
+*       会社コードとプラントチェック
+*----------------------------------------------------------------------*
+FORM CHK_BUKWRK_DETAIL .
+DATA:
+LW_RANGE_WERKS TYPE RANGE_T_WERKS.
+* 選択画面の会社コードの存在チェックを行う
+SELECT SINGLE * FROM T001
+WHERE BUKRS = BUKRS.
+
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'BUKRS'.
+MESSAGE E016(Z3) WITH BUKRS.
+*   会社コード & が存在しません
+ENDIF.
+
+* 選択画面の会社コードの権限チェックを行う
+AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+ID 'BUKRS' FIELD BUKRS          "対象会社コード
+ID 'ACTVT' FIELD '03'.
+
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'BUKRS'.
+MESSAGE E015(Z3) WITH BUKRS.
+*   会社コード & では実行する権限がありません。
+ENDIF.
+
+* プラントチェック
+CLEAR:
+A1F_WL_WERKS,
+LW_RANGE_WERKS.
+LW_RANGE_WERKS = WERKS[].
+CALL FUNCTION 'ZEG_ZZ_WERKS_CHK'
+EXPORTING
+IMPBUKRS           = BUKRS
+*     IMPWERKS           =
+IMPRNGWERKS        = LW_RANGE_WERKS
+IMPORTING
+EXPWERKS           = A1F_WL_WERKS
+*     EXPTABRET          =
+EXCEPTIONS
+WERKS_NOT_EXIST    = 1
+WERKS_NO_AUTHORITY = 2
+WERKS_BUKRS_ERROR  = 3
+OTHERS             = 4.
+IF SY-SUBRC <> 0.
+SET CURSOR FIELD 'BUKRS' .
+MESSAGE ID SY-MSGID TYPE 'E'  NUMBER SY-MSGNO
+WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+ENDFORM.                    " CHK_BUKWRK_DETAIL
+*&---------------------------------------------------------------------*
+*&      Form  GET_DMBTR_EXTERNAL
+*&---------------------------------------------------------------------*
+*       通貨金額換算IO
+*----------------------------------------------------------------------*
+*      -->I_DMBTR   国内通貨額
+*      <--O_ITANKA  外部通貨金額
+*----------------------------------------------------------------------*
+FORM GET_DMBTR_EXTERNAL  USING    I_DMBTR TYPE EKBE-DMBTR
+CHANGING O_ITANKA TYPE ZNEN002-ITANKA.
+DATA:
+LW_ITANKA LIKE BAPICURR-BAPICURR.
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_EXTERNAL'
+EXPORTING
+CURRENCY        = T001-WAERS
+AMOUNT_INTERNAL = I_DMBTR
+IMPORTING
+AMOUNT_EXTERNAL = LW_ITANKA.
+
+TRY .
+O_ITANKA = LW_ITANKA.
+CATCH CX_SY_CONVERSION_OVERFLOW .
+CLEAR O_ITANKA.
+ENDTRY.
+ENDFORM.                    " GET_DMBTR_EXTERNAL
+*&---------------------------------------------------------------------*
+*&      Form  GET_DMBTR_INTERNAL
+*&---------------------------------------------------------------------*
+*       通貨金額換算OI
+*----------------------------------------------------------------------*
+*      <--o_ITANKA  内部通貨金額
+*----------------------------------------------------------------------*
+FORM GET_DMBTR_INTERNAL  CHANGING O_ITANKA TYPE ZNEN002-ITANKA.
+DATA:
+LW_RETURN TYPE BAPIRETURN,
+LW_ITANKA LIKE BAPICURR-BAPICURR.
+LW_ITANKA = O_ITANKA.
+CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_INTERNAL'
+EXPORTING
+CURRENCY             = T001-WAERS
+AMOUNT_EXTERNAL      = LW_ITANKA
+MAX_NUMBER_OF_DIGITS = '11'
+IMPORTING
+AMOUNT_INTERNAL      = O_ITANKA
+RETURN               = LW_RETURN.
+IF LW_RETURN-TYPE = 'E' OR LW_RETURN-TYPE = 'A' OR
+LW_RETURN-TYPE = 'X'.
+CLEAR O_ITANKA.
+ENDIF.
+
+ENDFORM.                    " GET_DMBTR_INTERNAL
+**** END ADD 2014/09/18 ISID11 ****
+*Text symbol text・
+*B01:Search condition
+*Selection text・
+*BUKRS:        Company Code
+*LFART:        Shipping Order Judgment flag
+*LGORT:        Storage Location
+*MATNR:        Material number
+*WERKS:        Plant
+*ZANDT:        Account date

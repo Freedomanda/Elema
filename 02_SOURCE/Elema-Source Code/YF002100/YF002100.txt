@@ -1,0 +1,938 @@
+REPORT YF002100 MESSAGE-ID ZB
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT   58(0).
+*----------------------------------------------------------------------*
+*     ﾌﾟﾛｸﾞﾗﾑID : YF002100                                             *
+*     ﾌﾟﾛｸﾞﾗﾑ名 : 部門別当期売上原価内訳作成                           *
+*     処理種別  : バッチ(ABAP/4)                                       *
+*     処理概要  : 総勘定元帳ﾃｰﾌﾞﾙより，指定された年月のデータを抽出し  *
+*               : 勘定科目ごとに金額集計と構成比計算を行い，           *
+*               : 帳票を出力する。                                     *
+*     入力      : 会計年度，会計期間，会社ｺｰﾄﾞ                         *
+*     出力      : 部門別当期売上原価内訳                               *
+*----------------------------------------------------------------------*
+
+*テーブル定義
+TABLES:SKC1A,                          "総勘定元帳
+TGSBT,                          "部門ﾃｰﾌﾞﾙ"部門ﾃｰﾌﾞﾙ
+T001,                           "会社コードテーブル
+YFA04,                          "当期売上原価内訳CTLﾏｽﾀ
+YFA06.                          "勘定別集計先決定ﾃｰﾌﾞﾙ
+
+*内部テーブル定義
+DATA: BEGIN   OF       T_SKC1A OCCURS 100.       "総勘定元帳
+INCLUDE STRUCTURE  SKC1A.
+DATA: END     OF       T_SKC1A.
+
+DATA: BEGIN   OF       T_BUMON  OCCURS  50,      "部門ﾃｰﾌﾞﾙ
+GSBER       LIKE TGSBT-GSBER VALUE '',                  "部門ｺｰﾄﾞ
+GTEXT       LIKE TGSBT-GTEXT VALUE '',        "部門名称
+*     ZBBOOD(02)  TYPE N VALUE 0,                   "帳票出力順
+END     OF       T_BUMON.
+
+DATA: BEGIN   OF       T_CYOHYO OCCURS 100.      "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA04.      "(当期売上原価内訳)
+DATA: ZENZAN(15)  TYPE P DECIMALS 2 VALUE 0,            "前月末残高
+KARI(15)    TYPE P DECIMALS 2 VALUE 0,            "借方金額
+KASI(15)    TYPE P DECIMALS 2 VALUE 0,            "貸方金額
+TOUZAN(15)  TYPE P DECIMALS 2 VALUE 0,            "当月残高
+MATUZAN(15) TYPE P DECIMALS 2 VALUE 0,            "当月末残高
+HI(06)      TYPE P DECIMALS 1 VALUE 0,            "構成比
+END     OF       T_CYOHYO.
+
+DATA: BEGIN   OF       T_ZF210  OCCURS 100.      "集計先決定ﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA06.
+DATA: END     OF       T_ZF210.
+
+DATA: BEGIN   OF   T_SYUKEI       OCCURS 3,      "金額集計用ﾜｰｸﾃｰﾌﾞﾙ
+ZENZAN  LIKE T_CYOHYO-ZENZAN,    "前月末残高
+KARI    LIKE T_CYOHYO-KARI,      "借方金額
+KASI    LIKE T_CYOHYO-KASI,      "貸方金額
+TOUZAN  LIKE T_CYOHYO-TOUZAN,    "当月残高
+MATUZAN LIKE T_CYOHYO-MATUZAN.   "当月末残高
+DATA: END     OF   T_SYUKEI.
+
+*パラメータ定義
+PARAMETERS: P_GJAHR(04)  TYPE N,       "会計年度
+P_PERIO(02)  TYPE N,       "会計期間
+P_BUKRS(04),               "会社コード
+S_GSBERF(04),              "部門ｺｰﾄﾞ(FROM)
+S_GSBERT(04),              "部門ｺｰﾄﾞ(TO)
+P_NENJI AS CHECKBOX.       "年次用フラグ
+
+*作業用データ定義
+DATA: W_MSG(40),                       "メッセージ
+W_DATE       LIKE SY-DATUM,
+F_DATE       LIKE SY-DATUM,
+W_NEN_F      LIKE P_GJAHR,
+W_NEN_T      LIKE P_GJAHR,
+W_TUKI       LIKE P_PERIO,
+W_TUKI3(03)  TYPE N,
+W_BUNBO      LIKE T_CYOHYO-MATUZAN,
+W_HI         LIKE T_CYOHYO-HI,
+W_CTR        TYPE I  VALUE  0,
+W_CTR_LINE   TYPE I  VALUE 99,
+W_IDX        TYPE I,
+W_IDX_BUNBO  TYPE I,
+W_KINGAKU13(13) TYPE P,
+W_GJAHR(04)     TYPE N,
+W_PERIO(03)     TYPE N.
+
+DATA: BEGIN OF EDT,                    "編集後フォーマット
+MINUS(1) TYPE C,                 "  符号
+HI(6)    TYPE C,                 "  金額
+END OF EDT.
+
+INCLUDE:YF01NUMC,                      "金額12桁出力用編集ｻﾌﾞ
+YF01SKAN,                      "総勘定元帳月別ﾃﾞｰﾀ取込
+YF01RANK.                      "ランクごとの金額編集
+
+************************************************************************
+*  主処理                                                              *
+************************************************************************
+START-OF-SELECTION.
+
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS       = P_BUKRS        .
+
+MOVE: P_GJAHR TO W_DATE(4),
+P_PERIO TO W_DATE+4(2),
+'01' TO W_DATE+6(2).
+
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = W_DATE
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = W_GJAHR
+E_POPER        = W_PERIO
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+ENDIF.
+
+GET                 SKC1A.
+MOVE-CORRESPONDING  SKC1A TO T_SKC1A.
+APPEND                       T_SKC1A.
+
+END-OF-SELECTION.
+
+PERFORM  READ_FILES.
+*
+PERFORM  EDT_HEADER.                 "見出し編集
+
+LOOP  AT  T_BUMON.
+
+PERFORM  INIT_T_CYOHYO.            "帳票出力用ﾜｰｸﾃｰﾌﾞﾙ ｸﾘｱ
+PERFORM  READ_SKC1A.               "総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ
+
+PERFORM  SUMM_KINGAKU.             "金額集計処理
+PERFORM  PRNT_LIST.                "損益計算書出力処理
+ENDLOOP.
+
+EXIT.
+
+*======================================================================*
+*  ファイルの読込み                                                    *
+*======================================================================*
+FORM READ_FILES.
+
+CLEAR  : T_BUMON,T_CYOHYO,T_SYUKEI.
+REFRESH: T_BUMON,T_CYOHYO,T_SYUKEI.
+*------------------------------------------部門ﾃｰﾌﾞﾙ
+SELECT  *  FROM  TGSBT
+WHERE  GSBER  BETWEEN  S_GSBERF  AND  S_GSBERT.
+
+IF  SY-SUBRC  <>  0.
+EXIT.
+ENDIF.
+
+T_BUMON-GSBER   =  TGSBT-GSBER.
+T_BUMON-GTEXT   =  TGSBT-GTEXT.
+*   T_BUMON-ZBBOOD  =  ZC250-ZBBOOD.
+
+APPEND  T_BUMON.
+ENDSELECT.
+*------------------------------------------出力CTLﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA04  INTO  T_CYOHYO.
+
+IF  SY-SUBRC  =  0.
+W_CTR  =  W_CTR  +  1.           "読込件数ｶｳﾝﾀ UP
+ELSE.
+EXIT.
+ENDIF.
+
+APPEND  T_CYOHYO.
+
+IF  T_CYOHYO-ZBPRKBN  =  'B'.
+W_IDX_BUNBO  =  W_CTR.
+ENDIF.
+ENDSELECT.
+*------------------------------------------集計先決定ﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA06  APPENDING  TABLE  T_ZF210.
+
+IF  SY-SUBRC  NE  0.
+EXIT.
+ENDIF.
+*------------------------------------------集計ﾃｰﾌﾞﾙ
+DO  9  TIMES.
+APPEND  T_SYUKEI.
+ENDDO.
+*------------------------------------------内部テーブルソート
+SORT  T_SKC1A  BY SAKNR.             "総勘定元帳ソート(勘定科目順）
+SORT  T_BUMON  BY GSBER.             "部門ﾃｰﾌﾞﾙ  出力順にｿｰﾄ
+SORT  T_ZF210  BY HKONT.
+
+ENDFORM.
+
+*======================================================================*
+*  帳票出力用ﾜｰｸﾃｰﾌﾞﾙ  CLEAR                                           *
+*======================================================================*
+FORM INIT_T_CYOHYO.
+
+LOOP  AT  T_CYOHYO.
+
+T_CYOHYO-ZENZAN   =  0.
+T_CYOHYO-KARI     =  0.
+T_CYOHYO-KASI     =  0.
+T_CYOHYO-TOUZAN   =  0.
+T_CYOHYO-MATUZAN  =  0.
+T_CYOHYO-HI       =  0.
+
+MODIFY  T_CYOHYO.
+ENDLOOP.
+
+W_CTR_LINE  =  99.
+
+ENDFORM.
+
+*======================================================================*
+*  総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ・当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ              *
+*======================================================================*
+*FORM READ_SKC1A.
+*
+*  LOOP AT T_SKC1A  WHERE  GSBER  =  T_BUMON-GSBER.
+*
+*       AT END OF SAKNR.
+*
+*          SUM.
+*          PERFORM  ZIMD0005.              "総勘定元帳の対象月データ取得
+*
+*          LOOP AT T_ZF210 WHERE HKONT    =   T_SKC1A-SAKNR
+*                            AND ZBUGKEY <>  ''.
+*
+*            PERFORM  SUM_TUKI_DATA.        "対象月の金額集計
+*
+*          ENDLOOP.
+*       ENDAT.
+*  ENDLOOP.
+*
+*ENDFORM.
+FORM READ_SKC1A.
+*                                          "総勘定元帳
+LOOP AT T_SKC1A.
+ZI05-ZENZAN  = 0.
+ZI05-KARI    = 0.
+ZI05-KASI    = 0.
+ZI05-TOUZAN  = 0.
+ZI05-MATUZAN = 0.
+*現在の部門
+IF T_SKC1A-GSBER  =  T_BUMON-GSBER.
+PERFORM  ZIMD0005.               "総勘定元帳の対
+
+LOOP AT T_ZF210 WHERE HKONT   =  T_SKC1A-SAKNR
+AND ZBUGKEY <>  ''.
+PERFORM  SUM_TUKI_DATA.        "対象月の金額集計
+ENDLOOP.
+
+ENDIF.
+ENDLOOP.
+
+ENDFORM.
+
+
+
+*----------------------------------------------------------------------*
+*  帳票出力用ﾜｰｸﾃｰﾌﾞﾙ金額集計                                          *
+*----------------------------------------------------------------------*
+FORM SUM_TUKI_DATA.
+
+READ  TABLE T_CYOHYO  INDEX  T_ZF210-ZBUGSEQ.
+
+T_CYOHYO-ZENZAN   =  T_CYOHYO-ZENZAN   +  ZI05-ZENZAN.
+T_CYOHYO-KARI     =  T_CYOHYO-KARI     +  ZI05-KARI.
+T_CYOHYO-KASI     =  T_CYOHYO-KASI     +  ZI05-KASI.
+T_CYOHYO-TOUZAN   =  T_CYOHYO-TOUZAN   +  ZI05-TOUZAN.
+T_CYOHYO-MATUZAN  =  T_CYOHYO-MATUZAN  +  ZI05-MATUZAN.
+
+MODIFY      T_CYOHYO  INDEX  T_ZF210-ZBUGSEQ.
+
+ENDFORM.
+
+*======================================================================*
+*  金額集計処理                                                        *
+*======================================================================*
+FORM SUMM_KINGAKU.
+*- - - - - - - - - - - - - - - - - - - - - "ランクごとの金額集計
+PERFORM  ZIMD0006.
+*- - - - - - - - - - - - - - - - - - - - - "構成比計算
+PERFORM  KEIS_KOSEIHI.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  構成比計算                                                          *
+*----------------------------------------------------------------------*
+FORM KEIS_KOSEIHI.
+*                                          "構成比計算用分母取得
+READ  TABLE T_CYOHYO  INDEX  W_IDX_BUNBO.
+
+W_BUNBO  =  T_CYOHYO-MATUZAN.
+*                                          "構成比計算
+LOOP AT T_CYOHYO.
+
+IF  W_BUNBO  <>  0.
+T_CYOHYO-HI  =  T_CYOHYO-MATUZAN  /  W_BUNBO  *  100.
+ENDIF.
+
+MODIFY      T_CYOHYO  INDEX  SY-TABIX.
+ENDLOOP.
+
+ENDFORM.
+
+*======================================================================*
+*  部門別当期売上原価内訳表  出力処理                                  *
+*======================================================================*
+FORM PRNT_LIST.
+*                                          "出力コントロール
+LOOP AT T_CYOHYO  WHERE  ZBPRKBN  <> 'D'.
+
+IF  W_CTR_LINE  >=  58.
+
+NEW-PAGE.
+PERFORM  OUT_HEADER.             "見出し出力
+W_CTR_LINE  =  7.
+ENDIF.
+
+PERFORM  OUT_DETAIL.               "明細出力
+
+W_CTR_LINE  =  W_CTR_LINE  +  1.   "明細行カウントＵＰ
+ENDLOOP.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  見出し編集処理                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_HEADER.
+*                                          "対象年月編集
+W_NEN_F   =  W_GJAHR.
+W_NEN_T   =  P_GJAHR.
+W_TUKI3   =  W_PERIO.
+*                                          "期首月取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = W_NEN_F
+I_PERIV        = T001-PERIV
+I_POPER        = 01
+IMPORTING
+E_DATE         = F_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF  SY-SUBRC  >  0.
+MESSAGE A001  WITH  'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+ENDIF.
+
+*                                          "月末日取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = W_NEN_F
+I_PERIV        = T001-PERIV
+I_POPER        = W_TUKI3
+IMPORTING
+E_DATE         = W_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF  SY-SUBRC  >  0.
+MESSAGE A001  WITH  'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+ENDIF.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  見出し出力処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_HEADER.
+*                                          "見出し編集
+WRITE:  164 SY-PAGNO , 160 'ﾍﾟｰｼﾞ '.
+WRITE: /011 W_NEN_F,
+015 '年度',
+063 '部  門  別  当  期  売  上  原  価  内  訳  表',
+138 '作成年月日',
+148 SY-DATUM(4),
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+164 SY-UZEIT(2),
+166 ':',
+167 SY-UZEIT+2(2).
+WRITE: /062 '================================================',
+162 '単位：円'.
+WRITE: /071 '(',
+072 W_NEN_F,
+076 '年',
+078 F_DATE+4(2) NO-ZERO,
+080 '月 1日～',
+088 W_NEN_T,
+092 '年',
+094 P_PERIO NO-ZERO,
+096 '月',
+098 W_DATE+6(2) NO-ZERO,
+100 '日)'.
+WRITE: /051 '部門',
+056 T_BUMON-GSBER,
+061 T_BUMON-GTEXT.
+WRITE: /057 '科    目',
+084 '月    計',
+105 '累    計',
+114 '構成比'.
+ULINE /051(69).                      "単線出力
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  明細出力処理                                                        *
+*----------------------------------------------------------------------*
+FORM OUT_DETAIL.
+*                                          "見出し編集
+CASE    T_CYOHYO-ZBLSNM.
+WHEN  '△                  '.
+SKIP.
+WHEN  '--------------------'.
+ULINE /051(69).                  "単線出力
+WHEN  '===================='.
+WRITE: /051 '==============================',         "二重線出力
+081 '==============================',
+111 '========='.
+WHEN OTHERS.
+WRITE: /051  T_CYOHYO-ZBLSNM.
+
+W_KINGAKU13 = T_CYOHYO-TOUZAN * 100.      "97/03/04
+PERFORM YF01NUMC USING W_KINGAKU13 20 0.       "97/03/04
+WRITE:  072  O_NUM USING EDIT MASK 'RR____________________'.
+
+W_KINGAKU13 = T_CYOHYO-MATUZAN * 100.     "97/03/04
+PERFORM YF01NUMC USING W_KINGAKU13 20 0.       "97/03/04
+WRITE:  093  O_NUM USING EDIT MASK 'RR____________________'.
+
+PERFORM  EDT_KOSEIHI.            "構成比
+WRITE:  114  EDT USING EDIT MASK 'RR______'.
+
+ENDCASE.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  構成比編集                                                          *
+*----------------------------------------------------------------------*
+FORM EDT_KOSEIHI.
+
+IF T_CYOHYO-HI  <  0.                "負の値の場合
+EDT-MINUS  =  '-'.                 "  -セット
+W_HI     =  T_CYOHYO-HI  *  -1.    "　絶対値セット
+EDT-HI     =         W_HI.
+ELSE.                                "正の値の場合
+EDT-MINUS  =  ''.
+EDT-HI     =  T_CYOHYO-HI.
+ENDIF.
+
+CONDENSE  EDT  NO-GAPS.
+
+ENDFORM.
+REPORT YF002100 MESSAGE-ID ZB
+NO STANDARD PAGE HEADING
+LINE-SIZE   170
+LINE-COUNT   58(0).
+*----------------------------------------------------------------------*
+*     ﾌﾟﾛｸﾞﾗﾑID : YF002100                                             *
+*     ﾌﾟﾛｸﾞﾗﾑ名 : 部門別当期売上原価内訳作成                           *
+*     処理種別  : バッチ(ABAP/4)                                       *
+*     処理概要  : 総勘定元帳ﾃｰﾌﾞﾙより，指定された年月のデータを抽出し  *
+*               : 勘定科目ごとに金額集計と構成比計算を行い，           *
+*               : 帳票を出力する。                                     *
+*     入力      : 会計年度，会計期間，会社ｺｰﾄﾞ                         *
+*     出力      : 部門別当期売上原価内訳                               *
+*----------------------------------------------------------------------*
+
+*テーブル定義
+TABLES:SKC1A,                          "総勘定元帳
+TGSBT,                          "部門ﾃｰﾌﾞﾙ"部門ﾃｰﾌﾞﾙ
+T001,                           "会社コードテーブル
+YFA04,                          "当期売上原価内訳CTLﾏｽﾀ
+YFA06.                          "勘定別集計先決定ﾃｰﾌﾞﾙ
+
+*内部テーブル定義
+DATA: BEGIN   OF       T_SKC1A OCCURS 100.       "総勘定元帳
+INCLUDE STRUCTURE  SKC1A.
+DATA: END     OF       T_SKC1A.
+
+DATA: BEGIN   OF       T_BUMON  OCCURS  50,      "部門ﾃｰﾌﾞﾙ
+GSBER       LIKE TGSBT-GSBER VALUE '',                  "部門ｺｰﾄﾞ
+GTEXT       LIKE TGSBT-GTEXT VALUE '',        "部門名称
+*     ZBBOOD(02)  TYPE N VALUE 0,                   "帳票出力順
+END     OF       T_BUMON.
+
+DATA: BEGIN   OF       T_CYOHYO OCCURS 100.      "帳票出力用ﾃﾞｰﾀﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA04.      "(当期売上原価内訳)
+DATA: ZENZAN(15)  TYPE P DECIMALS 2 VALUE 0,            "前月末残高
+KARI(15)    TYPE P DECIMALS 2 VALUE 0,            "借方金額
+KASI(15)    TYPE P DECIMALS 2 VALUE 0,            "貸方金額
+TOUZAN(15)  TYPE P DECIMALS 2 VALUE 0,            "当月残高
+MATUZAN(15) TYPE P DECIMALS 2 VALUE 0,            "当月末残高
+HI(06)      TYPE P DECIMALS 1 VALUE 0,            "構成比
+END     OF       T_CYOHYO.
+
+DATA: BEGIN   OF       T_ZF210  OCCURS 100.      "集計先決定ﾃｰﾌﾞﾙ
+INCLUDE STRUCTURE  YFA06.
+DATA: END     OF       T_ZF210.
+
+DATA: BEGIN   OF   T_SYUKEI       OCCURS 3,      "金額集計用ﾜｰｸﾃｰﾌﾞﾙ
+ZENZAN  LIKE T_CYOHYO-ZENZAN,    "前月末残高
+KARI    LIKE T_CYOHYO-KARI,      "借方金額
+KASI    LIKE T_CYOHYO-KASI,      "貸方金額
+TOUZAN  LIKE T_CYOHYO-TOUZAN,    "当月残高
+MATUZAN LIKE T_CYOHYO-MATUZAN.   "当月末残高
+DATA: END     OF   T_SYUKEI.
+
+*パラメータ定義
+PARAMETERS: P_GJAHR(04)  TYPE N,       "会計年度
+P_PERIO(02)  TYPE N,       "会計期間
+P_BUKRS(04),               "会社コード
+S_GSBERF(04),              "部門ｺｰﾄﾞ(FROM)
+S_GSBERT(04),              "部門ｺｰﾄﾞ(TO)
+P_NENJI AS CHECKBOX.       "年次用フラグ
+
+*作業用データ定義
+DATA: W_MSG(40),                       "メッセージ
+W_DATE       LIKE SY-DATUM,
+F_DATE       LIKE SY-DATUM,
+W_NEN_F      LIKE P_GJAHR,
+W_NEN_T      LIKE P_GJAHR,
+W_TUKI       LIKE P_PERIO,
+W_TUKI3(03)  TYPE N,
+W_BUNBO      LIKE T_CYOHYO-MATUZAN,
+W_HI         LIKE T_CYOHYO-HI,
+W_CTR        TYPE I  VALUE  0,
+W_CTR_LINE   TYPE I  VALUE 99,
+W_IDX        TYPE I,
+W_IDX_BUNBO  TYPE I,
+W_KINGAKU13(13) TYPE P,
+W_GJAHR(04)     TYPE N,
+W_PERIO(03)     TYPE N.
+
+DATA: BEGIN OF EDT,                    "編集後フォーマット
+MINUS(1) TYPE C,                 "  符号
+HI(6)    TYPE C,                 "  金額
+END OF EDT.
+
+INCLUDE:YF01NUMC,                      "金額12桁出力用編集ｻﾌﾞ
+YF01SKAN,                      "総勘定元帳月別ﾃﾞｰﾀ取込
+YF01RANK.                      "ランクごとの金額編集
+
+************************************************************************
+*  主処理                                                              *
+************************************************************************
+START-OF-SELECTION.
+
+SELECT SINGLE * FROM  T001
+WHERE  BUKRS       = P_BUKRS        .
+
+MOVE: P_GJAHR TO W_DATE(4),
+P_PERIO TO W_DATE+4(2),
+'01' TO W_DATE+6(2).
+
+CALL FUNCTION 'FI_PERIOD_DETERMINE'
+EXPORTING
+I_BUDAT        = W_DATE
+I_BUKRS        = P_BUKRS
+IMPORTING
+E_GJAHR        = W_GJAHR
+E_POPER        = W_PERIO
+EXCEPTIONS
+FISCAL_YEAR    = 1
+PERIOD         = 2
+PERIOD_VERSION = 3
+POSTING_PERIOD = 4
+SPECIAL_PERIOD = 5
+VERSION        = 6
+POSTING_DATE   = 7
+OTHERS         = 8.
+
+IF SY-SUBRC <> 0.
+MESSAGE A001 WITH 'FI_PERIOD_DETERMINE' SY-SUBRC.
+ENDIF.
+
+GET                 SKC1A.
+MOVE-CORRESPONDING  SKC1A TO T_SKC1A.
+APPEND                       T_SKC1A.
+
+END-OF-SELECTION.
+
+PERFORM  READ_FILES.
+*
+PERFORM  EDT_HEADER.                 "見出し編集
+
+LOOP  AT  T_BUMON.
+
+PERFORM  INIT_T_CYOHYO.            "帳票出力用ﾜｰｸﾃｰﾌﾞﾙ ｸﾘｱ
+PERFORM  READ_SKC1A.               "総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ
+
+PERFORM  SUMM_KINGAKU.             "金額集計処理
+PERFORM  PRNT_LIST.                "損益計算書出力処理
+ENDLOOP.
+
+EXIT.
+
+*======================================================================*
+*  ファイルの読込み                                                    *
+*======================================================================*
+FORM READ_FILES.
+
+CLEAR  : T_BUMON,T_CYOHYO,T_SYUKEI.
+REFRESH: T_BUMON,T_CYOHYO,T_SYUKEI.
+*------------------------------------------部門ﾃｰﾌﾞﾙ
+SELECT  *  FROM  TGSBT
+WHERE  GSBER  BETWEEN  S_GSBERF  AND  S_GSBERT.
+
+IF  SY-SUBRC  <>  0.
+EXIT.
+ENDIF.
+
+T_BUMON-GSBER   =  TGSBT-GSBER.
+T_BUMON-GTEXT   =  TGSBT-GTEXT.
+*   T_BUMON-ZBBOOD  =  ZC250-ZBBOOD.
+
+APPEND  T_BUMON.
+ENDSELECT.
+*------------------------------------------出力CTLﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA04  INTO  T_CYOHYO.
+
+IF  SY-SUBRC  =  0.
+W_CTR  =  W_CTR  +  1.           "読込件数ｶｳﾝﾀ UP
+ELSE.
+EXIT.
+ENDIF.
+
+APPEND  T_CYOHYO.
+
+IF  T_CYOHYO-ZBPRKBN  =  'B'.
+W_IDX_BUNBO  =  W_CTR.
+ENDIF.
+ENDSELECT.
+*------------------------------------------集計先決定ﾃｰﾌﾞﾙ
+SELECT  *  FROM  YFA06  APPENDING  TABLE  T_ZF210.
+
+IF  SY-SUBRC  NE  0.
+EXIT.
+ENDIF.
+*------------------------------------------集計ﾃｰﾌﾞﾙ
+DO  9  TIMES.
+APPEND  T_SYUKEI.
+ENDDO.
+*------------------------------------------内部テーブルソート
+SORT  T_SKC1A  BY SAKNR.             "総勘定元帳ソート(勘定科目順）
+SORT  T_BUMON  BY GSBER.             "部門ﾃｰﾌﾞﾙ  出力順にｿｰﾄ
+SORT  T_ZF210  BY HKONT.
+
+ENDFORM.
+
+*======================================================================*
+*  帳票出力用ﾜｰｸﾃｰﾌﾞﾙ  CLEAR                                           *
+*======================================================================*
+FORM INIT_T_CYOHYO.
+
+LOOP  AT  T_CYOHYO.
+
+T_CYOHYO-ZENZAN   =  0.
+T_CYOHYO-KARI     =  0.
+T_CYOHYO-KASI     =  0.
+T_CYOHYO-TOUZAN   =  0.
+T_CYOHYO-MATUZAN  =  0.
+T_CYOHYO-HI       =  0.
+
+MODIFY  T_CYOHYO.
+ENDLOOP.
+
+W_CTR_LINE  =  99.
+
+ENDFORM.
+
+*======================================================================*
+*  総勘定元帳→帳票出力用ﾜｰｸﾃｰﾌﾞﾙ・当期利益計算用ﾜｰｸﾃｰﾌﾞﾙ              *
+*======================================================================*
+*FORM READ_SKC1A.
+*
+*  LOOP AT T_SKC1A  WHERE  GSBER  =  T_BUMON-GSBER.
+*
+*       AT END OF SAKNR.
+*
+*          SUM.
+*          PERFORM  ZIMD0005.              "総勘定元帳の対象月データ取得
+*
+*          LOOP AT T_ZF210 WHERE HKONT    =   T_SKC1A-SAKNR
+*                            AND ZBUGKEY <>  ''.
+*
+*            PERFORM  SUM_TUKI_DATA.        "対象月の金額集計
+*
+*          ENDLOOP.
+*       ENDAT.
+*  ENDLOOP.
+*
+*ENDFORM.
+FORM READ_SKC1A.
+*                                          "総勘定元帳
+LOOP AT T_SKC1A.
+ZI05-ZENZAN  = 0.
+ZI05-KARI    = 0.
+ZI05-KASI    = 0.
+ZI05-TOUZAN  = 0.
+ZI05-MATUZAN = 0.
+*現在の部門
+IF T_SKC1A-GSBER  =  T_BUMON-GSBER.
+PERFORM  ZIMD0005.               "総勘定元帳の対
+
+LOOP AT T_ZF210 WHERE HKONT   =  T_SKC1A-SAKNR
+AND ZBUGKEY <>  ''.
+PERFORM  SUM_TUKI_DATA.        "対象月の金額集計
+ENDLOOP.
+
+ENDIF.
+ENDLOOP.
+
+ENDFORM.
+
+
+
+*----------------------------------------------------------------------*
+*  帳票出力用ﾜｰｸﾃｰﾌﾞﾙ金額集計                                          *
+*----------------------------------------------------------------------*
+FORM SUM_TUKI_DATA.
+
+READ  TABLE T_CYOHYO  INDEX  T_ZF210-ZBUGSEQ.
+
+T_CYOHYO-ZENZAN   =  T_CYOHYO-ZENZAN   +  ZI05-ZENZAN.
+T_CYOHYO-KARI     =  T_CYOHYO-KARI     +  ZI05-KARI.
+T_CYOHYO-KASI     =  T_CYOHYO-KASI     +  ZI05-KASI.
+T_CYOHYO-TOUZAN   =  T_CYOHYO-TOUZAN   +  ZI05-TOUZAN.
+T_CYOHYO-MATUZAN  =  T_CYOHYO-MATUZAN  +  ZI05-MATUZAN.
+
+MODIFY      T_CYOHYO  INDEX  T_ZF210-ZBUGSEQ.
+
+ENDFORM.
+
+*======================================================================*
+*  金額集計処理                                                        *
+*======================================================================*
+FORM SUMM_KINGAKU.
+*- - - - - - - - - - - - - - - - - - - - - "ランクごとの金額集計
+PERFORM  ZIMD0006.
+*- - - - - - - - - - - - - - - - - - - - - "構成比計算
+PERFORM  KEIS_KOSEIHI.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  構成比計算                                                          *
+*----------------------------------------------------------------------*
+FORM KEIS_KOSEIHI.
+*                                          "構成比計算用分母取得
+READ  TABLE T_CYOHYO  INDEX  W_IDX_BUNBO.
+
+W_BUNBO  =  T_CYOHYO-MATUZAN.
+*                                          "構成比計算
+LOOP AT T_CYOHYO.
+
+IF  W_BUNBO  <>  0.
+T_CYOHYO-HI  =  T_CYOHYO-MATUZAN  /  W_BUNBO  *  100.
+ENDIF.
+
+MODIFY      T_CYOHYO  INDEX  SY-TABIX.
+ENDLOOP.
+
+ENDFORM.
+
+*======================================================================*
+*  部門別当期売上原価内訳表  出力処理                                  *
+*======================================================================*
+FORM PRNT_LIST.
+*                                          "出力コントロール
+LOOP AT T_CYOHYO  WHERE  ZBPRKBN  <> 'D'.
+
+IF  W_CTR_LINE  >=  58.
+
+NEW-PAGE.
+PERFORM  OUT_HEADER.             "見出し出力
+W_CTR_LINE  =  7.
+ENDIF.
+
+PERFORM  OUT_DETAIL.               "明細出力
+
+W_CTR_LINE  =  W_CTR_LINE  +  1.   "明細行カウントＵＰ
+ENDLOOP.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  見出し編集処理                                                      *
+*----------------------------------------------------------------------*
+FORM EDT_HEADER.
+*                                          "対象年月編集
+W_NEN_F   =  W_GJAHR.
+W_NEN_T   =  P_GJAHR.
+W_TUKI3   =  W_PERIO.
+*                                          "期首月取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = W_NEN_F
+I_PERIV        = T001-PERIV
+I_POPER        = 01
+IMPORTING
+E_DATE         = F_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF  SY-SUBRC  >  0.
+MESSAGE A001  WITH  'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+ENDIF.
+
+*                                          "月末日取得
+CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+EXPORTING
+I_GJAHR        = W_NEN_F
+I_PERIV        = T001-PERIV
+I_POPER        = W_TUKI3
+IMPORTING
+E_DATE         = W_DATE
+EXCEPTIONS
+INPUT_FALSE    = 1
+T009_NOTFOUND  = 2
+T009B_NOTFOUND = 3.
+
+IF  SY-SUBRC  >  0.
+MESSAGE A001  WITH  'LAST_DAY_IN_PERIOD_GET' SY-SUBRC.
+ENDIF.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  見出し出力処理                                                      *
+*----------------------------------------------------------------------*
+FORM OUT_HEADER.
+*                                          "見出し編集
+WRITE:  164 SY-PAGNO , 160 'ﾍﾟｰｼﾞ '.
+WRITE: /011 W_NEN_F,
+015 '年度',
+063 '部  門  別  当  期  売  上  原  価  内  訳  表',
+138 '作成年月日',
+148 SY-DATUM(4),
+152 '年',
+154 SY-DATUM+4(2) NO-ZERO,
+156 '月',
+158 SY-DATUM+6(2) NO-ZERO,
+160 '日',
+164 SY-UZEIT(2),
+166 ':',
+167 SY-UZEIT+2(2).
+WRITE: /062 '================================================',
+162 '単位：円'.
+WRITE: /071 '(',
+072 W_NEN_F,
+076 '年',
+078 F_DATE+4(2) NO-ZERO,
+080 '月 1日～',
+088 W_NEN_T,
+092 '年',
+094 P_PERIO NO-ZERO,
+096 '月',
+098 W_DATE+6(2) NO-ZERO,
+100 '日)'.
+WRITE: /051 '部門',
+056 T_BUMON-GSBER,
+061 T_BUMON-GTEXT.
+WRITE: /057 '科    目',
+084 '月    計',
+105 '累    計',
+114 '構成比'.
+ULINE /051(69).                      "単線出力
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  明細出力処理                                                        *
+*----------------------------------------------------------------------*
+FORM OUT_DETAIL.
+*                                          "見出し編集
+CASE    T_CYOHYO-ZBLSNM.
+WHEN  '△                  '.
+SKIP.
+WHEN  '--------------------'.
+ULINE /051(69).                  "単線出力
+WHEN  '===================='.
+WRITE: /051 '==============================',         "二重線出力
+081 '==============================',
+111 '========='.
+WHEN OTHERS.
+WRITE: /051  T_CYOHYO-ZBLSNM.
+
+W_KINGAKU13 = T_CYOHYO-TOUZAN * 100.      "97/03/04
+PERFORM YF01NUMC USING W_KINGAKU13 20 0.       "97/03/04
+WRITE:  072  O_NUM USING EDIT MASK 'RR____________________'.
+
+W_KINGAKU13 = T_CYOHYO-MATUZAN * 100.     "97/03/04
+PERFORM YF01NUMC USING W_KINGAKU13 20 0.       "97/03/04
+WRITE:  093  O_NUM USING EDIT MASK 'RR____________________'.
+
+PERFORM  EDT_KOSEIHI.            "構成比
+WRITE:  114  EDT USING EDIT MASK 'RR______'.
+
+ENDCASE.
+
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*  構成比編集                                                          *
+*----------------------------------------------------------------------*
+FORM EDT_KOSEIHI.
+
+IF T_CYOHYO-HI  <  0.                "負の値の場合
+EDT-MINUS  =  '-'.                 "  -セット
+W_HI     =  T_CYOHYO-HI  *  -1.    "　絶対値セット
+EDT-HI     =         W_HI.
+ELSE.                                "正の値の場合
+EDT-MINUS  =  ''.
+EDT-HI     =  T_CYOHYO-HI.
+ENDIF.
+
+CONDENSE  EDT  NO-GAPS.
+
+ENDFORM.

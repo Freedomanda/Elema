@@ -1,0 +1,3858 @@
+*&-------------------------------------------------------------------
+*& Report  ZM011000
+*&-------------------------------------------------------------------
+* [プログラム名]
+*   ZM011000        期末残高一覧表
+* [処理概要]
+*　　　期末時点における商品残高の内訳を示す
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/04/05   PSD T.SAITOH      新規開発　
+*  2002/04/09   PSD T.SAITOH      得意先特殊在庫と仕入先特殊在庫の
+*                                 期末残高設定ロジック修正
+*  2002/05/09   PSD T.SAITOH      会計数値違い明確化文章表示
+*  2002/05/15   PSD T.SAITOH      受注在庫数量取得方法変更
+*  2002/05/15   PSD T.SAITOH      パフォーマンス対応（第１回）
+*  2002/05/17   PSD T.SAITOH      とりあえず複数保管場所考慮
+*  2002/05/17   PSD T.SAITOH      とりあえず複数保管場所考慮2
+*  2002/05/17   PSD T.SAITOH      とりあえず複数保管場所考慮3
+*  2002/06/20   PSD T.SAITOH      再移送
+*  2002/07/04   PSD T.SAITOH      会社コード不具合対応
+*  2002/07/05   PSD T.SAITOH      パフォーマンス対応
+*  2002/09/20   PSD H.HARUKI      処理日付・時間対応
+*  2002/09/21   PSD H.HARUKI      購買グループを条件に追加対応
+*  2002/10/17   PSD K.ARAI        販売明細番号抽出先にMSKAHを追加
+*  2002/10/17   PSD K.ARAI        パフォーマンス対応
+*  2002/10/18   PSD K.ARAI        パフォーマンス対応
+*  2002/10/20   PSD K.ARAI        販売明細番号データループの不具合修正
+*  2002/10/24   PSD K.ARAI        MBEWH & MSKAH データ抽出方法修正
+*  2003/07/22   DMC R.Hata        ダウンロード機能追加
+*&-------------------------------------------------------------------
+REPORT zm011000
+LINE-SIZE 153
+LINE-COUNT 58
+NO STANDARD PAGE HEADING.
+
+*--- 定数項目
+CONSTANTS:
+cns_max_lfmon(2) TYPE n VALUE 16."会計期間の最大値
+
+CONSTANTS:
+cns_t001(4)    TYPE c VALUE 'T001',
+cns_t001k(5)   TYPE c VALUE 'T001K',
+cns_t001w(5)   TYPE c VALUE 'T001W',
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+cns_t024(4)    TYPE c VALUE 'T024',
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+cns_t001l(5)   TYPE c VALUE 'T001L',
+cns_mara(4)    TYPE c VALUE 'MARA',
+cns_kna1(4)    TYPE c VALUE 'KNA1',
+cns_lfa1(4)    TYPE c VALUE 'LFA1',
+cns_makt(4)    TYPE c VALUE 'MAKT',
+cns_mbew(4)    TYPE c VALUE 'MBEW',
+cns_mslb(4)    TYPE c VALUE 'MSLB',
+cns_marc(4)    TYPE c VALUE 'MARC',
+cns_mska(4)    TYPE c VALUE 'MSKA',
+cns_mard(4)    TYPE c VALUE 'MARD',
+cns_msku(4)    TYPE c VALUE 'MSKU',
+cns_mbewh(5)   TYPE c VALUE 'MBEWH',
+cns_mslbh(5)   TYPE c VALUE 'MSLBH',
+cns_march(5)   TYPE c VALUE 'MARCH',
+cns_mskah(5)   TYPE c VALUE 'MSKAH',
+cns_mardh(5)   TYPE c VALUE 'MARDH',
+cns_mskuh(5)   TYPE c VALUE 'MSKUH',
+cns_x          TYPE c VALUE 'X',
+cns_e          TYPE c VALUE 'E',
+cns_o          TYPE c VALUE 'O',
+cns_w          TYPE c VALUE 'W',
+cns_3_mslb(6)  TYPE c VALUE '3_MSLB',
+cns_4_marc(6)  TYPE c VALUE '4_MARC',
+cns_1_mska(1)  TYPE c VALUE '1',
+cns_1_mard(1)  TYPE c VALUE '1',
+cns_2_msku(6)  TYPE c VALUE '2_MSKU'.
+
+*  構造宣言
+TYPES: BEGIN OF typ_zm011000,
+bukrs     TYPE t001k-bukrs,"会社コード
+bwkey     TYPE mbew-bwkey, "プラント
+matnr     TYPE mara-matnr, "品目コード
+* MATERIAL PATTERN
+mptrn(10) TYPE c,          "保管場所種別
+lgort(10) TYPE c,          "保管場所
+lfgja     TYPE mbew-lfgja, "会計年度
+lfmon     TYPE mbew-lfmon, "会計期間
+maktx     TYPE makt-maktx, "品目名
+butxt     TYPE t001-butxt, "会社名
+pname     TYPE t001w-name1,"プラント名
+lname(70) TYPE c,          "保管場所名
+lgpbe(10) TYPE c,          "棚番
+num(8)    TYPE p DECIMALS 2,"数量
+meins     TYPE mara-meins, "単位
+untct(8)  TYPE p DECIMALS 2,"単価
+salk3(8)  TYPE p,          "在庫金額
+*  LBKUM     TYPE MBEW-LBKUM, "在庫合計
+lbkum     TYPE p DECIMALS 2,"在庫合計
+total(13)  TYPE p,          "総合計
+waers     TYPE t001-waers, "通貨コード
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+ekgrp    TYPE marc-ekgrp, "購買グループ
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+
+END OF typ_zm011000.
+
+* DATA宣言（処理用、帳票出力用）
+DATA: gt_exec  TYPE TABLE OF typ_zm011000,"処理用
+gf_exec  TYPE          typ_zm011000,"処理用構造
+gf_exec_tmp  TYPE typ_zm011000,     "現レコード退避用
+gf_exec_bef  TYPE typ_zm011000.     "前レコード格納用
+
+* 会社コードマスタ構造
+TYPES: BEGIN OF typ_t001,
+bukrs TYPE t001-bukrs,
+butxt TYPE t001-butxt,
+waers TYPE t001-waers, "通貨コード
+END OF typ_t001.
+
+DATA: gt_t001 TYPE TABLE OF typ_t001,
+gf_t001 TYPE typ_t001.
+
+* 評価レベルマスタ構造
+TYPES: BEGIN OF typ_t001k,
+bwkey TYPE t001k-bwkey,
+bukrs TYPE t001k-bukrs,
+END OF typ_t001k.
+
+DATA: gt_t001k TYPE TABLE OF typ_t001k,
+gf_t001k TYPE typ_t001k.
+
+* プラントマスタ構造
+TYPES: BEGIN OF typ_t001w,
+werks TYPE t001w-werks,
+name1 TYPE t001w-name1,
+END OF typ_t001w.
+
+DATA: gt_t001w TYPE TABLE OF typ_t001w,
+gf_t001w TYPE typ_t001w.
+
+* 品目テキスト構造
+TYPES: BEGIN OF typ_makt,
+matnr TYPE makt-matnr,
+maktx TYPE makt-maktx,
+END OF typ_makt.
+
+DATA: gt_makt TYPE TABLE OF typ_makt,
+gf_makt TYPE typ_makt.
+
+* 保管場所構造
+TYPES: BEGIN OF typ_t001l,
+werks TYPE t001l-werks,
+lgort TYPE t001l-lgort,
+lgobe TYPE t001l-lgobe,
+END OF typ_t001l.
+
+DATA: gf_t001l TYPE typ_t001.
+
+* 一般品目データ構造
+TYPES: BEGIN OF typ_mara,
+matnr TYPE mara-matnr,
+meins TYPE mara-meins,
+END OF typ_mara.
+
+DATA: gf_mara TYPE typ_mara.
+
+* 得意先マスタ構造
+TYPES: BEGIN OF typ_kna1,
+kunnr TYPE kna1-kunnr,
+name1 TYPE kna1-name1,
+END OF typ_kna1.
+
+DATA: gf_kna1 TYPE typ_kna1.
+
+* 仕入先マスタ構造
+TYPES: BEGIN OF typ_lfa1,
+lifnr TYPE lfa1-lifnr,
+name1 TYPE lfa1-name1,
+END OF typ_lfa1.
+
+DATA: gf_lfa1 TYPE typ_lfa1.
+
+* 評価在庫構造
+TYPES: BEGIN OF typ_mbew,
+bukrs TYPE t001-bukrs,
+bwkey TYPE mbew-bwkey,
+matnr TYPE mbew-matnr,
+lfgja TYPE mbew-lfgja,
+lfmon TYPE mbew-lfmon,
+lbkum TYPE mbew-lbkum,
+salk3 TYPE mbew-salk3,
+verpr TYPE mbew-verpr,
+peinh TYPE mbew-peinh,
+*---INSERT START   PSD H.HARUKI 2002/09/20 ---------------------------*
+ekgrp TYPE marc-ekgrp,
+*---INSERT END     PSD H.HARUKI 2002/09/20 ---------------------------*
+END OF typ_mbew.
+
+DATA: gt_mbew TYPE TABLE OF typ_mbew,
+gf_mbew TYPE typ_mbew,
+gt_mbew_bef TYPE TABLE OF typ_mbew, "前レコード
+gf_mbew_bef TYPE typ_mbew,          "前レコード
+gt_mbew_exec TYPE TABLE OF typ_mbew,"処理用
+gf_mbew_exec TYPE typ_mbew.         "処理用
+
+* MARD構造
+TYPES: BEGIN OF typ_mard,
+bukrs TYPE t001-bukrs,
+werks TYPE mard-werks,
+matnr TYPE mard-matnr,
+lgort TYPE mard-lgort,
+lfgja TYPE mbew-lfgja,
+lfmon TYPE mbew-lfmon,
+labst TYPE mard-labst,"自社在庫：保管場所
+lgpbe TYPE mard-lgpbe,"棚番
+END OF typ_mard.
+
+DATA: gt_mard TYPE TABLE OF typ_mard,
+gf_mard TYPE typ_mard.
+* ↓実際はグローバル
+DATA: lt_mard TYPE TABLE OF typ_mard,"ローカル用内部テーブル
+lf_mard LIKE gf_mard.
+
+* MSKA構造
+TYPES: BEGIN OF typ_mska,
+bukrs TYPE t001-bukrs,
+werks TYPE mard-werks,
+matnr TYPE mard-matnr,
+lgort TYPE mard-lgort,
+lfgja TYPE mbew-lfgja,
+lfmon TYPE mbew-lfmon,
+sobkz TYPE mska-sobkz,"特殊在庫
+kalab TYPE mska-kalab,"自社在庫：受注在庫
+END OF typ_mska.
+
+*DATA: GT_MSKA TYPE TABLE OF TYP_MSKA,
+DATA: gf_mska TYPE typ_mska.
+* ↓実際はグローバル
+DATA: lt_mska TYPE TABLE OF typ_mska,"ローカル用内部テーブル
+lf_mska LIKE gf_mska.
+
+* MSKU構造
+TYPES: BEGIN OF typ_msku,
+bukrs TYPE t001-bukrs,
+werks TYPE mard-werks,
+matnr TYPE mard-matnr,
+kunnr TYPE msku-kunnr,"得意先
+lfgja TYPE mbew-lfgja,
+lfmon TYPE mbew-lfmon,
+sobkz TYPE msku-sobkz,"特殊在庫
+kulab TYPE msku-kulab,"預託在庫
+END OF typ_msku.
+
+DATA: gt_msku TYPE TABLE OF typ_msku,
+gf_msku TYPE typ_msku.
+* ↓実際はグローバル
+DATA: lt_msku TYPE TABLE OF typ_msku,"ローカル用内部テーブル
+lf_msku TYPE typ_msku.
+
+* MSLB構造
+TYPES: BEGIN OF typ_mslb,
+bukrs TYPE t001-bukrs,
+werks TYPE mard-werks,
+matnr TYPE mard-matnr,
+lifnr TYPE mslb-lifnr,"仕入先
+lfgja TYPE mbew-lfgja,
+lfmon TYPE mbew-lfmon,
+sobkz TYPE mslb-sobkz,"特殊在庫
+lblab TYPE mslb-lblab,"支給在庫
+END OF typ_mslb.
+
+DATA: gt_mslb TYPE TABLE OF typ_mslb,
+gf_mslb TYPE typ_mslb.
+* ↓実際はグローバル
+DATA: lt_mslb TYPE TABLE OF typ_mslb,"ローカル用内部テーブル
+lf_mslb LIKE gf_mslb.
+
+* MARC構造
+TYPES: BEGIN OF typ_marc,
+bukrs TYPE t001-bukrs,
+werks TYPE mard-werks,
+matnr TYPE mard-matnr,
+lfgja TYPE mbew-lfgja,
+lfmon TYPE mbew-lfmon,
+trame TYPE marc-trame, "転送中在庫
+END OF typ_marc.
+
+DATA: gt_marc TYPE TABLE OF typ_marc,
+gf_marc TYPE typ_marc.
+DATA: lt_marc TYPE TABLE OF typ_marc,"ローカル用内部テーブル
+lf_marc LIKE gf_marc.
+
+DATA: gw_num(8)    TYPE p DECIMALS 2,     "作業用自社在庫数量
+gw_lgpbe(10) TYPE c,                "作業用棚番
+gw_total(10) TYPE p.                "作業用総合計
+*--- このフラグは保管場所種別が１の時のみ作用する。
+*---DELETE START PSD T.SAITOH 2002/05/17 ---------------------------*
+*DATA: FLG_LGORT_BREAK TYPE C.  "保管場所種別／保管場所ブレイク
+*---DELETE END   PSD T.SAITOH 2002/05/17 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+DATA: gf_lifnr_tmp  TYPE typ_lfa1,    "仕入先テンポラリ
+gf_kunnr_tmp  TYPE typ_kna1.    "得意先テンポラリ
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/05/15 ---------------------------*
+* MSKA(H)を統合　ＤＢの内容すべて格納する内部ＴＢＬ
+TYPES: BEGIN OF typ_mska_hs,
+matnr TYPE mard-matnr,
+werks TYPE mard-werks,
+lgort TYPE mard-lgort,
+sobkz TYPE mska-sobkz,"特殊在庫
+vbeln TYPE mska-vbeln,
+posnr TYPE mska-posnr,
+lfgja TYPE mbew-lfgja,
+lfmon TYPE mbew-lfmon,
+kalab TYPE mska-kalab,"自社在庫：受注在庫
+END OF typ_mska_hs.
+
+DATA: gt_mska_db TYPE HASHED TABLE OF typ_mska_hs
+WITH UNIQUE KEY matnr
+werks
+lgort
+sobkz
+vbeln
+posnr
+lfgja
+lfmon,
+gf_mska_db TYPE typ_mska_hs.
+* 伝票番号専用MSKA(H)型
+*  TYPES: BEGIN OF TYP_MSKA_NUMBERS,
+*    VBELN TYPE MSKA-VBELN,
+*    POSNR TYPE MSKA-POSNR,
+*    LGORT TYPE MARD-LGORT,
+*  END OF TYP_MSKA_NUMBERS.
+* 伝票番号専用MSKA(H)テーブル
+DATA: gt_mska_numbers TYPE TABLE OF typ_mska_hs,
+gf_mska_numbers TYPE typ_mska_hs.
+
+*---APPEND END   PSD T.SAITOH 2002/05/15 ---------------------------*
+
+*---APPEND START PSD T.SAITOH 2002/05/17 ---------------------------*
+* 複数保管場所対応（念のため）業務上はありえないが
+* システム的にはありえるため
+* 複数保管場所時品目名称非表示対応
+DATA: g_flg_matnr TYPE c."品目コード
+*---APPEND END   PSD T.SAITOH 2002/05/17 ---------------------------*
+*---INSERT START   PSD H.HARUKI 2002/09/20 ---------------------------*
+*  購買グループ　格納
+DATA: g_save_ekgrp TYPE marc-ekgrp .
+*---INSERT END     PSD H.HARUKI 2002/09/20 ---------------------------*
+*---INSERT START  NDSC R.HATA   2002/11/18 ---------------------------*
+Data : W_BUPER Like T009B-POPER ,
+W_GJAHR Like T009B-BDATJ .
+*---INSERT END    NDSC R.HATA   2002/11/18 ---------------------------*
+
+* Add 2003/07/22 Hata >>>
+* Mod 2003/11/05 Hata >>>
+Types : Begin Of TYP_DL ,
+*          bukrs(04) Type C ,         "会社コード
+*          bwkey(04) Type C ,         "プラント
+*          matnr(18) Type C ,         "品目コード
+*          mptrn(10) Type C ,         "保管場所種別
+*          lgort(10) Type C ,         "保管場所
+*          lfgja(04) Type C ,         "会計年度
+*          lfmon(02) Type C ,         "会計期間
+*          maktx(35) Type C ,         "品目名
+*          butxt(25) Type C ,         "会社名
+*          pname(30) Type C ,         "プラント名
+*          lname(70) Type C ,         "保管場所名
+*          lgpbe(10) Type C ,         "棚番
+*          num(8)    Type C ,         "数量
+*          meins(03) Type C ,         "単位
+*          untct(08) Type C ,         "単価
+*          salk3(08) Type C ,         "在庫金額
+*          lbkum(16) Type C ,         "在庫合計
+*          total(13) Type C ,         "総合計
+*          waers(03) Type C ,         "通貨コード
+*          ekgrp(04) Type C ,         "購買グループ
+ekgrp(04) Type C ,         "購買グループ
+matnr(18) Type C ,         "品目コード
+maktx(35) Type C ,         "品目名
+GOKEI(04) Type C ,         "合計
+lgpbe(10) Type C ,         "棚番
+lbkum(16) Type C ,         "在庫合計
+meins(03) Type C ,         "単位
+untct(08) Type C ,         "単価
+salk3(08) Type C ,         "在庫金額
+* Mod 2003/11/05 Hata <<<
+End Of TYP_DL .
+
+Data : GT_DL Type Table Of TYP_DL ,
+GF_DL Type TYP_DL .
+
+* Add 2003/07/22 Hata <<<
+
+* 選択画面 *----------------------------------------------------*
+*SELECTION-SCREEN BEGIN OF LINE.
+*SELECTION-SCREEN COMMENT 1(8)  TEXT-001.
+PARAMETERS: pr_lfgja   TYPE  mbew-lfgja OBLIGATORY.
+*SELECTION-SCREEN COMMENT 16(4) TEXT-002.
+PARAMETERS: pr_lfmon   TYPE  mbew-lfmon OBLIGATORY.
+*SELECTION-SCREEN COMMENT 30(4) TEXT-003.
+*SELECTION-SCREEN END   OF LINE.
+
+*---MODIFY START PSD T.SAITOH 2002/07/04 ---------------------------*
+*SELECT-OPTIONS:S_BUKRS FOR GF_T001-BUKRS  MEMORY ID BUK OBLIGATORY.
+PARAMETERS:pr_bukrs TYPE t001-bukrs  MEMORY ID buk OBLIGATORY.
+*---MODIFY END   PSD T.SAITOH 2002/07/04 ---------------------------*
+SELECT-OPTIONS:s_werks FOR gf_t001w-werks MEMORY ID wrk OBLIGATORY.
+*---INSERT START   PSD H.HARUKI 2002/09/20 ---------------------------*
+SELECT-OPTIONS:s_ekgrp FOR g_save_ekgrp MEMORY ID ekg .
+*---INSERT END     PSD H.HARUKI 2002/09/20 ---------------------------*
+
+
+* オプション設定
+SELECTION-SCREEN BEGIN OF BLOCK bkop
+WITH FRAME TITLE text-070.
+PARAMETERS: pr_page AS CHECKBOX."ページ表示
+PARAMETERS: pr_colr AS CHECKBOX."色表示
+SELECTION-SCREEN END   OF BLOCK bkop.
+
+* Add 2003/07/22 Hata >>>
+SELECTION-SCREEN BEGIN OF BLOCK DOWN WITH FRAME TITLE TEXT-036.
+PARAMETERS: R_NOT       RADIOBUTTON GROUP R1,
+R_DOWN      RADIOBUTTON GROUP R1,
+P_FILE      LIKE RLGRAP-FILENAME
+DEFAULT 'C:\TEST.CSV'.
+* Add 2003.09.02 >>>>>
+SELECTION-SCREEN BEGIN OF BLOCK DOWN2 WITH FRAME .
+Parameters : P_LOCAL  RadioButton Group R2 ,
+P_SERVE  RadioButton Group R2 .
+SELECTION-SCREEN END   OF BLOCK DOWN2.
+* Add 2003.09.02 <<<<<
+SELECTION-SCREEN END   OF BLOCK DOWN.
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN ON BLOCK DOWN.
+*---------------------------------------------------------------------
+*--- 入力ファイルのチェック
+IF R_DOWN = 'X'.
+IF P_FILE IS INITIAL.
+* ファイルパスを指定してください
+MESSAGE E855(Z1).
+ENDIF.
+ENDIF.
+
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR P_FILE.
+*---------------------------------------------------------------------
+*--- ファイル名呼び出し
+PERFORM FRM_CHK_FILE.
+
+
+* Add 2003/07/22 Hata <<<
+
+
+
+*--------------------------------------------------------------*
+
+*--------------------------------------------------------------*
+* INITIALIZATION
+*--------------------------------------------------------------*
+INITIALIZATION.
+* 指定計上年月→会計期間に変換
+
+PERFORM frm_change_cltofi USING    sy-datum+0(4)
+sy-datum+4(2)
+CHANGING pr_lfgja
+pr_lfmon.
+
+*---------------------------------------------------------------------
+* at selection-screen
+*---------------------------------------------------------------------
+AT SELECTION-SCREEN.
+IF sy-ucomm+0(1) <> '%'.
+PERFORM frm_check_year USING pr_lfgja.
+PERFORM frm_check_mon  USING pr_lfmon.
+PERFORM frm_check_bukrs.
+PERFORM frm_check_werks.
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+PERFORM frm_check_ekgrp.
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+ENDIF.
+
+*---------------------------------------------------------------------
+* TOP-OF-PAGE
+*---------------------------------------------------------------------
+TOP-OF-PAGE.
+
+PERFORM frm_top_of_page.
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+*       改ページ処理
+*----------------------------------------------------------------------*
+FORM frm_top_of_page.
+* 色設定
+*  IF PR_COLR = CNS_X.
+*   MAIN HEADER
+WRITE:/70(18) text-100.         "帳票タイトル
+WRITE : 114 '処理日付' ,
+sy-datum ,
+137 '処理時刻' ,
+sy-uzeit .
+
+*   PAGE DISPLAY ON
+*  ENDIF.
+IF pr_page = cns_x.
+WRITE:/145(2) sy-pagno,         "ページ数
+148(6) text-069.         "ページ（テキスト）
+ENDIF.
+WRITE:/01(10) text-050,         "会社コード（テキスト）
+12(4)  gf_exec_tmp-bukrs,"会社コード
+18(25) gf_exec_tmp-butxt,"会社名
+46(8)  text-051,         "プラント（テキスト）
+56(4)  gf_exec_tmp-bwkey,"プラント
+62(30) gf_exec_tmp-pname,"プラント名
+127(8) text-052,         "会計期間（テキスト）
+136(4) pr_lfgja,         "会計年度
+141(4) text-053,         "年度（テキスト）
+147(2) pr_lfmon,         "期間
+150(4) text-054.         "期間（テキスト）
+* UNDER LINE
+WRITE:  /1(10) text-066,"－――――
+46(8)  text-067,"――――
+127(8)  text-067,"――――
+141(4)  text-068,"――
+150(4)  text-068."――
+
+*---APPEND START PSD T.SAITOH 2002/05/09 ---------------------------*
+*    会計数値違い明確化文章
+WRITE:/0 text-072.
+*---APPEND END   PSD T.SAITOH 2002/05/09 ---------------------------*
+
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (BLUE)
+FORMAT COLOR COL_HEADING ON INTENSIFIED.
+* ITEM HEADER （テキスト）
+ENDIF.
+*  WRITE: /01(10) TEXT-055,"品目コード
+*          21(6)  TEXT-056,"品目名
+*          53(8)  TEXT-057,"保管場所
+*          65(10) TEXT-058,"保管場所名
+*          87(4)  TEXT-059,"棚番
+*---MODIFY START   PSD H.HARUKI 2002/09/21 ---------------------------*
+WRITE: /01(06) text-091,"購買グループ
+08(10) text-055,"品目コード
+28(6)  text-056,"品目名
+60(8)  text-057,"保管場所
+72(10) text-058,"保管場所名
+93(4)  text-059,"棚番
+*---MODIFY END    PSD H.HARUKI 2002/09/21 ---------------------------*
+99(4)  text-060,"数量
+114(4)  text-061,"単位
+120(4)  text-062,"単価
+136(8)  text-063,"在庫金額
+153(1)  space,   "スペース
+/01(153) sy-uline."下線
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SETING BLUE
+FORMAT COLOR OFF.
+ENDIF.
+
+ENDFORM.                    " FRM_TOP_OF_PAGE
+*---------------------------------------------------------------------
+* START-OF-SELECTION
+*---------------------------------------------------------------------
+START-OF-SELECTION.
+* 初期処理
+Perform Period_Get .
+PERFORM frm_select_t001k.
+PERFORM frm_select_t001.
+PERFORM frm_select_t001w.
+* 抽出処理
+PERFORM frm_extraction_mbew.
+* 各在庫のデータ選定
+PERFORM frm_extractions.
+* 集計処理&帳票出力
+PERFORM frm_compute.
+* ↓APPEND 2003/07/22 DMC K.MURATA
+IF R_DOWN = 'X'.
+*--- CHAR型に編集
+PERFORM FRM_CHAR_EDIT.
+* Mod 2003.09.02 >>>>>
+If P_LOCAL EQ 'X' .
+*--- CSVファイルをダウンロード
+PERFORM FRM_DATA_DL.
+Else .
+Perform FRM_DATA_TRANSFER .
+EndIf .
+* Mod 2003.09.02 <<<<<
+
+ENDIF.
+* ↑
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_extraction_MBEW
+*&---------------------------------------------------------------------*
+*       MBEW 品目評価：抽出処理
+*----------------------------------------------------------------------*
+FORM  frm_extraction_mbew.
+DATA:l_cnt_mbew TYPE i."MBEW取得件数
+* 抽出
+PERFORM frm_select_mbew.
+PERFORM frm_select_mbewh.
+
+* 取得件数
+DESCRIBE TABLE gt_mbew LINES l_cnt_mbew.
+IF l_cnt_mbew = 0.
+MESSAGE s616(z1).
+STOP.
+ENDIF.
+
+*---APPEND START PSD T.SAITOH 2002/07/04 ---------------------------*
+* 対象外プラントを削除する
+DELETE gt_mbew WHERE bukrs <> pr_bukrs.
+*---APPEND END   PSD T.SAITOH 2002/07/04 ---------------------------*
+
+* 会社コード／プラント／品目コードを昇順
+* 会計年度／会計期間を降順　ソート
+SORT gt_mbew  BY bukrs ASCENDING
+bwkey ASCENDING
+*---INSERT START   PSD H.HARUKI 2002/09/20 ---------------------------*
+ekgrp ASCENDING
+*---INSERT END     PSD H.HARUKI 2002/09/20 ---------------------------*
+matnr ASCENDING
+lfgja DESCENDING
+lfmon DESCENDING.
+
+CLEAR: gf_mbew_bef.
+* 当月末在庫に該当するレコード特定処理ループ
+LOOP AT gt_mbew INTO gf_mbew.
+*   在庫合計金額が０のものは対象外とする
+IF gf_mbew-salk3 <= 0.
+*     現レコードを前レコードをとして格納
+gf_mbew_bef = gf_mbew.
+CONTINUE.
+ENDIF.
+*   会社コード／プラント／品目コード  ブレイクごとに処理
+IF NOT ( gf_mbew-bukrs  = gf_mbew_bef-bukrs  AND
+gf_mbew-bwkey  = gf_mbew_bef-bwkey  AND
+gf_mbew-matnr  = gf_mbew_bef-matnr ).
+*     当月末在庫に該当するレコード検索
+PERFORM frm_specific_mbew.
+ENDIF.
+*   現レコードを前レコードをとして格納
+gf_mbew_bef = gf_mbew.
+ENDLOOP.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHANGE_CLTOFI
+*&---------------------------------------------------------------------*
+*       カレンダー年月→会計年月　変換処理
+*----------------------------------------------------------------------*
+*  -->  p1        カレンダー年
+*  <--  p2        カレンダー月
+*----------------------------------------------------------------------*
+FORM frm_change_cltofi USING value(pr_year)
+value(pr_mon)
+CHANGING pr_fi_year
+pr_fi_mon.
+*--- カレンダー月の判断（１～３）
+IF pr_mon >= 1 AND pr_mon <= 3.
+pr_fi_year = pr_year - 1.
+pr_fi_mon  = pr_mon + 9.
+*--- カレンダー月の判断（４～１２）
+ELSEIF pr_mon >= 4 AND pr_mon <= 12.
+pr_fi_year = pr_year.
+pr_fi_mon  = pr_mon - 3.
+ELSE.
+*--- カレンダー月（例外処理）
+ENDIF.
+
+ENDFORM.                    " FRM_CHANGE_CLTOFI
+*&===入力チェック======================================================*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_YEAR
+*&---------------------------------------------------------------------*
+*       入力チェック：年度
+*----------------------------------------------------------------------*
+FORM frm_check_year USING p_year.
+* --- 年度に０が入力された場合
+IF p_year = 0.
+*   "会計年度に[0]は指定できません
+MESSAGE s601(z1) WITH text-002
+text-004.
+STOP.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_YEAR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_MON
+*&---------------------------------------------------------------------*
+*       入力チェック：月
+*----------------------------------------------------------------------*
+FORM frm_check_mon USING p_mon.
+* ---期間が０の時
+IF p_mon = 0.
+*   "会計期間に[0]は指定できません
+MESSAGE e601(z1) WITH text-003
+text-004.
+STOP.
+ENDIF.
+* ---期間が範囲外の時
+IF NOT ( p_mon >= 1 AND p_mon <= cns_max_lfmon ).
+*   "会計期間には１～１２を指定してください。
+MESSAGE e700(z1) WITH text-003
+text-005.
+STOP.
+ENDIF.
+ENDFORM.                    " FRM_CHECK_MON
+
+*&---------------------------------------------------------------------*
+*&      CHECK_BUKRS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_BUKRS
+*&---------------------------------------------------------------------*
+*       会社コード存在チェック
+*----------------------------------------------------------------------*
+FORM frm_check_bukrs.
+DATA:lt_dummy TYPE TABLE OF typ_t001.
+
+SELECT bukrs
+FROM t001
+INTO CORRESPONDING FIELDS OF TABLE lt_dummy
+WHERE bukrs =  pr_bukrs.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE e606(z1) WITH text-006.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t001 sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      CHECK_WERKS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_WERKS
+*&---------------------------------------------------------------------*
+*       プラントコード存在チェック
+*----------------------------------------------------------------------*
+FORM frm_check_werks.
+DATA:lt_dummy TYPE TABLE OF typ_t001w.
+
+SELECT werks
+FROM t001w
+INTO CORRESPONDING FIELDS OF TABLE lt_dummy
+WHERE werks IN s_werks.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE e606(z1) WITH text-007.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t001w sy-subrc.
+ENDCASE.
+
+ENDFORM.
+
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+
+*&---------------------------------------------------------------------*
+*&      CHECK_EKGRP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_EKGRP
+*&---------------------------------------------------------------------*
+*       購買グループ存在チェック
+*----------------------------------------------------------------------*
+FORM frm_check_ekgrp.
+DATA:lt_dummy TYPE  TABLE OF typ_marc.
+
+SELECT ekgrp
+FROM t024
+INTO CORRESPONDING FIELDS OF TABLE lt_dummy
+WHERE ekgrp IN s_ekgrp.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE e606(z1) WITH text-092.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t024 sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+
+*&---------------------------------------------------------------------*
+*&      SELECT NUMBER 01
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_T001K
+*&---------------------------------------------------------------------*
+*       プラントコードから会社コードを取得
+*----------------------------------------------------------------------*
+FORM frm_select_t001k.
+
+SELECT bwkey
+bukrs
+FROM t001k
+INTO CORRESPONDING FIELDS OF TABLE gt_t001k
+WHERE bwkey IN s_werks.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+*      MESSAGE S616(Z1).
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t001k sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      SELECT NUMBER 02
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_T001
+*&---------------------------------------------------------------------*
+*       会社コードから会社名を取得
+*----------------------------------------------------------------------*
+FORM frm_select_t001.
+
+SELECT bukrs
+butxt
+waers
+FROM t001
+INTO CORRESPONDING FIELDS OF TABLE gt_t001
+WHERE bukrs =  pr_bukrs.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+*      MESSAGE S616(Z1).
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t001 sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      SELECT NUMBER 03
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_T001W
+*&---------------------------------------------------------------------*
+*       プラントコードからプラント名を取得
+*----------------------------------------------------------------------*
+FORM frm_select_t001w.
+
+SELECT werks
+name1
+FROM t001w
+INTO CORRESPONDING FIELDS OF TABLE gt_t001w
+WHERE werks IN s_werks.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+*      MESSAGE S616(Z1).
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t001w sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      SELECT NUMBER 04
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MBEW
+*&---------------------------------------------------------------------*
+*       評価在庫情報を取得
+*----------------------------------------------------------------------*
+FORM frm_select_mbew.
+
+SELECT bwkey "プラント
+matnr "品目コード
+lfgja "会計年度
+lfmon "会計期間
+lbkum "在庫合計数量
+salk3 "在庫合計金額
+verpr "移動平均原価
+peinh "価格単位
+FROM mbew
+INTO CORRESPONDING FIELDS OF gf_mbew
+WHERE bwkey IN s_werks
+AND ( lfgja <  pr_lfgja
+OR   (
+lfgja = pr_lfgja AND
+lfmon <= pr_lfmon
+)
+)
+*---APPEND START PSD T.SAITOH 2002/07/05 ---------------------------*
+*---DELETE START PSD K.ARAI   2002/10/24 ---------------------------*
+AND salk3 > 0.
+*---DELETE END   PSD K.ARAI   2002/10/24 ---------------------------*
+*---APPEND END   PSD T.SAITOH 2002/07/05 ---------------------------*
+
+*   会社コードを埋め込む
+READ TABLE gt_t001k INTO gf_t001k
+WITH KEY bwkey = gf_mbew-bwkey.
+gf_mbew-bukrs = gf_t001k-bukrs.
+
+*---MODIFY START   PSD H.HARUKI 2002/09/20 ---------------------------*
+*   購買グループが入力範囲内の時　埋め込み　&　内部ＴＢＬに　APPEND
+
+PERFORM ekgrp_get .
+IF sy-subrc = 0 .
+gf_mbew-ekgrp = g_save_ekgrp.
+APPEND gf_mbew TO gt_mbew.
+ENDIF .
+*      APPEND gf_mbew TO gt_mbew.
+
+*---MODIFY END     PSD H.HARUKI 2002/09/20 ---------------------------*
+ENDSELECT.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+*     MESSAGE S616(Z1).
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_mbew sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      SELECT NUMBER 05
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MBEWH
+*&---------------------------------------------------------------------*
+*       評価在庫履歴情報を取得
+*----------------------------------------------------------------------*
+FORM frm_select_mbewh.
+
+SELECT bwkey "プラント
+matnr "品目コード
+lfgja "会計年度
+lfmon "会計期間
+lbkum "在庫合計数量
+salk3 "在庫合計金額
+verpr "移動平均原価
+peinh "価格単位
+FROM mbewh
+INTO CORRESPONDING FIELDS OF gf_mbew
+WHERE bwkey IN s_werks
+*---MODIFY START PSD K.ARAI   2002/10/24 ---------------------------*
+*** 履歴テーブルは「入力値以降」でデータ検索を行う
+AND ( lfgja >  pr_lfgja
+OR   (
+lfgja = pr_lfgja AND
+lfmon >= pr_lfmon
+*     AND ( lfgja <  pr_lfgja
+*      OR   (
+*             lfgja = pr_lfgja AND
+*             lfmon <= pr_lfmon
+*---MODIFY END   PSD K.ARAI   2002/10/24 ---------------------------*
+)
+)
+*---APPEND START PSD T.SAITOH 2002/07/05 ---------------------------*
+*---DELETE START PSD K.ARAI   2002/10/24 ---------------------------*
+AND salk3 > 0.
+*---DELETE END   PSD K.ARAI   2002/10/24 ---------------------------*
+*---APPEND END   PSD T.SAITOH 2002/07/05 ---------------------------*
+
+*   会社コードを埋め込む
+READ TABLE gt_t001k INTO gf_t001k
+WITH KEY bwkey = gf_mbew-bwkey.
+gf_mbew-bukrs = gf_t001k-bukrs.
+
+*---MODIFY START   PSD H.HARUKI 2002/09/20 ---------------------------*
+*   購買グループが入力範囲内の時　埋め込み　&　内部ＴＢＬに　APPEND
+
+PERFORM ekgrp_get.
+IF sy-subrc = 0 .
+gf_mbew-ekgrp = g_save_ekgrp.
+APPEND gf_mbew TO gt_mbew.
+ENDIF .
+*      APPEND gf_mbew TO gt_mbew.
+
+*---MODIFY END     PSD H.HARUKI 2002/09/20 ---------------------------*
+ENDSELECT.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+*      MESSAGE S616(Z1).
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_mbew sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      SELECT NUMBER 42
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MAKT
+*&---------------------------------------------------------------------*
+*       品目テキストの取得
+*----------------------------------------------------------------------*
+*  -->  P_MATNR        品目コード
+*  <--  P_MAKTX        品目名
+*----------------------------------------------------------------------*
+FORM frm_select_makt USING    p_matnr
+CHANGING p_maktx.
+
+SELECT SINGLE
+maktx
+FROM makt
+INTO (p_maktx)
+WHERE matnr = p_matnr
+AND spras = 'J'.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_makt sy-subrc.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_MAKT
+*&---------------------------------------------------------------------*
+*&      SELECT NUMBER 44
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_MARA
+*&---------------------------------------------------------------------*
+*       基本数量単位を取得する
+*----------------------------------------------------------------------*
+*      -->P_MATNR  品目コード
+*      <--P_MEINS  基本数量単位
+*----------------------------------------------------------------------*
+FORM frm_select_mara USING    p_matnr
+CHANGING p_meins.
+SELECT SINGLE
+meins
+FROM mara
+INTO (p_meins)
+WHERE matnr = p_matnr.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_mara sy-subrc.
+ENDCASE.
+
+ENDFORM.                    " FRM_SELECT_MARA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MBEW
+*&---------------------------------------------------------------------*
+*       当月末在庫特定処理
+*----------------------------------------------------------------------*
+FORM frm_specific_mbew.
+DATA:lt_mbew    TYPE TABLE OF typ_mbew,"ローカル内部テーブル
+lf_mbew    LIKE gf_mbew.
+
+* ①A指定会計期間でMBEWを検索 select number 6
+SELECT SINGLE
+bwkey
+matnr
+lfgja
+lfmon
+lbkum
+salk3
+verpr
+peinh
+FROM   mbew
+INTO CORRESPONDING FIELDS OF lf_mbew
+WHERE  matnr   = gf_mbew-matnr
+AND  bwkey   = gf_mbew-bwkey
+*           AND  MATNR   = GF_MBEW-MATNR
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+lf_mbew-bukrs = gf_mbew-bukrs.
+*     処理用内部へ格納する
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+*    購買グループ SET
+lf_mbew-ekgrp = gf_mbew-ekgrp .
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+
+APPEND lf_mbew TO gt_mbew_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mbew
+sy-subrc.
+ENDCASE.
+
+* ①B指定会計期間でMBEWHを検索 select number 7
+SELECT SINGLE
+bwkey
+matnr
+lfgja
+lfmon
+lbkum
+salk3
+verpr
+peinh
+FROM   mbewh
+INTO CORRESPONDING FIELDS OF lf_mbew
+WHERE  matnr   = gf_mbew-matnr
+AND  bwkey   = gf_mbew-bwkey
+*           AND  MATNR   = GF_MBEW-MATNR
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+lf_mbew-bukrs = gf_mbew-bukrs.
+*     処理用内部へ格納する
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+*    購買グループ SET
+lf_mbew-ekgrp = gf_mbew-ekgrp .
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+
+APPEND lf_mbew TO gt_mbew_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mbew
+sy-subrc.
+ENDCASE.
+
+* ②A指定会計期間より大きいレコードをMBEWHから検索
+* select number 8
+SELECT bwkey
+matnr
+lfgja
+lfmon
+lbkum
+salk3
+verpr
+peinh
+FROM   mbewh
+INTO CORRESPONDING FIELDS OF TABLE lt_mbew
+WHERE  matnr   = gf_mbew-matnr
+AND  bwkey   = gf_mbew-bwkey
+*           AND  MATNR   = GF_MBEW-MATNR
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mbew
+sy-subrc.
+ENDCASE.
+
+* ②B指定会計期間より大きいレコードをMBEWから検索
+* select number 9
+SELECT bwkey
+matnr
+lfgja
+lfmon
+lbkum
+salk3
+verpr
+peinh
+FROM   mbew
+APPENDING CORRESPONDING FIELDS OF TABLE lt_mbew
+WHERE  matnr   = gf_mbew-matnr
+AND  bwkey   = gf_mbew-bwkey
+*           AND  MATNR   = GF_MBEW-MATNR
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mbew
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_mbew IS INITIAL ).
+*     ソート
+SORT lt_mbew BY  lfgja ASCENDING
+lfmon ASCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mbew INTO lf_mbew.
+*       会社コード挿入
+lf_mbew-bukrs = gf_mbew-bukrs.
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+*    購買グループ SET
+lf_mbew-ekgrp = gf_mbew-ekgrp .
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+
+*       処理用内部へ格納する
+APPEND lf_mbew TO gt_mbew_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+* ③A指定会計期間より小さいレコードをMBEWHから検索
+* select number 10
+SELECT bwkey
+matnr
+lfgja
+lfmon
+lbkum
+salk3
+verpr
+peinh
+FROM   mbewh
+INTO CORRESPONDING FIELDS OF TABLE lt_mbew
+WHERE  matnr   = gf_mbew-matnr
+AND  bwkey   = gf_mbew-bwkey
+*           AND  MATNR   = GF_MBEW-MATNR
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mbew
+sy-subrc.
+ENDCASE.
+
+* ③B指定会計期間より小さいレコードをMBEWから検索
+* select number 11
+SELECT bwkey
+matnr
+lfgja
+lfmon
+lbkum
+salk3
+verpr
+peinh
+FROM   mbew
+APPENDING CORRESPONDING FIELDS OF TABLE lt_mbew
+WHERE  matnr   = gf_mbew-matnr
+AND  bwkey   = gf_mbew-bwkey
+*           AND  MATNR   = GF_MBEW-MATNR
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mbew
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_mbew IS INITIAL ).
+*     ソート
+SORT lt_mbew BY lfgja DESCENDING
+lfmon DESCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mbew INTO lf_mbew.
+*       会社コード挿入
+lf_mbew-bukrs = gf_mbew-bukrs.
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+*    購買グループ SET
+lf_mbew-ekgrp = gf_mbew-ekgrp .
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+
+*       処理用内部へ格納する
+APPEND lf_mbew TO gt_mbew_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+ENDFORM.                    " FRM_SPECIFIC_MBEW
+*&---------------------------------------------------------------------*
+*&      Form  FRM_EXTRACTIONS
+*&---------------------------------------------------------------------*
+*       各在庫の選定処理
+*----------------------------------------------------------------------*
+FORM frm_extractions.
+DATA:l_cnt_mbew_exec TYPE i."EXEC取得件数
+* 取得件数
+DESCRIBE TABLE gt_mbew_exec LINES l_cnt_mbew_exec.
+IF l_cnt_mbew_exec = 0.
+MESSAGE s616(z1).
+STOP.
+ENDIF.
+
+*---APPEND START PSD T.SAITOH 2002/05/15 ---------------------------*
+* 受注在庫（販売明細番号取得）
+PERFORM frm_specific_mska_before.
+* 受注在庫（MSKA全データ取得）
+PERFORM frm_specific_mska_all.
+*---APPEND END   PSD T.SAITOH 2002/05/15 ---------------------------*
+
+LOOP AT gt_mbew_exec INTO gf_mbew_exec.
+*---MODIFY START PSD T.SAITOH 2002/05/15 ---------------------------*
+*    PERFORM FRM_SPECIFIC_MSKA.
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+*    PERFORM frm_specific_mska_up.
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+PERFORM frm_specific_mska_up.
+*    PERFORM FRM_SPECIFIC_MSKA.
+*---MODIFY END   PSD K.ARAI 2002/10/17 ---------------------------*
+*---MODIFY END   PSD K.ARAI 2002/10/17 ---------------------------*
+PERFORM frm_specific_mard.
+PERFORM frm_specific_msku_ready.
+PERFORM frm_specific_mslb_ready.
+PERFORM frm_specific_marc.
+ENDLOOP.
+
+ENDFORM.                    " FRM_EXTRACTIONS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_MBEW
+*&---------------------------------------------------------------------*
+*       ＭＢＥＷ共通項目セット
+*----------------------------------------------------------------------*
+FORM frm_set_mbew.
+DATA: lf_t001  TYPE typ_t001,
+lf_t001k TYPE typ_t001k,
+lf_t001w TYPE typ_t001w.
+DATA: l_verpr(9) TYPE p DECIMALS 2,"移動平均原価作業用
+l_salk3(9) TYPE p DECIMALS 2."在庫合計金額
+
+CLEAR:gf_exec.
+*  MOVE-CORRESPONDING FIELDS OF GF_MBEW_EXEC GF_EXEC.
+gf_exec-bukrs = gf_mbew_exec-bukrs .
+gf_exec-bwkey = gf_mbew_exec-bwkey .
+gf_exec-matnr = gf_mbew_exec-matnr .
+*  保管場所、仕入先、得意先、転送中（テキスト）
+*  GF_EXEC-LGORT = GF_MBEW_EXEC-LGORT ."保管場所　後ほど設定
+*  GF_EXEC-MPTRN = GF_MBEW_EXEC-MPTRN ."保管場所種別　後ほど設定
+gf_exec-lfgja = gf_mbew_exec-lfgja .
+gf_exec-lfmon = gf_mbew_exec-lfmon .
+*  GF_EXEC-MAKTX = GF_MBEW_EXEC-MAKTX ."品目名
+PERFORM frm_select_makt USING    gf_mbew_exec-matnr
+CHANGING gf_exec-maktx.
+
+*  GF_EXEC-BUTXT = GF_MBEW_EXEC-BUTXT ."会社名
+READ TABLE gt_t001 INTO lf_t001
+WITH KEY bukrs = gf_mbew_exec-bukrs.
+gf_exec-butxt = lf_t001-butxt.
+
+*  GF_EXEC-PNAME = GF_MBEW_EXEC-PNAME ."プラント名
+READ TABLE gt_t001w INTO lf_t001w
+WITH KEY werks = gf_mbew_exec-bwkey.
+gf_exec-pname = lf_t001w-name1.
+
+*---INSERT START   PSD H.HARUKI 2002/09/21 ---------------------------*
+*  購買グループ
+gf_exec-ekgrp = gf_mbew_exec-ekgrp .
+*---INSERT END     PSD H.HARUKI 2002/09/21 ---------------------------*
+
+
+*  GF_EXEC-LNAME = GF_MBEW_EXEC-LNAME ."保管所名  後ほど設定
+*  GF_EXEC-LGPBE = GF_MBEW_EXEC-LGPBE ."棚番　　　後ほど設定
+*  GF_EXEC-NUM = GF_MBEW_EXEC- .       "数量　　　後ほど設定
+
+*  GF_EXEC-MEINS = GF_MBEW_EXEC- .      "単位
+PERFORM frm_select_mara USING    gf_mbew_exec-matnr
+CHANGING gf_exec-meins.
+*  GF_EXEC-UNTCT = GF_MBEW_EXEC- .     "単価　
+* 移動平均原価を価格変換する
+PERFORM frm_currency_amount USING    lf_t001-waers
+gf_mbew_exec-verpr
+CHANGING l_verpr.
+Move : lf_t001-waers To GF_EXEC-WAERS .
+
+
+* ０で除算を回避
+IF gf_mbew_exec-peinh <> 0.
+gf_exec-untct = l_verpr / gf_mbew_exec-peinh.
+ELSE.
+gf_exec-untct = 0.
+ENDIF.
+
+* 合計金額を価格変換する
+PERFORM frm_currency_amount USING    lf_t001-waers
+gf_mbew_exec-salk3
+CHANGING l_salk3.
+
+gf_exec-salk3 = l_salk3 . "合計金額
+
+
+gf_exec-lbkum = gf_mbew_exec-lbkum . "合計数量
+*  GF_EXEC-TOTAL = GF_MBEW_EXEC- .     "総合計
+
+
+ENDFORM.                    " FRM_SET_MBEW
+*---APPEND START PSD T.SAITOH 2002/05/15 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSKA_BEFORE
+*&---------------------------------------------------------------------*
+*       １－①受注在庫の特定処理_前処理伝票番号全件取得
+*----------------------------------------------------------------------*
+FORM frm_specific_mska_before.
+Data : L_LFMON Like MSKAH-LFMON ,
+L_LFGJA Like MSKAH-LFGJA .
+* 伝票番号パターンを抽出
+SELECT DISTINCT
+matnr
+werks
+lgort
+sobkz
+vbeln
+posnr
+lfgja
+lfmon
+INTO CORRESPONDING FIELDS OF TABLE gt_mska_numbers
+FROM mska
+FOR ALL ENTRIES IN gt_mbew_exec
+WHERE  matnr = gt_mbew_exec-matnr
+AND  werks IN s_werks
+AND  kalab <> 0
+AND  (
+( lfgja   =  pr_lfgja AND
+lfmon   <= pr_lfmon
+)
+OR
+(
+lfgja   <  pr_lfgja
+)
+)
+.
+
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+
+*---APPEND START PSD K.ARAI   2002/10/17 ---------------------------*
+Move :  pr_lfgja To L_LFGJA ,
+pr_lfmon To L_LFMON .
+* MSKAH より伝票番号パターンを抽出
+Do .
+SELECT DISTINCT
+matnr
+werks
+lgort
+sobkz
+vbeln
+posnr
+lfgja
+lfmon
+APPENDING CORRESPONDING FIELDS OF TABLE gt_mska_numbers
+FROM mskah
+FOR ALL ENTRIES IN gt_mbew_exec
+WHERE  matnr = gt_mbew_exec-matnr
+AND  werks IN s_werks
+AND  kalab <> 0
+AND  (
+*  ---MODIFY START PSD K.ARAI   2002/10/24 ---------------------------*
+*  ---MODIFY START NDSC R.Hata  2002/11/18 ---------------------------*
+LFGJA EQ L_LFGJA
+And     LFMON EQ L_LFMON
+
+*                   ( lfgja   =  pr_lfgja AND
+*                     lfmon   >= pr_lfmon
+*                   )
+*                   OR
+*                   (
+*                     lfgja   >  pr_lfgja
+*                    ( lfgja   =  pr_lfgja AND
+*                      lfmon   <= pr_lfmon
+*                    )
+*                    OR
+*                    (
+*                      lfgja   <  pr_lfgja
+*  ---MODIFY END   PSD K.ARAI   2002/10/24 ---------------------------*
+*               )
+*  ---MODIFY END   NDSC R.Hata  2002/11/18 ---------------------------*
+)
+.
+
+*   --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+Exit .
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+Add 1 To L_LFMON .
+If L_LFMON GE 13 .
+Move '01' To L_LFMON .
+Add 1 To L_LFGJA .
+EndIf .
+If L_LFMON GE W_BUPER+1(02)
+And L_LFGJA GE W_GJAHR .
+Exit .
+EndIf .
+EndDo .
+*---APPEND END   PSD K.ARAI   2002/10/17 ---------------------------*
+ENDFORM.  " FRM_SPECIFIC_MSKA_BEFORE.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSKA_ALL
+*&---------------------------------------------------------------------*
+*       １－①受注在庫の特定処理_前処理全データ取得
+*----------------------------------------------------------------------*
+FORM frm_specific_mska_all.
+DATA: l_recnum TYPE i."レコード件数
+
+DESCRIBE TABLE gt_mska_numbers LINES l_recnum.
+* 対象なしの場合は下記のセレクトを行なわない
+IF l_recnum = 0.
+EXIT.
+ENDIF.
+
+* MSKA(H)より全データ格納
+SELECT matnr
+werks
+lgort
+sobkz
+vbeln
+posnr
+lfgja
+lfmon
+kalab
+INTO CORRESPONDING FIELDS OF TABLE gt_mska_db
+FROM mska
+FOR ALL ENTRIES IN gt_mska_numbers
+WHERE matnr = gt_mska_numbers-matnr
+AND werks = gt_mska_numbers-werks
+AND lgort = gt_mska_numbers-lgort
+AND sobkz = gt_mska_numbers-sobkz
+AND vbeln = gt_mska_numbers-vbeln
+AND posnr = gt_mska_numbers-posnr
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+
+* MSKA(H)より全データ格納
+SELECT matnr
+werks
+lgort
+sobkz
+vbeln
+posnr
+lfgja
+lfmon
+kalab
+APPENDING CORRESPONDING FIELDS OF TABLE gt_mska_db
+FROM mskah
+FOR ALL ENTRIES IN gt_mska_numbers
+WHERE matnr = gt_mska_numbers-matnr
+AND werks = gt_mska_numbers-werks
+AND lgort = gt_mska_numbers-lgort
+AND sobkz = gt_mska_numbers-sobkz
+AND vbeln = gt_mska_numbers-vbeln
+AND posnr = gt_mska_numbers-posnr
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+
+
+ENDFORM.  " FRM_SPECIFIC_MSKA_ALL.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSKA_UP
+*&---------------------------------------------------------------------*
+*       １－①受注在庫の特定処理_上階層
+*        販売伝票番号＋明細番号
+*----------------------------------------------------------------------*
+FORM frm_specific_mska_up.
+*---APPEND START PSD K.ARAI 2002/10/17 ---------------------------*
+LOOP AT gt_mska_numbers INTO gf_mska_numbers
+where matnr = GF_MBEW_EXEC-matnr
+and WERKS = GF_MBEW_EXEC-BWKEY.
+PERFORM frm_specific_mska USING gf_mska_numbers-vbeln
+gf_mska_numbers-posnr
+gf_mska_numbers-lgort.
+ENDLOOP.
+*---APPEND END   PSD K.ARAI 2002/10/17 ---------------------------*
+
+*---DELETE START PSD K.ARAI 2002/10/17 ---------------------------*
+*  LOOP AT gt_mska_numbers INTO gf_mska_numbers.
+*    PERFORM frm_specific_mska USING gf_mska_numbers-vbeln
+*                                    gf_mska_numbers-posnr
+*                                    gf_mska_numbers-lgort.
+*  ENDLOOP.
+*---DELETE END   PSD K.ARAI 2002/10/17 ---------------------------*
+ENDFORM.  " FRM_SPECIFIC_MSKA_BEFORE.
+*---APPEND END   PSD T.SAITOH 2002/05/15 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSKA
+*&---------------------------------------------------------------------*
+*       １－①受注在庫の特定処理
+*----------------------------------------------------------------------*
+* --> P_VBELN 販売伝票番号
+* --> P_POSNR 明細番号
+* --> P_LGORT 保管場所
+*----------------------------------------------------------------------*
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+*FORM frm_specific_mska USING p_vbeln p_posnr p_lgort.
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+FORM frm_specific_mska USING p_vbeln p_posnr p_lgort.
+*FORM frm_specific_mska.
+*---MODIFY END   PSD K.ARAI 2002/10/18 ---------------------------*
+*---MODIFY START PSD K.ARAI 2002/10/18 ---------------------------*
+*---DELETE START PSD K.ARAI 2002/10/18 ---------------------------*
+*  LOOP AT gt_mska_numbers INTO gf_mska_numbers
+*                          where matnr = GF_MBEW_EXEC-matnr
+*                            and WERKS = GF_MBEW_EXEC-BWKEY.
+*---DELETE END   PSD K.ARAI 2002/10/18 ---------------------------*
+
+*  LOOP AT gt_mska_numbers INTO gf_mska_numbers.
+*---MODIFY END   PSD K.ARAI 2002/10/18 ---------------------------*
+*---MODIFY END   PSD K.ARAI 2002/10/17 ---------------------------*
+FIELD-SYMBOLS <fs_mska> LIKE gt_mska_db.
+FIELD-SYMBOLS <fsf_mska> LIKE gf_mska_db.
+
+ASSIGN gt_mska_db TO <fs_mska>.
+*---APPEND START PSD T.SAITOH 2002/05/17 ---------------------------*
+ASSIGN gf_mska_db TO <fsf_mska>.
+*---APPEND END   PSD T.SAITOH 2002/05/17 ---------------------------*
+CLEAR: lt_mska,lf_mska.
+
+* ①A指定会計期間でMSKAを検索
+* select number 12
+
+*---APPEND START PSD T.SAITOH 2002/05/17 ---------------------------*
+*   READ TABLE <FS_MSKA> INTO LF_MSKA
+READ TABLE <fs_mska> INTO <fsf_mska>
+*---APPEND END   PSD T.SAITOH 2002/05/17 ---------------------------*
+WITH TABLE KEY
+matnr   = gf_mbew_exec-matnr
+werks   = gf_mbew_exec-bwkey
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+*---MODIFY START PSD K.ARAI 2002/10/20 ---------------------------*
+*                       lgort   = gf_mska_numbers-lgort
+lgort   = p_lgort
+*---MODIFY END   PSD K.ARAI 2002/10/20 ---------------------------*
+*                       lgort   = p_lgort
+*---MODIFY END   PSD K.ARAI 2002/10/17 ---------------------------*
+sobkz   = cns_e
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+*---MODIFY START PSD K.ARAI 2002/10/20 ---------------------------*
+vbeln   = p_vbeln
+posnr   = p_posnr
+*                       vbeln   = gf_mska_numbers-vbeln
+*                       posnr   = gf_mska_numbers-posnr
+*---MODIFY END   PSD K.ARAI 2002/10/20 ---------------------------*
+*                       vbeln   = p_vbeln
+*                       posnr   = p_posnr
+*---MODIFY END   PSD K.ARAI 2002/10/17 ---------------------------*
+lfgja   = pr_lfgja
+lfmon   = pr_lfmon.
+
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*---APPEND START PSD T.SAITOH 2002/05/17 ---------------------------*
+MOVE-CORRESPONDING <fsf_mska> TO lf_mska.
+*---APPEND END   PSD T.SAITOH 2002/05/17 ---------------------------*
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mska.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+
+* ②A指定会計期間より大きいレコードをMSKAHから検索
+* select number 14
+*  FIELD-SYMBOLS <FS_MSKA> LIKE GF_MSKA_DB.
+LOOP AT gt_mska_db ASSIGNING <fsf_mska>
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_e
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+*---MODIFY START PSD K.ARAI 2002/10/20 ---------------------------*
+AND  vbeln   = p_vbeln
+AND  posnr   = p_posnr
+*                           AND  vbeln   = gf_mska_numbers-vbeln
+*                           AND  posnr   = gf_mska_numbers-posnr
+*---MODIFY END   PSD K.ARAI 2002/10/20 ---------------------------*
+*                           AND  vbeln   = p_vbeln
+*                           AND  posnr   = p_posnr
+*---MODIFY END   PSD K.ARAI 2002/10/17 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+MOVE-CORRESPONDING <fsf_mska> TO lf_mska.
+APPEND lf_mska TO lt_mska.
+
+ENDLOOP.
+
+
+*  SELECT
+*         WERKS
+*         MATNR
+*         LGORT
+*         LFGJA
+*         LFMON
+*         KALAB
+*         SOBKZ
+*         FROM   MSKAH
+*         INTO CORRESPONDING FIELDS OF TABLE LT_MSKA
+*         WHERE  MATNR   = GF_MBEW_EXEC-MATNR
+*           AND  WERKS   = GF_MBEW_EXEC-BWKEY
+*           AND  SOBKZ   = CNS_E
+**---APPEND START PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  VBELN   = P_VBELN
+*           AND  POSNR   = P_POSNR
+**---APPEND END   PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  (
+*                  ( LFGJA   = PR_LFGJA AND
+*                    LFMON   > PR_LFMON
+*                  )
+*                  OR
+*                  (
+*                    LFGJA   > PR_LFGJA
+*                  )
+*                )
+*
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+
+* ②B指定会計期間より大きいレコードをMSKAから検索
+* select number 15
+*  SELECT
+*         WERKS
+*         MATNR
+*         LGORT
+*         LFGJA
+*         LFMON
+*         KALAB
+*         SOBKZ
+*         FROM   MSKA
+*         APPENDING CORRESPONDING FIELDS OF TABLE LT_MSKA
+*         WHERE  MATNR   = GF_MBEW_EXEC-MATNR
+*           AND  WERKS   = GF_MBEW_EXEC-BWKEY
+*           AND  SOBKZ   = CNS_E
+**---APPEND START PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  VBELN   = P_VBELN
+*           AND  POSNR   = P_POSNR
+**---APPEND END   PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  (
+*                  ( LFGJA   = PR_LFGJA AND
+*                    LFMON   > PR_LFMON
+*                  )
+*                  OR
+*                  (
+*                    LFGJA   > PR_LFGJA
+*                  )
+*                )
+*
+*           .
+* --- エラーチェック
+*  CASE SY-SUBRC.
+*    WHEN 0.
+*    WHEN 4.
+*    WHEN OTHERS.
+*      MESSAGE A603(Z1) WITH SY-REPID
+*                            CNS_MSKA
+*                            SY-SUBRC.
+*  ENDCASE.
+
+IF NOT ( lt_mska IS INITIAL ).
+*     ソート
+SORT lt_mska BY  lfgja ASCENDING
+lfmon ASCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mska INTO lf_mska.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mska.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+* ③A指定会計期間より小さいレコードをMSKAHから検索
+* select number 16
+
+LOOP AT gt_mska_db ASSIGNING <fsf_mska>
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_e
+*---MODIFY START PSD K.ARAI 2002/10/17 ---------------------------*
+*---MODIFY START PSD K.ARAI 2002/10/20 ---------------------------*
+AND  vbeln   = p_vbeln
+AND  posnr   = p_posnr
+*                       AND  vbeln   = gf_mska_numbers-vbeln
+*                       AND  posnr   = gf_mska_numbers-posnr
+*---MODIFY END   PSD K.ARAI 2002/10/20 ---------------------------*
+*                       AND  vbeln   = p_vbeln
+*                       AND  posnr   = p_posnr
+*---MODIFY END   PSD K.ARAI 2002/10/17 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+
+MOVE-CORRESPONDING <fsf_mska> TO lf_mska.
+APPEND lf_mska TO lt_mska.
+
+ENDLOOP.
+
+*  SELECT
+*         WERKS
+*         MATNR
+*         LGORT
+*         LFGJA
+*         LFMON
+*         KALAB
+*         SOBKZ
+*         FROM   MSKAH
+*         INTO CORRESPONDING FIELDS OF TABLE LT_MSKA
+*         WHERE  MATNR   = GF_MBEW_EXEC-MATNR
+*           AND  WERKS   = GF_MBEW_EXEC-BWKEY
+*           AND  SOBKZ   = CNS_E
+**---APPEND START PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  VBELN   = P_VBELN
+*           AND  POSNR   = P_POSNR
+**---APPEND END   PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  (
+*                  ( LFGJA   = PR_LFGJA AND
+*                    LFMON   < PR_LFMON
+*                  )
+*                  OR
+*                  (
+*                    LFGJA   < PR_LFGJA
+*                  )
+*                )
+*
+*           .
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+
+* ③B指定会計期間より小さいレコードをMSKAから検索
+* select number 17
+*  SELECT
+*         WERKS
+*         MATNR
+*         LGORT
+*         LFGJA
+*         LFMON
+*         KALAB
+*         SOBKZ
+*         FROM   MSKA
+*         APPENDING CORRESPONDING FIELDS OF TABLE LT_MSKA
+*         WHERE  MATNR   = GF_MBEW_EXEC-MATNR
+*           AND  WERKS   = GF_MBEW_EXEC-BWKEY
+*           AND  SOBKZ   = CNS_E
+**---APPEND START PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  VBELN   = P_VBELN
+*           AND  POSNR   = P_POSNR
+**---APPEND END   PSD T.SAITOH 2002/05/15 ---------------------------*
+*           AND  (
+*                  ( LFGJA   = PR_LFGJA AND
+*                    LFMON   < PR_LFMON
+*                  )
+*                  OR
+*                  (
+*                    LFGJA   < PR_LFGJA
+*                  )
+*                )
+*
+*           .
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mska
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_mska IS INITIAL ).
+*     ソート
+SORT lt_mska BY lfgja DESCENDING
+lfmon DESCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mska INTO lf_mska.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mska.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+*---APPEND START PSD K.ARAI 2002/10/17 ---------------------------*
+*---DELETE START PSD K.ARAI 2002/10/17 ---------------------------*
+*  ENDLOOP.
+*---DELETE END   PSD K.ARAI 2002/10/17 ---------------------------*
+*---APPEND END   PSD K.ARAI 2002/10/17 ---------------------------*
+ENDFORM.                    " FRM_SPECIFIC_MSKA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_MSKA
+*&---------------------------------------------------------------------*
+*       １－①MSKA詳細設定
+*----------------------------------------------------------------------*
+FORM frm_set_mska.
+* 保管場所
+gf_exec-lgort = lf_mska-lgort.
+* 保管場所種別
+gf_exec-mptrn = cns_1_mska.
+* 保管場所名
+* select number 43
+SELECT SINGLE
+lgobe
+FROM t001l
+INTO (gf_exec-lname)
+WHERE werks = lf_mska-werks
+AND lgort = lf_mska-lgort.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t001l sy-subrc.
+ENDCASE.
+
+* 棚番 --- 未設定
+* Add 2003/11/05 >>>
+Select Single LGPBE
+From  MARD
+Into  GF_EXEC-LGPBE
+Where MATNR EQ GF_EXEC-MATNR
+And  WERKS EQ lf_mska-werks
+And  LGORT EQ lf_mska-lgort.
+* Add 2003/11/05 <<<
+
+* 数量
+gf_exec-num = lf_mska-kalab.
+
+ENDFORM.                    " FRM_SET_MSKA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MARD
+*&---------------------------------------------------------------------*
+*       １－②自社保管場所在庫の特定処理
+*----------------------------------------------------------------------*
+FORM frm_specific_mard.
+
+CLEAR: lt_mard,lf_mard.
+* ①A指定会計期間でMARDを検索
+* select number 18
+SELECT SINGLE
+werks
+matnr
+lgort
+lfgja
+lfmon
+labst
+lgpbe
+*         SOBKZ
+FROM   mard
+INTO CORRESPONDING FIELDS OF lf_mard
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mard.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mard
+sy-subrc.
+ENDCASE.
+
+* ①B指定会計期間でMARDHを検索
+* select number 19
+SELECT SINGLE
+werks
+matnr
+lgort
+lfgja
+lfmon
+labst
+*         LGPBE
+*         SOBKZ
+FROM   mardh
+INTO CORRESPONDING FIELDS OF lf_mard
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mard.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mard
+sy-subrc.
+ENDCASE.
+
+* ②A指定会計期間より大きいレコードをMARDHから検索
+* select number 20
+SELECT
+werks
+matnr
+lgort
+lfgja
+lfmon
+labst
+*         LGPBE
+*         SOBKZ
+FROM   mardh
+INTO CORRESPONDING FIELDS OF TABLE lt_mard
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mard
+sy-subrc.
+ENDCASE.
+
+* ②B指定会計期間より大きいレコードをMARDから検索
+* select number 21
+SELECT
+werks
+matnr
+lgort
+lfgja
+lfmon
+labst
+lgpbe
+*         SOBKZ
+FROM   mard
+APPENDING CORRESPONDING FIELDS OF TABLE lt_mard
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mard
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_mard IS INITIAL ).
+*     ソート
+SORT lt_mard BY  lfgja ASCENDING
+lfmon ASCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mard INTO lf_mard.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mard.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+* ③A指定会計期間より小さいレコードをMARDHから検索
+* select number 22
+SELECT
+werks
+matnr
+lgort
+lfgja
+lfmon
+labst
+*         LGPBE
+*         SOBKZ
+FROM   mardh
+INTO CORRESPONDING FIELDS OF TABLE lt_mard
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mard
+sy-subrc.
+ENDCASE.
+
+* ③B指定会計期間より小さいレコードをMARDから検索
+* select number 23
+SELECT
+werks
+matnr
+lgort
+lfgja
+lfmon
+labst
+lgpbe
+*         SOBKZ
+FROM   mard
+APPENDING CORRESPONDING FIELDS OF TABLE lt_mard
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mard
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_mard IS INITIAL ).
+*     ソート
+SORT lt_mard BY lfgja DESCENDING
+lfmon DESCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mard INTO lf_mard.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mard.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+
+ENDFORM.                    " FRM_SPECIFIC_MARD
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_MARD
+*&---------------------------------------------------------------------*
+*       １－②MARD詳細設定
+*----------------------------------------------------------------------*
+FORM frm_set_mard.
+* 保管場所
+gf_exec-lgort = lf_mard-lgort.
+* 保管場所種別
+gf_exec-mptrn = cns_1_mard.
+* 保管場所名
+* select number 43
+SELECT SINGLE
+lgobe
+FROM t001l
+INTO (gf_exec-lname)
+WHERE werks = lf_mard-werks
+AND lgort = lf_mard-lgort.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_t001l sy-subrc.
+ENDCASE.
+
+* 棚番
+gf_exec-lgpbe = lf_mard-lgpbe.
+* 数量
+gf_exec-num = lf_mard-labst.
+
+ENDFORM.                    " FRM_SET_MSKA
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSKU_ready
+*&---------------------------------------------------------------------*
+*     ２  MSKU設定　前処理
+*----------------------------------------------------------------------*
+FORM frm_specific_msku_ready.
+
+DATA:  lt_kunnr TYPE TABLE OF typ_kna1,"取得用
+lf_kunnr TYPE typ_kna1.         "取得用構造
+
+* 得意先取得--現テーブル SELECT NUMBER 47
+SELECT kunnr
+FROM   msku
+INTO CORRESPONDING FIELDS OF TABLE lt_kunnr
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+GROUP by kunnr.
+
+* 得意先取得--履歴テーブル SELECT NUMBER 48
+SELECT kunnr
+FROM   mskuh
+APPENDING CORRESPONDING FIELDS OF TABLE lt_kunnr
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+GROUP by kunnr.
+
+* 得意先コードでソート
+SORT lt_kunnr BY kunnr ASCENDING.
+
+* 得意先ごとに期末在庫を求めるようにする
+LOOP AT lt_kunnr INTO lf_kunnr.
+gf_kunnr_tmp = lf_kunnr.
+AT NEW kunnr.
+*     得意先特殊在庫当月末在庫設定
+PERFORM frm_specific_msku.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " FRM_SPECIFIC_MSKU_ready
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSKU
+*&---------------------------------------------------------------------*
+*       ２　得意先特殊在庫（預託在庫）の特定処理
+*----------------------------------------------------------------------*
+FORM frm_specific_msku.
+
+CLEAR: lt_msku,lf_msku.
+
+* ①A指定会計期間でMSKUを検索
+* select number 24
+SELECT SINGLE
+werks
+matnr
+*         LGORT
+kunnr
+lfgja
+lfmon
+kulab
+*         LGPBE
+sobkz
+FROM   msku
+INTO CORRESPONDING FIELDS OF lf_msku
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  kunnr   = gf_kunnr_tmp-kunnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_msku.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_msku
+sy-subrc.
+ENDCASE.
+
+* ①B指定会計期間でMSKUHを検索
+* select number 25
+SELECT SINGLE
+werks
+matnr
+*         LGORT
+kunnr
+lfgja
+lfmon
+kulab
+*         LGPBE
+sobkz
+FROM   mskuh
+INTO CORRESPONDING FIELDS OF lf_msku
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  kunnr   = gf_kunnr_tmp-kunnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_msku.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_msku
+sy-subrc.
+ENDCASE.
+
+* ②A指定会計期間より大きいレコードをMSKUHから検索
+* select number 26
+SELECT
+werks
+matnr
+*         LGORT
+kunnr
+lfgja
+lfmon
+kulab
+*         LGPBE
+sobkz
+FROM   mskuh
+INTO CORRESPONDING FIELDS OF TABLE lt_msku
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  kunnr   = gf_kunnr_tmp-kunnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_msku
+sy-subrc.
+ENDCASE.
+
+* ②B指定会計期間より大きいレコードをMSKUから検索
+* select number 27
+SELECT
+werks
+matnr
+*         LGORT
+kunnr
+lfgja
+lfmon
+kulab
+*         LGPBE
+sobkz
+FROM   msku
+APPENDING CORRESPONDING FIELDS OF TABLE lt_msku
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  kunnr   = gf_kunnr_tmp-kunnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_msku
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_msku IS INITIAL ).
+*     ソート
+SORT lt_msku BY  lfgja ASCENDING
+lfmon ASCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_msku INTO lf_msku.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_msku.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+* ③A指定会計期間より小さいレコードをMSKUHから検索
+* select number 28
+SELECT
+werks
+matnr
+*         LGORT
+kunnr
+lfgja
+lfmon
+kulab
+*         LGPBE
+sobkz
+FROM   mskuh
+INTO CORRESPONDING FIELDS OF TABLE lt_msku
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  kunnr   = gf_kunnr_tmp-kunnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_msku
+sy-subrc.
+ENDCASE.
+
+* ③B指定会計期間より小さいレコードをMSKUから検索
+* select number 29
+SELECT
+werks
+matnr
+*         LGORT
+kunnr
+lfgja
+lfmon
+kulab
+*         LGPBE
+sobkz
+FROM   msku
+APPENDING CORRESPONDING FIELDS OF TABLE lt_msku
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_w
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  kunnr   = gf_kunnr_tmp-kunnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_msku
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_msku IS INITIAL ).
+*     ソート
+SORT lt_msku BY lfgja DESCENDING
+lfmon DESCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_msku INTO lf_msku.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_msku.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+
+ENDFORM.                    " FRM_SPECIFIC_MSKU
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_MSKU
+*&---------------------------------------------------------------------*
+*       MSKU詳細設定
+*----------------------------------------------------------------------*
+FORM frm_set_msku.
+* 保管場所
+gf_exec-lgort = lf_msku-kunnr.
+* 保管場所種別
+gf_exec-mptrn = cns_2_msku.
+* 保管場所名
+* select number 45
+SELECT SINGLE
+name1
+FROM kna1
+INTO (gf_exec-lname)
+WHERE kunnr = lf_msku-kunnr.
+
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_kna1 sy-subrc.
+ENDCASE.
+
+* 棚番(BLANK)
+gf_exec-lgpbe = space.
+* 数量
+gf_exec-num = lf_msku-kulab.
+
+ENDFORM.                    " FRM_SET_MSKU
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSLB_ready
+*&---------------------------------------------------------------------*
+*       MSLB設定　前処理
+*----------------------------------------------------------------------*
+FORM frm_specific_mslb_ready.
+
+DATA:  lt_lifnr TYPE TABLE OF typ_lfa1,"取得用
+lf_lifnr TYPE typ_lfa1.         "取得用構造
+
+* 仕入先取得--現テーブル SELECT NUMBER 49
+SELECT lifnr
+FROM   mslb
+INTO CORRESPONDING FIELDS OF TABLE lt_lifnr
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+GROUP by lifnr.
+
+* 仕入先取得--履歴テーブル SELECT NUMBER 50
+SELECT lifnr
+FROM   mslbh
+APPENDING CORRESPONDING FIELDS OF TABLE lt_lifnr
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+GROUP by lifnr.
+
+* 仕入先でソート
+SORT lt_lifnr BY lifnr ASCENDING.
+
+* 仕入先ごとに期末在庫を求めるようにする
+LOOP AT lt_lifnr INTO lf_lifnr.
+gf_lifnr_tmp = lf_lifnr.
+AT NEW lifnr.
+*     仕入先特殊在庫設定
+PERFORM frm_specific_mslb.
+ENDAT.
+ENDLOOP.
+
+ENDFORM.                    " FRM_SPECIFIC_MSLB_ready
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MSLB
+*&---------------------------------------------------------------------*
+*       ３仕入先特殊在庫（支給品）の特定処理
+*----------------------------------------------------------------------*
+FORM frm_specific_mslb.
+
+CLEAR: lt_mslb,lf_mslb.
+* ①A指定会計期間でMSLBを検索
+* select number 30
+SELECT SINGLE
+werks
+matnr
+*         LGORT
+lifnr
+lfgja
+lfmon
+lblab
+*         LGPBE
+sobkz
+FROM   mslb
+INTO CORRESPONDING FIELDS OF lf_mslb
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lifnr   = gf_lifnr_tmp-lifnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mslb.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mslb
+sy-subrc.
+ENDCASE.
+
+* ①B指定会計期間でMSLBHを検索
+* select number 31
+SELECT SINGLE
+werks
+matnr
+*         LGORT
+lifnr
+lfgja
+lfmon
+lblab
+*         LGPBE
+sobkz
+FROM   mslbh
+INTO CORRESPONDING FIELDS OF lf_mslb
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lifnr   = gf_lifnr_tmp-lifnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mslb.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mslb
+sy-subrc.
+ENDCASE.
+
+* ②A指定会計期間より大きいレコードをMSLBHから検索
+* select number 32
+SELECT
+werks
+matnr
+*         LGORT
+lifnr
+lfgja
+lfmon
+lblab
+*         LGPBE
+sobkz
+FROM   mslbh
+INTO CORRESPONDING FIELDS OF TABLE lt_mslb
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lifnr   = gf_lifnr_tmp-lifnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mslb
+sy-subrc.
+ENDCASE.
+
+* ②B指定会計期間より大きいレコードをMSLBから検索
+* select number 33
+SELECT
+werks
+matnr
+*         LGORT
+lifnr
+lfgja
+lfmon
+lblab
+*         LGPBE
+sobkz
+FROM   mslb
+APPENDING CORRESPONDING FIELDS OF TABLE lt_mslb
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lifnr   = gf_lifnr_tmp-lifnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mslb
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_mslb IS INITIAL ).
+*     ソート
+SORT lt_mslb BY  lfgja ASCENDING
+lfmon ASCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mslb INTO lf_mslb.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mslb.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+* ③A指定会計期間より小さいレコードをMSLBHから検索
+* select number 34
+SELECT
+werks
+matnr
+*         LGORT
+lifnr
+lfgja
+lfmon
+lblab
+*         LGPBE
+sobkz
+FROM   mslbh
+INTO CORRESPONDING FIELDS OF TABLE lt_mslb
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lifnr   = gf_lifnr_tmp-lifnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mslb
+sy-subrc.
+ENDCASE.
+
+* ③B指定会計期間より小さいレコードをMSLBから検索
+* select number 35
+SELECT
+werks
+matnr
+*         LGORT
+lifnr
+lfgja
+lfmon
+lblab
+*         LGPBE
+sobkz
+FROM   mslb
+APPENDING CORRESPONDING FIELDS OF TABLE lt_mslb
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  sobkz   = cns_o
+*---APPEND START PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  lifnr   = gf_lifnr_tmp-lifnr
+*---APPEND END   PSD T.SAITOH 2002/04/09 ---------------------------*
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_mslb
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_mslb IS INITIAL ).
+*     ソート
+SORT lt_mslb BY lfgja DESCENDING
+lfmon DESCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_mslb INTO lf_mslb.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_mslb.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+
+ENDFORM.                    " FRM_SPECIFIC_MSLB
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_MSLB
+*&---------------------------------------------------------------------*
+*       MSLB詳細設定
+*----------------------------------------------------------------------*
+FORM frm_set_mslb.
+* 保管場所
+gf_exec-lgort = lf_mslb-lifnr.
+* 保管場所種別
+gf_exec-mptrn = cns_3_mslb.
+* 保管場所名
+* select number 46
+SELECT SINGLE
+name1
+FROM lfa1
+INTO (gf_exec-lname)
+WHERE lifnr = lf_mslb-lifnr.
+
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid cns_lfa1 sy-subrc.
+ENDCASE.
+
+* 棚番(BLANK)
+gf_exec-lgpbe = space.
+* 数量
+gf_exec-num = lf_mslb-lblab.
+
+ENDFORM.                    " FRM_SET_MSLB
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SPECIFIC_MARC
+*&---------------------------------------------------------------------*
+*       ４転送中在庫の特定処理
+*----------------------------------------------------------------------*
+FORM frm_specific_marc.
+
+CLEAR: lt_marc,lf_marc.
+* ①A指定会計期間でMARCを検索
+* select number 36
+SELECT SINGLE
+werks
+matnr
+*         LGORT
+*         LIFNR
+lfgja
+lfmon
+trame
+*         LGPBE
+*         SOBKZ
+FROM   marc
+INTO CORRESPONDING FIELDS OF lf_marc
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_marc.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_marc
+sy-subrc.
+ENDCASE.
+
+* ①B指定会計期間でMARCHを検索
+* select number 37
+SELECT SINGLE
+werks
+matnr
+*         LGORT
+*         LIFNR
+lfgja
+lfmon
+trame
+*         LGPBE
+*         SOBKZ
+FROM   march
+INTO CORRESPONDING FIELDS OF lf_marc
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  lfgja   = pr_lfgja
+AND  lfmon   = pr_lfmon.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_marc.
+APPEND gf_exec TO gt_exec.
+EXIT.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_marc
+sy-subrc.
+ENDCASE.
+
+* ②A指定会計期間より大きいレコードをMARCHから検索
+* select number 38
+SELECT
+werks
+matnr
+*         LGORT
+*         LIFNR
+lfgja
+lfmon
+trame
+*         LGPBE
+*         SOBKZ
+FROM   march
+INTO CORRESPONDING FIELDS OF TABLE lt_marc
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_marc
+sy-subrc.
+ENDCASE.
+
+* ②B指定会計期間より大きいレコードをMARCから検索
+* select number 39
+SELECT
+werks
+matnr
+*         LGORT
+*         LIFNR
+lfgja
+lfmon
+trame
+*         LGPBE
+*         SOBKZ
+FROM   marc
+APPENDING CORRESPONDING FIELDS OF TABLE lt_marc
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   > pr_lfmon
+)
+OR
+(
+lfgja   > pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_marc
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_marc IS INITIAL ).
+*     ソート
+SORT lt_marc BY  lfgja ASCENDING
+lfmon ASCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_marc INTO lf_marc.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_marc.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+* ③A指定会計期間より小さいレコードをMARCHから検索
+* select number 40
+SELECT
+werks
+matnr
+*         LGORT
+*         LIFNR
+lfgja
+lfmon
+trame
+*         LGPBE
+*         SOBKZ
+FROM   march
+INTO CORRESPONDING FIELDS OF TABLE lt_marc
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_marc
+sy-subrc.
+ENDCASE.
+
+* ③B指定会計期間より小さいレコードをMARCから検索
+* select number 41
+SELECT
+werks
+matnr
+*         LGORT
+*         LIFNR
+lfgja
+lfmon
+trame
+*         LGPBE
+*         SOBKZ
+FROM   marc
+APPENDING CORRESPONDING FIELDS OF TABLE lt_marc
+WHERE  matnr   = gf_mbew_exec-matnr
+AND  werks   = gf_mbew_exec-bwkey
+AND  (
+( lfgja   = pr_lfgja AND
+lfmon   < pr_lfmon
+)
+OR
+(
+lfgja   < pr_lfgja
+)
+)
+
+.
+* --- エラーチェック
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid
+cns_marc
+sy-subrc.
+ENDCASE.
+
+IF NOT ( lt_marc IS INITIAL ).
+*     ソート
+SORT lt_marc BY lfgja DESCENDING
+lfmon DESCENDING.
+*     1 LOOP ONLY
+LOOP AT lt_marc INTO lf_marc.
+*     MBEW項目設定
+PERFORM frm_set_mbew.
+*     詳細設定
+PERFORM frm_set_marc.
+APPEND gf_exec TO gt_exec.
+EXIT.
+ENDLOOP.
+EXIT.
+ENDIF.
+
+
+ENDFORM.                    " FRM_SPECIFIC_MARC
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_MARC
+*&---------------------------------------------------------------------*
+*       MARC詳細設定
+*----------------------------------------------------------------------*
+FORM frm_set_marc.
+* 保管場所(BLANK)
+gf_exec-lgort = space.
+* 保管場所種別
+gf_exec-mptrn = cns_4_marc.
+* 保管場所名(転送中)
+gf_exec-lname = text-071.
+* 棚番(BLANK)
+gf_exec-lgpbe = space.
+* 数量
+gf_exec-num = lf_marc-trame.
+
+ENDFORM.                    " FRM_SET_MARC
+*&---------------------------------------------------------------------*
+*&      Form  FRM_COMPUTE
+*&---------------------------------------------------------------------*
+*       集計処理
+*----------------------------------------------------------------------*
+FORM frm_compute.
+DATA: lf_matnr_break TYPE c."品目コードブレイクフラグ
+DATA: l_cnt_exec TYPE i."EXEC取得件数
+
+SORT gt_exec BY bukrs ASCENDING  "会社コード
+bwkey ASCENDING  "プラントコード
+ekgrp ASCENDING  "購買グループ
+matnr ASCENDING  "品目コード
+mptrn ASCENDING  "保管場所種別
+lgort ASCENDING  "保管場所コード
+lgpbe DESCENDING."棚番
+
+* 在庫数量０ははじく
+DELETE gt_exec WHERE num = 0.
+
+* 総合計初期化
+CLEAR gw_total.
+
+* 取得件数
+DESCRIBE TABLE gt_exec LINES l_cnt_exec.
+IF l_cnt_exec = 0.
+MESSAGE s616(z1).
+STOP.
+ENDIF.
+
+*---APPEND START PSD T.SAITOH 2002/05/17 ---------------------------*
+CLEAR: g_flg_matnr.
+*---APPEND END   PSD T.SAITOH 2002/05/17 ---------------------------*
+
+LOOP AT gt_exec INTO gf_exec.
+gf_exec_tmp = gf_exec."退避(AT関連ゆえ)
+*   会社コードORプラントコード　ブレイク時改ページ
+*   ただし最初のレコードは改ページ条件としない
+IF sy-tabix <> 1.
+*   会社コードORプラントコード　ブレイク時改ページ
+AT NEW bwkey.
+NEW-PAGE.
+ENDAT.
+ENDIF.
+*---DELETE START PSD T.SAITOH 2002/05/17 ---------------------------*
+**   保管場所種別　が最後
+*    AT END OF MPTRN.
+*      FLG_LGORT_BREAK = CNS_X.
+*    ENDAT.
+*---DELETE END   PSD T.SAITOH 2002/05/17 ---------------------------*
+
+*   保管場所種別／保管場所　が最初
+
+*---APPEND START PSD T.SAITOH 2002/05/17 ---------------------------*
+* 複数保管場所対応（念のため）業務上はありえないが
+* システム的にはありえるため
+*   複数保管場所時の品目名称を非表示 X
+AT NEW matnr.
+g_flg_matnr = cns_x.
+ENDAT.
+*---APPEND END   PSD T.SAITOH 2002/05/17 ---------------------------*
+
+*   自社在庫数を初期化する
+AT NEW lgort.
+IF gf_exec_tmp-mptrn+0(1) = '1'.
+CLEAR: gw_num,      "作業用自社在庫数初期化
+gw_lgpbe.    "作業用棚番
+gw_lgpbe = gf_exec_tmp-lgpbe."棚番設定
+ENDIF.
+ENDAT.
+*   自社在庫数を集計する
+IF gf_exec_tmp-mptrn+0(1) = '1'.
+gw_num = gw_num + gf_exec_tmp-num.
+*     自社在庫数を確定する
+AT END OF lgort.
+PERFORM frm_write_detail_mptrn1.
+ENDAT.
+*      CONTINUE.
+*   自社在庫数以外場合
+ELSE.
+PERFORM frm_write_detail.
+ENDIF.
+
+
+*   品目コードが最後
+AT END OF matnr.
+PERFORM frm_detail_total.
+ENDAT.
+
+*   会社コード／プラント　最後
+AT END OF bwkey.
+PERFORM frm_all_total.
+ENDAT.
+
+*   前レコード格納
+gf_exec_bef = gf_exec_tmp.
+
+ENDLOOP.
+
+ENDFORM.                    " FRM_COMPUTE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WRITE_DETAIL
+*&---------------------------------------------------------------------*
+*       明細部分帳票出力処理
+*----------------------------------------------------------------------*
+FORM frm_write_detail.
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (BLUE)
+FORMAT COLOR COL_HEADING ON INTENSIFIED OFF.
+ENDIF.
+* 前レコードと同じ品目コードは出力しない
+*---MODIFY START PSD T.SAITOH 2002/05/17 ---------------------------*
+*  IF GF_EXEC_BEF-MATNR <> GF_EXEC_TMP-MATNR.
+IF g_flg_matnr = cns_x.
+*---MODIFY END   PSD T.SAITOH 2002/05/17 ---------------------------*
+*   保管場所種別フラグを初期化
+*---DELETE START PSD T.SAITOH 2002/05/17 ---------------------------*
+*    CLEAR FLG_LGORT_BREAK.
+*---DELETE END   PSD T.SAITOH 2002/05/17 ---------------------------*
+
+*    WRITE: /1(18)  GF_EXEC_TMP-MATNR,
+**           21(10)  GF_EXEC_TMP-MPTRN,
+*           21(30)  GF_EXEC_TMP-MAKTX.
+*    WRITE: 53(10)  GF_EXEC_TMP-LGORT,
+*           65(20)  GF_EXEC_TMP-LNAME,
+*           87(10)  GF_EXEC_TMP-LGPBE,
+*---MODIFY START   PSD H.HARUKI 2002/09/21 ---------------------------*
+WRITE: /1(03)  gf_exec_tmp-ekgrp,
+8(18)  gf_exec_tmp-matnr,
+*           21(10)  GF_EXEC_TMP-MPTRN,
+28(30)  gf_exec_tmp-maktx.
+WRITE: 60(10)  gf_exec_tmp-lgort,
+72(20)  gf_exec_tmp-lname,
+93(05)  gf_exec_tmp-lgpbe,
+*---MODIFY END    PSD H.HARUKI 2002/09/21 ---------------------------*
+99(13)  gf_exec_tmp-num
+*          99(10)  GW_NUM
+.
+ELSE.
+WRITE  /1(1)   space.
+*    WRITE: 53(10)  GF_EXEC_TMP-LGORT,
+*           65(20)  GF_EXEC_TMP-LNAME,
+*           87(10)  GF_EXEC_TMP-LGPBE,
+*---MODIFY START   PSD H.HARUKI 2002/09/21 ---------------------------*
+WRITE: 60(10)  gf_exec_tmp-lgort,
+72(20)  gf_exec_tmp-lname,
+93(05)  gf_exec_tmp-lgpbe,
+*---MODIFY END    PSD H.HARUKI 2002/09/21 ---------------------------*
+99(13)  gf_exec_tmp-num
+*          99(10)  GW_NUM
+.
+ENDIF.
+
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (OFF)
+WRITE 153(1) space.
+FORMAT COLOR OFF.
+ENDIF.
+
+ENDFORM.                    " FRM_WRITE_DETAIL
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WRITE_DETAIL_MPTRN1
+*&---------------------------------------------------------------------*
+*       明細：保管場所種別＝１：自社在庫出力
+*----------------------------------------------------------------------*
+FORM frm_write_detail_mptrn1.
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (BLUE)
+FORMAT COLOR COL_HEADING ON INTENSIFIED OFF.
+ENDIF.
+* 前レコードと同じ品目コードでないか
+* 保管場所種別が１の最後の場合は出力
+*---MODIFY START PSD T.SAITOH 2002/05/17 ---------------------------*
+*  IF GF_EXEC_BEF-MATNR <> GF_EXEC_TMP-MATNR OR
+*     FLG_LGORT_BREAK = CNS_X.
+* 複数保管場所対応（念のため）業務上はありえないが
+* システム的にはありえるため
+IF g_flg_matnr <> space.
+*---MODIFY END   PSD T.SAITOH 2002/05/17 ---------------------------*
+
+*   保管場所種別フラグを初期化
+*---DELETE START PSD T.SAITOH 2002/05/17 ---------------------------*
+*   CLEAR FLG_LGORT_BREAK.
+*---MODIFY END   PSD T.SAITOH 2002/05/17 ---------------------------*
+*---APPEND START PSD T.SAITOH 2002/05/17 ---------------------------*
+* 複数保管場所対応（念のため）業務上はありえないが
+* システム的にはありえるため
+CLEAR: g_flg_matnr.
+*---APPEND END   PSD T.SAITOH 2002/05/17 ---------------------------*
+*    WRITE: /1(18)  GF_EXEC_TMP-MATNR,
+*          21(10)  GF_EXEC_TMP-MPTRN,
+*           21(30)  GF_EXEC_TMP-MAKTX.
+*    WRITE: 53(10)  GF_EXEC_TMP-LGORT,
+*           65(20)  GF_EXEC_TMP-LNAME,
+*           87(10)  GW_LGPBE,
+*---MODIFY START   PSD H.HARUKI 2002/09/21 ---------------------------*
+WRITE: /1(03)  gf_exec_tmp-ekgrp,
+8(18)  gf_exec_tmp-matnr,
+*          21(10)  GF_EXEC_TMP-MPTRN,
+28(30)  gf_exec_tmp-maktx.
+WRITE: 60(10)  gf_exec_tmp-lgort,
+72(20)  gf_exec_tmp-lname,
+93(05)  gw_lgpbe,
+*---MODIFY END    PSD H.HARUKI 2002/09/21 ---------------------------*
+99(13)  gw_num
+.
+ELSE.
+WRITE  /1(1)   space.
+*    WRITE: 53(10)  GF_EXEC_TMP-LGORT,
+*           65(20)  GF_EXEC_TMP-LNAME,
+*           87(10)  GW_LGPBE,
+*---MODIFY START   PSD H.HARUKI 2002/09/21 ---------------------------*
+WRITE: 60(10)  gf_exec_tmp-lgort,
+72(20)  gf_exec_tmp-lname,
+93(05)  gw_lgpbe,
+*---MODIFY END    PSD H.HARUKI 2002/09/21 ---------------------------*
+99(13)  gw_num
+.
+ENDIF.
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (OFF)
+WRITE 153(1) space.
+FORMAT COLOR OFF.
+ENDIF.
+
+ENDFORM.                    " FRM_WRITE_DETAIL_MPTRN1
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DETAIL_TOTAL
+*&---------------------------------------------------------------------*
+*       明細合計出力
+*----------------------------------------------------------------------*
+FORM frm_detail_total.
+
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (BLUE)
+FORMAT COLOR COL_TOTAL ON INTENSIFIED OFF.
+ENDIF.
+WRITE:  /1(1)  space,
+*         053(4)  TEXT-064,         "合計
+*---MODIFY START   PSD H.HARUKI 2002/09/21 ---------------------------*
+060(4)  text-064,         "合計
+*---MODIFY END    PSD H.HARUKI 2002/09/21 ---------------------------*
+099(13) gf_exec_tmp-lbkum,"在庫合計
+114(3)  gf_exec_tmp-meins,"単位
+120(15) gf_exec_tmp-untct,"単価
+136(16) gf_exec_tmp-salk3."在庫金額
+
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (OFF)
+WRITE 153(1) space.
+FORMAT COLOR OFF.
+ENDIF.
+WRITE:/.
+
+*   総合計の計算
+gw_total = gw_total + gf_exec_tmp-salk3.
+
+ENDFORM.                    " FRM_DETAIL_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ALL_TOTAL
+*&---------------------------------------------------------------------*
+*       総合計
+*----------------------------------------------------------------------*
+FORM frm_all_total.
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (BLUE)
+FORMAT COLOR COL_TOTAL ON INTENSIFIED.
+ENDIF.
+WRITE:  /1(1)  space.
+*  WRITE:/053(6)  TEXT-065,         "総合計
+*---MODIFY START   PSD H.HARUKI 2002/09/21 ---------------------------*
+WRITE:/060(6)  text-065,         "総合計
+*---MODIFY END    PSD H.HARUKI 2002/09/21 ---------------------------*
+136(16) gw_total.         "在庫金額
+
+* 色設定
+IF pr_colr = cns_x.
+*   COLOR SET (OFF)
+WRITE 153(1) space.
+FORMAT COLOR OFF.
+ENDIF.
+
+WRITE:/.
+Move : gw_total To gf_exec-Total .
+Modify gt_exec From gf_exec
+Transporting TOTAL Where BUKRS EQ gf_exec-BUKRS
+And  BWKEY EQ gf_exec-BWKEY .
+
+CLEAR gw_total.                  "総合計を初期化
+
+ENDFORM.                    " FRM_ALL_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CURRENCY_AMOUNT
+*&---------------------------------------------------------------------*
+*       金額変換処理
+*----------------------------------------------------------------------*
+*      -->P_WAERS    通貨コード
+*      -->P_BEFORE   変換前金額
+*      <--P_AFTER    変換後金額
+*----------------------------------------------------------------------*
+FORM frm_currency_amount             USING    p_waers
+p_before
+CHANGING p_after.
+DATA l_idoc_amount(255) TYPE c.
+*--- 汎用モジュール金額変換モジュール
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+currency    = p_waers
+sap_amount  = p_before
+IMPORTING
+idoc_amount = l_idoc_amount
+EXCEPTIONS
+OTHERS      = 1.
+IF sy-subrc <> 1.
+p_after = l_idoc_amount.
+ENDIF.
+
+ENDFORM.                    " FRM_CURRENCY_AMOUNT
+*---INSERT START   PSD H.HARUKI 2002/09/20 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  ekgrp_get
+*&---------------------------------------------------------------------*
+*  評価在庫内部テーブルより購買グループを取得
+*----------------------------------------------------------------------*
+*  l_ekgrp_flg : 購買グループが範囲内 = '0'
+*                              範囲外 = '1'
+*----------------------------------------------------------------------*
+FORM ekgrp_get .
+SELECT SINGLE
+ekgrp
+FROM   marc
+INTO g_save_ekgrp
+WHERE  matnr   = gf_mbew-matnr
+AND  werks   = gf_mbew-bwkey
+AND ekgrp IN s_ekgrp .
+
+ENDFORM.                    " ekgrp_get
+*---INSERT END     PSD H.HARUKI 2002/09/20 ---------------------------*
+*---INSERT START  NDSC R.HATA   2002/11/18 ---------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  ekgrp_get
+*&---------------------------------------------------------------------*
+*  評価在庫内部テーブルより購買グループを取得
+*----------------------------------------------------------------------*
+*  l_ekgrp_flg : 購買グループが範囲内 = '0'
+*                              範囲外 = '1'
+*----------------------------------------------------------------------*
+Form Period_Get .
+Call Function 'DATE_TO_PERIOD_CONVERT'
+Exporting
+I_DATE               = SY-DATUM
+I_PERIV              = 'V3'
+IMPORTING
+E_BUPER              = W_BUPER
+E_GJAHR              = W_GJAHR
+EXCEPTIONS
+INPUT_FALSE          = 1
+T009_NOTFOUND        = 2
+T009B_NOTFOUND       = 3
+OTHERS               = 4
+.
+If SY-SUBRC NE 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+EndForm .                   " ekgrp_get
+*---INSERT START  NDSC R.HATA   2002/11/18 ---------------------------*
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHK_FILE
+*&---------------------------------------------------------------------*
+*       2003/07/22 ADD
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_CHK_FILE.
+CALL FUNCTION 'WS_FILENAME_GET'
+EXPORTING
+*       DEF_FILENAME           = ' '
+*       DEF_PATH               = ' '
+MASK                   = '*.*,ALL Files,*.*. '
+MODE                   = 'S'
+TITLE                  = '期末残高一覧表'
+IMPORTING
+FILENAME               = P_FILE
+*       RC                     =
+EXCEPTIONS
+OTHERS                 = 5
+.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+* ↑
+ENDFORM.                    " FRM_CHK_FILE
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_DL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_DATA_DL.
+CALL FUNCTION 'WS_DOWNLOAD'
+EXPORTING
+FILENAME                      = P_FILE
+FILETYPE                      = 'DAT'
+MODE                          = ' '
+*   IMPORTING
+*    FILELENGTH                    =
+TABLES
+DATA_TAB                      = GT_DL
+*    FIELDNAMES                    =
+EXCEPTIONS
+FILE_OPEN_ERROR               = 1
+FILE_WRITE_ERROR              = 2
+INVALID_FILESIZE              = 3
+INVALID_TYPE                  = 4
+NO_BATCH                      = 5
+UNKNOWN_ERROR                 = 6
+INVALID_TABLE_WIDTH           = 7
+GUI_REFUSE_FILETRANSFER       = 8
+CUSTOMER_ERROR                = 9
+OTHERS                        = 10
+.
+IF SY-SUBRC = 0.
+MESSAGE   S400(Z1) WITH 'ダウンロードに成功しました'.
+ELSE.
+MESSAGE  E400(Z1) WITH 'ダウンロードできませんでした'.
+ENDIF.
+
+ENDFORM.                    " FRM_DATA_DL
+
+
+
+FORM FRM_CHAR_EDIT.
+Data : L_LGORT Like GF_EXEC-LGORT ,
+L_MATNR Like GF_EXEC-MATNR ,
+L_FLAG(1) Type C ,
+L_NUM   Like GF_EXEC-NUM .
+* Mod 2003/11/05 >>>
+Move 'X' To L_FLAG .
+LOOP AT GT_EXEC INTO GF_EXEC.
+If  GF_EXEC-MATNR NE L_MATNR
+And L_FLAG NE 'X' .
+*      Write : L_NUM   TO GF_DL-NUM  .
+APPEND  GF_DL TO GT_DL .
+CLEAR :  GF_DL , L_NUM .
+EndIf .
+
+MOVE :
+*           GF_EXEC-BUKRS TO GF_DL-BUKRS,    "CHAR型の項目
+*           GF_EXEC-BWKEY TO GF_DL-BWKEY,
+GF_EXEC-MATNR TO GF_DL-MATNR,
+*           GF_EXEC-MPTRN TO GF_DL-MPTRN,
+*           GF_EXEC-LGORT TO GF_DL-LGORT,
+*           GF_EXEC-LFGJA TO GF_DL-LFGJA,
+*           GF_EXEC-LFMON TO GF_DL-LFMON,
+GF_EXEC-MAKTX TO GF_DL-MAKTX,
+'合計'        To gf_dl-gokei ,
+*           GF_EXEC-BUTXT TO GF_DL-BUTXT,
+*           GF_EXEC-PNAME TO GF_DL-PNAME,
+*           GF_EXEC-LNAME TO GF_DL-LNAME,
+GF_EXEC-LGPBE TO GF_DL-LGPBE,
+GF_EXEC-MEINS TO GF_DL-MEINS,
+*           GF_EXEC-WAERS TO GF_DL-WAERS,
+GF_EXEC-EKGRP TO GF_DL-EKGRP.
+
+*    Add GF_EXEC-NUM To L_NUM .
+WRITE :
+*            GF_EXEC-NUM   TO GF_DL-NUM  ,    "CHAR以外
+GF_EXEC-UNTCT TO GF_DL-UNTCT,
+GF_EXEC-SALK3 TO GF_DL-SALK3,
+GF_EXEC-LBKUM TO GF_DL-LBKUM.
+*            GF_EXEC-TOTAL TO GF_DL-TOTAL.
+Clear L_FLAG .
+Move : GF_EXEC-MATNR To L_MATNR .
+* Mod 2003/11/05 <<<
+ENDLOOP.
+APPEND  GF_DL TO GT_DL .
+CLEAR   GF_DL .
+
+ENDFORM.                    " FRM_CHAR_EDIT
+
+* Add 2003.09.02 >>>>>
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_TRANSFER
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+Form FRM_DATA_TRANSFER .
+Data : W_LINE(1000) Type C ,
+W_TAB Type X Value '09' .
+
+Open DataSet P_FILE For Output In Text Mode .
+If SY-SUBRC NE 0 .
+Message S400(Z1) With 'ファイルオープンエラー' .
+Stop .
+EndIf .
+Clear : GF_DL .
+Loop At GT_DL Into GF_DL .
+Concatenate
+* Mod 2003/11/05 Hata >>>
+*          GF_DL-bukrs
+*          GF_DL-bwkey
+*          GF_DL-matnr
+*          GF_DL-mptrn
+*          GF_DL-lgort
+*          GF_DL-lfgja
+*          GF_DL-lfmon
+*          GF_DL-maktx
+*          GF_DL-butxt
+*          GF_DL-pname
+*          GF_DL-lname
+*          GF_DL-lgpbe
+*          GF_DL-num
+*          GF_DL-meins
+*          GF_DL-untct
+*          GF_DL-salk3
+*          GF_DL-lbkum
+*          GF_DL-total
+*          GF_DL-waers
+*          GF_DL-ekgrp
+GF_DL-ekgrp         "購買グループ
+GF_DL-matnr         "品目コード
+GF_DL-maktx         "品目名
+GF_DL-GOKEI         "合計
+GF_DL-lgpbe         "棚番
+GF_DL-lbkum         "在庫合計
+GF_DL-meins         "単位
+GF_DL-untct         "単価
+GF_DL-salk3         "在庫金額
+* Mod 2003/11/05 Hata <<<
+Into  W_LINE
+Separated By W_TAB
+.
+Transfer W_LINE TO P_FILE .
+Clear : GF_DL .
+EndLoop .
+If SY-SUBRC EQ 0 .
+Message S400(Z1) With 'ダウンロードに成功しました'.
+Else.
+Message E400(Z1) With 'ダウンロードできませんでした'.
+EndIf.
+EndForm .
+* Add 2003.09.02 <<<<<

@@ -1,0 +1,1344 @@
+*&---------------------------------------------------------------------*
+*& 検収照合システム                                                    *
+*&     プログラム名称：検収データ取込み                                *
+*&     プログラムＩＤ：YK011400                                        *
+*&     作成者　　　　：K.ISHIKAWA(NSP)   作成日　　　　：2001/12/12    *
+*&     更新者　　　　：K.KAJISA(NDSC)    更新日　　　　：2002/02/14    *
+*&                     符号反転条件の変更                              *
+*&     更新者　　　　：K.KAJISA(NDSC)    更新日　　　　：2002/03/04    *
+*&                     選択画面調整                                    *
+*&     更新者　　　　：K.KAJISA(NDSC)    更新日　　　　：2002/03/04    *
+*&                     単価、金額の空白時のABEND回避                   *
+*&     更新者        :M.SHIRAISHI(NDSC)  更新日        : 2002/03/22    *
+*&                     仕入先取得先の項目変更                          *
+*&     更新者        :K.KAJISA(NDSC)     更新日        : 2002/03/22    *
+*&                     得意先取得不可時の対応変更                      *
+*&     更新者        :KURANO Sadayuki    更新日        : 2002/03/23    *
+*&                     事業領域取得不可時の対応変更                    *
+*&     更新者        :KURANO Sadayuki    更新日        : 2002/04/09    *
+*&                     入力ファイル削除処理の追加                      *
+*&     更新者        :KURANO Sadayuki    更新日        : 2002/04/19    *
+*&                     得意先コードのマスタによるチェックを追加        *
+*&                     得意先コードの変換EXITを追加                    *
+*&     更新者        :KURANO Sadayuki    更新日        : 2002/04/22    *
+*&                     処理件数の出力を追加                            *
+*&     更新者        :KAJISA kajisa      更新日        : 2002/05/29    *
+*&                     合計金額算出ロジック変更                        *
+*&     更新者        :M.Shiraishi        更新日        : 2002/06/12    *
+*&                     品目変換マスタ取得ロジック変更                  *
+*&     更新者　　　　:M.Shiraishi        更新日        : 2002/06/13    *
+*&                     2002/06/12修正追加                              *
+*&     更新者        :M.Shiraishi        更新日        : 2002/06/19    *
+*&                     製品部門においてTVTA使用するように変更          *
+*&     更新者        :Inagoshi           更新日        : 2002/06/27    *
+*&     YK120用内部テーブルの更新キー(営業所)の復活(商社モデル用)       *
+*&      <= 営業グループの間違い                                        *
+*&     更新者        :Kajisa             更新日        : 2002/09/18    *
+*&                    品目コードのゼロ埋め処理 追加                    *
+*&     更新者        :Kajisa             更新日        : 2002/10/17    *
+*&                    訂正コードロジックの追加                         *
+*&     更新者        :Kajisa             更新日        : 2002/11/07    *
+*&                    訂正コードロジックの修正                         *
+*{   INSERT         TEDK905238                                        3
+*&     更新者        :Hata               更新日        : 2003/04/21    *
+*&                    締日取得ロジックの修正　　　　                   *
+*&     更新者        :Hata               更新日        : 2003/05/02    *
+*&                    営業Ｇ取得なし対応　　　　　　                   *
+*}   INSERT
+*&=====================================================================*
+*&     更新者        :Abe                更新日        : 2003/07/14    *
+*&                    YK011400をコピーして作成                         *
+*&                    『確定フラグ』を初期値で更新するように変更       *
+*&     更新者        :Abe(DMC)           更新日        : 2004/08/27    *
+*&                     得意先コードの変換EXIT(汎用モジュール)を削除    *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+*&     本プログラムでは，最後に「エラーデータ一覧」というレポートが
+*&     出力され，そのカラム「ステータス」でエラーの種別を示すメッセ
+*&     ージが表示される。
+*&     ただし，エラーのあるレコードもデータベースに登録される。なお，
+*&     ある種のエラーになっても，それに影響を受けない後続のチェック
+*&     処理は最後まで実施されるが，最初に検出されたエラーのみが表示
+*&     される。
+*&---------------------------------------------------------------------*
+REPORT      YK011400
+LINE-COUNT 58
+LINE-SIZE 170
+NO STANDARD PAGE HEADING
+MESSAGE-ID Y1.
+
+*----------------------------------------------------------------------*
+*   宣言部
+*----------------------------------------------------------------------*
+TABLES:     YK110,          " 検収データ
+YK120,          " 検収合計データ
+MAKT,           " 品目テキスト
+EDSDC,          " 販売組織： 流通チャネルに対するEDI取引先の
+"            割当て
+TVKO,           " 組織単位： 販売組織
+TVTA,           " 〃　　　： 販売エリア
+KNVV,           " 得意先マスター： 販売データ
+KNVP,           " 〃　　　　　　： 取引先機能
+KNA1,           "               ： 一般データ
+KNMT,           " 得意先/品目情報レコードデータテーブル
+T100,           " 会社コード
+TCURC.          " 通貨コード
+
+*   内部テーブル
+DATA: BEGIN OF I_GOUKEI OCCURS 1.
+INCLUDE STRUCTURE YK120.        " 検収合計テーブル
+DATA: END OF I_GOUKEI.
+*   EIAJ1101
+*   （非fillerの各フィールドのコメント内の"/nnn"は累計bytes数を示す）
+DATA: BEGIN OF I_EIAJ OCCURS 1,     " record-size = 1,013 bytes
+FILLER_1(15)   TYPE C,
+HATCOD(12)     TYPE C,      " 発注者コード/27
+JYUCOD(12)     TYPE C,      " 受注者コード(得意先コード)/39
+FILLER_2(8)    TYPE C,
+CYUBAN(23)     TYPE C,      " 注文番号(得意先発注番号)/70
+*2002/10/17 MOD START
+*        filler_3(21)   type c,
+SEIZOU(19)     TYPE C,
+TEISEI(1)      TYPE C,
+KOKKBN(1)      TYPE C,
+*2002/10/17 MOD END
+MEINS(3)       TYPE C,      " 単位/94
+FILLER_4(55)   TYPE C,
+JHINCD(25)     TYPE C,      " 受注者品目コード/174
+HHINCD(25)     TYPE C,      " 発注者品目コード(得意先品目)/199
+FILLER_5(35)   TYPE C,
+NNDAT(6)       TYPE C,      " 納入日/240
+FILLER_6(50)   TYPE C,
+KSURYO(12)     TYPE C,      " 検収数量/302
+KENYMD(6)      TYPE C,      " 検収日/308
+*       FILLER_7(42)   TYPE C,      " 2002/03/08 MOD
+FILLER_7(41)   TYPE C,      " 2002/03/08 MOD
+ZEIKBN(1)      TYPE C,      " 消費税区分 2002/03/08 ADD
+TFKBN(1)       TYPE C,      " 取引符号区分
+*        FILLER_8(386)  TYPE C,     "2002/03/08 ADD
+*{   REPLACE        TEDK905238                                        1
+*\        filler_8(326)  type c,      "2002/03/08 MOD
+FILLER_8(21)  TYPE C,      "2003/04/21 MOD
+KEIGETSU(4)   TYPE C,      "2003/04/21 ADD
+FILLER_82(301) TYPE C,     "2003/04/21 ADD
+
+*}   REPLACE
+KTUKA(3)       TYPE C,      " 通貨コード/740
+FILLER_9(16)   TYPE C,
+KTANKA(16)     TYPE C,      " 検収単価(外貨)/772
+*        FILLER_10(15)  TYPE C,     " 2002/05/29 MOD
+K_KIN(15)      TYPE C,      " 検収金額(外貨) 2002/05/29 MOD
+CTAX(15)       TYPE C,      " 消費税(外貨)/802
+AMOUNT(15)     TYPE C,      " 合計額(外貨)/817
+FILLER_11(196) TYPE C,
+END OF I_EIAJ.
+
+*   正常登録データ
+DATA: BEGIN OF I_SUCCESS OCCURS 1,
+BUKRS  LIKE YK110-BUKRS,        " 会社コード
+YKYEAR LIKE YK110-YKYEAR,       " 暦年
+AUDDOC LIKE YK110-AUDDOC,       " 検収番号
+HATCOD LIKE I_EIAJ-HATCOD,      " 発注者コード
+CYUBAN LIKE I_EIAJ-CYUBAN,      " 注文番号
+TABIX  LIKE SY-TABIX,           " 行
+END OF I_SUCCESS.
+
+*   エラーデータ
+DATA: BEGIN OF I_FAILURE OCCURS 1,
+BUKRS  LIKE YK110-BUKRS,        " 会社コード
+YKYEAR LIKE YK110-YKYEAR,       " 暦年
+AUDDOC LIKE YK110-AUDDOC,       " 検収番号
+HATCOD LIKE I_EIAJ-HATCOD,      " 発注者コード
+CYUBAN LIKE I_EIAJ-CYUBAN,      " 注文番号
+TABIX  LIKE SY-TABIX,           " 行
+DIAG(32)  TYPE C,               " エラー診断
+END OF I_FAILURE.
+
+*   YK110ロックキー
+DATA: BEGIN OF I_LOCKED_KEY OCCURS 1,
+BUKRS  LIKE YK110-BUKRS,        " 会社コード
+YKYEAR LIKE YK110-YKYEAR,       " 暦年
+AUDDOC LIKE YK110-AUDDOC,       " 検収番号
+END OF I_LOCKED_KEY.
+
+*   ワークエリア
+DATA: W_KUNR1   LIKE YK110-KUNNR,       " 得意先コード
+W_KUNR2   LIKE YK110-KUNNR,       " 得意先コード作業用 2002/04/19
+W_LIFNR   LIKE EDSDC-LIFNR,       " 仕入先コード
+W_MATNR   LIKE KNMT-MATNR,        " 品目コード
+W_UNIQUE  LIKE ISOFIELDS-UNIQUE,  " 単位変換用
+W_DECMLS  LIKE TCURX-CURRDEC,     " 小数桁数
+W_DECS(2)    TYPE P,              " 〃　　　computational
+W_DATS    LIKE YK110-ZFBDT,       " ダミー
+W_ZTERM   LIKE VBRK-ZTERM,        " ダミー
+W_QUANT   LIKE INRI-QUANTITY,     " ダミー
+W_RCD     LIKE INRI-RETURNCODE,   " ダミー
+W_STRING(35) TYPE C,              " ダミー
+W_QUAN(12)   TYPE C,              " ダミー(11.3)
+W_UNTPRC(18) TYPE C,              " ダミー(17.5)
+W_AMOUNT(16) TYPE C,              " ダミー(15.2)
+*{   INSERT         TEDK905238                                        2
+* Add 2003.04.21 >>>
+W_DATE TYPE D,                    "締日取得用日付
+* Add 2003.04.21 <<<
+*
+*}   INSERT
+
+W_SUBRC   LIKE SY-SUBRC,          " エラーリターンワーク
+
+W_ERROR      TYPE C,              " エラー識別番号
+FG_OK        TYPE C,              " リターンコード
+
+CT_INCNT  LIKE SY-DBCNT,          " 入力レコードカウント
+CT_LNCNT  LIKE SY-TABIX,          " 入力ラインカウント
+
+CT_INS110 LIKE SY-DBCNT,          " YK110登録件数
+CT_INS120 LIKE SY-DBCNT,          " YK120登録件数
+CT_UPD120 LIKE SY-DBCNT,          " YK120更新件数
+
+W_BUFF(1013).                     " EIAJ1101の入力バッファ
+
+DATA: ST_KONDD  LIKE KONDD.             " 構造体 - 品目変換： データ部門
+
+DATA W_AMOUNT2 LIKE BAPICURR-BAPICURR.  "2002/03/18 ADD
+DATA W_NUMC(22) TYPE N.                 "2002/03/18 ADD
+***ADD 2002/06/13
+DATA W_MATWA TYPE KOTD601-MATWA.        "2002/06/13 ADD
+***ADD END
+**ADD 2002/06/19
+DATA: WA_SPART LIKE YK140-SPART.        "製品部門 ADD 2002/06/19
+**ADDEND 2002/06/19
+*----------------------------------------------------------------------*
+*   選択画面定義
+*----------------------------------------------------------------------*
+*SELECTION-SCREEN SKIP 3.                           "2002/03/04 DEL
+PARAMETERS P_INFILE(128) TYPE C DEFAULT SPACE.    " 入力ファイル名
+*SELECTION-SCREEN SKIP 1.                           "2002/03/04 DEL
+*SELECTION-SCREEN BEGIN OF BLOCK SOURCE_OF_FILE
+*                        WITH FRAME TITLE TEXT-001.  " 入力元
+*SELECTION-SCREEN BEGIN OF LINE.                    "2002/03/04 DEL
+*SELECTION-SCREEN POSITION 1.                       "2002/03/04 DEL
+PARAMETERS P_SERVER RADIOBUTTON GROUP 001 DEFAULT 'X'.    " サーバ
+*SELECTION-SCREEN POSITION 5.                       "2002/03/04 DEL
+*SELECTION-SCREEN COMMENT (10) TEXT-002.            "2002/03/04 DEL
+*SELECTION-SCREEN END OF LINE.                      "2002/03/04 DEL
+*SELECTION-SCREEN BEGIN OF LINE.                    "2002/03/04 DEL
+*SELECTION-SCREEN POSITION 1.                       "2002/03/04 DEL
+PARAMETERS P_LOCAL  RADIOBUTTON GROUP 001.                " ローカル
+PARAMETERS P_OPNERR LIKE SY-MSGTY DEFAULT 'W'. "エラー 2002/04/09
+PARAMETERS P_DEL AS CHECKBOX DEFAULT  'X'. "削除フラグ 2002/04/09
+PARAMETERS P_DELERR LIKE SY-MSGTY DEFAULT 'E'. "エラー 2002/04/09
+*SELECTION-SCREEN POSITION 5.                       "2002/03/04 DEL
+*SELECTION-SCREEN COMMENT (10) TEXT-003.            "2002/03/04 DEL
+*SELECTION-SCREEN END OF LINE.                      "2002/03/04 DEL
+*SELECTION-SCREEN END OF BLOCK SOURCE_OF_FILE.      "2002/03/04 DEL
+*SELECTION-SCREEN SKIP 1.                           "2002/03/04 DEL
+PARAMETERS P_BUKRS  LIKE YK110-BUKRS   MEMORY ID BUK.     " 会社コード
+PARAMETERS P_YKYEAR LIKE YK110-YKYEAR                     " 暦年
+DEFAULT SY-DATUM(4).
+PARAMETERS P_GSBER  LIKE YK110-GSBER   DEFAULT 'B000'.    "事業領域
+
+*----------------------------------------------------------------------*
+*   実行
+*----------------------------------------------------------------------*
+INITIALIZATION.
+
+AT SELECTION-SCREEN.
+
+*   サーバ or ローカルから？
+IF P_SERVER = 'X'.
+*       サーバから入力（入力ファイル名は必須）
+IF P_INFILE IS INITIAL.
+MESSAGE E667 .
+ENDIF.
+ENDIF.
+
+START-OF-SELECTION.
+
+*** １． ファイルEIAJ1101の読込み
+*
+
+*   サーバ or ローカルから？
+IF P_SERVER = 'X'.
+*       サーバから入力（入力ファイル名は必須）
+OPEN DATASET P_INFILE IN TEXT MODE.     " ファイルのオープン
+
+IF SY-SUBRC > 0.
+MESSAGE ID 'Y1' TYPE P_OPNERR NUMBER '668'.
+STOP.
+ENDIF.
+
+DO.
+CLEAR: I_EIAJ.
+
+*           レコードのゲット
+READ DATASET P_INFILE INTO W_BUFF.
+
+IF SY-SUBRC > 0.    " SY-SUBRC = 4, when EOF
+EXIT.
+ENDIF.
+
+MOVE W_BUFF TO I_EIAJ.
+APPEND I_EIAJ.
+ENDDO.
+
+CLOSE DATASET P_INFILE.
+ELSE.
+*       ファイルのアップロード
+CALL FUNCTION 'UPLOAD'
+EXPORTING
+FILENAME            = P_INFILE
+FILETYPE            = 'ASC'
+SILENT              = 'S'
+IMPORTING
+ACT_FILENAME        = P_INFILE
+TABLES
+DATA_TAB            = I_EIAJ
+EXCEPTIONS
+CONVERSION_ERROR    = 1
+INVALID_TABLE_WIDTH = 2
+INVALID_TYPE        = 3
+NO_BATCH            = 4
+UNKNOWN_ERROR       = 5
+OTHERS              = 6.
+
+IF SY-SUBRC <> 0.
+MESSAGE I400
+WITH 'E:入力ファイルのアップロードに失敗しました'.
+STOP.
+ENDIF.
+ENDIF.
+
+*   レコードカウントチェック
+DESCRIBE TABLE I_EIAJ LINES CT_INCNT.
+IF CT_INCNT = 0.
+MESSAGE S669 .
+STOP.
+ELSE. "2002/04/22 ADD
+MESSAGE I402 WITH CT_INCNT '件入力しました' P_INFILE.
+ENDIF.
+
+*** ２． ファイル項目の不足分の取得
+*
+
+CLEAR: CT_INS110, CT_INS120, CT_UPD120.     " カウンタクリア
+CLEAR: I_LOCKED_KEY.                        " ヘッダークリア
+LOOP AT I_EIAJ.
+*2002/05/29 ADD START 合計金額算出ロジック追加
+IF I_EIAJ-AMOUNT = 0.
+CASE I_EIAJ-ZEIKBN.
+WHEN '1'. "税込
+I_EIAJ-AMOUNT = I_EIAJ-K_KIN.
+WHEN OTHERS. "税抜
+I_EIAJ-AMOUNT = I_EIAJ-CTAX + I_EIAJ-K_KIN.
+ENDCASE.
+ENDIF.
+*2002/05/29 ADD END
+CT_LNCNT = SY-TABIX.
+
+*       データベース，エラーフラグ & 内部テーブルのクリア
+CLEAR: YK110.
+CLEAR: W_ERROR.
+CLEAR: I_GOUKEI.
+CLEAR: I_SUCCESS, I_FAILURE.
+
+*       データベースの編集
+YK110-MANDT = SY-MANDT.
+
+*       登録データの設定
+I_SUCCESS-HATCOD = I_EIAJ-HATCOD.   " 発注者コード
+I_SUCCESS-CYUBAN = I_EIAJ-CYUBAN.   " 注文番号
+I_SUCCESS-TABIX  = CT_LNCNT.        " 行
+
+*       注文番号 & 得意先コードの取得
+CLEAR: W_KUNR1, W_STRING.
+*       MOVE I_EIAJ-JYUCOD(10) TO W_KUNR1.      " 受注者コード03/22MOD
+*       MOVE I_EIAJ-HATCOD     TO W_KUNR1.      " 受注者コード2002/04/19
+W_KUNR2 = I_EIAJ-HATCOD.
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT         = W_KUNR2
+IMPORTING
+OUTPUT        = W_KUNR1
+.
+MOVE I_EIAJ-CYUBAN     TO YK110-BSTKD.  " 注文番号
+
+* 2004/08/27 DEL-S
+*        CALL FUNCTION 'YK_GET_KUNNR_FROM_BSTKD'
+*            EXPORTING
+*                I_KUNR1 = W_KUNR1       " 受注者コード
+*                I_BSTKD = YK110-BSTKD   " 注文番号
+*            IMPORTING
+*                E_KUNNR = YK110-KUNNR   " 得意先コード
+*                E_NAME1 = W_STRING      " 得意先名
+*            EXCEPTIONS
+*                NO_GET  = 1.
+* 2004/08/27 DEL-E
+
+* 2004/08/27 MOD-S
+MOVE W_KUNR1 TO YK110-KUNNR.            " 得意先コード
+*        IF SY-SUBRC > 0 OR YK110-KUNNR IS INITIAL.
+IF YK110-KUNNR IS INITIAL.
+* 2004/08/27 MOD-E
+PERFORM SET_ERR_NO USING '1'.   " 得意先コード取得エラー
+YK110-KUNNR = I_EIAJ-HATCOD. "2002/03/22
+ENDIF.
+SELECT SINGLE * FROM KNA1 "2002/04/19 ADD
+WHERE  KUNNR  = YK110-KUNNR.
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING '1'. " 得意先コード取得エラー
+ENDIF.
+
+*       販売組織，流通チャネル，製品部門の取得
+CLEAR: W_LIFNR.
+*       MOVE I_EIAJ-HATCOD TO W_LIFNR.      " 仕入先コード 20020322 DEL
+MOVE I_EIAJ-JYUCOD TO W_LIFNR.      " 仕入先ｺｰﾄﾞ 20020322
+SELECT SINGLE VKORG                 " 販売組織
+VTWEG                 " 流通チャネル
+SPART                 " 製品部門
+FROM EDSDC
+INTO (YK110-VKORG,
+YK110-VTWEG,
+YK110-SPART)
+WHERE KUNNR = YK110-KUNNR
+AND LIFNR = W_LIFNR.
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING '2'.   " EDSDC検索エラー
+***DEL 2002/06/19
+*       ENDIF.
+***DEL END 2002/06/19
+ELSE.
+**ADD 2002/06/19
+SELECT SINGLE SPAKU INTO WA_SPART FROM TVTA
+WHERE VKORG = YK110-VKORG
+AND   VTWEG = YK110-VTWEG
+AND   SPART = YK110-SPART.
+
+IF SY-SUBRC > 0.
+WA_SPART = YK110-SPART.
+ENDIF.
+ENDIF.
+**ADDEND 2002/06/19
+*       会社コードの取得
+IF NOT YK110-VKORG IS INITIAL.
+SELECT SINGLE BUKRS     " 会社コード
+FROM TVKO   INTO YK110-BUKRS
+WHERE VKORG = YK110-VKORG.
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING '3'.   " TVKO検索エラー
+ENDIF.
+ENDIF.
+
+*       会社コードが取得できなかった場合，選択画面のパラメータをセット
+IF YK110-BUKRS IS INITIAL.
+YK110-BUKRS = P_BUKRS.
+ENDIF.
+I_SUCCESS-BUKRS = YK110-BUKRS.
+
+*       検収日，納入日の取得
+PERFORM CHECK_DATE USING I_EIAJ-KENYMD FG_OK.
+IF FG_OK = SPACE.
+CONCATENATE '20' I_EIAJ-KENYMD INTO YK110-AUDDAT.
+ELSE.
+PERFORM SET_ERR_NO USING '4'.   " 検収日エラー
+ENDIF.
+PERFORM CHECK_DATE USING I_EIAJ-NNDAT FG_OK.
+IF FG_OK = SPACE.
+CONCATENATE '20' I_EIAJ-NNDAT INTO YK110-DVLDAT.
+ELSE.
+PERFORM SET_ERR_NO USING '4'.   " 納入日エラー
+ENDIF.
+*{   INSERT         TEDK905238                                        1
+* Add 2003.04.21 >>>
+IF I_EIAJ-KEIGETSU CN '0123456789'.
+MOVE YK110-AUDDAT TO W_DATE .
+ELSE.
+CONCATENATE '20' I_EIAJ-KEIGETSU '01' INTO W_DATE.
+ENDIF.
+* Add 2003.04.21 <<<
+*
+*}   INSERT
+
+*       締め日の取得
+CLEAR: W_DATS, W_ZTERM.
+CALL FUNCTION 'YK_ZFBDT_GET_BY_KNVV'
+EXPORTING
+I_CORD         = YK110-KUNNR    " 得意先コード
+I_VKORG        = YK110-VKORG    " 販売組織
+I_VTWEG        = YK110-VTWEG    " 流通チャネル
+*               I_SPART        = YK110-SPART    " 製品部門 DEL20020619
+I_SPART        = WA_SPART       " 製品部門 ADD20020619
+*{   REPLACE        TEDK905238                                        2
+*\                i_day          = yk110-auddat   " 検収日
+I_DAY          = W_DATE    " 検収日
+*}   REPLACE
+IMPORTING
+E_ZFBDT        = YK110-ZFBDT    " 締め日
+E_ZFBDT_OLD    = W_DATS
+E_SIHARAIBI    = W_DATS
+E_ZTERM        = W_ZTERM
+EXCEPTIONS
+NO_GET_T052    = 1
+NO_GOOD_GETDAY = 2
+NO_GET_ZTERM   = 3
+OTHERS         = 4.
+
+*       締め日が取得できなかった場合，選択画面のパラメータをセット
+*       （YK110-ZFBDTが取得できなかった，というチェックは冗長か）
+IF SY-SUBRC = 0 AND NOT YK110-ZFBDT IS INITIAL.
+YK110-YKYEAR = YK110-ZFBDT(4).
+ELSE.
+PERFORM SET_ERR_NO USING '5'.   " 締日取得エラー
+YK110-YKYEAR = P_YKYEAR.
+ENDIF.
+I_SUCCESS-YKYEAR = YK110-YKYEAR.
+
+*       検収番号の取得
+CLEAR: W_QUANT, W_RCD.
+CALL FUNCTION 'NUMBER_GET_NEXT'
+EXPORTING
+NR_RANGE_NR             = '10'
+OBJECT                  = 'YKAUDDOC'
+QUANTITY                = '1'
+SUBOBJECT               = YK110-BUKRS   " 会社コード
+TOYEAR                  = YK110-YKYEAR  " 暦年
+IMPORTING
+NUMBER                  = YK110-AUDDOC  " 検収番号
+QUANTITY                = W_QUANT
+RETURNCODE              = W_RCD
+EXCEPTIONS
+INTERVAL_NOT_FOUND      = 1
+NUMBER_RANGE_NOT_INTERN = 2
+OBJECT_NOT_FOUND        = 3
+QUANTITY_IS_0           = 4
+QUANTITY_IS_NOT_1       = 5
+INTERVAL_OVERFLOW       = 6.
+I_SUCCESS-AUDDOC = YK110-AUDDOC.
+
+IF SY-SUBRC > 0.
+MESSAGE S670 .
+ROLLBACK WORK.
+PERFORM DEQUEUE_YK110.
+STOP.
+ENDIF.
+
+*       固定値のセット
+YK110-PRCFLG = '1'.             " 入力区分
+* 2003/07/14 MOD-S:初期値で更新
+*        YK110-FIXFLG = 'X'.             " 確定フラグ
+YK110-FIXFLG = ' '.             " 確定フラグ
+* 2003/07/14 MOD-E
+
+*       営業所 & 営業グループの取得
+IF NOT ( YK110-KUNNR IS INITIAL OR YK110-VKORG IS INITIAL OR
+YK110-VTWEG IS INITIAL OR YK110-SPART IS INITIAL ).
+SELECT SINGLE VKBUR     " 営業所
+*{   DELETE         &$&$&$&$                                          3
+* Del 2003/05/02 >>>>
+*\                          vkgrp     " 営業グループ
+* Del 2003/05/02 <<<<
+*}   DELETE
+*{   REPLACE        &$&$&$&$                                          4
+*\                        from knvv   into (yk110-vkbur,
+*\                                          yk110-vkgrp)
+* Mod 2003/05/02 >>>>
+FROM KNVV   INTO YK110-VKBUR
+* Mod 2003/05/02 <<<<
+*}   REPLACE
+WHERE KUNNR = YK110-KUNNR   " 得意先コード
+AND VKORG = YK110-VKORG   " 販売組織
+AND VTWEG = YK110-VTWEG   " 流通チャネル
+* DEL 2002/06/19          AND SPART = YK110-SPART.  " 製品部門
+AND SPART = WA_SPART.  " 製品部門 ADD20020619
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING '6'.   " KNVV検索エラー
+ENDIF.
+ENDIF.
+
+*       検収先の取得
+IF NOT ( YK110-KUNNR IS INITIAL OR YK110-VKORG IS INITIAL OR
+YK110-VTWEG IS INITIAL OR YK110-SPART IS INITIAL ).
+SELECT KUNN2        " 取引先の得意先コード('KUNN2'で正解！)
+FROM KNVP   INTO YK110-KUNR2
+UP TO 1 ROWS
+WHERE KUNNR = YK110-KUNNR   " 得意先コード
+AND VKORG = YK110-VKORG   " 販売組織
+AND VTWEG = YK110-VTWEG   " 流通チャネル
+*DELL 2002/06/19          AND SPART = YK110-SPART   " 製品部門
+AND SPART = WA_SPART   " 製品部門 ADD20020619
+AND PARVW = 'Y4'.
+EXIT.
+ENDSELECT.
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING '7'.   " KNVP検索エラー
+ENDIF.
+ENDIF.
+
+*       事業領域の取得
+* ///     現在，テーブル内にGSBERが非空のデータが存在しないために，
+* ///   ちゃんと取得できるかどうかのチェックを行うことができていない！
+* ///   （以上のコメントは，テストができたところで抹消すること）
+IF NOT ( YK110-VKORG IS INITIAL OR YK110-VTWEG IS INITIAL OR
+YK110-SPART IS INITIAL ).
+SELECT SINGLE GSBER     " 事業領域
+FROM TVTA   INTO YK110-GSBER
+WHERE VKORG = YK110-VKORG   " 販売組織
+AND VTWEG = YK110-VTWEG   " 流通チャネル
+*  DEL 2002/06/19         AND SPART = YK110-SPART.  " 製品部門
+AND SPART = WA_SPART.  " 製品部門 ADD20020619
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING '8'.   " TVTA検索エラー
+* >> 2002/03/23
+ELSEIF YK110-GSBER IS INITIAL. " 値が無い場合
+YK110-GSBER = P_GSBER. " デフォルト値セット
+* >>
+ENDIF.
+ENDIF.
+
+*       品目コードの取得
+MOVE I_EIAJ-HHINCD TO YK110-KDMAT.  " 得意先(発注者)品目コード
+IF NOT ( YK110-VKORG  IS INITIAL OR YK110-VTWEG IS INITIAL OR
+YK110-KUNNR  IS INITIAL OR YK110-KDMAT IS INITIAL OR
+YK110-AUDDAT IS INITIAL ).
+*           品目コードの取得
+CLEAR: W_MATNR.
+SELECT MATNR
+FROM KNMT   INTO W_MATNR
+UP TO 1 ROWS
+WHERE VKORG = YK110-VKORG   " 販売組織
+AND VTWEG = YK110-VTWEG   " 流通チャネル
+AND KUNNR = YK110-KUNNR   " 製品部門
+AND KDMAT = YK110-KDMAT.  " 得意先品目コード
+EXIT.
+ENDSELECT.
+IF SY-SUBRC > 0.
+***DEL 2002/06/12
+*               PERFORM SET_ERR_NO USING 'A'.   " KNMT検索エラー
+*               YK110-MATNR = I_EIAJ-HHINCD.    " 発注者品名コード
+***DEL END
+***ADD 2002/06/13
+MOVE YK110-KDMAT+0(18) TO W_MATWA. "入力品目コードへ変換
+***ADD END
+***ADD 2002/06/12
+*2002/09/18 ADD START
+PERFORM EDIT_MATNR USING W_MATWA.
+*2002/09/18 ADD END
+*               品目コードの変換
+CLEAR: ST_KONDD.
+CALL FUNCTION 'YK_GET_SMATN_FROM_MATWA'
+EXPORTING
+I_KAPPL = 'V'
+I_KSCHL = 'Y001'
+I_VKORG = YK110-VKORG   " 販売組織
+I_VTWEG = YK110-VTWEG   " 流通チャネル
+I_KUNAG = YK110-KUNNR   " 得意先コード
+I_MATWA = W_MATWA       " 得意先品目コード
+I_DATE  = YK110-AUDDAT  " 検収日
+IMPORTING
+E_KONDD = ST_KONDD
+E_SMATN = YK110-MATNR
+EXCEPTIONS
+NO_GET  = 1.
+
+*               YK110-MATNRが正常に取得できなかった場合も変換エラー扱い
+*               とする！
+IF SY-SUBRC > 0 OR YK110-MATNR IS INITIAL.
+PERFORM SET_ERR_NO USING 'B'.
+" 品目コード変換エラー
+***DEL 2002/06/13
+*                   YK110-MATNR = W_MATNR.
+***DEL END
+***ADD 2002/06/13
+YK110-MATNR = I_EIAJ-HHINCD.    " 発注者品名コード
+***ADD END
+ENDIF.
+***ADD END 2002/06/12
+ELSE.
+*2002/09/18 ADD START
+PERFORM EDIT_MATNR USING W_MATNR.
+*2002/09/18 ADD END
+
+*               品目コードの変換
+CLEAR: ST_KONDD.
+CALL FUNCTION 'YK_GET_SMATN_FROM_MATWA'
+EXPORTING
+I_KAPPL = 'V'
+I_KSCHL = 'Y001'
+I_VKORG = YK110-VKORG   " 販売組織
+I_VTWEG = YK110-VTWEG   " 流通チャネル
+I_KUNAG = YK110-KUNNR   " 得意先コード
+I_MATWA = W_MATNR       " 品目コード
+I_DATE  = YK110-AUDDAT  " 検収日
+IMPORTING
+E_KONDD = ST_KONDD
+E_SMATN = YK110-MATNR
+EXCEPTIONS
+NO_GET  = 1.
+
+*               YK110-MATNRが正常に取得できなかった場合も変換エラー扱い
+*               とする！
+IF SY-SUBRC > 0 OR YK110-MATNR IS INITIAL.
+PERFORM SET_ERR_NO USING 'B'.
+" 品目コード変換エラー
+YK110-MATNR = W_MATNR.
+ENDIF.
+ENDIF.
+ENDIF.
+
+*       品目テキストの取得
+IF NOT YK110-MATNR IS INITIAL.
+SELECT SINGLE MAKTX     " 品目テキスト
+FROM MAKT   INTO YK110-MAKTX
+WHERE MATNR = YK110-MATNR   " 品目コード
+AND SPRAS = SY-LANGU.     " 言語
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING '9'.   " MAKT検索エラー
+ENDIF.
+ENDIF.
+*2002/03/18 MOD START
+**       検収数量の変換（9(9)V999 -> 11.3）
+*        MOVE '       0.   '     TO W_QUAN.          " 11.3
+**       空白などのデータがあればアボートする！
+**       （以下のコメントを外せば，アボートは回避できる）
+** ///   PERFORM DECIMAL_RJ  USING I_EIAJ-KSURYO+1(8) 8.
+** ///   PERFORM FRACTION_LJ USING I_EIAJ-KSURYO+9(3).
+** ///   IF I_EIAJ-KSURYO+1(8) <> SPACE.             " 検収数量(整数部)
+*            MOVE I_EIAJ-KSURYO+1(8) TO W_QUAN(8).
+** ///   ELSE.
+** ///       MOVE '       0'         TO W_QUAN(8).
+** ///   ENDIF.
+*        MOVE I_EIAJ-KSURYO+9(3)     TO W_QUAN+9.    " 検収数量(小数部)
+*        MOVE W_QUAN                 TO YK110-KNQUAN.
+PERFORM EDIT_KINGAKU USING I_EIAJ-KSURYO 3.
+YK110-KNQUAN = W_AMOUNT2.
+*2002/03/18 MOD END
+*       「取引符号区分」が初期値でなければ，符号を反転する
+*       IF NOT I_EIAJ-TFKBN IS INITIAL.
+*2002/10/17 MOD START
+*        if i_eiaj-tfkbn  = '2'.        "2002/02/14 MOD
+*            yk110-knquan = yk110-knquan * ( -1 ).
+*        endif.
+PERFORM CHK_MAINA USING YK110-KNQUAN.
+*2002/10/17 MOD END
+*       単位の変換
+CLEAR: W_UNIQUE.
+CALL FUNCTION 'UNIT_OF_MEASURE_ISO_TO_SAP'
+EXPORTING
+ISO_CODE  = I_EIAJ-MEINS    " 単位(ISO)
+IMPORTING
+SAP_CODE  = YK110-KNUNIT    " 単位(SAP)
+UNIQUE    = W_UNIQUE
+EXCEPTIONS
+NOT_FOUND = 1.
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING 'C'.   " 単位変換エラー
+*           変換できなかった場合，入力した単位を使用する
+MOVE I_EIAJ-MEINS TO YK110-KNUNIT.
+ENDIF.
+
+*       通貨コードの妥当性チェック
+MOVE I_EIAJ-KTUKA TO YK110-WAERS.       " 通貨コード
+SELECT SINGLE *
+FROM TCURC
+WHERE WAERS = YK110-WAERS.
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING 'D'.   " TCURC検索エラー
+
+*           会社コードから通貨コードの取得
+SELECT SINGLE WAERS
+FROM T001   INTO YK110-WAERS
+WHERE BUKRS = YK110-BUKRS.  " 会社コード
+
+IF SY-SUBRC > 0.
+PERFORM SET_ERR_NO USING 'E'.   " 通貨コード取得エラー
+MOVE 'JPY' TO YK110-WAERS.      " 強行手段
+ENDIF.
+ENDIF.
+
+*       小数桁数の取得
+*       （次の関数の呼出しでは，通貨コードの正当性が保証されているため，
+*         エラーリターンは完全無視する！）
+CLEAR: W_DECMLS.
+CALL FUNCTION 'FWOS_CURRENCY_DECIMALS_READ'
+EXPORTING
+I_CURRENCY         = YK110-WAERS    " 通貨コード
+IMPORTING
+E_DECIMALS         = W_DECMLS       " 金額換算用指数
+EXCEPTIONS
+I_CURRENCY_INITIAL = 1.
+*       単価，金額の単位換算
+MOVE W_DECMLS TO W_DECS.    " to computatinal form
+W_DECS = W_DECS - 2.
+
+*2002/03/18 MOD START
+**       単価の変換（9(11)V9(5) -> 17.5）
+*        MOVE '           0.     '  TO W_UNTPRC.     " 17.5
+**       空白などのデータがあればアボートする！
+**       （以下のコメントを外せば，アボートは回避できる）
+*        PERFORM DECIMAL_RJ  USING I_EIAJ-KTANKA(11) 11.
+*        PERFORM FRACTION_LJ USING I_EIAJ-KTANKA+11(5).
+*        IF I_EIAJ-KTANKA(11) <> SPACE.              " 単価(整数部)
+*            MOVE I_EIAJ-KTANKA(11) TO W_UNTPRC+1(11).
+*        ELSE.
+*            MOVE '          0'     TO W_UNTPRC+1(11).
+*        ENDIF.
+*        MOVE I_EIAJ-KTANKA+11(5)   TO W_UNTPRC+13.  " 単価(小数部)
+*        MOVE W_UNTPRC              TO YK110-KNUNTPRC.
+PERFORM EDIT_KINGAKU USING I_EIAJ-KTANKA 5.
+YK110-KNUNTPRC = W_AMOUNT2.
+*2002/03/18 MOD END
+*2002/03/18 START
+**       金額(類)の変換（9(12)V999 -> 15.2）
+*        MOVE '            0.  '    TO W_AMOUNT.     " 15.2
+**       空白などのデータがあればアボートする！
+**       （以下のコメントを外せば，アボートは回避できる）
+*        PERFORM DECIMAL_RJ  USING I_EIAJ-CTAX(12) 12.
+*        PERFORM FRACTION_LJ USING I_EIAJ-CTAX+12(2).
+*        IF I_EIAJ-CTAX(12) <> SPACE.                " 消費税額(整数部)
+*            MOVE I_EIAJ-CTAX(12)   TO W_AMOUNT+1(12).
+*        ELSE.
+*            MOVE '           0'    TO W_AMOUNT+1(12).
+*        ENDIF.
+*        MOVE I_EIAJ-CTAX+12(2)     TO W_AMOUNT+14.  " 消費税額(小数部)
+*        MOVE W_AMOUNT              TO YK110-KNTAXAMT.
+*        YK110-KNTAXAMT = YK110-KNTAXAMT * ( 10 ** W_DECS ).
+PERFORM EDIT_KINGAKU USING I_EIAJ-CTAX   3.
+YK110-KNTAXAMT = W_AMOUNT2.
+YK110-KNTAXAMT = YK110-KNTAXAMT * ( 10 ** W_DECS ).
+*2002/03/18 MOD END
+*       「取引符号区分」が初期値でなければ，符号を反転する
+*        IF NOT I_EIAJ-TFKBN IS INITIAL.
+*2002/10/17 MOD START
+*       if i_eiaj-tfkbn  = '2'.        "2002/02/14 MOD
+*           yk110-kntaxamt = yk110-kntaxamt * ( -1 ).
+*       endif.
+PERFORM CHK_MAINA USING YK110-KNTAXAMT.
+*2002/10/17 MOD END
+*2002/03/18 START
+*        MOVE '            0.  '    TO W_AMOUNT.     " 15.2
+**       空白などのデータがあればアボートする！
+**       （以下のコメントを外せば，アボートは回避できる）2003/03/18 解禁
+*        PERFORM DECIMAL_RJ  USING I_EIAJ-AMOUNT(12) 12.
+*        PERFORM FRACTION_LJ USING I_EIAJ-AMOUNT+12(2).
+*        IF I_EIAJ-AMOUNT(12) <> SPACE.              " 税込金額(整数部)
+*            MOVE I_EIAJ-AMOUNT(12) TO W_AMOUNT+1(12).
+*        ELSE.
+*            MOVE '           0'    TO W_AMOUNT+1(12).
+*        ENDIF.
+*        MOVE I_EIAJ-AMOUNT+12(2)   TO W_AMOUNT+14.  " 税込金額(小数部)
+*        MOVE W_AMOUNT              TO YK110-KNETXAMT.
+*        YK110-KNETXAMT = YK110-KNETXAMT * ( 10 ** W_DECS ).
+PERFORM EDIT_KINGAKU USING I_EIAJ-AMOUNT 3.
+YK110-KNETXAMT = W_AMOUNT2.
+YK110-KNETXAMT = YK110-KNETXAMT * ( 10 ** W_DECS ).
+*2002/03/18 MOD END
+*       「取引符号区分」が初期値でなければ，符号を反転する
+*        IF NOT I_EIAJ-TFKBN IS INITIAL.
+*2002/10/17 MOD START
+*       if i_eiaj-tfkbn  = '2'.        "2002/02/14 MOD
+*           yk110-knetxamt = yk110-knetxamt * ( -1 ).
+*       endif.
+PERFORM CHK_MAINA USING YK110-KNETXAMT.
+*2002/10/17 MOD END
+YK110-KNITXAMT = YK110-KNETXAMT - YK110-KNTAXAMT.   " 税抜金額
+
+*       登録日時 & 登録ユーザ
+YK110-INSDAT = SY-DATUM.        " 登録日
+YK110-INSTIM = SY-UZEIT.        " 登録時
+YK110-INSUSR = SY-UNAME.        " 登録ユーザ
+
+*** ３． データベース（YK110 & YK120）の更新
+*
+
+*       検収データの追加登録
+
+*       既存チェック
+SELECT SINGLE *
+FROM YK110
+WHERE BUKRS  = YK110-BUKRS
+AND YKYEAR = YK110-YKYEAR
+AND AUDDOC = YK110-AUDDOC.
+
+IF SY-SUBRC > 0.
+PERFORM ENQUEUE_YK110 USING W_SUBRC.    " (予約)ロック
+
+IF W_SUBRC > 0.
+MESSAGE S671 .
+ROLLBACK WORK.
+PERFORM DEQUEUE_YK110.
+STOP.
+ENDIF.
+
+INSERT YK110 FROM YK110.
+
+W_SUBRC = SY-SUBRC.
+IF W_SUBRC > 0.
+MESSAGE S672 WITH 'YK110' .
+ROLLBACK WORK.
+PERFORM DEQUEUE_YK110.
+STOP.
+ENDIF.
+
+CT_INS110 = CT_INS110 + 1.
+ELSE.
+*           キーが既存！
+MESSAGE S673 .
+ROLLBACK WORK.
+PERFORM DEQUEUE_YK110.
+STOP.
+ENDIF.
+
+*       I_GOUKEIの作成
+READ TABLE I_GOUKEI
+WITH KEY BUKRS  = YK110-BUKRS
+YKYEAR = YK110-YKYEAR
+KUNNR  = YK110-KUNNR
+KUNR2  = YK110-KUNR2
+VKORG  = YK110-VKORG
+VTWEG  = YK110-VTWEG
+SPART  = YK110-SPART
+VKBUR  = YK110-VKBUR  "ADD営業所 2002/06/27
+VKGRP  = YK110-VKGRP  "営業グループ
+GSBER  = YK110-GSBER
+ZFBDT  = YK110-ZFBDT.
+
+*       見つからなかったか
+IF SY-SUBRC > 0.
+*           新規作成
+MOVE-CORRESPONDING YK110 TO I_GOUKEI.
+APPEND I_GOUKEI.
+ELSE.
+*           更新処理
+I_GOUKEI-KNITXAMT = I_GOUKEI-KNITXAMT + YK110-KNITXAMT.
+I_GOUKEI-KNTAXAMT = I_GOUKEI-KNTAXAMT + YK110-KNTAXAMT.
+I_GOUKEI-KNETXAMT = I_GOUKEI-KNETXAMT + YK110-KNETXAMT.
+MODIFY I_GOUKEI INDEX SY-TABIX.
+ENDIF.
+
+*       登録データ or エラーデータの追加
+IF W_ERROR = SPACE.
+APPEND I_SUCCESS.
+ELSE.
+MOVE-CORRESPONDING I_SUCCESS TO I_FAILURE.
+CASE W_ERROR.
+WHEN '1'.   I_FAILURE-DIAG = '得意先コード取得エラー'.
+WHEN '2'.   I_FAILURE-DIAG = 'EDSDC検索エラー'.
+WHEN '3'.   I_FAILURE-DIAG = 'TVKO検索エラー'.
+WHEN '4'.   I_FAILURE-DIAG = '検収/納入日エラー'.
+*         when '5'.  i_failure-diag = '締日取得エラー'. "MOD 2002/06/27
+WHEN '5'.   I_FAILURE-DIAG = '支払基準日取得エラー'.
+WHEN '6'.   I_FAILURE-DIAG = 'KNVV検索エラー'.
+WHEN '7'.   I_FAILURE-DIAG = 'KNVP検索エラー'.
+WHEN '8'.   I_FAILURE-DIAG = 'TVTA検索エラー'.
+WHEN '9'.   I_FAILURE-DIAG = 'MAKT検索エラー'.
+WHEN 'A'.   I_FAILURE-DIAG = 'KNMT検索エラー'.
+WHEN 'B'.   I_FAILURE-DIAG = '品目コード変換エラー'.
+WHEN 'C'.   I_FAILURE-DIAG = '単位変換エラー'.
+WHEN 'D'.   I_FAILURE-DIAG = 'TCURC検索エラー'.
+WHEN 'E'.   I_FAILURE-DIAG = '通貨コード取得エラー'.
+ENDCASE.
+APPEND I_FAILURE.
+ENDIF.
+
+ENDLOOP.    " AT I_EIAJ
+
+IF W_SUBRC = 0.
+*       YK120の更新
+LOOP AT I_GOUKEI.
+CLEAR: YK120.
+SELECT SINGLE *
+FROM YK120
+WHERE BUKRS  = I_GOUKEI-BUKRS
+AND YKYEAR = I_GOUKEI-YKYEAR
+AND KUNNR  = I_GOUKEI-KUNNR
+AND KUNR2  = I_GOUKEI-KUNR2
+AND VKORG  = I_GOUKEI-VKORG
+AND VTWEG  = I_GOUKEI-VTWEG
+AND SPART  = I_GOUKEI-SPART
+AND VKBUR  = I_GOUKEI-VKBUR
+AND VKGRP  = I_GOUKEI-VKGRP
+AND GSBER  = I_GOUKEI-GSBER
+AND ZFBDT  = I_GOUKEI-ZFBDT.
+
+*           見つからなかったか
+IF SY-SUBRC > 0.
+*               新規登録
+PERFORM ENQUEUE_YK120 USING W_SUBRC.
+IF W_SUBRC > 0.
+EXIT.
+ENDIF.
+
+I_GOUKEI-INSDAT   = SY-DATUM.
+I_GOUKEI-INSTIM   = SY-UZEIT.
+I_GOUKEI-INSUSR   = SY-UNAME.
+INSERT YK120 FROM I_GOUKEI.
+
+W_SUBRC = SY-SUBRC.
+IF W_SUBRC > 0.
+MESSAGE S674 .
+EXIT.
+ENDIF.
+
+CT_INS120 = CT_INS120 + 1.
+ELSE.
+*               更新処理
+PERFORM ENQUEUE_YK120 USING W_SUBRC.
+IF W_SUBRC > 0.
+EXIT.
+ENDIF.
+
+YK120-KNITXAMT = YK120-KNITXAMT + I_GOUKEI-KNITXAMT.
+YK120-KNTAXAMT = YK120-KNTAXAMT + I_GOUKEI-KNTAXAMT.
+YK120-KNETXAMT = YK120-KNETXAMT + I_GOUKEI-KNETXAMT.
+YK120-UPDDAT   = SY-DATUM.
+YK120-UPDTIM   = SY-UZEIT.
+YK120-UPDUSR   = SY-UNAME.
+UPDATE YK120 FROM YK120.
+
+W_SUBRC = SY-SUBRC.
+IF W_SUBRC > 0.
+MESSAGE S674 .
+EXIT.
+ENDIF.
+
+CT_UPD120 = CT_UPD120 + 1.
+ENDIF.
+
+ENDLOOP.    " AT I_GOUKEI
+ENDIF.
+
+IF W_SUBRC = 0.
+COMMIT WORK.
+PERFORM DEQUEUE_YK110.
+PERFORM DEQUEUE_YK120.
+ELSE.
+ROLLBACK WORK.
+PERFORM DEQUEUE_YK110.
+PERFORM DEQUEUE_YK120.
+STOP.
+ENDIF.
+
+*** ４． 結果出力
+*
+
+*   データ一覧 & 登録/更新件数
+WRITE /.
+WRITE: / '正常データ一覧'.
+WRITE /.
+WRITE: /2  '会社コード',
+14 '暦年',
+21 '検収番号',
+32 '発注者コード',
+54 '注文番号',
+74 '行'.
+ULINE.
+LOOP AT I_SUCCESS.
+WRITE: /5      I_SUCCESS-BUKRS,     " 会社コード
+14     I_SUCCESS-YKYEAR,    " 暦年
+20     I_SUCCESS-AUDDOC,    " 検収番号
+32     I_SUCCESS-HATCOD,    " 発注者コード
+46     I_SUCCESS-CYUBAN,    " 注文番号
+73(7)  I_SUCCESS-TABIX.     " 行
+ENDLOOP.
+ULINE.
+
+WRITE /.
+WRITE: / 'エラーデータ一覧'.
+WRITE /.
+WRITE: /2  '会社コード',
+14 '暦年',
+21 '検収番号',
+32 '発注者コード',
+54 '注文番号',
+74 '行',
+81 'ステータス'.
+ULINE.
+LOOP AT I_FAILURE.
+WRITE: /5      I_FAILURE-BUKRS,     " 会社コード
+14     I_FAILURE-YKYEAR,    " 暦年
+20     I_FAILURE-AUDDOC,    " 検収番号
+32     I_FAILURE-HATCOD,    " 発注者コード
+46     I_FAILURE-CYUBAN,    " 注文番号
+73(7)  I_FAILURE-TABIX,     " 行
+81     I_FAILURE-DIAG.      " エラー診断
+ENDLOOP.
+ULINE.
+
+WRITE /.
+WRITE: /1     'YK110登録件数',
+18(6) CT_INS110,
+24    '件'.
+WRITE: /1     'YK120登録件数',
+18(6) CT_INS120,
+24    '件'.
+WRITE: /1     'YK120更新件数',
+18(6) CT_UPD120,
+24    '件'.
+
+* メッセージ出力 2002/04/22 ADD
+MESSAGE I402 WITH CT_INS110 '件登録しました' 'YK110'.
+MESSAGE I402 WITH CT_INS120 '件登録しました' 'YK120'.
+MESSAGE I402 WITH CT_UPD120 '件更新しました' 'YK120'.
+
+* 入力ファイル削除 2002/04/09
+IF P_DEL = 'X'.
+DELETE DATASET P_INFILE.
+IF SY-SUBRC <> 0.
+MESSAGE ID 'Y1' TYPE P_DELERR NUMBER '401'
+WITH 'ファイルが削除できません' P_INFILE.
+ELSE.
+MESSAGE ID 'Y1' TYPE 'I' NUMBER '401'
+WITH 'ファイルを削除しました' P_INFILE.
+ENDIF.
+ENDIF.
+
+STOP.
+
+
+*----------------------------------------------------------------------*
+*   FORM DECIMAL_RJ/FRACTION_LJ
+*----------------------------------------------------------------------*
+*       整数部の右寄せ/小数部の左寄せ
+*----------------------------------------------------------------------*
+*       <-> STR (数値パターンの文字列)
+*       ->  LEN (文字列長)
+*----------------------------------------------------------------------*
+
+*FORM DECIMAL_RJ USING STR
+*                      VALUE(LEN) TYPE P.
+*    DATA: N         TYPE P,
+*          W_STR(15) TYPE C.
+*
+*    CONDENSE STR NO-GAPS.
+*    MOVE STR TO W_STR.
+*    SHIFT W_STR BY 1 PLACES LEFT.
+*    IF STR CO '1234567890 +-' AND W_STR NA '+-'.
+*        N = LEN - STRLEN( STR ).
+*        SHIFT STR BY N PLACES RIGHT.
+*    ELSE.
+*        MOVE SPACE TO STR.
+*    ENDIF.
+*ENDFORM.
+
+*FORM FRACTION_LJ USING STR.
+*
+*    CONDENSE STR NO-GAPS.
+*    IF NOT STR CO '1234567890 '.
+*        MOVE SPACE TO STR.
+*    ENDIF.
+*ENDFORM.
+
+*----------------------------------------------------------------------*
+*   FORM CHECK_DATE
+*----------------------------------------------------------------------*
+*       日付チェック（簡便的方法）
+*----------------------------------------------------------------------*
+*       -> DATE  (6桁の日付YYMMDD)
+*       <- FG_OK (SPACE: OK, 'X': NG)
+*----------------------------------------------------------------------*
+
+FORM CHECK_DATE USING VALUE(DATE)
+FG_OK.
+FG_OK = ' '.
+IF DATE CN '0123456789'.
+FG_OK = 'X'.
+ELSE.
+IF NOT ( DATE+2(2) BETWEEN '01' AND '12' ) OR
+NOT ( DATE+4(2) BETWEEN '01' AND '31' ).
+FG_OK = 'X'.
+ENDIF.
+ENDIF.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*   FORM ENQUEUE/DEQUEUE_YK110
+*   FORM ENQUEUE/DEQUEUE_YK120
+*----------------------------------------------------------------------*
+*       ロック処理/解除
+*----------------------------------------------------------------------*
+*   <- W_SUBRC: SY-SUBRC (ENQUEUE only)
+*----------------------------------------------------------------------*
+
+FORM ENQUEUE_YK110 USING W_SUBRC.
+CALL FUNCTION 'ENQUEUE_EY_YK110'
+EXPORTING
+MODE_YK110     = 'E'
+MANDT          = SY-MANDT
+BUKRS          = YK110-BUKRS
+YKYEAR         = YK110-YKYEAR
+AUDDOC         = YK110-AUDDOC
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+
+W_SUBRC = SY-SUBRC.
+IF W_SUBRC > 0.
+MESSAGE S675 WITH 'YK110' .
+ELSE.
+MOVE YK110-BUKRS  TO I_LOCKED_KEY-BUKRS.
+MOVE YK110-YKYEAR TO I_LOCKED_KEY-YKYEAR.
+MOVE YK110-AUDDOC TO I_LOCKED_KEY-AUDDOC.
+APPEND I_LOCKED_KEY.
+CLEAR: I_LOCKED_KEY.
+ENDIF.
+ENDFORM.
+
+FORM DEQUEUE_YK110.
+LOOP AT I_LOCKED_KEY.
+CALL FUNCTION 'DEQUEUE_EY_YK110'
+EXPORTING
+MODE_YK110 = 'E'
+MANDT      = SY-MANDT
+BUKRS      = I_LOCKED_KEY-BUKRS
+YKYEAR     = I_LOCKED_KEY-YKYEAR
+AUDDOC     = I_LOCKED_KEY-AUDDOC
+EXCEPTIONS
+OTHERS     = 1.
+
+IF SY-SUBRC > 0.
+MESSAGE S676 WITH 'YK110' .
+STOP.
+ENDIF.
+ENDLOOP.
+ENDFORM.
+
+FORM ENQUEUE_YK120 USING W_SUBRC.
+CALL FUNCTION 'ENQUEUE_EY_YK120'
+EXPORTING
+MODE_YK120     = 'E'
+MANDT          = SY-MANDT
+BUKRS          = I_GOUKEI-BUKRS
+YKYEAR         = I_GOUKEI-YKYEAR
+KUNNR          = I_GOUKEI-KUNNR
+KUNR2          = I_GOUKEI-KUNR2
+VKORG          = I_GOUKEI-VKORG
+VTWEG          = I_GOUKEI-VTWEG
+SPART          = I_GOUKEI-SPART
+VKBUR          = I_GOUKEI-VKBUR
+VKGRP          = I_GOUKEI-VKGRP
+GSBER          = I_GOUKEI-GSBER
+ZFBDT          = I_GOUKEI-ZFBDT
+EXCEPTIONS
+FOREIGN_LOCK   = 1
+SYSTEM_FAILURE = 2
+OTHERS         = 3.
+
+W_SUBRC = SY-SUBRC.
+IF W_SUBRC > 0.
+MESSAGE S675 WITH 'YK120' .
+ENDIF.
+ENDFORM.
+
+FORM DEQUEUE_YK120.
+LOOP AT I_GOUKEI.
+CALL FUNCTION 'DEQUEUE_EY_YK120'
+EXPORTING
+MODE_YK120 = 'E'
+MANDT      = SY-MANDT
+BUKRS      = I_GOUKEI-BUKRS
+YKYEAR     = I_GOUKEI-YKYEAR
+KUNNR      = I_GOUKEI-KUNNR
+KUNR2      = I_GOUKEI-KUNR2
+VKORG      = I_GOUKEI-VKORG
+VTWEG      = I_GOUKEI-VTWEG
+SPART      = I_GOUKEI-SPART
+VKBUR      = I_GOUKEI-VKBUR
+VKGRP      = I_GOUKEI-VKGRP
+GSBER      = I_GOUKEI-GSBER
+ZFBDT      = I_GOUKEI-ZFBDT
+EXCEPTIONS
+OTHERS     = 1.
+
+IF SY-SUBRC > 0.
+MESSAGE S676 WITH 'YK120' .
+STOP.
+ENDIF.
+ENDLOOP.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+*   FORM SET_ERR_NO
+*----------------------------------------------------------------------*
+*       エラー番号のセット
+*----------------------------------------------------------------------*
+*       ->  ERR_NO
+*----------------------------------------------------------------------*
+
+FORM SET_ERR_NO USING VALUE(ERR_NO).
+IF W_ERROR IS INITIAL.
+W_ERROR = ERR_NO.
+ENDIF.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_KINGAKU  2002/03/18 ADD
+*&---------------------------------------------------------------------*
+*       金額の小数部整数部分割
+*----------------------------------------------------------------------*
+*      -->P_CHAR   連結文字列
+*      -->P_DEC    小数部桁数
+*----------------------------------------------------------------------*
+FORM EDIT_KINGAKU USING    P_CHAR
+P_DEC.
+W_NUMC    = P_CHAR.
+W_AMOUNT2 = W_NUMC * 10 ** ( P_DEC * -1 ).
+
+ENDFORM.                    " EDIT_KINGAKU
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_MATNR
+*&---------------------------------------------------------------------*
+*       品目コードのゼロ埋め 2002/09/18 ADD
+*----------------------------------------------------------------------*
+*      -->P_MATNR  編集される品目コード
+*----------------------------------------------------------------------*
+FORM EDIT_MATNR USING P_MATNR.
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT              = P_MATNR
+IMPORTING
+OUTPUT             = P_MATNR
+EXCEPTIONS
+LENGTH_ERROR       = 1
+OTHERS             = 2.
+
+ENDFORM.                    " EDIT_MATNR
+*&---------------------------------------------------------------------*
+*&      Form  CHK_MAINA
+*&---------------------------------------------------------------------*
+*       マイナスチェック
+*----------------------------------------------------------------------*
+*      -->符号反転対象
+*----------------------------------------------------------------------*
+FORM CHK_MAINA USING    P_INT.
+*2002/11/07 MOD START
+*  CASE I_EIAJ-TEISEI.
+*  WHEN '1'.
+*    IF I_EIAJ-TFKBN = '2'.
+*      P_INT = P_INT * -1.
+*    ENDIF.
+*  WHEN '2'.
+*    IF I_EIAJ-TFKBN = '2'.
+*      P_INT = P_INT * -1.
+*    ENDIF.
+*  WHEN '3'.
+*    IF I_EIAJ-TFKBN = '1'.
+*      P_INT = P_INT * -1.
+*    ENDIF.
+*  ENDCASE.
+IF I_EIAJ-TEISEI = '3'.
+P_INT = P_INT * -1.
+ENDIF.
+IF I_EIAJ-TFKBN = '2'.
+P_INT = P_INT * -1.
+ENDIF.
+*2002/11/07 MOD END
+
+ENDFORM.                    " CHK_MAINA

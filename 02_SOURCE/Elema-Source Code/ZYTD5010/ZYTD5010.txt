@@ -1,0 +1,846 @@
+REPORT ZYTD5010 MESSAGE-ID Y1.
+************************************************************************
+***  REPORT    ZYTD5010
+***  PROGRAM   品目マスタ登録ＤＩ用ファイル作成（移行用／ＥＤＩ用）
+***  MAKE DATE 1998.12.03
+***  CODED BY  S.AOYAGI(PSS)
+***  変更履歴   \\PCX31756\TST\IRE_EDI_HINMOKU.WRK
+***  2002/06/21 再移送
+***  2007/10/01 貿易対応項目追加
+***  2010/03/02 元品目、元プラント、先プラント、先購買グループを
+***             入力ファイルから取得するように変更
+***  2012/08/22 ISID ES-UP
+***  2012/10/29 ISID ES-UP
+***  2012/12/14 GSL Tohtake 数値のみの品目コードは前ゼロ埋め処理を行う
+***  2014/08/29 ISID18      コードページを"UTF-8"に修正
+***  2015/01/08 ISID11      アップロード時のBOMロジック改修
+***  2015/02/04 ISID18      コードページ修正
+***  2016/03/15 ISID18      MRPプロファイル設定
+************************************************************************
+TABLES: ZMMH1,
+BGR00,      "セッションレコード
+BMM00,      "ヘッダレコード
+MARA,       "品目マスタ: 一般データ
+MARC ,
+MVKE ,
+MBEW ,
+T001W.      "プラント/分岐
+************************************************************************
+* Del 2010/03/02 --->
+*--元品目、元プラント、変更後プラントは入力ファイルから受け取るので、
+*  選択画面から廃棄
+*SELECTION-SCREEN : BEGIN OF BLOCK 1 WITH FRAME TITLE TEXT-005.
+*PARAMETERS : I_WERKS LIKE MARC-WERKS OBLIGATORY .
+*SELECT-OPTIONS : S_MATNR FOR MARC-MATNR .
+*SELECTION-SCREEN : END OF BLOCK 1.
+*
+*SELECTION-SCREEN SKIP 1.
+*
+*SELECTION-SCREEN : BEGIN OF BLOCK 2 WITH FRAME TITLE TEXT-006.
+*PARAMETERS : P_WERKS LIKE MARC-WERKS OBLIGATORY .
+*SELECTION-SCREEN : END OF BLOCK 2.
+*
+*SELECTION-SCREEN SKIP 1.
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+*-- 入力ファイルパス追加
+SELECTION-SCREEN : BEGIN OF BLOCK 1 WITH FRAME TITLE TEXT-008.
+*PARAMETERS : P_FILE AS CHECKBOX .
+PARAMETERS : FNAMEIN LIKE RLGRAP-FILENAME.  "入力ファイル
+SELECTION-SCREEN : END OF BLOCK 1.
+SELECTION-SCREEN SKIP 1.
+* Add 2010/03/02 <---
+
+SELECTION-SCREEN : BEGIN OF BLOCK 3 WITH FRAME TITLE TEXT-007.
+PARAMETERS:P_OFILE(120) LOWER CASE OBLIGATORY
+DEFAULT '\\tecr3ap01\r3common\' .
+SELECTION-SCREEN : END OF BLOCK 3.
+
+*SELECTION-SCREEN SKIP .
+*SELECTION-SCREEN BEGIN OF LINE .
+*SELECTION-SCREEN COMMENT 01(08) TEXT-001 .
+*SELECTION-SCREEN COMMENT 33(06) TEXT-003 .
+*SELECTION-SCREEN COMMENT 49(10) TEXT-004 .
+*SELECTION-SCREEN POSITION 40 .
+*PARAMETERS : I_WERKS LIKE MARC-WERKS OBLIGATORY .
+*SELECTION-SCREEN POSITION 60 .
+*PARAMETERS : P_WERKS LIKE MARC-WERKS OBLIGATORY .
+*SELECTION-SCREEN END OF LINE .
+******************************************************************
+DATA:BEGIN OF TAB OCCURS 1.
+DATA: HKUBUN TYPE C.       "変更区分(移行用はSPACE、EDIは有効)
+DATA: MATNR(18).           "品目コード
+DATA: WERKS(4).            "プラント
+INCLUDE STRUCTURE ZMMH1.
+DATA: MBRSH LIKE BMM00-MBRSH ,
+MTART LIKE BMM00-MTART ,
+VKORG LIKE BMM00-VKORG ,
+VTWEG LIKE BMM00-VTWEG .
+DATA:END OF TAB.
+
+* Del 2010/03/02 --->
+*-- パフォーマンスを考慮して、内部テーブル定義を見直し
+*DATA :BEGIN OF T_MARA OCCURS 1 .
+*        INCLUDE STRUCTURE MARA .
+*DATA :END OF T_MARA .
+* Del 2010/03/02 <---
+
+DATA:TOTAL TYPE I,
+LINE  TYPE I.
+DATA:MSG(120).
+DATA MSG1 LIKE MESSAGE.
+
+* Add 2010/03/02 --->
+*-- 入力ファイル読込作業用
+DATA:WK_READ(999) TYPE C OCCURS 0 WITH HEADER LINE.
+
+*-- 入力ファイルデータ格納用
+TYPES:BEGIN OF T_INFILE,
+MATNR      TYPE MARC-MATNR, "品目コード
+WERKS_OLD  TYPE MARC-WERKS, "プラント
+WERKS_NEW  TYPE MARC-WERKS, "プラント（新）
+EKGRP      TYPE MARC-EKGRP, "購買グループ
+DUMMY(2)   TYPE C,          "末尾ゴミ対処
+END OF  T_INFILE.
+
+DATA:GT_INFILE TYPE STANDARD TABLE OF T_INFILE,
+GW_INFILE TYPE T_INFILE.
+
+*-- 品目マスタ（プラント） 一括取得用
+TYPES:BEGIN OF T_MARC,
+MATNR TYPE MARC-MATNR,
+WERKS TYPE MARC-WERKS,
+EKGRP TYPE MARC-EKGRP,
+MTVFP TYPE MARC-MTVFP,
+HERKL TYPE MARC-HERKL,
+STAWN TYPE MARC-STAWN,
+END OF T_MARC.
+
+DATA:GT_MARC TYPE HASHED TABLE OF T_MARC
+WITH UNIQUE KEY MATNR WERKS,
+GW_MARC TYPE T_MARC.
+
+*-- MARC存在確認エラーフラグ
+DATA:GW_MARC_ERR(1) TYPE C. "一件でもMARCに無いデータがあればON
+
+*-- 品目マスタ
+DATA :GT_MARA TYPE HASHED TABLE OF MARA
+WITH UNIQUE KEY MATNR,
+GW_MARA TYPE MARA.
+
+*-- 品目の保管場所データ
+TYPES:BEGIN OF T_MARD,
+MATNR TYPE MARD-MATNR,
+WERKS TYPE MARD-WERKS,
+LGORT TYPE MARD-LGORT,
+LGPBE TYPE MARD-LGPBE, "棚番
+END OF T_MARD.
+
+DATA :GT_MARD TYPE SORTED TABLE OF T_MARD
+WITH UNIQUE KEY MATNR WERKS LGORT,
+GW_MARD TYPE T_MARD.
+
+*-- 品目評価
+TYPES:BEGIN OF T_MBEW,
+MATNR TYPE MBEW-MATNR, "品目コード
+BWKEY TYPE MBEW-BWKEY, "評価レベル
+BWTAR TYPE MBEW-BWTAR, "評価タイプ
+VERPR TYPE MBEW-VERPR, "移動平均原価/期間単位価格
+PEINH TYPE MBEW-PEINH, "価格単位
+END OF T_MBEW.
+
+DATA :GT_MBEW TYPE SORTED TABLE OF T_MBEW
+WITH NON-UNIQUE KEY MATNR BWKEY BWTAR,
+GW_MBEW TYPE T_MBEW.
+
+**** START ADD 2015/02/04 ISID18 ****
+DATA:
+G_OUTPUT_CP  TYPE ZTEGZZM001-Z_OUTPUT_CP,
+G_FLGUTF8    TYPE FLAG.
+**** END ADD 2015/02/04 ISID18 ****
+
+* Add 2010/03/02 <---
+* Mod ES-UP 2012/08/22 -->
+*CONSTANTS : W_TAB TYPE X VALUE '09' .
+CONSTANTS: W_TAB TYPE STRING VALUE CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB.
+* Mod ES-UP 2012/08/22 <--
+************************************************************************
+*include yi02hinm.               "品目用インクルード
+************************************************************************
+START-OF-SELECTION.
+PERFORM INIT.                 "初期処理
+
+**** START ADD 2015/02/04 ISID18 ****
+* コードページ取得処理
+PERFORM FRM_GET_CPAGE.
+**** END ADD 2015/02/04 ISID18 ****
+
+* Add 2010/03/02 --->
+*-- 入力ファイル読込
+PERFORM READ_INFILE.
+* Add 2010/03/02 <---
+
+PERFORM DATA_GET .
+PERFORM OPEN_FILE.            "OPEN FILE
+*  PERFORM READ_FILE.            "ｲﾝﾀﾌｪｰｽﾌｧｲﾙREAD
+PERFORM DATA_EDIT.            "ﾃﾞｰﾀ編集
+PERFORM CLOSE_FILE.           "CLOSE FILE
+PERFORM INFOMATION.
+*  perform delete_rc.
+END-OF-SELECTION.
+************************************************************************
+***  初期処理
+************************************************************************
+FORM INIT.
+CLEAR :TOTAL .
+* CHECK P_RAD2 = 'X'.
+* IF P_WERKS IS INITIAL.
+*   MESSAGE I400 WITH 'E:プラントは必須入力です.'. STOP.
+* ENDIF.
+ENDFORM.                    "INIT
+************************************************************************
+***  ファイルオープン
+************************************************************************
+FORM OPEN_FILE.
+* Add ES-UP 2012/08/22 -->
+****START DEL 2014/08/29 ISID18****
+*  CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+*  DATA L_CODEPAGE TYPE CPCODEPAGE.
+****END DEL 2014/08/29 ISID18****
+* Add ES-UP 2012/08/22 <--
+*  OPEN DATASET P_IFILE FOR INPUT IN TEXT MODE.
+* if sy-subrc <> 0.
+*   message e402 with '品目マスタファイル'
+*                       'オープンエラー'  p_ifile. stop.
+* endif.
+DELETE DATASET  P_OFILE.
+* Mod ES-UP 2012/08/22 -->
+*  OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE.
+* Mod ES-UP 2012/10/29 -->
+*  OPEN DATASET P_OFILE FOR OUTPUT
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+*    IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID18 ****
+DATA L_SAPCODEPAGE TYPE STRING.
+DATA L_CODEPAGE    TYPE ABAP_ENCODING.
+L_SAPCODEPAGE = G_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+IF G_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_OFILE FOR OUTPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+**** END ADD 2015/02/04 ISID18 ****
+**** START UPD 2015/02/04 ISID18 ****
+*  OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
+OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE ENCODING UTF-8
+IGNORING CONVERSION ERRORS.
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+* Mod ES-UP 2012/10/29 <--
+* Mod ES-UP 2012/08/22 <--
+IF SY-SUBRC <> 0.
+MESSAGE S401 WITH '出力ファイルオープンエラー' P_OFILE. STOP.
+ENDIF.
+ENDFORM.                    "OPEN_FILE
+************************************************************************
+***  ファイルの読込み
+************************************************************************
+FORM READ_FILE.
+DATA : D_LINE(1000) TYPE C .
+REFRESH TAB.CLEAR TOTAL.
+*  DO.
+**    READ DATASET P_IFILE INTO TAB.
+*     READ DATASET P_IFILE INTO D_Line.
+*     IF SY-SUBRC <> 0. EXIT. ENDIF.
+*     Perform Split_Data Using D_Line .
+*     APPEND TAB.
+*     TOTAL = TOTAL + 1.
+*     Clear : TAB , D_Line .
+*  ENDDO.
+*  CLOSE DATASET P_IFILE.
+ENDFORM.                    "READ_FILE
+************************************************************************
+***  ファイルのクローズ
+************************************************************************
+FORM CLOSE_FILE.
+CLOSE DATASET P_OFILE.
+ENDFORM.                    "CLOSE_FILE
+************************************************************************
+***  データ編集
+************************************************************************
+FORM DATA_EDIT.
+LOOP AT TAB.
+IF SY-TABIX = 1.
+PERFORM MAKE_BGR00.         "セッションレコードの作成
+ENDIF.
+PERFORM MAKE_BMM00.           "ヘッダレコード作成
+PERFORM MAKE_ZMMH1.           "メインデータ作成
+ENDLOOP.
+ENDFORM.                    "DATA_EDIT
+************************************************************************
+***  セッションレコードの作成
+************************************************************************
+FORM MAKE_BGR00.
+BGR00-STYPE  = '0'.           "レコードタイプ
+BGR00-GROUP  = SY-UNAME.      "グループ名
+BGR00-MANDT  = SY-MANDT.      "クライアント
+BGR00-USNAM  = '/'.           "ＵＳＥＲ　ＩＤ
+BGR00-START  = SY-DATUM.      "開始日
+BGR00-XKEEP  = '/'.           "保持フラグ
+BGR00-NODATA = '/'.           "バッチインプットなし項目
+TRANSFER BGR00 TO P_OFILE.
+ENDFORM.                    "MAKE_BGR00
+************************************************************************
+***  ヘッダレコードの作成
+************************************************************************
+FORM MAKE_BMM00.
+BMM00-STYPE = '1'.           "レコードタイプ
+BMM00-TCODE = 'MM01'.
+*  IF ( P_RAD2 = 'X' OR P_RAD3 = 'X' ) OR     "ＥＤＩ又は期末で 99.03.19
+*     TAB-HKUBUN = '3'.                       "変更モード     1999.03.19
+*    BMM00-TCODE = 'MM02'.
+*  ENDIF.
+BMM00-MATNR = TAB-MATNR.     "品目コード
+* BMM00-MBRSH = 'Y'.           "産業コード
+BMM00-MBRSH = TAB-MBRSH .
+* BMM00-MTART = 'HAWA'.        "品目タイプ
+BMM00-MTART = TAB-MTART .
+BMM00-WERKS = TAB-WERKS.     "プラント
+* IF P_RAD1 = 'X'.
+*   BMM00-WERKS = TAB-WERKS.   "プラント
+* 1998.12.04 DEBUG
+*BMM00-WERKS = 'P'.
+*BMM00-WERKS+1(3) = TAB-WERKS.
+* 1998.12.04 DEBUG
+* ELSE.
+*   BMM00-WERKS = P_WERKS.     "プラント
+* ENDIF.
+* BMM00-LGORT = '/'.           "保管場所
+BMM00-LGORT = 'H000' .       "保管場所
+BMM00-BUKRS = '/'.           "会社コード
+BMM00-BWTAR = '/'.           "評価タイプ
+BMM00-VKORG = '1000'.        "販売組織
+* BMM00-VKORG = TAB-VKORG.     "販売組織
+
+BMM00-VTWEG = '10'.          "流通チャネル
+* BMM00-VTWEG = TAB-VTWEG.     "流通チャネル
+
+BMM00-LGNUM = '/'.           "倉庫番号/複合
+BMM00-LGTYP = '/'.           "保管域タイプ
+***** 2016/3/15 ISID18 DEL START *****
+*  BMM00-DISPR = '/'.           "品目: MRP プロファイル
+***** 2016/3/15 ISID18 DEL END *****
+***** 2016/3/15 ISID18 INS START *****
+BMM00-DISPR = 'ELEM'.      "品目: MRP プロファイル
+***** 2016/3/15 ISID18 INS END *****
+BMM00-PROPR = '/'.           "需要予測プロファイル
+BMM00-XEIA1 = 'X'.           "日程計画１ビユー
+BMM00-XEIB1 = 'X'.           "会計ビユー区分
+BMM00-XEID1 = 'X'.           "MRP１ビユー区分
+BMM00-XEID2 = 'X'.           "MRP２ビユー区分
+BMM00-XEIE1 = 'X'.           "購買管理ビユー区分
+BMM00-XEIE2 = 'X'.           "POテキストビユー区分
+BMM00-XEIK1 = 'X'.           "基本データビユー区分
+BMM00-XEIL1 = 'X'.           "保管場所ビユー区分
+BMM00-XEIP1 = 'X'.           "需要予測ビユー区分
+BMM00-XEIS1 = 'X'.           "WM倉庫管理ビユー
+BMM00-XEIV1 = 'X'.           "販売管理１ビユー
+BMM00-XEIV2 = 'X'.           "販売管理２ビユー
+BMM00-XEIV3 = 'X'.           "販売テキストビユー
+BMM00-XEIV4 = 'X'.           "販売／プラントビユー
+BMM00-XEIF1 = 'X'.           "生産資源／治工具ビユー
+BMM00-XEIQ1 = '/'.           "品質管理ビユー区分
+BMM00-XEIG1 = '/'.           "原価計算ビユー区分
+BMM00-XEIC1 = '/'.           "分類ビユー区分
+BMM00-XEIA2 = 'X'.           "日程計画２ビユー
+BMM00-XEID3 = 'X'.           "MRP３ビユー区分
+BMM00-XEIVE = 'X'.           "海外取引ビユー
+BMM00-A_VPSTA = '/'.         "MARA-VPSTA
+BMM00-A_PSTAT = '/'.         "MARA-PSTAT
+BMM00-C_PSTAT = '/'.         "MARC-PSTAT
+BMM00-D_PSTAT = '/'.         "MARD-PSTAT
+BMM00-W_PSTAT = '/'.         "MBEW-PSTAT
+BMM00-SENDE   = '/'.         "レコード終了フラグ
+TRANSFER BMM00 TO P_OFILE.
+ENDFORM.                    "MAKE_BMM00
+************************************************************************
+***  メインデータの作成
+************************************************************************
+FORM MAKE_ZMMH1.
+IF TAB-MEINS EQ TAB-VRKME .
+MOVE '/' TO TAB-VRKME .
+ENDIF .
+IF TAB-MEINS EQ TAB-BSTME .
+MOVE '/' TO TAB-BSTME .
+ENDIF .
+MOVE-CORRESPONDING TAB TO ZMMH1.
+ZMMH1-STYPE = 'Z'.           "レコードタイプ
+* ZMMH1-PRDHA = TAB-PRODH.
+ZMMH1-SENDE   = '/'.         "レコード終了フラグ
+TRANSFER ZMMH1 TO P_OFILE.
+
+ENDFORM.                    "MAKE_ZMMH1
+************************************************************************
+***  結果出力
+************************************************************************
+FORM INFOMATION.
+* Add 2010/03/02 --->
+DATA:L_CNT TYPE I.
+CLEAR:L_CNT.
+DESCRIBE TABLE GT_INFILE LINES L_CNT.
+MESSAGE I402 WITH '入力件数=' L_CNT '件'.
+* Add 2010/03/02 <---
+MESSAGE I402 WITH '対象件数=' TOTAL '件'.
+ENDFORM.                    "INFOMATION
+************************************************************************
+***
+************************************************************************
+FORM DELETE_RC.
+*  OPEN DATASET P_IFILE FOR OUTPUT.
+*  IF SY-SUBRC <> 0.
+*    MESSAGE I402 WITH 'ファイルは削除されませんでした'.
+*  ELSE.
+*    MESSAGE I402 WITH '入力ファイルを全件削除しました'.
+*  ENDIF.
+**  open dataset p_sfile for output.
+*  IF SY-SUBRC <> 0.
+*    MESSAGE I402 WITH 'GSファイルは削除されませんでした'.
+*  ELSE.
+*    MESSAGE I402 WITH 'GS入力ファイルを全件削除しました'.
+*  ENDIF.
+*
+ENDFORM.                    "DELETE_RC
+
+*** END OF PROGRAM ***
+*&---------------------------------------------------------------------*
+*&      Form  Split_Data
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_D_LINE  text
+*----------------------------------------------------------------------*
+FORM SPLIT_DATA USING    F_LINE.
+SPLIT F_LINE AT W_TAB
+INTO TAB-HKUBUN           "変更区分
+TAB-MATNR            "品目コード
+TAB-WERKS            "プラント
+TAB-STYPE            "バッチインプットインターフェース
+TAB-MEINS            "基本数量単位
+TAB-MAKTX            "品目テキスト
+TAB-PRODH            "品目階層
+TAB-PRDHA            "品目階層
+TAB-MATKL            "品目グループ
+TAB-MTPOS_MARA       "一般明細カテゴリグループ
+TAB-WRKST            "主構成物質
+TAB-NORMT            "産業標準に応じたテキスト
+TAB-GEWEI            "重量単位
+TAB-VMSTA            "販売ビューからの品目ｽﾃｰﾀｽ
+TAB-VMSTD          "販売品目ステータスの有効期間開始日
+TAB-SKTOF            "現金値引区分
+TAB-GSBER            "事業領域
+TAB-KONDM            "品目価格設定グループ
+TAB-KTGRM            "品目の勘定設定グループ
+TAB-MTPOS            "品目マスタの明細カテゴリグループ
+TAB-TAXIM            "税区分: 品目 (購買管理)
+TAB-TATY1            "税カテゴリ (消費税等)
+TAB-TAXM1            "品目の税分類
+TAB-SCMNG            "出荷単位 (BTCI)
+TAB-MVGR1            "商品グループ
+TAB-MVGR2            "最終製品
+TAB-MVGR3            "商品分類
+TAB-MVGR4            "開発部販売実績
+TAB-MVGR5            "品目グループ 5
+TAB-PRAT1            "ID: 製品属性 1
+TAB-PRAT2            "製品属性 2 用 ID
+TAB-PRAT3            "品目属性 3 用 ID
+TAB-PRAT4            "品目属性 4 用 ID
+TAB-PRAT5            "品目属性 5 用 ID
+TAB-PRAT6            "品目属性 6 の ID
+TAB-PRAT7            "品目属性 7 用 ID
+TAB-PRAT8            "品目属性 8 用 ID
+TAB-PRAT9                                 "品目属性 9
+TAB-PRATA            "品目属性 10 用 ID
+TAB-MTVFP            "利用可能在庫確認の確認グループ
+TAB-TRAGR            "輸送グループ
+TAB-LADGR            "積載グループ
+TAB-LTEXT            "品目テキスト
+TAB-EKGRP            "購買グループ
+TAB-MMSTA            "プラント特有品目ステータス
+TAB-MINBE            "発注点 (BTCI)
+TAB-KAUTB            "区分: "購買発注自動生成
+TAB-DISMM            "MRP タイプ
+TAB-DISPO            "MRP 管理者
+TAB-DISLS            "ロットサイズ (品目計画)
+TAB-BSTRF            "購買発注数量の丸め数量
+TAB-SOBSL            "特殊調達タイプ
+TAB-FHORI            "日程計画余裕キー
+TAB-EISBE            "安全在庫 (BTCI)
+TAB-BKLAS            "評価クラス
+TAB-VPRSV            "原価管理区分
+TAB-VERPR            "移動平均原価 (BTCI)
+TAB-PEINH            "価格単位 (BTCI)
+TAB-STPRS            "標準原価 (BTCI)
+TAB-SENDE            "バッチインプット終了
+TAB-MBRSH            "産業コード
+TAB-MTART            "品目タイプ
+TAB-VKORG            "販売組織
+TAB-VTWEG            "流通チャネル
+TAB-SPART            "製品部門
+TAB-GEWEI            "質量単位
+TAB-DWERK            "出荷プラント
+TAB-VERSG            "品目統計グループ
+TAB-VRKME            "販売単位
+TAB-BSTME            "発注単位
+TAB-WEBAZ            "入庫処理日数 (BTCI)
+TAB-LGPBE            "棚番
+TAB-VRKUZ            "基本数量単位変換係数分子 (BTCI)
+TAB-VRKME            "販売単位
+TAB-VRKUN            "基本単位への単位変換の分母
+TAB-BSTUZ            "基本数量単位変換係数分子 (BTCI)
+TAB-BSTME            "発注単位
+TAB-BSTUN            "基本単位への単位変換の分母
+.
+ENDFORM.                    " Split_Data
+
+
+*---------------------------------------------------------------------*
+*       FORM DATA_GET                                                 *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM DATA_GET .
+
+DATA : W_MBEW TYPE MBEW .
+* Add ES-UP 2012/10/30 -->
+DATA : L_HERKL TYPE ZMMH1-HERKL. "品目の原産国
+* Add ES-UP 2012/10/30 <--
+* Del 2010/03/02 --->
+*-- 品目マスタは一括取得
+*  CLEAR TAB.
+*  SELECT WERKS EKGRP MATNR MTVFP
+** Add 2007/10/01 --->
+*        HERKL
+*        STAWN
+** Add 2007/10/01 <---
+*    FROM MARC
+*    INTO CORRESPONDING FIELDS OF TABLE TAB
+*    WHERE WERKS EQ I_WERKS
+*     AND  MATNR IN S_MATNR.
+*  SELECT *
+*    INTO TABLE T_MARA
+*    FROM MARA FOR ALL ENTRIES IN TAB
+*   WHERE MATNR EQ TAB-MATNR.
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+*-- 初期化
+REFRESH:GT_MARC, GT_MARA,
+GT_MBEW, GT_MARD.
+*-- MARCを取得
+SELECT MATNR WERKS EKGRP MTVFP
+HERKL STAWN
+FROM MARC
+INTO TABLE GT_MARC
+FOR ALL ENTRIES IN GT_INFILE
+WHERE MATNR = GT_INFILE-MATNR
+AND WERKS = GT_INFILE-WERKS_OLD.
+
+*-- MARCが１件でも読めてればマスタ取得
+IF NOT GT_MARC[] IS INITIAL.
+*   MARA
+SELECT *
+INTO TABLE GT_MARA
+FROM MARA FOR ALL ENTRIES IN GT_MARC
+WHERE MATNR = GT_MARC-MATNR.
+*   MARD
+SELECT MATNR
+WERKS
+LGORT
+LGPBE
+FROM MARD
+INTO TABLE GT_MARD
+FOR ALL ENTRIES IN GT_MARC
+WHERE MATNR = GT_MARC-MATNR
+AND WERKS = GT_MARC-WERKS.
+*   MBEW
+SELECT MATNR
+BWKEY
+BWTAR
+VERPR
+PEINH
+FROM MBEW
+INTO TABLE GT_MBEW
+FOR ALL ENTRIES IN GT_MARC
+WHERE MATNR = GT_MARC-MATNR
+AND BWKEY = GT_MARC-WERKS.
+
+ENDIF.
+* Add 2010/03/02 <---
+
+* Del 2010/03/02 --->
+*-- 入力ファイルでループ
+*  LOOP AT TAB .
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+CLEAR GW_MARC_ERR.
+LOOP AT GT_INFILE INTO GW_INFILE.
+CLEAR:GW_MARC,GW_MARA,GW_MARD,GW_MBEW,
+TAB.
+*   MARCを読み込み
+READ TABLE GT_MARC INTO GW_MARC
+WITH TABLE KEY MATNR = GW_INFILE-MATNR
+WERKS = GW_INFILE-WERKS_OLD. "元品元プラ検索
+*   読めた場合
+IF SY-SUBRC = 0.
+MOVE-CORRESPONDING GW_MARC TO TAB. "MARC→TABにセット
+*   読めなかった場合
+ELSE.
+IF GW_MARC_ERR IS INITIAL.  "エラー出力前
+WRITE:/01 TEXT-009.       "未登録品目/プラントリスト
+ENDIF.
+WRITE:/01 GW_INFILE-MATNR,
+20 GW_INFILE-WERKS_OLD.
+GW_MARC_ERR = 'X'.
+CONTINUE.
+ENDIF.
+*   以降、MARCが読めた場合のみ実行
+* Add 2010/03/02 <---
+* Add 2008.03.14 >>>
+IF TAB-HERKL IS INITIAL .
+MOVE 'JP' TO TAB-HERKL .
+ENDIF .
+CLEAR : W_MBEW .
+* Del 2010/03/02 --->
+*    SELECT LGPBE
+*      FROM MARD
+*      INTO CORRESPONDING FIELDS OF TAB
+*      WHERE WERKS EQ I_WERKS
+*       AND  MATNR EQ TAB-MATNR .
+*       EXIT .
+*     ENDSELECT .
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+*-- MARD読込
+LOOP AT GT_MARD INTO GW_MARD
+WHERE MATNR = GW_INFILE-MATNR
+AND WERKS = GW_INFILE-WERKS_OLD.
+TAB-LGPBE = GW_MARD-LGPBE.
+EXIT.
+ENDLOOP.
+* Add 2010/03/02 <---
+IF SY-SUBRC NE 0.
+MOVE :    '1'     TO TAB-LGPBE .
+ENDIF.
+
+* Del 2010/03/02 --->
+*    SELECT VERPR PEINH
+*      FROM MBEW
+*      INTO CORRESPONDING FIELDS OF W_MBEW
+*      WHERE BWKEY EQ I_WERKS
+*       AND  MATNR EQ TAB-MATNR .
+*      EXIT .
+*    ENDSELECT .
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+*-- MBEW読込
+LOOP AT GT_MBEW INTO GW_MBEW
+WHERE MATNR = GW_INFILE-MATNR
+AND BWKEY = GW_INFILE-WERKS_OLD.
+MOVE-CORRESPONDING GW_MBEW TO W_MBEW.
+EXIT.
+ENDLOOP.
+* Add 2010/03/02 <---
+IF SY-SUBRC EQ 0.
+MOVE :  W_MBEW-VERPR TO TAB-VERPR ,
+W_MBEW-PEINH TO TAB-PEINH .
+MULTIPLY : TAB-VERPR BY 100 .
+ELSE .
+MOVE :  1      TO TAB-VERPR .
+ENDIF.
+* Add 2008.03.14 <<<
+
+* Del 2010/03/02 --->
+*    READ TABLE T_MARA WITH KEY MATNR = TAB-MATNR .
+*    MOVE-CORRESPONDING T_MARA TO TAB .
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+READ TABLE GT_MARA INTO GW_MARA WITH TABLE KEY MATNR = TAB-MATNR .
+* Add ES-UP 2012/10/30 -->
+L_HERKL = TAB-HERKL. "原産国退避
+* Add ES-UP 2012/10/30 <--
+MOVE-CORRESPONDING GW_MARA TO TAB .
+* Add ES-UP 2012/10/30 -->
+TAB-HERKL = L_HERKL. "原産国回避
+*--- 外部変換
+WRITE GW_MARA-MEINS TO TAB-MEINS. "基本数量単位
+WRITE GW_MARA-GEWEI TO TAB-GEWEI. "重量単位
+**    WRITE GW_MVKE-VRKME TO TAB-VRKME. "販売単位
+WRITE GW_MARA-BSTME TO TAB-BSTME. "発注単位
+WRITE GW_MARA-STOFF TO TAB-STOFF. "危険物コード
+* Add ES-UP 2012/10/30 <--
+* Add 2010/03/02 <---
+
+* Del 2010/03/02 --->
+*    MOVE : P_WERKS TO TAB-WERKS ,
+**           P_EKGRP To TAB-EKGRP ,
+*           P_WERKS+1(3) TO TAB-EKGRP ,
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+MOVE : GW_INFILE-WERKS_NEW TO TAB-WERKS , "新プラント
+GW_INFILE-EKGRP TO TAB-EKGRP ,     "新購買グループ
+* Add 2010/03/02 <---
+* Mod 2008.03.14 >>>
+*           1       TO TAB-VERPR ,
+*           '1'     TO TAB-LGPBE ,
+* Mod 2008.03.14 <<<
+'X'     TO TAB-KAUTB ,
+'/'     TO TAB-MVGR1 ,
+'/'     TO TAB-MVGR2 ,
+'/'     TO TAB-MVGR3 ,
+'/'     TO TAB-MVGR4 ,
+'/'     TO TAB-PRODH ,
+'/'     TO TAB-MTPOS ,
+'/'     TO TAB-VPRSV ,
+* Del 2009.09.18 >>>
+*           '/'     TO TAB-PEINH ,
+* Del 2009.09.18 <<<
+'/'     TO TAB-MTVFP ,
+'/'     TO TAB-VERSG ,
+'/'     TO TAB-BKLAS ,
+'MWST'  TO TAB-TATY1 .
+
+ADD 1 TO TOTAL .
+* Del 2010/03/02 --->
+*    CLEAR : T_MARA .
+*    MODIFY TAB .
+* Del 2010/03/02 <---
+* Add 2010/03/02 --->
+APPEND TAB.
+* Add 2010/03/02 <---
+ENDLOOP .
+ENDFORM .                    "DATA_GET
+* Add 2010/03/02 --->
+*&---------------------------------------------------------------------*
+*&      Form  READ_INFILE
+*&---------------------------------------------------------------------*
+*       入力ファイル取込み
+*----------------------------------------------------------------------*
+FORM READ_INFILE.
+DATA : L_LINE(100) TYPE C ,
+NO_DATA(1) TYPE C VALUE 'X' .
+
+REFRESH:GT_INFILE.
+
+* Add ES-UP 2012/08/22 -->
+****START DEL 2014/08/29 ISID18****
+*  CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+*  DATA L_CODEPAGE TYPE CPCODEPAGE.
+****END DEL 2014/08/29 ISID18****
+* Add ES-UP 2012/08/22 <--
+
+* Mod ES-UP 2012/08/22 -->
+*  OPEN DATASET FNAMEIN FOR INPUT IN TEXT MODE .
+****START DEL 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+****END DEL 2014/08/29 ISID18****
+
+**** START ADD 2015/02/04 ISID18 ****
+DATA L_SAPCODEPAGE TYPE STRING.
+DATA L_CODEPAGE    TYPE ABAP_ENCODING.
+L_SAPCODEPAGE = G_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+IF G_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET FNAMEIN FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+**** END ADD 2015/02/04 ISID18 ****
+OPEN DATASET FNAMEIN FOR INPUT
+**** START UPD 2014/08/31 ISID19 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/08/31 ISID19 ****
+**** START ADD 2015/01/08 ISID11 ****
+SKIPPING BYTE-ORDER MARK
+**** END ADD 2015/01/08 ISID11 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID18 ****
+ENDIF.
+**** END ADD 2015/02/04 ISID18 ****
+
+* Mod ES-UP 2012/08/22 <--
+
+IF SY-SUBRC NE 0 .
+MESSAGE I668 .
+STOP .
+ENDIF .
+
+DO .
+READ DATASET FNAMEIN INTO L_LINE .
+IF  SY-SUBRC = 0 .
+CLEAR:GW_INFILE.
+SPLIT L_LINE AT W_TAB INTO
+GW_INFILE-MATNR
+GW_INFILE-WERKS_OLD
+GW_INFILE-WERKS_NEW
+GW_INFILE-EKGRP
+GW_INFILE-DUMMY.
+* Mod GSL Tohtake 2012/12/14 -->
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT  = GW_INFILE-MATNR
+IMPORTING
+OUTPUT = GW_INFILE-MATNR.
+* Mod GSL Tohtake 2012/12/14 <--
+APPEND GW_INFILE TO GT_INFILE.
+ELSE.
+EXIT .
+ENDIF .
+CLEAR : L_LINE ,NO_DATA .
+ENDDO .
+
+CLOSE DATASET FNAMEIN .
+IF NO_DATA EQ 'X' .
+MESSAGE I204 .
+STOP .
+ENDIF .
+
+ENDFORM.                    " READ_INFILE
+* Add 2010/03/02 <---
+**** START ADD 2015/02/04 ISID18 ****
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_CPAGE
+*&---------------------------------------------------------------------*
+*       コードページ取得処理
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_GET_CPAGE .
+
+CLEAR:
+G_OUTPUT_CP,
+G_FLGUTF8.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-101
+IMPORTING
+EXPCODEPAGE = G_OUTPUT_CP
+EXPFLGUTF8  = G_FLGUTF8.
+
+ENDFORM.                    " FRM_GET_CPAGE
+**** END ADD 2015/02/04 ISID18 ****

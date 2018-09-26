@@ -1,0 +1,610 @@
+REPORT ZB021100 MESSAGE-ID Y1 LINE-COUNT 58
+LINE-SIZE 170.
+************************************************************************
+***  REPORT    ZB021100
+***  PROGRAM   得意先品目情報登録バッチインプット
+***  MAKE DATE 2002.01.22
+***  CODED BY  Y.TATEBAYASHI(PSD)
+***  YI021100 よりコピー ＋ 機能追加
+***      ①ファイルレイアウトの変更(｢明細用途｣の追加)
+***      ②選択画面の変更 … ｢テストのみ実行｣のチェックボックス追加
+***                          ファイル読み込みに｢ローカル｣の追加
+***      ③チェック項目の追加
+***      ④一覧表示の追加
+***  変更履歴
+***  2002.05.08 エラー結果表示の修正
+***  2002.05.08 テキスト格納先の変更
+***  2002.06.26 テキストが'/'の時は空白データ
+**** 2002.07.04 明細用途の変換ロジックの削除
+*&   2012/09/03 ISID              ES-UP
+*&   2014/08/29 ISID18            コードページを"UTF-8"に修正
+*&   2015/01/12 ISID11            アップロード時のBOMロジック改修
+*&   2015/02/04 ISID18            コードページ修正
+************************************************************************
+* データ宣言
+************************************************************************
+TABLES : KNA1 , MARA .
+* Add ES-UP 2012/09/03 -->
+*-----------------------------------------------------------------------
+*  固定値
+*-----------------------------------------------------------------------
+****START UPD 2014/08/29 ISID18****
+*CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+CONSTANTS CNS_UTF TYPE STRING VALUE `UTF-8`.
+****END UPD 2014/08/29 ISID18****
+* Add ES-UP 2012/09/03 <--
+*- BDC tab
+DATA : BEGIN OF BDC OCCURS 0 .
+INCLUDE STRUCTURE BDCDATA.
+DATA : END   OF BDC .
+*- 読み込みデータ
+DATA : BEGIN OF I_TXT OCCURS 0 ,  "2002/04/18
+* Mod ES-UP 2012/10/24 -->
+*        DUMMY(150) TYPE C,
+DUMMY  TYPE STRING,
+* Mod ES-UP 2012/10/24 <--
+END   OF I_TXT .
+DATA : BEGIN OF KITM OCCURS 0 ,
+KUNNR     LIKE MV10A-KUNNR ,  " 得意先コード
+MATNR     LIKE MV10A-MATNR ,  " 品目コード
+KDMAT     LIKE MV10A-KDMAT ,  " 得意先品目コード
+LTX01(40) TYPE C           ,  " テキスト
+VWPOS     LIKE KNMT-VWPOS  ,  " 明細用途
+END   OF KITM .
+DATA : BEGIN OF INFO OCCURS 0 ,
+KUNNR(10) ,                   " 得意先コード
+VKORG(4)  ,                   " 販売組織
+VTWEG(2)  ,                   " 流通チャネル
+MATNR(18) ,                   " 品目コード
+*--- Mod Start 2010/11/02
+*     kdmat(22) ,                   " 得意先品目コード
+KDMAT(25) ,                   " 得意先品目コード
+*--- Mod End   2010/11/02
+BIKO(40)  ,                   " 備考
+VWPOS(4)  ,                   " 明細用途
+END   OF INFO .
+DATA   MSG1 LIKE MESSAGE .
+DATA : KYOTEN(6)        ,
+TOTAL     TYPE I ,
+OKCNT     TYPE I ,
+LINE      TYPE I ,
+ERRCHECK  TYPE C ,
+ERRCNT    TYPE I ,
+VWPOS(4)         .
+**** START ADD 2015/02/04 ISID18 ****
+DATA:
+G_OUTPUT_CP  TYPE ZTEGZZM001-Z_OUTPUT_CP,
+G_FLGUTF8    TYPE FLAG.
+**** END ADD 2015/02/04 ISID18 ****
+************************************************************************
+SELECTION-SCREEN SKIP 1 .
+PARAMETERS : P_VKORG     LIKE MV10A-VKORG     ,     " 販売組織
+P_VTWEG     LIKE MV10A-VTWEG     .     " 流通チャネル
+SELECTION-SCREEN SKIP 1 .
+PARAMETERS : P_IFILE(128) TYPE C LOWER CASE ,
+P_SEL1 RADIOBUTTON GROUP RADI  ,
+P_SEL2 RADIOBUTTON GROUP RADI  .
+SELECTION-SCREEN SKIP 1 .
+PARAMETERS : P_CHECK     TYPE  C    AS CHECKBOX  .
+************************************************************************
+START-OF-SELECTION .
+
+IF     P_SEL1 = 'X' AND P_IFILE =  SPACE .
+MESSAGE I403 WITH 'ファイル名を指定してください' .
+STOP .
+ELSEIF P_SEL1 = 'X' AND P_IFILE <> SPACE .
+**** START ADD 2015/02/04 ISID18 ****
+*   コードページ取得処理
+PERFORM FRM_GET_CPAGE.
+**** END ADD 2015/02/04 ISID18 ****
+PERFORM OPEN_FILE  .      " OPEN FILE
+PERFORM READ_FILE  .      " ｲﾝﾀﾌｪｰｽﾌｧｲﾙREAD
+ELSEIF P_SEL2 = 'X' AND P_SEL1 = SPACE   .
+**** START ADD 2015/02/04 ISID18 ****
+*   コードページ取得処理
+PERFORM FRM_GET_CPAGE.
+**** END ADD 2015/02/04 ISID18 ****
+PERFORM READ_LOCAL .
+ENDIF .
+PERFORM EDIT       .        " データ編集
+PERFORM DATA_CHECK .        " データチェック
+IF P_CHECK = SPACE .
+PERFORM MAKE_BDC .        " BDCDATA 作成
+PERFORM INFOMATION .      " 結果出力
+ELSE  .
+*   write:/ 'エラーチェック結果'.
+*   write:/ 'エラーはありませんでした'.
+PERFORM INFOMATION .      " 結果出力
+ENDIF .
+
+END-OF-SELECTION .
+************************************************************************
+***  ファイルオープン
+************************************************************************
+FORM OPEN_FILE .
+* Mod ES-UP 2012/09/03 -->
+*  open dataset p_ifile for input in text mode .
+****START DEL 2014/08/29 ISID18****
+*  DATA L_CODEPAGE TYPE ABAP_ENCODING.
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+****END DEL 2014/08/29 ISID18****
+
+**** START ADD 2015/02/04 ISID18 ****
+DATA L_SAPCODEPAGE TYPE STRING.
+DATA L_CODEPAGE    TYPE ABAP_ENCODING.
+L_SAPCODEPAGE = G_OUTPUT_CP.
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+IF G_FLGUTF8 IS INITIAL.
+TRY.
+OPEN DATASET P_IFILE FOR INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+CATCH CX_SY_CODEPAGE_CONVERTER_INIT.
+SY-SUBRC = 8.
+ENDTRY.
+ELSE.
+OPEN DATASET P_IFILE FOR INPUT
+**** START UPD 2014/08/31 ISID19 ****
+*    IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IN TEXT MODE ENCODING UTF-8
+**** END UPD 2014/08/31 ISID19 ****
+**** START ADD 2015/01/12 ISID11 ****
+SKIPPING BYTE-ORDER MARK
+**** END ADD 2015/01/12I SID11 ****
+IGNORING CONVERSION ERRORS.
+**** START ADD 2015/02/04 ISID18 ****
+ENDIF.
+**** END ADD 2015/02/04 ISID18 ****
+
+* Mod ES-UP 2012/09/03 <--
+IF SY-SUBRC <> 0 .
+MESSAGE I402 WITH
+'得意先品目情報ファイル' 'オープンエラー' P_IFILE .
+STOP .
+ENDIF .
+ENDFORM .                    "open_file
+************************************************************************
+***  ファイルの読み込み
+************************************************************************
+FORM READ_FILE .
+REFRESH KITM .  CLEAR TOTAL .
+DO .
+*     read dataset p_ifile into kitm ." 2002/04/18 MOD
+* Mod ES-UP 2012/10/24 -->
+*     read dataset p_ifile into I_TXT ." 2002/04/18 MOD
+READ DATASET P_IFILE INTO I_TXT-DUMMY.
+* Mod ES-UP 2012/10/24 <--
+IF SY-SUBRC <> 0 .  EXIT .  ENDIF .
+PERFORM SPLIT_DATA.              " 2002/04/18 MOD
+APPEND KITM .
+TOTAL = TOTAL + 1 .
+ENDDO .
+CLOSE DATASET P_IFILE .
+ENDFORM.                    "read_file
+************************************************************************
+***  データ編集
+************************************************************************
+FORM EDIT.
+REFRESH INFO.
+LOOP AT KITM.
+INFO-KUNNR = KITM-KUNNR.         "得意先コード
+INFO-VKORG = P_VKORG.            "販売組織
+INFO-VTWEG = P_VTWEG.            "流通チャネル
+INFO-MATNR = KITM-MATNR.         "品目コード
+*--- Mod Start 2010/11/02
+*    info-kdmat = kitm-kdmat(22).     "得意先品目コード
+INFO-KDMAT = KITM-KDMAT(25).     "得意先品目コード
+*--- Mod End   2010/11/02
+*2002/07/04 ADD START  vwpos
+INFO-VWPOS = KITM-VWPOS.         "
+*2002/07/04 ADD END
+*2002/06/26 ADD START
+IF KITM-LTX01 <> '/'.
+*2002/06/26 ADD END
+INFO-BIKO  = KITM-LTX01+0(40).   "備考
+*2002/06/26 ADD START
+ENDIF.
+*2002/06/26 ADD END
+APPEND INFO.
+ENDLOOP.
+ENDFORM.                    "edit
+************************************************************************
+***  ＢＤＣデータ作成
+************************************************************************
+FORM MAKE_BDC .
+CLEAR : KYOTEN , OKCNT .
+REFRESH BDC .
+LOOP AT INFO .
+REFRESH BDC .
+CLEAR   VWPOS .
+*2002/07/04 MOD START
+*    if info-vwpos = '44' or info-vwpos = '45' or info-vwpos = '46' .
+*      vwpos = 'ZTMP' .
+*    endif .
+*2002/09/02 Add >>>
+IF INFO-VWPOS EQ '/' .
+CLEAR : INFO-VWPOS .
+ENDIF .
+*2002/09/02 Add >>>
+VWPOS = INFO-VWPOS.
+*2002/07/04 MOD END
+PERFORM FRM_SET_BDCTAB
+TABLES   BDC
+USING : 'X' 'SAPMV10A'       '0100'      ,
+' ' 'MV10A-KUNNR'    INFO-KUNNR  , " 得意先cd
+' ' 'MV10A-VKORG'    INFO-VKORG  , " 販売組織
+' ' 'MV10A-VTWEG'    INFO-VTWEG  , " 流通ﾁｬﾈﾙ
+' ' 'BDC_OKCODE'     '/00'       , " ENTER
+'X' 'SAPMV10A'       '0200'      ,
+' ' 'MV10A-MATNR(1)' INFO-MATNR  , " 品目コード
+' ' 'MV10A-KDMAT(1)' INFO-KDMAT  , " 品目情報
+' ' 'BDC_OKCODE'     '=SELE'     , " ENTER
+*--
+'X' 'SAPMV10A'       '0300'      ,
+' ' 'MV10A-LPRIO'    '3'         ,
+' ' 'MV10A-ANTLF'    '9'         ,
+' ' 'MV10A-VWPOS'    VWPOS       ,
+*2002/05/31 MOD START
+*                     ' ' 'BDC_OKCODE'     'TEXT'      , " ENTER
+' ' 'MV10A-POSTX'    INFO-BIKO   , " 得意先品目
+' ' 'BDC_OKCODE'     'SICH'      . " 保存
+*2002/05/31 MOD END
+*2002/05/31 DEL START
+*--
+*                     'X' 'SAPLV70T'       '0101'      ,
+*                     ' ' 'LV70T-LTX01(1)' info-biko   , " 備考
+*                     ' ' 'BDC_OKCODE'     'UPD'       , " 保存
+*                     'X' 'SAPMV10A'       '0300'      ,
+*                     ' ' 'BDC_OKCODE'     'SICH'      . " 保存
+*2002/05/31 DEL END
+PERFORM CALL_TRAN .                       "バッチインプット実行
+ENDLOOP.
+ENDFORM.                    "make_bdc
+************************************************************************
+***  バッチインプット実行
+************************************************************************
+FORM CALL_TRAN .                                   "TESTは 'A' にする
+*2002/07/04 ADD START
+DATA:W_MODE VALUE 'N'.
+*2002/07/04 ADD END
+*2002/07/04 ADD START
+*  call transaction 'VD51' using bdc mode 'N'       "本番は 'N' にする
+CALL TRANSACTION 'VD51' USING BDC MODE W_MODE
+*2002/07/04 ADD END
+UPDATE 'S'.
+IF SY-SUBRC = 0 .
+OKCNT = OKCNT + 1 .
+ELSE .
+CALL FUNCTION 'WRITE_MESSAGE'
+EXPORTING
+MSGID  = SY-MSGID
+MSGNO  = SY-MSGNO
+MSGTY  = SY-MSGTY
+MSGV1  = SY-MSGV1
+MSGV2  = SY-MSGV2
+MSGV3  = SY-MSGV3
+MSGV4  = SY-MSGV4
+MSGV5  = SY-MSGV4
+IMPORTING
+MESSG  = MSG1
+EXCEPTIONS
+OTHERS = 1.
+*2002/05/21 MOD START
+*   message i400 with msg1 .
+*   message i403 with '得意先=' info-kunnr '品目=' info-matnr .
+ERRCNT = ERRCNT + 1 .
+*    IF sy-msgty = 'E'.      "2002/06/26 DEL
+WRITE:/1 MSG1 ,
+/1  '得意先=',
+11 INFO-KUNNR,
+24  '品目=',
+29 INFO-MATNR .
+*    ENDIF.                 "2002/06/26 DEL
+*2002/05/21 MOD END
+ENDIF.
+ENDFORM.                    "call_tran
+************************************************************************
+*       ＤＢＣテーブルへのセット
+************************************************************************
+FORM FRM_SET_BDCTAB TABLES P_BDCDATA STRUCTURE BDCDATA
+USING  VALUE(OPERAND1)
+VALUE(OPERAND2)
+VALUE(OPERAND3) .
+CLEAR P_BDCDATA .
+IF OPERAND1 = 'X' .
+P_BDCDATA-DYNBEGIN = OPERAND1 .     " 'X'
+P_BDCDATA-PROGRAM  = OPERAND2 .     " PROGRAM NAME
+P_BDCDATA-DYNPRO   = OPERAND3 .     " Dynpro NO
+APPEND P_BDCDATA .
+ELSE .
+P_BDCDATA-FNAM = OPERAND2 .
+P_BDCDATA-FVAL = OPERAND3 .
+APPEND P_BDCDATA .
+ENDIF .
+
+ENDFORM.                    " frm_set_bdctab
+************************************************************************
+***  結果出力
+************************************************************************
+FORM INFOMATION.
+MESSAGE I402 WITH '読込件数='   TOTAL  '件' .
+MESSAGE I402 WITH '登録件数='   OKCNT  '件' .
+MESSAGE I402 WITH 'エラー件数=' ERRCNT '件' .
+ENDFORM.                    "infomation
+*** END OF PROGRAM ***
+************************************************************************
+***  データチェック
+************************************************************************
+FORM DATA_CHECK .
+LOOP AT INFO .
+* 受注先(KUNNR) CHECK  2001.09.03 ADD >>>
+CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+EXPORTING
+INPUT  = INFO-KUNNR
+IMPORTING
+OUTPUT = INFO-KUNNR
+EXCEPTIONS
+OTHERS = 1.
+* 受注先(KUNNR) CHECK  2001.09.03 ADD <<<
+*-- 得意先コードチェック
+SELECT SINGLE * FROM KNA1 WHERE KUNNR = INFO-KUNNR
+AND KTOKD = '0001' .
+IF SY-SUBRC <> 0 .
+WRITE:/001 INFO-KUNNR ,    012 INFO-VKORG ,
+017 INFO-VTWEG ,    020 INFO-MATNR ,
+039 INFO-KDMAT ,    063 '得意先コードが存在しません' .
+ERRCHECK = 'X' .
+ELSE .
+****
+*2002/06/21 ADD START
+IF  INFO-MATNR(1) = ' '.
+WRITE:/001 INFO-KUNNR ,    012 INFO-VKORG ,
+017 INFO-VTWEG ,    020 INFO-MATNR ,
+039 INFO-KDMAT ,    063 '品目コードの先端が空白です' .
+ERRCHECK = 'X' .
+ELSE.
+*2002/06/21 ADD END
+CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+EXPORTING
+INPUT        = INFO-MATNR
+IMPORTING
+OUTPUT       = INFO-MATNR
+EXCEPTIONS
+LENGTH_ERROR = 1
+OTHERS       = 2.
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+*-- 品目コードチェック
+SELECT SINGLE * FROM MARA WHERE MATNR = INFO-MATNR .
+IF SY-SUBRC <> 0 .
+WRITE:/001 INFO-KUNNR ,    012 INFO-VKORG ,
+017 INFO-VTWEG ,    020 INFO-MATNR ,
+039 INFO-KDMAT ,    063 '品目コードが存在しません' .
+ERRCHECK = 'X' .
+ENDIF .
+ENDIF .
+*2002/06/21 ADD START
+ENDIF.
+*2002/06/21 ADD END
+IF ERRCHECK = 'X' .
+ERRCNT = ERRCNT + 1 .
+DELETE INFO INDEX SY-TABIX .
+ENDIF .
+CLEAR : INFO , ERRCHECK .
+ENDLOOP .
+ENDFORM.                    " data_check
+************************************************************************
+***  ローカルより読み込み
+************************************************************************
+FORM READ_LOCAL .
+* 2002/06/22 受け取り大修正
+*- 読み込みデータ
+*  data : begin of in_file occurs 0 ,
+*    data(200) type c ,
+*         end   of in_file .
+* Add ES-UP 2012/09/10 -->
+DATA: L_FILE_TABLE TYPE FILETABLE,
+L_FILE       TYPE REF TO FILE_TABLE,
+L_TITLE      TYPE STRING,
+L_RC         TYPE I.
+DATA: L_FILENAME TYPE STRING,
+L_INITIAL_DIRECTORY TYPE STRING,
+L_CODEPAGE TYPE ABAP_ENCODING.
+* Add ES-UP 2012/09/10 <--
+CLEAR KITM.
+REFRESH KITM.
+
+**** START ADD 2015/02/04 ISID18 ****
+DATA L_SAPCODEPAGE TYPE STRING.
+L_SAPCODEPAGE = G_OUTPUT_CP.
+**** END ADD 2015/02/04 ISID18 ****
+
+*- アップロード
+* Mod ES-UP 2012/09/10 -->
+*  call function 'UPLOAD'
+*       exporting
+*            filename                = p_ifile
+*            filetype                = 'DAT'
+*       tables
+**            data_tab                = in_file
+*           data_tab                =  kitm
+*       exceptions
+*            conversion_error        = 1
+*            invalid_table_width     = 2
+*            invalid_type            = 3
+*            no_batch                = 4
+*            unknown_error           = 5
+*            others                  = 6 .
+L_TITLE = ``.
+PERFORM SPLIT_FILE USING P_IFILE
+L_INITIAL_DIRECTORY
+L_FILENAME.
+L_FILENAME = P_IFILE.
+CL_GUI_FRONTEND_SERVICES=>FILE_OPEN_DIALOG(
+EXPORTING
+WINDOW_TITLE            = L_TITLE
+*      DEFAULT_EXTENSION       = DEFAULT_EXTENSION
+DEFAULT_FILENAME        = L_FILENAME
+*      FILE_FILTER             = FILE_FILTER
+*      WITH_ENCODING           = WITH_ENCODING
+INITIAL_DIRECTORY       = L_INITIAL_DIRECTORY
+*      MULTISELECTION          = MULTISELECTION
+CHANGING
+FILE_TABLE              = L_FILE_TABLE
+RC                      = L_RC
+*      USER_ACTION             = USER_ACTION
+*      FILE_ENCODING           = FILE_ENCODING
+EXCEPTIONS "POVの時は、すべて0にすること
+FILE_OPEN_DIALOG_FAILED = 1
+CNTL_ERROR              = 2
+ERROR_NO_GUI            = 3
+NOT_SUPPORTED_BY_GUI    = 4
+OTHERS                  = 5 ).
+IF L_RC > 0.
+READ TABLE L_FILE_TABLE REFERENCE INTO L_FILE INDEX 1.
+IF SY-SUBRC = 0.
+L_FILENAME = L_FILE->FILENAME.
+****START UPD 2014/08/29 ISID18****
+*  L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+**** START UPD 2015/02/04 ISID18 ****
+*      L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_UTF ).
+IF L_SAPCODEPAGE IS NOT INITIAL.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( L_SAPCODEPAGE ).
+ENDIF.
+**** END UPD 2015/02/04 ISID18 ****
+****END UPD 2014/08/29 ISID18****
+CL_GUI_FRONTEND_SERVICES=>GUI_UPLOAD(
+EXPORTING
+FILENAME                = L_FILENAME
+FILETYPE                = 'DAT'
+HAS_FIELD_SEPARATOR     = ABAP_TRUE
+*      HEADER_LENGTH           = 0
+*      READ_BY_LINE            = 'X'
+*      DAT_MODE                = SPACE
+CODEPAGE                = L_CODEPAGE
+*      IGNORE_CERR             = ABAP_TRUE
+*      REPLACEMENT             = '#'
+*      VIRUS_SCAN_PROFILE      = VIRUS_SCAN_PROFILE
+*    IMPORTING
+*      FILELENGTH              = FILELENGTH
+*      HEADER                  = HEADER
+CHANGING
+DATA_TAB                = KITM[]
+EXCEPTIONS
+FILE_OPEN_ERROR         = 1
+FILE_READ_ERROR         = 2
+NO_BATCH                = 3
+GUI_REFUSE_FILETRANSFER = 4
+INVALID_TYPE            = 5
+NO_AUTHORITY            = 6
+UNKNOWN_ERROR           = 7
+BAD_DATA_FORMAT         = 8
+HEADER_NOT_ALLOWED      = 9
+SEPARATOR_NOT_ALLOWED   = 10
+HEADER_TOO_LONG         = 11
+UNKNOWN_DP_ERROR        = 12
+ACCESS_DENIED           = 13
+DP_OUT_OF_MEMORY        = 14
+DISK_FULL               = 15
+DP_TIMEOUT              = 16
+NOT_SUPPORTED_BY_GUI    = 17
+ERROR_NO_GUI            = 18
+OTHERS                  = 19 ).
+ENDIF.
+ENDIF.
+* Mod ES-UP 2012/09/10 <--
+*- エラー確認
+IF SY-SUBRC <> 0 .
+MESSAGE S638 .  STOP .
+ENDIF .
+* データ件数チェック
+*  describe table in_file lines line .
+DESCRIBE TABLE KITM LINES LINE .
+IF LINE = 0 .
+MESSAGE S639 .  STOP .
+*  else .
+*    refresh info .
+*    loop at in_file .
+*      kitm-kunnr = in_file+00(10) .     " 得意先コード
+*      kitm-matnr = in_file+10(18) .     " 品目コード
+*      kitm-kdmat = in_file+27(22) .     " 得意先品目コード
+*      kitm-ltx01 = in_file+59(40) .     " テキスト
+*      kitm-vwpos = in_file+99(04) .     " 明細用途
+*      append   kitm .
+*      clear  : kitm , in_file .
+*    endloop .
+ENDIF .
+
+ENDFORM.                    " read_local
+* Add ES-UP 2012/11/01 -->
+FORM SPLIT_FILE USING P_FULL TYPE CLIKE
+P_PATH TYPE STRING
+P_NAME TYPE STRING.
+DATA: L_DELIMITER TYPE C LENGTH 1,
+L_SPLIT     TYPE REF TO STRING,
+I_SPLIT     TYPE STANDARD TABLE OF STRING,
+L_TABIX     TYPE I.
+*
+CLEAR: P_PATH, P_NAME.
+CL_GUI_FRONTEND_SERVICES=>GET_FILE_SEPARATOR(
+CHANGING FILE_SEPARATOR    = L_DELIMITER ).
+SPLIT P_FULL AT L_DELIMITER INTO TABLE I_SPLIT.
+L_TABIX = LINES( I_SPLIT ).
+IF L_TABIX = 0.
+RETURN.
+ENDIF.
+READ TABLE I_SPLIT INTO P_NAME INDEX L_TABIX.
+DELETE I_SPLIT INDEX L_TABIX.
+CONCATENATE LINES OF I_SPLIT INTO P_PATH SEPARATED BY L_DELIMITER.
+ENDFORM.                    "split_file
+* Add ES-UP 2012/11/01 <--
+*&---------------------------------------------------------------------*
+*&      Form  SPLIT_DATA
+*&---------------------------------------------------------------------*
+*       区切り文字で分割
+*----------------------------------------------------------------------*
+FORM SPLIT_DATA.
+* Del ES-UP 2012/09/03 -->
+*DATA W_TAB TYPE X VALUE '09'.
+* Del ES-UP 2012/09/03 <--
+CLEAR KITM.
+* Mod ES-UP 2012/09/03 -->
+*  SPLIT I_TXT-DUMMY AT W_TAB INTO
+SPLIT I_TXT-DUMMY AT CL_ABAP_CHAR_UTILITIES=>HORIZONTAL_TAB INTO
+* Mod ES-UP 2012/09/03 <--
+KITM-KUNNR
+KITM-MATNR
+KITM-KDMAT
+KITM-LTX01
+KITM-VWPOS.
+
+ENDFORM.                    " SPLIT_DATA
+****START ADD 2015/02/04 ISID18 ****
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_CPAGE
+*&---------------------------------------------------------------------*
+*       コードページ取得
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM FRM_GET_CPAGE .
+
+CLEAR:
+G_OUTPUT_CP,
+G_FLGUTF8.
+
+CALL FUNCTION 'ZEG_ZZ_GLOBAL_PGM_CONFIG_GET'
+EXPORTING
+IMPPGM      = SY-REPID
+IMPBUKRS    = TEXT-001
+IMPORTING
+EXPCODEPAGE = G_OUTPUT_CP
+EXPFLGUTF8  = G_FLGUTF8.
+
+ENDFORM.                    " FRM_GET_CPAGE
+****END ADD 2015/02/04 ISID18 ****

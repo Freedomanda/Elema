@@ -1,0 +1,162 @@
+REPORT zzkura99 LINE-COUNT 58
+LINE-SIZE 170.
+
+* 使用テーブル
+TABLES bsid.  "会計管理: 得意先の二次索引
+TABLES bsad.  "会計管理: 得意先の二次索引 (決済明細)
+TABLES yk510. "一括請求書ヘッダデータ
+TABLES stxh.  "STXD SAPscript テキストファイルヘッダ 2002.04.10A
+TABLES kna1.  "
+TABLES knvp.  "得意先マスタ 取引先機能
+
+* グローバル変数
+DATA i_yk510 LIKE STANDARD TABLE OF yk510 WITH HEADER LINE.
+DATA w_tdname LIKE stxh-tdname.
+TYPES: BEGIN OF st_bsid,
+waers LIKE bsid-waers,
+shkzg LIKE bsid-shkzg,
+wrbtr LIKE bsid-wrbtr,
+END OF st_bsid.
+DATA i_bsid TYPE STANDARD TABLE OF st_bsid WITH HEADER LINE.
+DATA w_lblamt LIKE yk510-lblamt.
+DATA w_cicamt LIKE yk510-cicamt.
+DATA w_cblamt LIKE yk510-cblamt.
+DATA w_zfbdt LIKE yk510-zfbdt.
+RANGES r_kunnr FOR bsid-kunnr.
+DATA i_knvp LIKE STANDARD TABLE OF knvp WITH HEADER LINE.
+
+* 選択画面
+PARAMETERS p_bukrs LIKE yk510-bukrs DEFAULT 'C001'.
+SELECT-OPTIONS s_kunnr FOR yk510-kunnr.
+PARAMETERS p_zfbdt LIKE yk510-zfbdt DEFAULT '20020930'.
+PARAMETERS p_all AS CHECKBOX.
+
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* 前締日作成
+CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+EXPORTING
+day_in            = p_zfbdt
+IMPORTING
+last_day_of_month = w_zfbdt
+EXCEPTIONS
+day_in_no_date    = 1
+OTHERS            = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+IF p_zfbdt = w_zfbdt. "締日が月末の場合
+w_zfbdt+6(2) = 01. "同月月初
+w_zfbdt = w_zfbdt - 1. "前月月末
+ELSE. "締日が月末でない場合
+w_zfbdt+6(2) = 01. "同月月初
+w_zfbdt = w_zfbdt - 1. "前月月末
+w_zfbdt+6(2) = p_zfbdt+6(2). "締日を合わせる
+ENDIF.
+
+* 請求書ヘッダ検索
+SELECT        *
+FROM   yk510
+INTO   TABLE i_yk510
+WHERE  bukrs  = p_bukrs
+AND    kunnr IN s_kunnr
+AND    zfbdt  = p_zfbdt.
+
+LOOP AT i_yk510.
+*   高千穂請求書出力対象チェック
+w_tdname+0(10) = i_yk510-kunnr.
+w_tdname+10(4) = i_yk510-bukrs.
+SELECT SINGLE * FROM  stxh
+WHERE  tdobject  = 'KNB1'
+AND    tdname    = w_tdname
+AND    tdid      = 'ZK01'
+AND    tdspras   = sy-langu.
+IF sy-subrc <> 0.
+CONTINUE.
+ENDIF.
+*   子コード取得
+REFRESH r_kunnr.
+SELECT        *
+INTO   TABLE i_knvp
+FROM   knvp
+WHERE  parvw  = 'Y3' "入金先
+AND    kunn2  = i_yk510-kunnr.
+r_kunnr-sign = 'I'.
+r_kunnr-option = 'EQ'.
+LOOP AT i_knvp.
+r_kunnr-low = i_knvp-kunnr.
+APPEND r_kunnr.
+ENDLOOP.
+*   当月残高取得
+CLEAR w_cblamt.
+REFRESH i_bsid.
+SELECT waers shkzg SUM( wrbtr )
+INTO   TABLE i_bsid
+FROM   bsid
+WHERE  bukrs  = i_yk510-bukrs
+AND    kunnr IN r_kunnr
+AND    budat <= p_zfbdt "締日以前に転記
+GROUP  by waers shkzg.
+SELECT waers shkzg SUM( wrbtr )
+APPENDING TABLE i_bsid
+FROM   bsad
+WHERE  bukrs  = i_yk510-bukrs
+AND    kunnr IN r_kunnr
+AND    budat <= p_zfbdt  "締日以前に転記して
+AND    augdt  > p_zfbdt  "締日より後に決済された
+GROUP  by waers shkzg.
+LOOP AT i_bsid.
+IF i_bsid-shkzg = 'S'. "借方が正
+w_cblamt = w_cblamt + i_bsid-wrbtr.
+ELSE.
+w_cblamt = w_cblamt - i_bsid-wrbtr.
+ENDIF.
+ENDLOOP.
+*   前月残高取得
+CLEAR w_lblamt.
+REFRESH i_bsid.
+SELECT waers shkzg SUM( wrbtr )
+INTO   TABLE i_bsid
+FROM   bsid
+WHERE  bukrs  = i_yk510-bukrs
+AND    kunnr IN r_kunnr
+AND    budat <= w_zfbdt "前締日以前に転記
+GROUP  by waers shkzg.
+SELECT waers shkzg SUM( wrbtr )
+APPENDING TABLE i_bsid
+FROM   bsad
+WHERE  bukrs  = i_yk510-bukrs
+AND    kunnr IN r_kunnr
+AND    budat <= w_zfbdt  "前締日以前に転記
+AND    augdt  > w_zfbdt  "前締日より後に決済
+GROUP  by waers shkzg.
+LOOP AT i_bsid.
+IF i_bsid-shkzg = 'S'. "借方が正
+w_lblamt = w_lblamt + i_bsid-wrbtr.
+ELSE.
+w_lblamt = w_lblamt - i_bsid-wrbtr.
+ENDIF.
+ENDLOOP.
+*   当月入金額
+w_cicamt = w_lblamt + i_yk510-cstamt - w_cblamt.
+*   チェック
+IF p_all <> 'X' AND              "エラーのみ
+w_lblamt = i_yk510-lblamt AND "前月請求額が一致
+w_cicamt = i_yk510-cicamt AND "当月入金額が一致
+w_cblamt = i_yk510-cblamt.    "当月請求額が一致
+CONTINUE.
+ENDIF.
+*   出力
+SELECT SINGLE * FROM  kna1
+WHERE  kunnr  = i_yk510-kunnr.
+WRITE: / i_yk510-kunnr, kna1-name1,
+i_yk510-lblamt CURRENCY i_yk510-waers,
+i_yk510-cicamt CURRENCY i_yk510-waers,
+i_yk510-cblamt CURRENCY i_yk510-waers.
+WRITE: /48
+w_lblamt CURRENCY i_yk510-waers,
+w_cicamt CURRENCY i_yk510-waers,
+w_cblamt CURRENCY i_yk510-waers.
+ENDLOOP.

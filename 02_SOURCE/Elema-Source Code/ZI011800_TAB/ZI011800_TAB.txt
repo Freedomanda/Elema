@@ -1,0 +1,325 @@
+************************************************************************
+* DOCUMENTATION
+* PROGRAM ID   : ZI011800
+* PROGRAM NAME : 手形バッチ登録用ファイル作成
+* DESCRIPTION  :
+* TYPE         : REPORT
+* CREATED BY   : K.KAJISA(NDSC)
+* DATE         : 2001/01/25
+*----------------------------------------------------------------------*
+* Change Log
+* Date        Author    Contents
+* YYYY/MM/DD  X.XXXXXX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+************************************************************************
+REPORT ZI011800  NO STANDARD PAGE HEADING MESSAGE-ID Y1
+LINE-SIZE  170
+LINE-COUNT  58.
+************************************************************************
+*-テーブル定義
+TABLES:BGR00, "セッションデータ用バッチ入力構造
+BBKPF, "会計伝票の伝票ヘッダ（バッチ入力構造）
+BBSEG, "会計伝票セグメント (バッチ入力構造)
+T001.  "会社コード
+************************************************************************
+*-選択画面
+PARAMETERS:P_FILE LIKE RLGRAP-FILENAME
+LOWER CASE OBLIGATORY.       "入力ﾌｧｲﾙ名
+PARAMETERS:P_OFILE(60) LOWER CASE OBLIGATORY.      "出力ﾌｧｲﾙ名
+PARAMETERS: P_GROUP LIKE BGR00-GROUP OBLIGATORY    "セッション名
+DEFAULT SY-REPID,
+P_UNAME LIKE BGR00-USNAM OBLIGATORY    "ユーザ名
+DEFAULT SY-UNAME.
+
+SELECTION-SCREEN BEGIN OF BLOCK BLK1 WITH FRAME
+TITLE TEXT-001. "ファイル
+PARAMETERS : P_LOCAL TYPE C DEFAULT 'X' NO-DISPLAY,
+"ﾛｰｶﾙﾌｧｲﾙを使用
+P_SERVER TYPE C NO-DISPLAY .      "ｻｰﾊﾞｰﾌｧｲﾙを使用
+SELECTION-SCREEN END OF BLOCK BLK1.
+SELECTION-SCREEN BEGIN OF BLOCK BLK2 WITH FRAME    "ヘッダ情報
+TITLE TEXT-002.
+PARAMETERS : P_BLART LIKE BBKPF-BLART              "伝票タイプ
+OBLIGATORY DEFAULT 'SA',
+P_BUKRS LIKE BBKPF-BUKRS              "会社コード
+OBLIGATORY MEMORY ID BUK,
+P_BUDAT LIKE BBKPF-BUDAT              "転記日付
+OBLIGATORY,
+P_BLDAT LIKE BBKPF-BLDAT              "伝票日付
+OBLIGATORY,
+P_WAERS LIKE BBKPF-WAERS              "通貨コード
+OBLIGATORY,
+P_KURSF LIKE BBKPF-KURSF,             "換算レート
+P_WWERT LIKE BBKPF-WWERT,             "換算日付
+P_XBLNR LIKE BBKPF-XBLNR,             "参照伝票番号
+P_BKTXT LIKE BBKPF-BKTXT.             "伝票ヘッダテキスト
+SELECTION-SCREEN END OF BLOCK BLK2.
+************************************************************************
+*- 内部テーブル
+DATA: BEGIN OF TB_REC OCCURS 100,                  "入力ファイル形式
+NEWBS  LIKE BBSEG-NEWBS,                     "転記キー
+NEWKO  LIKE BBSEG-NEWKO,                     "勘定コード
+NEWUM  LIKE BBSEG-NEWUM,                     "特殊仕訳コード
+WRBTR  LIKE BBSEG-WRBTR,                     "伝票通貨額
+DMBTR  LIKE BBSEG-DMBTR,                     "国内通貨額
+*      MWSKZ  LIKE BBSEG-MWSKZ,                     "税コード
+ZUONR  LIKE BBSEG-ZUONR,                     "ソートキー
+SGTXT  LIKE BBSEG-SGTXT,                     "明細テキスト
+ZFBDT  LIKE BBSEG-ZFBDT,                     "期日(以下手形用)
+WSTAT  LIKE BBSEG-WSTAT,                     "手形ステータス
+WEVWV  LIKE BBSEG-WEVWV,                     "手形取組計画
+WDATE  LIKE BBSEG-WDATE,                     "振出日
+ZLSCH  LIKE BBSEG-ZLSCH,                     "支払方法
+WNAME  LIKE BBSEG-WNAME,                     "手形受取人
+WORT1  LIKE BBSEG-WORT1,                     "手形振込人市区町村名
+*      REGIO  LIKE BBSEG-REGIO,                     "地域
+WBZOG  LIKE BBSEG-WBZOG,                     "手形支払人
+WORT2  LIKE BBSEG-WORT2,                     "手形名宛人市区町村名
+BANKL  LIKE BBSEG-BANKL,                     "銀行コード
+BANKS  LIKE BBSEG-BANKS,                     "銀行国コード
+BANKN  LIKE BBSEG-BANKN,                     "銀行口座番号
+BKONT  LIKE BBSEG-BKONT,                     "銀行管理キー
+END OF TB_REC.
+************************************************************************
+*- ワーク変数
+
+*- カウンタ定義
+DATA: CNT_ETC        LIKE SY-DBCNT.                   "汎用カウンタ
+*-フラグ定義
+DATA: FLG_GAIKA(1)   TYPE C.                          "外貨判定
+************************************************************************
+START-OF-SELECTION.
+PERFORM INIT_PROC.            "初期処理
+PERFORM MAIN_PROC.            "メイン処理
+*&---------------------------------------------------------------------*
+*&      Form  INIT_PROC
+*&---------------------------------------------------------------------*
+*       初期処理
+*----------------------------------------------------------------------*
+FORM INIT_PROC.
+REFRESH TB_REC.
+* ファイルの入力
+IF P_SERVER = 'X'.
+PERFORM GET_FILE_S.                      "サーバからの読込み
+ELSEIF P_LOCAL = 'X'.
+PERFORM GET_FILE_L.                      "ローカルからの読込み
+ENDIF.
+DESCRIBE TABLE TB_REC LINES CNT_ETC.
+IF CNT_ETC < 1.
+MESSAGE E008.                            "入力データ無し
+ENDIF.
+*出力ファイル
+DELETE DATASET P_OFILE.
+OPEN DATASET P_OFILE FOR OUTPUT IN TEXT MODE.
+IF SY-SUBRC <> 0.
+MESSAGE I401 WITH '出力ファイルオープンエラー' P_OFILE.STOP.
+ENDIF.
+*外貨判定
+CLEAR: T001,FLG_GAIKA.
+SELECT SINGLE WAERS INTO T001-WAERS FROM T001
+WHERE BUKRS = P_BUKRS.
+IF T001-WAERS <> P_WAERS.
+FLG_GAIKA = 'X'.
+ENDIF.
+ENDFORM.                    " INIT_PROC
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_S
+*&---------------------------------------------------------------------*
+*       サーバからの読込み
+*----------------------------------------------------------------------*
+FORM GET_FILE_S.
+OPEN DATASET P_FILE IN TEXT MODE.        "ファイルのOPEN
+IF SY-SUBRC <> 0.                        "ファイルのOPEN ERROR
+EXIT.                                  "すべての処理終了
+ENDIF.
+DO.
+* レコード読込み
+READ DATASET P_FILE INTO TB_REC .      "レコード読込み
+IF SY-SUBRC <> 0 .                     "レコードが存在しない場合
+EXIT .                               "ループ脱出
+ENDIF .
+APPEND TB_REC.
+ENDDO.
+
+ENDFORM.                    " GET_FILE_S
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_L
+*&---------------------------------------------------------------------*
+*       ローカルからの読込み
+*----------------------------------------------------------------------*
+FORM GET_FILE_L.
+CALL FUNCTION 'UPLOAD'
+EXPORTING
+FILENAME            = P_FILE
+FILETYPE            = 'DAT'
+*            FILETYPE            = CN_FTYPE
+TABLES
+DATA_TAB            = TB_REC
+EXCEPTIONS
+CONVERSION_ERROR    = 1
+FILE_OPEN_ERROR     = 2
+FILE_READ_ERROR     = 3
+INVALID_TABLE_WIDTH = 4
+INVALID_TYPE        = 5
+NO_BATCH            = 6
+UNKNOWN_ERROR       = 7
+OTHERS              = 8.
+IF SY-SUBRC <> 0.                                "UPLOAD ERROR
+MESSAGE A001 WITH  'UPLOAD' SY-SUBRC.          "すべての処理終了
+ENDIF.
+
+ENDFORM.                    " GET_FILE_L
+*&---------------------------------------------------------------------*
+*&      Form  MAIN_PROC
+*&---------------------------------------------------------------------*
+*       主処理
+*----------------------------------------------------------------------*
+FORM MAIN_PROC.
+
+PERFORM EDIT_OUT.                   "ＢＤＣ用ファイルデータ作成
+PERFORM INFOMATION.                "結果をジョブログ出力
+
+ENDFORM.                    " MAIN_PROC
+*&---------------------------------------------------------------------*
+*&      Form  EDIT_OUT
+*&---------------------------------------------------------------------*
+*       ＢＤＣ用ファイルデータ作成
+*----------------------------------------------------------------------*
+FORM EDIT_OUT.
+LOOP AT TB_REC.
+IF SY-TABIX = 1.
+PERFORM MAKE_BGR00.  "セッションデータセット
+PERFORM MAKE_BBKPF.     "ヘッダデータセット
+ENDIF.
+PERFORM MAKE_BBSEG.     "明細データセット
+ENDLOOP.
+
+ENDFORM.                    " EDIT_OUT
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BGR00
+*&---------------------------------------------------------------------*
+*       セッションデータ用バッチ入力構造への値セット
+*----------------------------------------------------------------------*
+FORM MAKE_BGR00.
+CLEAR  BGR00.
+PERFORM INIT_SET USING 'BGR00'.
+BGR00-STYPE  = '0'.           "バッチインプットインタフェースレコー
+BGR00-GROUP  = P_GROUP.       "キューグループ名
+BGR00-MANDT  = SY-MANDT.      "クライアント
+BGR00-USNAM  = P_UNAME.      "キューユーザ ID / 履歴用
+CLEAR  BGR00-START.           "開始日
+BGR00-XKEEP  = 'X'.           "フラグ: 処理後バッチインプットセッシ
+*    BGR00-NODATA = '/'.           "バッチインプットなし項目
+TRANSFER BGR00 TO P_OFILE.
+
+ENDFORM.                    " MAKE_BGR00
+*&---------------------------------------------------------------------*
+*&      Form  INIT_SET
+*&---------------------------------------------------------------------*
+*       バッチテーブルへの初期値のセット
+*----------------------------------------------------------------------*
+*      -->P_DB   セット先データベース名
+*----------------------------------------------------------------------*
+FORM INIT_SET USING    VALUE(P_DB).
+
+FIELD-SYMBOLS <PT> TYPE ANY.
+TABLES:DD03L.
+DATA: WK_DB(60) TYPE C.
+SELECT * FROM DD03L WHERE TABNAME = P_DB.
+IF DD03L-DATATYPE = 'CHAR'.
+CONCATENATE P_DB '-' DD03L-FIELDNAME INTO WK_DB.
+ASSIGN (WK_DB) TO <PT>.
+<PT> = '/'.
+ENDIF.
+ENDSELECT.
+
+ENDFORM.                    " INIT_SET
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BBKPF
+*&---------------------------------------------------------------------*
+*       会計伝票の伝票ヘッダ（バッチ入力構造）への値のセット
+*----------------------------------------------------------------------*
+FORM MAKE_BBKPF.
+CLEAR  BBKPF.
+PERFORM INIT_SET USING 'BBKPF'.
+BBKPF-STYPE = '1'.            "バッチインプットインタフェースレコー
+BBKPF-TCODE = 'FB01'.
+BBKPF-BLART  = P_BLART.       "伝票タイプ
+BBKPF-BUKRS  = P_BUKRS.       "会社コード
+BBKPF-BUDAT  = P_BUDAT.       "転記日付
+BBKPF-BLDAT  = P_BLDAT.       "伝票日付
+BBKPF-WAERS  = P_WAERS.       "通貨コード
+BBKPF-KURSF  = P_KURSF.       "換算レート
+BBKPF-WWERT  = P_WWERT.       "換算日付
+BBKPF-XBLNR  = P_XBLNR.       "参照伝票番号
+BBKPF-BKTXT  = P_BKTXT.       "伝票ヘッダテキスト
+TRANSFER BBKPF TO P_OFILE.
+
+ENDFORM.                    " MAKE_BBKPF
+*&---------------------------------------------------------------------*
+*&      Form  MAKE_BBSEG
+*&---------------------------------------------------------------------*
+*       会計伝票セグメント (バッチ入力構造)への値セット
+*----------------------------------------------------------------------*
+FORM MAKE_BBSEG.
+
+CLEAR  BBSEG.
+PERFORM INIT_SET USING 'BBSEG'.
+
+BBSEG-STYPE = '2'.                 "バッチインプットインタフェース
+BBSEG-TBNAM = 'BBSEG'.             "テーブル名
+BBSEG-WBANK  = '/'.                "手形が支払われる銀行住所
+BBSEG-NEWBS  = TB_REC-NEWBS.       "転記キー
+BBSEG-NEWKO  = TB_REC-NEWKO.       "勘定コード
+BBSEG-NEWUM  = TB_REC-NEWUM.       "特殊仕訳コード
+BBSEG-WRBTR  = TB_REC-WRBTR.       "伝票通貨額
+IF FLG_GAIKA = 'X'.
+BBSEG-DMBTR  = TB_REC-DMBTR.     "国内通貨額
+ENDIF.
+*  IF NOT TB_REC-MWSKZ IS INITIAL.
+*    BBSEG-MWSKZ  = TB_REC-MWSKZ.     "税コード
+*  ENDIF.
+BBSEG-ZUONR  = TB_REC-ZUONR.       "ソートキー
+BBSEG-SGTXT  = TB_REC-SGTXT.       "明細テキスト
+IF NOT TB_REC-NEWUM IS INITIAL.     "特殊仕訳が初期値で無い時
+BBSEG-ZFBDT  = TB_REC-ZFBDT.       "期日
+BBSEG-WSTAT  = TB_REC-WSTAT.       "手形ステータス
+IF NOT TB_REC-WEVWV IS INITIAL.
+BBSEG-WEVWV  = TB_REC-WEVWV.       "手形取組計画
+ENDIF.
+BBSEG-WDATE  = TB_REC-WDATE.       "振出日
+BBSEG-ZLSCH  = TB_REC-ZLSCH.       "支払方法
+BBSEG-WNAME  = TB_REC-WNAME.       "手形受取人
+BBSEG-WORT1  = TB_REC-WORT1.       "手形振出人市区町村名
+*  BBSEG-REGIO  = TB_REC-REGIO.       "地域(都道府県)
+BBSEG-WBZOG  = TB_REC-WBZOG.       "手形支払人
+BBSEG-WORT2  = TB_REC-WORT2.       "手形名宛人市区町村名
+BBSEG-BANKL  = TB_REC-BANKL.       "銀行コード
+BBSEG-BANKS  = TB_REC-BANKS.       "銀行国コード
+BBSEG-BANKN  = TB_REC-BANKN.       "銀行口座番号
+BBSEG-BKONT  = TB_REC-BKONT.       "銀行管理キー
+ENDIF.
+*特殊項目
+BBSEG-MEINS = '/'.                 "基本数量単位
+BBSEG-PYCUR = '/'.                 "自動支払通貨
+BBSEG-SPRAS = '/'.                 "言語キー
+
+
+TRANSFER BBSEG TO P_OFILE.
+
+ENDFORM.                    " MAKE_BBSEG
+*&---------------------------------------------------------------------*
+*&      Form  INFOMATION
+*&---------------------------------------------------------------------*
+*       結果をジョブログへ出力
+*----------------------------------------------------------------------*
+FORM INFOMATION.
+CLOSE DATASET P_OFILE.
+IF CNT_ETC IS INITIAL.
+MESSAGE I400 WITH TEXT-E01.
+DELETE DATASET P_OFILE.
+OPEN DATASET P_OFILE  FOR OUTPUT IN TEXT MODE.
+CLOSE DATASET P_OFILE.
+ENDIF.
+MESSAGE I402 WITH '読込件数=' CNT_ETC   '件'.
+
+ENDFORM.                    " INFOMATION

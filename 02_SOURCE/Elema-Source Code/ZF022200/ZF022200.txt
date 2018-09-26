@@ -1,0 +1,4062 @@
+************************************************************************
+* [プログラム名]
+*   ZF022200    入金実績データ格納
+*
+* [処理概要]
+*   指定した得意先の入金実績を金種別に表示し、売上高も表示する。
+*   データをAddon Table(ZF0001)に格納する。
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/01/24   PSD T.KAWAHARA    新規開発　
+*  2002/02/14   PSD T.SAITOH    TPR001 バグ対応開始
+*    ～
+*  2002/02/23   PSD T.SAITOH    TPR001 バグ対応（確認バグ数：77）
+*  2002/02/22   PSD T.SAITOH    SCR001 受手決済の抽出条件変更
+*  2002/02/22   PSD T.SAITOH    SCR002 手形入金の抽出ＴＢＬを追加
+*  2002/02/23   PSD T.SAITOH    SCR003 売上の抽出ＴＢＬを変更
+*  2002/03/11   PSD T.SAITOH           親勘定に振替処理を追加
+*  2002/03/26   PSD T.SAITOH           受注残高変更・追加
+*  2002/03/28   PSD T.SAITOH           親勘定に振替処理を廃止
+*  2002/03/28   PSD T.SAITOH           SELECT NUMBER 19,20,21を廃止
+*  2002/03/29   PSD T.SAITOH           Select number 10,16を変更
+*  2002/03/29   PSD T.SAITOH           親勘定に振替処理を復活
+*  2002/03/29   PSD T.SAITOH           Select number 16関連変更
+*  2002/03/29   PSD T.SAITOH           親子識別条件追加
+*  2002/03/29   PSD T.SAITOH           SELECT 20,21 条件　親→子へ変更
+*  2002/04/11   PSD T.SAITOH           レイアウト変更
+*  2002/04/19   PSD T.SAITOH           終了メッセージ不具合対応
+*  2002/04/19   PSD T.SAITOH           売掛金残高／売掛金入金予定を
+*                                      前月締め分を加算し累計表示対応
+*  2002/06/20   PSD T.SAITOH           再移送
+*  2002/08/23   PSD T.SAITOH           明細が複数ある時金額が数倍となる
+*                                      バグを修正
+*  2002/08/29   psd Imai               ・8/23修正のデグレ
+*　　　　　　　　　　　　　　　　　　　（明細削除するためのキー未取得）
+*　　　　　　　　　　　　　　　　　　　・入金日を締め日を取得していた
+*　　　　　　　　　　　　　　　　　　　・得意先マスタの親コード取得ミス
+*　　　　　　　　　　　　　　　　　　　（RE→Y3に変更）
+*　2002/08/31 psd Imai                 バグ修正
+*　　　　　　　　　　　　　　　　　　　・与信残高
+*　　　　　　　　　　　　　　　　　　　・外貨取引（売上高）
+*  2002/09/03 PSD IMAI                 ・親子振替の抽出日付を支払基準日
+*                                      から転記日付に変更
+*  2002/09/04 PSD IMAI                 他入金を算出するように変更
+*  2002/09/12 PSD IMAI                 売掛金残高、他入金の抽出変更
+*                                      変更箇所[*09/05,*09/06]
+*  2002/11/29 PSD TATE                 バグ対応 等
+*             コメント削除  (削除前PG:ZF011000_20021129_BACK)
+*  2003/06/05 PSD IMAI                 受取手形残高の抽出を変更
+*  2006/04/21 DMC MIKAMI               WORKｴﾘｱの会計年度を決済伝票の年度
+*                                      に変更
+*  2006/07 DMC J.CHENGBIN              国内通貨額を伝票通貨額に変更対応
+*  ZF011000_TYP_BSAD,ZF011000_TYP_BSAD,ZF011000_TYP_BSEG構造に
+*  WRBTR(伝票通貨額)項目を追加
+*  ZF011000_TYP_KNVV構造にWAERS(通貨コード)項目を追加
+*  2007/04/20 DMC KURATA               ユーロ対応
+*                                      (換算レートの取得方法変更)
+*  2008/07/24 DMC LIU                  出力帳票のヘッダ部分に項目を追加
+*  2009/06/01 NDSC MIKAMI              金額集計不具合修正
+*  2010/06/14 m.murata                 ZF011005をコピーして作成。
+*                                      複数得意先対応
+*                                      アドオンテーブルに格納
+************************************************************************
+REPORT  zf011000 NO STANDARD PAGE HEADING
+LINE-SIZE 145  LINE-COUNT 44(0)  MESSAGE-ID z1.
+
+************************************************************************
+*                          TABLES                                      *
+************************************************************************
+TABLES:  t001,  skb1,  kna1,  knb1, knc3,  knvv,  knkk,  t052, t052u,
+s067,  vbrk,  bseg,  bsid, bsad.
+TABLES:  s066.
+*2006/07 J.CB ADD_START
+TABLES:  bkpf,  tcurr.
+*2006/07 J.CB ADD_END
+************************************************************************
+*                          DATA                                        *
+*　　　　　　　 　　　グローバル変数定義　　　　　　　 　　
+************************************************************************
+DATA : g_e_flg(1)      TYPE c           ."EXITフラグ"★★★★★★★★
+*  insert 2006/04/21 MIKAMI {
+DATA : g_periv         TYPE t001-periv.
+* }insert 2006/04/21 MIKAMI
+*2006/07 J.CB ADD_START
+*　1:通貨対象以外フラグ；　　　2:レート換算ありフラグ
+DATA : g_change_wrbtr_flg(1)  TYPE c.
+*2006/07 J.CB ADD_END
+************************************************************************
+*                        CONSTANTS                                     *
+*　　　　　　　 　　　定数項目定義      　　　　　　　 　　　　　　　
+************************************************************************
+CONSTANTS:
+c_bukrs(10)    TYPE c VALUE '会社コード'                 ,
+c_kna1(28)     TYPE c VALUE '得意先マスタ（一般データ）' ,
+c_knvv(30)     TYPE c VALUE '得意先マスタ（販売データ）' ,
+c_skb1(10)     TYPE c VALUE '勘定コード'                 ,
+c_tbl_001(4)   TYPE c VALUE 'T001'                       ,
+c_tbl_002(4)   TYPE c VALUE 'KNA1'                       ,
+c_tbl_003(4)   TYPE c VALUE 'SKB1'                       ,
+c_tbl_004(4)   TYPE c VALUE 'KNVV'                       ,
+c_tbl_005(5)   TYPE c VALUE 'T052U'                      ,
+c_tbl_006(4)   TYPE c VALUE 'T052'                       ,
+c_tbl_007(4)   TYPE c VALUE 'S067'                       ,
+c_tbl_s067(4)  TYPE c VALUE 'S067'                       ,
+c_tbl_008(4)   TYPE c VALUE 'KNC3'                       ,
+c_tbl_009(4)   TYPE c VALUE 'KNKK'                       ,
+c_tbl_010(4)   TYPE c VALUE 'BSID'                       ,
+c_tbl_011(4)   TYPE c VALUE 'BSAD'                       ,
+c_tbl_012(4)   TYPE c VALUE 'BSEG'                       ,
+c_tbl_013(4)   TYPE c VALUE 'VBRK'                       ,
+c_tbl_014(4)   TYPE c VALUE 'VBRP'                       ,
+c_jpy(3)       TYPE c VALUE 'JPY'                        ,
+c_yotei(10)    TYPE c VALUE '0002102004'                 ,
+c_tbl_knvp(4)  TYPE c VALUE 'KNVP'                       ,
+cns_msg(64)    TYPE c VALUE '存在する月以外'             ,
+cns_a(1)       TYPE c VALUE 'A'                          ,
+cns_n(1)       TYPE c VALUE 'N'                          ,
+cns_l(1)       TYPE c VALUE 'L'                          ,
+cns_m(1)       TYPE c VALUE 'M'                          ,
+cns_o(1)       TYPE c VALUE 'O'                          ,
+cns_s(1)       TYPE c VALUE 'S'                          ,
+cns_p(1)       TYPE c VALUE 'P'                          ,
+cns_f2(2)      TYPE c VALUE 'F2'                         ,
+cns_l2(2)      TYPE c VALUE 'L2'                         ,
+cns_g2(2)      TYPE c VALUE 'G2'                         ,
+cns_s1(2)      TYPE c VALUE 'S1'                         ,
+cns_s2(2)      TYPE c VALUE 'S2'                         ,
+cns_re(2)      TYPE c VALUE 'RE'                         .
+*2006/07 J.CB ADD_START
+CONSTANTS:
+c_msg_1(50)  TYPE c VALUE
+'得意先通貨/国内通貨以外の外貨分は含まれません'                ,
+c_msg_2(50)  TYPE c VALUE    '※一部レート換算があります',
+*2007/04/20 DEL START
+*      C_TBL_TCURR(5)  TYPE C VALUE 'TCURR'                     ,
+*2007/04/20 DEL END
+c_tbl_bkpf(4)  TYPE c VALUE 'BKPF'                       ,
+cns_1(1)       TYPE c VALUE '1'                          .
+*2006/07 J.CB ADD_END
+************************************************************************
+*                      TYPES / DATA         　　  　                   *
+*　　　　　　　　　　  　構造定義　　　　　                            *
+*　　　　　　　　　　　内部テーブル定義                          　　　*
+************************************************************************
+* 各列用
+TYPES : BEGIN OF types_list ,
+sime_1 TYPE bseg-dmbtr ,  " 先々月締め
+sime_2 TYPE bseg-dmbtr ,  " 先月締め
+sime_3 TYPE bseg-dmbtr ,  " 指定年月締め
+sime_4 TYPE bseg-dmbtr ,  " 翌月締め
+END   OF types_list .
+* 他の支払条件
+TYPES : BEGIN OF types_zterm ,
+sonota1 TYPE knvv-zterm ,
+sonota2 TYPE knvv-zterm ,
+sonota3 TYPE knvv-zterm ,
+sonota4 TYPE knvv-zterm ,
+sonota5 TYPE knvv-zterm ,
+END   OF types_zterm .
+*--insert start 2010/06/14 m.murata
+TYPES : BEGIN OF typ_kna1,
+kunnr TYPE kna1-kunnr,
+name1 TYPE kna1-name1,
+END   OF typ_kna1.
+*--insert end   2010/06/14 m.murata
+*
+DATA : g_sousai    LIKE knkk-klimk ,  " 相殺計算用
+g_yotei     LIKE knkk-klimk ,  " 相殺計算用
+g_sousai_1  LIKE knkk-klimk ,  " 相殺計算用（仕入先別合計）
+g_yotei_1   LIKE knkk-klimk ,  " 相殺計算用（仕入先別合計）
+g_augdt     TYPE bseg-augdt .  " 決済日付退避用
+*2006/07 J.CB ADD_START
+DATA : g_genkin    LIKE knkk-klimk ,  " 伝票毎の現金入金集計
+g_tegata    LIKE knkk-klimk ,  " 伝票毎の手形入金集計
+*       G_SOUSAI    LIKE KNKK-KLIMK ,  " 伝票毎の相殺入金集計
+g_tanyu     LIKE knkk-klimk ,  " 伝票毎の他入金集計
+g_tanyu_flg(1) TYPE c.         "他入金フラグ
+*2006/07 J.CB ADD_END
+*2008/07/24 DMC ADD_START
+TYPES : BEGIN OF types_kunnr ,
+kunnr TYPE knvv-kunnr ,
+END   OF types_kunnr .
+*2008/07/24 DMC ADD_END
+* 締め月日
+TYPES : BEGIN OF types_simemd ,
+mm(2) TYPE c ,
+dd(2) TYPE c ,
+END   OF types_simemd .
+* 請求タイプ
+TYPES : BEGIN OF types_fkart ,
+ftype TYPE vbrk-fkart ,
+END   OF types_fkart .
+* 期間
+TYPES : BEGIN OF kikan ,
+sign(1)   TYPE c ,
+option(2) TYPE c ,
+low       TYPE d ,
+high      TYPE d ,
+END   OF kikan .
+
+DATA : g_zterm     TYPE types_zterm ,  " 支払条件
+g_fkart     TYPE types_fkart ,  " 請求タイプ
+g_genzan    LIKE s067-olikw  ,  " 現在受注残
+g_tegatazan LIKE knc3-saldv  ,  " 手形決済残
+g_yosinzan  LIKE knkk-klimk  ,  " 与信残高額
+g_uritotal  LIKE knkk-klimk  ,  " 売掛金合計
+g_yosinmax  LIKE knkk-klimk  .  " 与信限度額
+*2008/07/24 DMC ADD_START
+DATA : g_genzan_g    LIKE s067-olikw,  " グループ受注残
+g_tegatazan_g LIKE knc3-saldv,  " グループ手形決済残
+g_yosinzan_g  LIKE knkk-klimk,  " グループ与信残高額
+g_uritotal_g  LIKE knkk-klimk,  " グループ売掛金合計
+g_yosinmax_g  LIKE knkk-klimk.  " グループ与信限度額
+DATA : g_group_flg(1) TYPE c.          " グループ合算金額出力フラグ
+*2008/07/24 DMC ADD_END
+* 締め月日（ヘッダ）
+DATA : g_simemd1   TYPE types_simemd ,
+g_simemd2   TYPE types_simemd ,
+g_simemd3   TYPE types_simemd ,
+g_simemd4   TYPE types_simemd .
+*--insert start 2010/06/14 m.murata
+DATA :
+*      得意先抽出用
+it_kna1          TYPE SORTED TABLE OF typ_kna1
+WITH UNIQUE KEY kunnr,
+st_kna1          TYPE typ_kna1,
+*      アドオンテーブル格納用内部テーブル
+it_zf0001        TYPE TABLE OF zf0001,
+st_zf0001        TYPE zf0001,
+*      エラーデータ格納用内部テーブル
+it_err           TYPE TABLE OF zf0001,
+st_err           TYPE zf0001,
+
+wk_skip          TYPE c,             "処理スキップ
+wk_spmon         TYPE spmon,         "年月
+wk_time(14)      TYPE n,             "出力年月日時間
+wk_ins_cnt(5)    TYPE p DECIMALS 0,  "登録件数
+wk_upd_cnt(5)    TYPE p DECIMALS 0,  "更新件数
+wk_err_cnt(5)    TYPE p DECIMALS 0.  "失敗件数
+*--insert end   2010/06/14 m.murata
+* 請求タイプ
+DATA : g_tab_fkart LIKE STANDARD TABLE OF g_fkart .
+* 期間用
+DATA : g_zfbdt      TYPE kikan VALUE IS INITIAL    ,
+g_zfbdt1     TYPE kikan VALUE IS INITIAL    ,
+g_zfbdt2     TYPE kikan VALUE IS INITIAL    ,
+g_zfbdt3     TYPE kikan VALUE IS INITIAL    ,
+g_zfbdt4     TYPE kikan VALUE IS INITIAL    ,
+s_zfbdt      LIKE STANDARD TABLE OF g_zfbdt ,
+s_zfbdt2     LIKE STANDARD TABLE OF g_zfbdt .
+DATA : wa_knvv          TYPE zf011000_typ_knvv  VALUE IS INITIAL ,
+wa_tmp_knvv      TYPE zf011000_typ_knvv  VALUE IS INITIAL ,
+wa_t052u         TYPE zf011000_typ_t052u VALUE IS INITIAL ,
+wa_bseg          TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+*2006/07 J.CB ADD_START
+wa_bseg_genkin   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tegata   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_sousai   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tanyu    TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_genkin_sum  TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tegata_sum  TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_sousai_sum  TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tanyu_sum   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_genkin_yo   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tegata_yo   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_sousai_yo   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tanyu_yo    TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_genkin_yo_sum   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tegata_yo_sum   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_sousai_yo_sum   TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+wa_bseg_tanyu_yo_sum    TYPE zf011000_typ_bseg  VALUE IS INITIAL ,
+*2006/07 J.CB ADD_END
+wa_bsad          TYPE zf011000_typ_bsad  VALUE IS INITIAL ,
+wa_vbrk          TYPE zf011000_typ_vbrk  VALUE IS INITIAL ,
+wa_vbrp          TYPE zf011000_typ_vbrp  VALUE IS INITIAL ,
+wa_vbrp1         TYPE zf011000_typ_vbrp  VALUE IS INITIAL ,
+wa_vbrp2         TYPE zf011000_typ_vbrp  VALUE IS INITIAL ,
+wa_vbrp3         TYPE zf011000_typ_vbrp  VALUE IS INITIAL ,
+wa_vbrp4         TYPE zf011000_typ_vbrp  VALUE IS INITIAL ,
+g_tab_knkk       LIKE STANDARD TABLE OF knkk              ,
+g_tab_knvv       LIKE STANDARD TABLE OF zf011000_typ_knvv ,
+g_tab_kna1       LIKE STANDARD TABLE OF kna1              ,
+*2006/07 J.CB ADD_START
+*2008/07/24 DMC ADD_START
+wa_kunnr          TYPE types_kunnr  VALUE IS INITIAL ,
+g_tab_kunnr       TYPE TABLE OF types_kunnr          ,
+*2008/07/24 DMC ADD_END
+g_tab_bseg_genkin LIKE STANDARD TABLE OF zf011000_typ_bseg,
+g_tab_bseg_tegata LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_sousai LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_tanyu  LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_genkin_sum LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_tegata_sum LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_sousai_sum LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_tanyu_sum  LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_genkin_yo  LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_tegata_yo  LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_sousai_yo  LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_tanyu_yo   LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_genkin_yo_sum LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_tegata_yo_sum LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_sousai_yo_sum LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg_tanyu_yo_sum  LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+*2006/07 J.CB ADD_END
+g_tab_bseg       LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bseg2      LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+g_tab_bsid       LIKE STANDARD TABLE OF zf011000_typ_bsid ,
+g_tab_bsid_p     LIKE STANDARD TABLE OF zf011000_typ_bsid ,
+g_tab_bsad_p     LIKE STANDARD TABLE OF zf011000_typ_bsad ,
+g_tab_bsid2      LIKE STANDARD TABLE OF zf011000_typ_bsid ,
+g_tab_bsad       LIKE STANDARD TABLE OF zf011000_typ_bsad ,
+g_tab_vbrk       LIKE STANDARD TABLE OF zf011000_typ_vbrk ,
+g_tab_bsad_sosai LIKE STANDARD TABLE OF zf011000_typ_bsad ,
+g_tab_vbrp       TYPE STANDARD TABLE OF zf011000_typ_vbrp ,
+g_tab_vbrp2      LIKE STANDARD TABLE OF zf011000_typ_vbrp .
+
+* 請求タイプ
+g_fkart-ftype = 'RE'          .
+APPEND g_fkart TO g_tab_fkart .
+g_fkart-ftype = 'G2'          .
+APPEND g_fkart TO g_tab_fkart .
+g_fkart-ftype = 'L2'          .
+APPEND g_fkart TO g_tab_fkart .
+g_fkart-ftype = 'S1'          .
+APPEND g_fkart TO g_tab_fkart .
+g_fkart-ftype = 'S2'          .
+APPEND g_fkart TO g_tab_fkart .
+* 明細用
+DATA : g_list_01   TYPE types_list VALUE IS INITIAL , " 売上
+g_list_02   TYPE types_list VALUE IS INITIAL , " 返品
+g_list_03   TYPE types_list VALUE IS INITIAL , " 値引き
+g_list_04   TYPE types_list VALUE IS INITIAL , " 値増し
+g_list_05   TYPE types_list VALUE IS INITIAL , " 請求取消
+g_list_06   TYPE types_list VALUE IS INITIAL , " ｸﾚｼﾞｯﾄﾒﾓ取消
+g_list_07   TYPE types_list VALUE IS INITIAL , " 売上計
+g_list_08   TYPE types_list VALUE IS INITIAL , " 消費税
+g_list_09   TYPE types_list VALUE IS INITIAL , " 税込計
+g_list_10   TYPE types_list VALUE IS INITIAL , " 粗利
+g_list_11   TYPE types_list VALUE IS INITIAL , " 現金入金
+g_list_12   TYPE types_list VALUE IS INITIAL , " 手形入金
+g_list_13   TYPE types_list VALUE IS INITIAL , " 相殺入金
+g_list_14   TYPE types_list VALUE IS INITIAL , " 他入金
+g_list_15   TYPE types_list VALUE IS INITIAL , " 入金計
+g_list_18   TYPE types_list VALUE IS INITIAL , " 売掛金入金予定
+g_list_19   TYPE types_list                  , " 親会社に振替
+g_list_20   TYPE types_list VALUE IS INITIAL , " 他調整
+g_parentage LIKE kna1-kunnr                  . " 得意先cd(親)
+* 前々月締め日範囲より１日前の日付（過去を指定するため）
+DATA : g_zfbdt0          TYPE kikan VALUE IS INITIAL    .
+* 過去の範囲を含む基準日設定
+DATA : s_zfbdt_past      LIKE STANDARD TABLE OF g_zfbdt .
+* 全売掛金入金予定：前々月より前の金額合計
+DATA : g_list_18_sime_0  TYPE bseg-dmbtr .
+
+DATA : l_dmshb(8) TYPE p .
+
+******
+* 決済伝票番号
+TYPES: BEGIN OF augbl,
+sign(1)   TYPE c ,
+option(2) TYPE c ,
+low       TYPE bseg-augbl  ,
+high      TYPE bseg-augbl  ,
+END   OF augbl.
+DATA: g_augbl     TYPE augbl VALUE IS INITIAL .
+
+*2006/07 J.CB ADD_START
+*換算レート、換算開始日
+TYPES: BEGIN OF types_tcurr ,
+budat TYPE bkpf-budat ,
+ukurs TYPE tcurr-ukurs ,
+END OF types_tcurr.
+*2007/04/20 DEL START
+*DATA:
+*       G_TAB_TCURR       LIKE STANDARD TABLE OF TCURR,
+*       WA_TCURR          TYPE TCURR VALUE IS INITIAL.
+*DATA:
+*       G_TAB_TYPES_TCURR       TYPE TABLE OF TYPES_TCURR,
+*2007/04/20 DEL END
+DATA:
+wa_types_tcurr          TYPE types_tcurr VALUE IS INITIAL.
+*2006/07 J.CB ADD_END
+
+************************************************************************
+*                         画面定義　                                   *
+*                                                                      *
+************************************************************************
+* 会社コード
+PARAMETERS:  p_bukrs LIKE t001-bukrs
+MEMORY ID buk OBLIGATORY.
+* 指定年月
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT (33) text-001.
+PARAMETERS p_year(4)  TYPE n DEFAULT sy-datum(4)  OBLIGATORY .
+SELECTION-SCREEN:COMMENT 40(2) text-002,
+POSITION 43.
+PARAMETERS p_month TYPE month  DEFAULT sy-datum+4(2) OBLIGATORY.
+SELECTION-SCREEN: COMMENT 46(2) text-003,
+POSITION 50.
+SELECTION-SCREEN END OF LINE.
+* 得意先コード
+*--delete start 2010/06/14 m.murata
+*PARAMETERS:  p_kunnr LIKE kna1-kunnr OBLIGATORY.
+*--delete end   2010/06/14 m.murata
+*--insert start 2010/06/14 m.murata
+SELECT-OPTIONS s_kunnr FOR kna1-kunnr.
+*--insert end   2010/06/14 m.murata
+* 販売組織
+PARAMETERS:  p_vkorg LIKE knvv-vkorg OBLIGATORY.
+* 流通チャンネル
+PARAMETERS:  p_vtweg LIKE knvv-vtweg OBLIGATORY.
+* 製品部門
+PARAMETERS:  p_spart LIKE knvv-spart OBLIGATORY.
+SELECTION-SCREEN SKIP.
+* 債権債務勘定
+SELECTION-SCREEN: BEGIN OF BLOCK block1
+WITH FRAME TITLE text-004.
+* 売掛金
+SELECT-OPTIONS s_uri      FOR skb1-saknr OBLIGATORY.
+SELECT-OPTIONS s_blrtar  FOR bsad-blart OBLIGATORY.
+
+* 売掛金入金予定
+SELECT-OPTIONS s_uyotei   FOR skb1-saknr OBLIGATORY.
+SELECT-OPTIONS s_blart  FOR bsad-blart OBLIGATORY.
+SELECT-OPTIONS s_bschl  FOR bsad-bschl  OBLIGATORY. "転記キー
+* 売上
+SELECTION-SCREEN END OF BLOCK block1.
+SELECTION-SCREEN SKIP.
+* 入金金種
+SELECTION-SCREEN: BEGIN OF BLOCK block2
+WITH FRAME TITLE text-005.
+* 現金勘定
+SELECT-OPTIONS s_genkin   FOR skb1-saknr OBLIGATORY.
+* 受取手形
+SELECT-OPTIONS s_tegata   FOR skb1-saknr OBLIGATORY.
+* 相殺
+SELECT-OPTIONS s_sousai   FOR skb1-saknr OBLIGATORY.
+* 他入金
+SELECT-OPTIONS s_tanyu    FOR skb1-saknr OBLIGATORY.
+* 受手決済
+SELECT-OPTIONS s_ukete    FOR skb1-saknr OBLIGATORY.
+* 受手決済伝票タイプ
+SELECT-OPTIONS s_blrtac  FOR bsad-blart OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK block2.
+
+
+************************************************************************
+*                        INITIALIZATION                                *
+************************************************************************
+INITIALIZATION.
+*初期化処理
+REFRESH : g_tab_kna1 , g_tab_knkk , g_tab_knvv , g_tab_bseg,
+g_tab_bseg2, g_tab_bsid , g_tab_bsid2, g_tab_bsad,
+g_tab_vbrk , g_tab_vbrp , g_tab_vbrp2.
+CLEAR   : g_e_flg.
+*2006/07 J.CB ADD_START
+REFRESH : g_tab_bseg_genkin , g_tab_bseg_tegata ,
+g_tab_bseg_sousai , g_tab_bseg_tanyu ,
+g_tab_bseg_genkin_sum , g_tab_bseg_tegata_sum ,
+g_tab_bseg_sousai_sum , g_tab_bseg_tanyu_sum,
+g_tab_bseg_genkin_yo , g_tab_bseg_tegata_yo ,
+g_tab_bseg_sousai_yo , g_tab_bseg_tanyu_yo ,
+g_tab_bseg_genkin_yo_sum , g_tab_bseg_tegata_yo_sum ,
+g_tab_bseg_sousai_yo_sum , g_tab_bseg_tanyu_yo_sum .
+CLEAR   : g_change_wrbtr_flg , g_tanyu_flg.
+*2006/07 J.CB ADD_END
+*2008/07/24 DMC ADD_START
+REFRESH : g_tab_kunnr.
+CLEAR   : g_genzan,g_genzan_g , g_tegatazan_g , g_yosinzan_g,
+g_uritotal_g , g_yosinmax_g,g_group_flg.
+*2008/07/24 DMC ADD_END
+*--insert start 2010/06/14 m.murata
+CLEAR   : wk_ins_cnt, wk_upd_cnt, wk_err_cnt.
+*--insert end   2010/06/14 m.murata
+************************************************************************
+*                        AT SELECTION-SCREEN                           *
+************************************************************************
+AT SELECTION-SCREEN.
+* 月の入力チェック
+PERFORM f_check_month.
+* 会社コード存在チェック
+PERFORM f_check_buk.
+* 得意先コード存在チェック
+PERFORM f_check_kunnr.
+* 勘定コード存在チェック
+PERFORM f_check_hkont.
+************************************************************************
+*                        START-OF-SELECTION                            *
+************************************************************************
+START-OF-SELECTION.
+
+CLEAR : g_list_18 , l_dmshb .
+
+*  insert 2006/04/21 MIKAMI {
+PERFORM f_get_periv.
+* }insert 2006/04/21 MIKAMI
+
+*--insert start 2010/06/14 m.murata
+* 対象得意先コード抽出
+PERFORM get_cust_code.
+* 共通項目設定
+PERFORM set_common_item.
+
+LOOP AT it_kna1 INTO st_kna1.
+*   変数初期化
+PERFORM init_val.
+*--insert end   2010/06/14 m.murata
+
+PERFORM f_get_knvp.
+*-----対象データ抽出処理
+* 支払条件取得処理
+PERFORM f_get_zterm.
+*--add start 2010/06/14 m.murata
+CHECK wk_skip = space.
+*--add end   2010/06/14 m.murata
+* 支払条件テキスト取得処理
+PERFORM f_get_text1.
+* 固定日取得処理
+PERFORM f_get_zfael.
+*2007/04/20 DEL START
+**2006/07 J.CB ADD_START
+**   換算レートリスト取得処理
+*    PERFORM F_GET_UKURS.
+**2006/07 J.CB ADD_END
+*2007/04/20 DEL END
+*2008/07/24 DMC ADD_START
+*得意先から必要情報取得処理
+PERFORM f_get_kunnr.
+CLEAR:wa_kunnr.
+LOOP AT g_tab_kunnr INTO wa_kunnr.
+*2008/07/24 DMC ADD_END
+* 現在受注残取得処理
+PERFORM f_get_olikw.
+* 手形決済残取得処理
+PERFORM f_get_tegatazan.
+* 与信関連金額取得処理
+PERFORM f_get_yosin.
+*2008/07/24 DMC ADD_START
+ENDLOOP.
+g_yosinzan_g = g_yosinzan_g - g_genzan_g.
+IF g_group_flg = '1'.
+CLEAR: g_genzan_g,    " グループ受注残
+g_tegatazan_g, " グループ手形決済残
+g_yosinzan_g,  " グループ与信残高額
+g_uritotal_g,  " グループ売掛金合計
+g_yosinmax_g.  " グループ与信限度額
+ENDIF.
+*2008/07/24 DMC ADD_END
+* 売上関連集計処理
+PERFORM f_sumurikanren.
+* 入金関連集計処理
+*2006/07 J.CB MODIFY_START
+*  PERFORM F_SUMNYUKIN_SUB .
+*  PERFORM F_SUM_MONEY_RECEIVED.
+PERFORM f_money_received.
+*2006/07 J.CB MODIFY_END
+* 売掛金合計の取得
+*  PERFORM FRM_GET_URIKAKE .
+PERFORM f_get_ar.
+*--delete start 2010/06/14 m.murata
+**-----帳票出力処理
+*  perform f_list_out.
+*--delete end   2010/06/14 m.murata
+*--insert start 2010/06/14 m.murata
+*---データ格納
+PERFORM insert_table.
+ENDLOOP.
+IF wk_ins_cnt <> 0 OR
+wk_upd_cnt <> 0.
+COMMIT WORK.
+ENDIF.
+
+* 結果出力
+PERFORM output_result.
+*--insert end   2010/06/14 m.murata
+*--delete start 2010/06/14 m.murata
+** 正常終了メッセージ
+*  MESSAGE s856.
+*--delete end   2010/06/14 m.murata
+
+************************************************************************
+*
+*                        END-OF-SELECTION                              *
+************************************************************************
+END-OF-SELECTION.
+
+************************************************************************
+*                        TOP-OF-PAGE                                   *
+************************************************************************
+*--delete start 2010/06/14 m.murata
+*TOP-OF-PAGE .
+*
+*  WRITE : /081  '出力日時:' ,
+*           090  sy-datum    ,
+*           101  sy-uzeit    ,
+*           110  'PAGE:'     ,
+*           115  sy-pagno    .
+*2006/07 J.CB MODIFY_START
+*  WRITE : /050 '入金実績表'.
+*  IF g_change_wrbtr_flg = ''.
+*    WRITE : /050 '入金実績表'.
+*  ELSEIF g_change_wrbtr_flg = '1'.
+*    FORMAT COLOR COL_TOTAL ON INTENSIFIED.
+*    WRITE : /050 '入金実績表', 075 c_msg_1.
+*    FORMAT COLOR OFF.
+*  ELSEIF g_change_wrbtr_flg = '2'.
+*    FORMAT COLOR COL_TOTAL ON INTENSIFIED.
+*    WRITE : /050 '入金実績表', 094 c_msg_2.
+*    FORMAT COLOR OFF.
+*  ENDIF.
+*2006/07 J.CB MODIFY_END
+*  WRITE : /002 '得意先コード：',   018 p_kunnr, 030 kna1-name1.
+**** WRITE : /002 '会社コード：', 018 P_BUKRS, 024 T001-BUTXT.
+*2006/07 J.CB MODIFY_START
+*  WRITE : /002 '指定年月：',   018 P_YEAR, 023 '年',026 P_MONTH,
+*           029 '月締め'.
+*  WRITE : /002 '指定年月：',   018 p_year, 023 '年',026 p_month,
+*           029 '月締め',
+*           078 '通貨:', 86 wa_knvv-waers.
+*2006/07 J.CB MODIFY_END
+*  WRITE : /002 '支払条件：',   018 wa_knvv-zterm,
+*           024  wa_t052u-text1,
+*           078 '他の支払条件：', 093 g_zterm-sonota1,
+*           098 g_zterm-sonota2,  104 g_zterm-sonota3,
+*           110 g_zterm-sonota4,  116 g_zterm-sonota5.
+****  WRITE : /002 '販売組織：', 018 P_VKORG, 024 '流通チャネル',
+****           042 P_VTWEG, 046 '製品部門', 058 P_SPART.
+*2006/07 J.CB MODIFY_START
+*  WRITE : /002 '現在受注残：', 015(19) G_GENZAN    CURRENCY T001-WAERS,
+*           034 '手形決済残：', 046(19) G_TEGATAZAN CURRENCY T001-WAERS,
+*           065 '与信残高額：', 077 G_YOSINZAN  CURRENCY T001-WAERS.
+*
+*  WRITE : /002 '売掛金合計：', 014 G_URITOTAL  CURRENCY T001-WAERS,
+*           065 '与信限度額：', 077 G_YOSINMAX  CURRENCY T001-WAERS.
+*
+*  WRITE : /002 '現在受注残：', 015(19) g_genzan    CURRENCY t001-waers,
+*034 '円',
+*           038 '手形決済残：', 050(19) g_tegatazan CURRENCY t001-waers,
+*069 '円',
+*
+*           073 '与信残高額：', 085 g_yosinzan  CURRENCY t001-waers,105
+*'円'.
+*
+*
+*  WRITE : /002 '売掛金合計：', 014 g_uritotal  CURRENCY t001-waers,34
+*'円',
+*           073 '与信限度額：', 085 g_yosinmax  CURRENCY t001-waers,105
+*'円'
+*.
+*2008/07/24 DMC ADD_START
+*  IF g_group_flg = '0'.
+*    WRITE : /002    '（グループ）'.
+*    WRITE : /002    '現在受注残：',
+*            015(19) g_genzan_g CURRENCY t001-waers,
+*            034     '円',
+*            038     '手形決済残：',
+*            050(19) g_tegatazan_g CURRENCY t001-waers,
+*            069     '円',
+*            073     '与信残高額：',
+*            085     g_yosinzan_g CURRENCY t001-waers,
+*            105    '円'.
+*    WRITE : /002   '売掛金合計：',
+*             014   g_uritotal_g CURRENCY t001-waers,
+*             034   '円',
+*             073   '与信限度額：',
+*             085   g_yosinmax_g  CURRENCY t001-waers,
+*             105   '円'.
+*  ENDIF.
+*2008/07/24 DMC ADD_END
+*2006/07 J.CB MODIFY_END
+*  FORMAT COLOR COL_HEADING ON.
+*  PERFORM frm_sy_uline.
+*  PERFORM frm_sy_vline_right.
+*  PERFORM frm_sy_vline_left.
+*  WRITE :  002 '取 引',
+*
+*           031 g_simemd1-mm, 034 '月', 037 g_simemd1-dd, 040 '日締',
+*           051 g_simemd2-mm, 054 '月', 057 g_simemd2-dd, 060 '日締',
+*           071 g_simemd3-mm, 074 '月', 077 g_simemd3-dd, 080 '日締',
+*           091 g_simemd4-mm, 094 '月', 097 g_simemd4-dd, 100 '日締'.
+*
+*  PERFORM frm_sy_vline_right.
+*  FORMAT COLOR OFF.
+*  PERFORM frm_sy_uline.
+*--delete end   2010/06/14 m.murata
+
+************************************************************************
+*                        サブルーチン                                  *
+************************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  f_check_buk
+*&---------------------------------------------------------------------*
+*       会社コード存在チェック
+*----------------------------------------------------------------------*
+FORM f_check_buk.
+*-- 会社コード名称、通貨コードの取得
+SELECT SINGLE butxt waers spras
+FROM t001
+INTO (t001-butxt,t001-waers,t001-spras)
+WHERE bukrs = p_bukrs.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+IF sy-subrc <> 0.
+MESSAGE s600 WITH c_bukrs.
+SET CURSOR FIELD p_bukrs.
+STOP.
+ENDIF.
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_001 sy-subrc.
+ENDCASE.
+ENDFORM.                    " f_check_buk
+*&---------------------------------------------------------------------*
+*&      Form  f_check_kunnr
+*&---------------------------------------------------------------------*
+*       得意先コード存在チェック
+*----------------------------------------------------------------------*
+FORM f_check_kunnr.
+* 得意先名称取得
+SELECT SINGLE name1   FROM kna1
+INTO kna1-name1
+*--modify start 2010/06/14 m.murata
+*                        WHERE kunnr = p_kunnr.
+WHERE kunnr IN s_kunnr.
+*--modify end   2010/06/14 m.murata
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+IF sy-subrc <> 0.
+MESSAGE s600 WITH c_kna1.
+*--modify start 2010/06/14 m.murata
+*        set cursor field p_kunnr.
+SET CURSOR FIELD s_kunnr-low.
+*--modify end   2010/06/14 m.murata
+STOP.
+ENDIF.
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_002 sy-subrc.
+ENDCASE.
+ENDFORM.                    " f_check_kunnr
+*&---------------------------------------------------------------------*
+*&      Form  f_check_hkont
+*&---------------------------------------------------------------------*
+*       勘定コード存在チェック
+*----------------------------------------------------------------------*
+FORM f_check_hkont.
+
+*--- 売掛金チェック
+SELECT SINGLE bukrs FROM skb1 INTO skb1-bukrs
+WHERE bukrs = p_bukrs AND
+saknr IN s_uri.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE s600(z1) WITH c_skb1.
+STOP.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid c_tbl_003 sy-subrc.
+STOP.
+ENDCASE.
+* --- 売掛金入金予定チェック
+SELECT SINGLE bukrs FROM skb1 INTO skb1-bukrs
+WHERE bukrs = p_bukrs AND
+saknr IN s_uyotei.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE s600(z1) WITH c_skb1.
+STOP.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid c_tbl_003 sy-subrc.
+ENDCASE.
+* --- 現金勘定チェック
+SELECT SINGLE bukrs FROM skb1 INTO skb1-bukrs
+WHERE bukrs = p_bukrs AND
+saknr IN s_genkin.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE s600(z1) WITH c_skb1.
+STOP.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid c_tbl_003 sy-subrc.
+ENDCASE.
+* --- 受取手形チェック
+SELECT SINGLE bukrs FROM skb1 INTO skb1-bukrs
+WHERE bukrs = p_bukrs AND
+saknr IN s_tegata.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE s600(z1) WITH c_skb1.
+STOP.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid c_tbl_003 sy-subrc.
+ENDCASE.
+* --- 相殺チェック
+SELECT SINGLE bukrs FROM skb1 INTO skb1-bukrs
+WHERE bukrs = p_bukrs AND
+saknr IN s_sousai.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE s600(z1) WITH c_skb1.
+STOP.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid c_tbl_003 sy-subrc.
+ENDCASE.
+* --- 他入金チェック
+SELECT SINGLE bukrs FROM skb1 INTO skb1-bukrs
+WHERE bukrs = p_bukrs AND
+saknr IN s_tanyu.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE s600(z1) WITH c_skb1.
+STOP.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid c_tbl_003 sy-subrc.
+ENDCASE.
+* --- 受手決済チェック
+SELECT SINGLE bukrs FROM skb1 INTO skb1-bukrs
+WHERE bukrs = p_bukrs AND
+saknr IN s_ukete.
+CASE sy-subrc.
+WHEN 0.
+WHEN 4.
+MESSAGE s600(z1) WITH c_skb1.
+STOP.
+WHEN OTHERS.
+MESSAGE a603(z1) WITH sy-repid c_tbl_003 sy-subrc.
+ENDCASE.
+
+ENDFORM.                    " f_check_hkont
+*&---------------------------------------------------------------------*
+*&      Form  f_get_zterm
+*&---------------------------------------------------------------------*
+*       支払条件取得処理
+*----------------------------------------------------------------------*
+FORM f_get_zterm.
+*2006/07 J.CB MODIFY_START
+
+*  SELECT KUNNR VKORG VTWEG SPART ZTERM FROM KNVV
+*               INTO CORRESPONDING FIELDS OF TABLE  G_TAB_KNVV
+*               WHERE KUNNR = P_KUNNR."得意先コード
+SELECT kunnr vkorg vtweg spart zterm waers FROM knvv
+INTO CORRESPONDING FIELDS OF TABLE  g_tab_knvv
+*--modify start 2010/06/14 m.murata
+*               WHERE kunnr = p_kunnr."得意先コード
+WHERE kunnr = st_kna1-kunnr."得意先コード
+*--modify end   2010/06/14 m.murata
+*2006/07 J.CB MODIFY_END
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_004 sy-subrc.
+ENDCASE.
+* 対象支払条件取得
+*--modify start 2010/06/14 m.murata
+*  READ TABLE g_tab_knvv WITH KEY kunnr  = p_kunnr
+READ TABLE g_tab_knvv WITH KEY kunnr  = st_kna1-kunnr
+*--modify end   2010/06/14 m.murata
+vkorg  = p_vkorg
+vtweg  = p_vtweg
+spart  = p_spart
+INTO wa_knvv.
+IF sy-subrc = 0.
+*--modify start 2010/06/14 m.murata
+*    DELETE  g_tab_knvv WHERE kunnr  = p_kunnr
+DELETE  g_tab_knvv WHERE kunnr  = st_kna1-kunnr
+*--modify end   2010/06/14 m.murata
+AND vkorg  = p_vkorg
+AND vtweg  = p_vtweg
+AND spart  = p_spart.
+ELSE.
+*--delete start 2010/06/14 m.murata
+*    message s600 with c_knvv.
+*    stop.
+*--delete end   2010/06/14 m.murata
+*--add start 2010/06/14 m.murata
+st_err-bukrs = p_bukrs.
+st_err-vkorg = p_vkorg.
+st_err-vtweg = p_vtweg.
+st_err-spart = p_spart.
+st_err-spmon = wk_spmon.
+st_err-kunnr = st_kna1-kunnr.
+st_err-name1 = st_kna1-name1.
+MESSAGE s600 WITH c_knvv INTO st_err-text1.
+APPEND st_err TO it_err.
+
+wk_err_cnt = wk_err_cnt + 1.
+wk_skip = 'X'.
+EXIT.
+*--add end   2010/06/14 m.murata
+ENDIF.
+
+* 他の支払条件セット
+LOOP AT g_tab_knvv INTO wa_tmp_knvv.
+CASE sy-tabix.
+WHEN 1.
+g_zterm-sonota1 = wa_tmp_knvv-zterm.
+WHEN 2.
+g_zterm-sonota2 = wa_tmp_knvv-zterm.
+WHEN 3.
+g_zterm-sonota3 = wa_tmp_knvv-zterm.
+WHEN 4.
+g_zterm-sonota4 = wa_tmp_knvv-zterm.
+WHEN 5.
+g_zterm-sonota5 = wa_tmp_knvv-zterm.
+WHEN OTHERS.
+EXIT.
+ENDCASE.
+ENDLOOP.
+ENDFORM.                    " f_get_zterm
+*&---------------------------------------------------------------------*
+*&      Form  f_get_text1
+*&---------------------------------------------------------------------*
+*       支払条件テキスト取得処理
+*----------------------------------------------------------------------*
+FORM f_get_text1.
+
+SELECT SINGLE zterm text1 FROM t052u
+INTO CORRESPONDING FIELDS OF  wa_t052u
+WHERE spras = 'J'           "言語
+AND zterm = wa_knvv-zterm "支払条件
+AND ztagg = '31'.         "期限
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_005 sy-subrc.
+ENDCASE.
+
+ENDFORM.                    " f_get_text1
+*&---------------------------------------------------------------------*
+*&      Form  f_get_zfael
+*&---------------------------------------------------------------------*
+*       固定日取得処理
+*----------------------------------------------------------------------*
+FORM f_get_zfael.
+
+* 固定日の取得処理
+SELECT SINGLE zfael FROM t052
+INTO  t052-zfael
+WHERE zterm = wa_knvv-zterm "支払条件
+AND ztagg = '31'.         "期限
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_006 sy-subrc.
+ENDCASE.
+* 締年月セット
+PERFORM frm_data_for_period_closing.
+* 売掛金残高／入金予定　累計対応
+* 過去を対象とする場合の対応
+g_zfbdt0-high   =  g_zfbdt1-low. "前々月対象範囲より１日前の日付
+g_zfbdt0-sign   = 'I'.
+g_zfbdt0-option = 'BT'.
+APPEND g_zfbdt0 TO  s_zfbdt_past."前々月より前
+g_zfbdt1-low    =  g_zfbdt1-low  + 1."前々月対象範囲（LOW）
+g_zfbdt2-low    =  g_zfbdt1-high + 1."前月対象範囲（LOW）
+g_zfbdt3-low    =  g_zfbdt2-high + 1."当月対象範囲（LOW）
+g_zfbdt4-low    =  g_zfbdt3-high + 1."次月対象範囲（LOW）
+
+g_simemd1-mm = g_zfbdt1-high+4(2).   "前々月
+g_simemd1-dd = g_zfbdt1-high+6(2).   "前々月の日
+g_simemd2-mm = g_zfbdt2-high+4(2).   "前月
+g_simemd2-dd = g_zfbdt2-high+6(2).   "前月の日
+g_simemd3-mm = g_zfbdt3-high+4(2).   "当月
+g_simemd3-dd = g_zfbdt3-high+6(2).   "当月の日
+g_simemd4-mm = g_zfbdt4-high+4(2).   "次月
+g_simemd4-dd = g_zfbdt4-high+6(2).   "次月の日
+
+g_zfbdt3-sign   = 'I'.
+g_zfbdt3-option = 'BT'.
+APPEND g_zfbdt3 TO  s_zfbdt.
+
+g_zfbdt2-sign   = 'I'.
+g_zfbdt2-option = 'BT'.
+APPEND g_zfbdt2 TO  s_zfbdt.
+
+g_zfbdt1-sign   = 'I'.
+g_zfbdt1-option = 'BT'.
+APPEND g_zfbdt1 TO  s_zfbdt.
+
+g_zfbdt4-sign   = 'I'.
+g_zfbdt4-option = 'BT'.
+APPEND g_zfbdt4 TO  s_zfbdt.
+
+* 締め日期間を昇順ソート
+SORT s_zfbdt ASCENDING BY low.
+* 締め日期間を設定
+READ TABLE s_zfbdt INTO g_zfbdt1 INDEX 1.
+READ TABLE s_zfbdt INTO g_zfbdt2 INDEX 2.
+READ TABLE s_zfbdt INTO g_zfbdt3 INDEX 3.
+READ TABLE s_zfbdt INTO g_zfbdt4 INDEX 4.
+* 売掛金残高／入金予定　累計対応
+* 過去を対象とする場合の対応
+APPEND g_zfbdt1 TO  s_zfbdt_past."前々月
+APPEND g_zfbdt2 TO  s_zfbdt_past."前月
+APPEND g_zfbdt3 TO  s_zfbdt_past."当月
+APPEND g_zfbdt4 TO  s_zfbdt_past."翌月
+* 締め日期間を昇順ソート
+SORT s_zfbdt_past ASCENDING BY low.
+* 締め日期間を設定
+READ TABLE s_zfbdt_past INTO g_zfbdt0 INDEX 1.
+
+ENDFORM.                    " f_get_zfael
+*&---------------------------------------------------------------------*
+*&      Form  f_get_olikw
+*&---------------------------------------------------------------------*
+*       現在受注残取得処理
+*----------------------------------------------------------------------*
+FORM f_get_olikw.
+
+*2008/07/24 DMC DEL_START
+*  CLEAR G_GENZAN.
+*2008/07/24 DMC DEL_END
+GET PARAMETER ID 'KKB' FIELD s067-kkber.
+
+SELECT olikw FROM s067
+INTO  s067-olikw
+WHERE kkber = s067-kkber "与信管理領域
+AND vrsio = '000'
+*2008/07/24 DMC MOD_START
+*                    AND KNKLI = P_KUNNR.   "与信得意先コード
+AND knkli = wa_kunnr-kunnr."与信得意先コード
+*2008/07/24 DMC MOD_END
+*2008/07/24 DMC ADD_START
+*--modify start 2010/06/14 m.murata
+*    IF wa_kunnr-kunnr = p_kunnr.
+IF wa_kunnr-kunnr = st_kna1-kunnr.
+*--modify end   2010/06/14 m.murata
+*2008/07/24 DMC ADD_END
+g_genzan = g_genzan + s067-olikw.
+*2008/07/24 DMC ADD_START
+ENDIF.
+g_genzan_g = g_genzan_g + s067-olikw.
+*2008/07/24 DMC ADD_END
+
+ENDSELECT.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_007 sy-subrc.
+ENDCASE.
+
+
+GET PARAMETER ID 'KKB' FIELD s066-kkber.
+SELECT oeikw FROM s066
+INTO  s066-oeikw
+WHERE kkber = s066-kkber "与信管理領域
+AND vrsio = '000'
+*2008/07/24 DMC MOD_START
+*                    AND KNKLI = P_KUNNR.   "与信得意先コード
+AND knkli = wa_kunnr-kunnr."与信得意先コード
+*2008/07/24 DMC MOD_END
+*2008/07/24 DMC ADD_START
+*--modify start 2010/06/14 m.murata
+*    if wa_kunnr-kunnr = p_kunnr.
+IF wa_kunnr-kunnr = st_kna1-kunnr.
+*--modify end   2010/06/14 m.murata
+*2008/07/24 DMC ADD_END
+*     現在受注残の設定処理
+g_genzan = g_genzan + s066-oeikw.
+*2008/07/24 DMC ADD_START
+ENDIF.
+g_genzan_g = g_genzan_g + s066-oeikw.
+*2008/07/24 DMC ADD_END
+ENDSELECT.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_s067 sy-subrc.
+ENDCASE.
+
+
+ENDFORM.                    " f_get_olikw
+*&---------------------------------------------------------------------*
+*&      Form  f_get_tegatazan
+*&---------------------------------------------------------------------*
+*       手形決済残取得処理
+*----------------------------------------------------------------------*
+FORM f_get_tegatazan.
+* Add 2008.12.05 --->
+CLEAR : knc3 .
+* Add 2008.12.05 <---
+
+*2003/06/05 start 　最終年度の手形残高データを取得するように変更
+* SELECT SINGLE SALDV SOLLL HABNL FROM KNC3
+*                   INTO  (KNC3-SALDV,KNC3-SOLLL,KNC3-HABNL)
+*                   WHERE KUNNR = P_KUNNR   "得意先コード
+*                     AND BUKRS = P_BUKRS   "会社コード
+*                     AND SHBKZ = 'W'.      "特殊仕訳コード
+SELECT * FROM knc3 UP TO 1 ROWS
+*2008/07/24 DMC MOD_START
+*                    WHERE KUNNR = P_KUNNR   "得意先コード
+WHERE kunnr = wa_kunnr-kunnr "得意先コード
+*2008/07/24 DMC MOD_END
+AND bukrs = p_bukrs   "会社コード
+AND shbkz = 'W'      "特殊仕訳コード
+ORDER BY gjahr DESCENDING.
+ENDSELECT.
+*2003/06/05 end
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_008 sy-subrc.
+ENDCASE.
+* 手形決済残取得
+*2008/07/24 DMC ADD_START
+*--modify start 2010/06/14 m.murata
+*  if wa_kunnr-kunnr = p_kunnr.
+IF wa_kunnr-kunnr = st_kna1-kunnr.
+*--modify end   2010/06/14 m.murata
+*2008/07/24 DMC ADD_END
+* 手形決済残  = 繰越残高 + 年度借方転記合計額 - 今年度貸方転記合計
+g_tegatazan = knc3-saldv + knc3-solll - knc3-habnl.
+*2008/07/24 DMC ADD_START
+ENDIF.
+* 手形決済残  = 繰越残高 + 年度借方転記合計額 - 今年度貸方転記合計
+g_tegatazan_g = knc3-saldv + knc3-solll - knc3-habnl + g_tegatazan_g.
+*2008/07/24 DMC ADD_END
+
+ENDFORM.                    " f_get_tegatazan
+*&---------------------------------------------------------------------*
+*&      Form  f_get_yosin
+*&---------------------------------------------------------------------*
+*       与信関連金額取得処理
+*----------------------------------------------------------------------*
+FORM f_get_yosin.
+SELECT SINGLE klimk skfor ssobl FROM knkk
+INTO  (knkk-klimk,knkk-skfor,knkk-ssobl)
+*2008/07/24 DMC MOD_START
+*                    WHERE KUNNR = P_KUNNR     "得意先コード
+WHERE kunnr = wa_kunnr-kunnr "得意先コード
+*2008/07/24 DMC MOD_END
+AND kkber = s067-kkber. "与信管理領域
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_009 sy-subrc.
+ENDCASE.
+*2008/07/24 DMC ADD_START
+*--modify start 2010/06/14 m.murata
+*  if wa_kunnr-kunnr = p_kunnr.
+IF wa_kunnr-kunnr = st_kna1-kunnr.
+*--modify end   2010/06/14 m.murata
+*2008/07/24 DMC ADD_END
+g_uritotal = knkk-skfor.
+g_yosinmax = knkk-klimk.
+g_yosinzan = knkk-klimk - knkk-skfor - knkk-ssobl - g_genzan.
+*2008/07/24 DMC ADD_START
+ENDIF.
+g_uritotal_g = knkk-skfor + g_uritotal_g.
+g_yosinmax_g = knkk-klimk + g_yosinmax_g.
+g_yosinzan_g = knkk-klimk - knkk-skfor - knkk-ssobl + g_yosinzan_g.
+*2008/07/24 DMC ADD_END
+
+ENDFORM.                    " f_get_yosin
+*&---------------------------------------------------------------------*
+*&      Form  f_sumurikanren
+*&---------------------------------------------------------------------*
+*       売上関連集計処理
+*----------------------------------------------------------------------*
+FORM f_sumurikanren.
+
+* 売掛金残高集計処理
+*  delete 2006/04/18 MIKAMI {
+*  PERFORM F_SUM_URIZAN.
+* }delete 2006/04/18 MIKAMI
+* 請求伝票関連集計処理
+PERFORM f_sum_seikyu.
+* その他集計処理
+PERFORM f_sum_etc.
+
+ENDFORM.                    " f_sumurikanren
+*  delete 2006/04/18 MIKAMI {
+*&---------------------------------------------------------------------*
+*&      Form  f_sum_urizan
+*&---------------------------------------------------------------------*
+*       売掛金残高集計処理
+*----------------------------------------------------------------------*
+*FORM F_SUM_URIZAN.
+*
+*  SELECT  BUDAT GJAHR BELNR SHKZG DMBTR HKONT ZFBDT FROM BSID
+*                      INTO CORRESPONDING FIELDS OF TABLE G_TAB_BSID
+*                      WHERE BUKRS =  P_BUKRS        " 会社コード
+*                        AND KUNNR =  P_KUNNR        " 得意先コード
+*                        AND HKONT IN S_URI          " 売掛金勘定
+*                        AND BUDAT IN S_ZFBDT_PAST . " 転記日以前
+*  CASE SY-SUBRC.
+*    WHEN 0.
+*    WHEN 4."対象データなし
+*    WHEN OTHERS.
+*      MESSAGE A603 WITH SY-REPID C_TBL_010 SY-SUBRC.
+*  ENDCASE.
+*
+*  SELECT  BUDAT GJAHR BELNR SHKZG DMBTR HKONT ZFBDT FROM BSAD
+*                      INTO CORRESPONDING FIELDS OF TABLE G_TAB_BSAD
+*                      WHERE BUKRS =  P_BUKRS        " 会社コード
+*                        AND KUNNR =  P_KUNNR        " 得意先コード
+*                        AND BLART IN S_BLART        " 伝票タイプ
+*                        AND HKONT IN S_URI          " 売掛金勘定
+*                        AND BUDAT IN S_ZFBDT_PAST . " 転記日以前
+*  CASE SY-SUBRC.
+*    WHEN 0.
+*    WHEN 4."対象データなし
+*    WHEN OTHERS.
+*      MESSAGE A603 WITH SY-REPID C_TBL_010 SY-SUBRC.
+*  ENDCASE.
+*
+*ENDFORM.                    " f_sum_urizan
+* }delete 2006/04/18 MIKAMI
+*&---------------------------------------------------------------------*
+*&      Form  f_sum_seikyu
+*&---------------------------------------------------------------------*
+*       請求伝票関連集計処理
+*----------------------------------------------------------------------*
+FORM f_sum_seikyu.
+* 請求伝票ヘッダ読込処理
+SELECT  fkart fkdat vbeln waerk vbtyp FROM vbrk
+INTO CORRESPONDING FIELDS OF TABLE g_tab_vbrk
+WHERE fkdat IN s_zfbdt          " 請求日
+AND bukrs = p_bukrs            " 会社コード
+*--modify start 2010/06/14 m.murata
+*                        and kunrg = p_kunnr            " 得意先コード
+AND kunrg = st_kna1-kunnr      " 得意先コード
+*--modify end   2010/06/14 m.murata
+AND ( ( fkart =  cns_f2
+AND     fktyp =  cns_l
+AND     vbtyp =  cns_m )
+OR   ( fkart =  cns_re
+AND     fktyp =  cns_l
+AND     vbtyp =  cns_o )
+OR   ( fkart =  cns_s2
+AND     fktyp =  cns_a
+AND     vbtyp =  cns_s )
+OR   ( fkart =  cns_s2
+AND     fktyp =  cns_l
+AND     vbtyp =  cns_s )
+OR   ( fkart =  cns_s1
+AND     fktyp =  cns_a
+AND     vbtyp =  cns_n )
+OR   ( fkart =  cns_s1
+AND     fktyp =  cns_l
+AND     vbtyp =  cns_n )
+OR   ( fkart =  cns_l2
+AND     fktyp =  cns_a
+AND     vbtyp =  cns_p )
+OR   ( fkart =  cns_g2
+AND     fktyp =  cns_a
+AND     vbtyp =  cns_o ) )
+AND     rfbsk =  'C'   .
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+EXIT.
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_013 sy-subrc.
+ENDCASE.
+
+* 請求伝票明細読込処理
+SELECT vbeln posnr wavwr mwsbp kursk netwr FROM vbrp
+INTO CORRESPONDING FIELDS OF TABLE g_tab_vbrp
+FOR ALL ENTRIES IN g_tab_vbrk
+WHERE vbeln = g_tab_vbrk-vbeln. "請求伝票番号
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_014 sy-subrc.
+ENDCASE.
+* 原価・税額集計処理
+SORT g_tab_vbrp BY vbeln ASCENDING.
+LOOP AT g_tab_vbrp INTO wa_vbrp.
+wa_vbrp2 = wa_vbrp.
+wa_vbrp3-vbeln = wa_vbrp-vbeln.
+*   請求伝票通貨を取得
+READ TABLE g_tab_vbrk INTO wa_vbrk
+WITH KEY vbeln = wa_vbrp-vbeln.
+*   請求タイプを格納
+wa_vbrp3-fkdat = wa_vbrk-fkdat.
+*   請求日を格納
+wa_vbrp3-fkart = wa_vbrk-fkart.
+*   請求カテゴリを設定
+wa_vbrp3-vbtyp = wa_vbrp-vbtyp.
+*   正味額を格納
+*2006/07 J.CB MODIFY_START
+*    WA_VBRP2-NETWR =  WA_VBRP-NETWR * WA_VBRP-KURSK.
+wa_vbrp2-netwr =  wa_vbrp-netwr.
+*2006/07 J.CB MODIFY_END
+
+*   伝票カテゴリによる変換
+IF wa_vbrk-vbtyp = cns_n OR
+wa_vbrk-vbtyp = cns_o.
+wa_vbrp2-wavwr = wa_vbrp2-wavwr * ( -1 ).
+wa_vbrp2-mwsbp = wa_vbrp2-mwsbp * ( -1 ).
+wa_vbrp2-netwr = wa_vbrp2-netwr * ( -1 ).
+ENDIF.
+
+*2006/07 J.CB DELETE_START
+**   原価換算レート乗算
+*    WA_VBRP2-WAVWR = WA_VBRP-KURSK * WA_VBRP2-WAVWR.
+**   税額換算レート乗算
+*    WA_VBRP2-MWSBP = WA_VBRP-KURSK * WA_VBRP2-MWSBP.
+*2006/07 J.CB DELETE_END
+
+*2006/07 J.CB MODIFY_START
+*    IF WA_VBRK-WAERK = C_JPY.
+*      WA_VBRP3-WAVWR = WA_VBRP3-WAVWR + WA_VBRP2-WAVWR.
+*      WA_VBRP3-MWSBP = WA_VBRP3-MWSBP + WA_VBRP2-MWSBP.
+*      WA_VBRP3-NETWR = WA_VBRP3-NETWR + WA_VBRP2-NETWR.
+*    ELSE.
+*      WA_VBRP3-WAVWR = WA_VBRP3-WAVWR + WA_VBRP2-WAVWR / 100.
+*      WA_VBRP3-MWSBP = WA_VBRP3-MWSBP + WA_VBRP2-MWSBP / 100.
+*      WA_VBRP3-NETWR = WA_VBRP3-NETWR + WA_VBRP2-NETWR / 100.
+*    ENDIF.
+wa_vbrp3-wavwr = wa_vbrp3-wavwr + wa_vbrp2-wavwr.
+wa_vbrp3-mwsbp = wa_vbrp3-mwsbp + wa_vbrp2-mwsbp.
+wa_vbrp3-netwr = wa_vbrp3-netwr + wa_vbrp2-netwr.
+*2006/07 J.CB MODIFY_END
+
+AT END OF vbeln.
+APPEND wa_vbrp3 TO g_tab_vbrp2.
+CLEAR: wa_vbrp3,wa_vbrp2.
+ENDAT.
+ENDLOOP.
+CLEAR: wa_vbrp,wa_vbrp2,wa_vbrp3.
+
+* 各集計処理
+CLEAR: s_zfbdt2,wa_vbrk,wa_vbrp.
+REFRESH  s_zfbdt2.
+* 請求伝票番号でループ
+LOOP AT g_tab_vbrp2 INTO wa_vbrp.
+*   前々月の場合
+IF    wa_vbrp-fkdat >= g_zfbdt1-low
+AND wa_vbrp-fkdat <= g_zfbdt1-high.
+PERFORM frm_mon_sum_vbrp USING wa_vbrp
+g_list_01-sime_1
+g_list_02-sime_1
+g_list_03-sime_1
+g_list_04-sime_1
+g_list_05-sime_1
+g_list_06-sime_1
+g_list_08-sime_1
+wa_vbrp1-wavwr.
+ENDIF.
+*   前月の場合
+IF    wa_vbrp-fkdat >= g_zfbdt2-low
+AND wa_vbrp-fkdat <= g_zfbdt2-high.
+PERFORM frm_mon_sum_vbrp USING wa_vbrp
+g_list_01-sime_2
+g_list_02-sime_2
+g_list_03-sime_2
+g_list_04-sime_2
+g_list_05-sime_2
+g_list_06-sime_2
+g_list_08-sime_2
+wa_vbrp2-wavwr.
+ENDIF.
+*   当月の場合
+IF    wa_vbrp-fkdat >= g_zfbdt3-low
+AND wa_vbrp-fkdat <= g_zfbdt3-high.
+PERFORM frm_mon_sum_vbrp USING wa_vbrp
+g_list_01-sime_3
+g_list_02-sime_3
+g_list_03-sime_3
+g_list_04-sime_3
+g_list_05-sime_3
+g_list_06-sime_3
+g_list_08-sime_3
+wa_vbrp3-wavwr.
+ENDIF.
+*   次月の場合
+IF    wa_vbrp-fkdat >= g_zfbdt4-low
+AND wa_vbrp-fkdat <= g_zfbdt4-high.
+PERFORM frm_mon_sum_vbrp USING wa_vbrp
+g_list_01-sime_4
+g_list_02-sime_4
+g_list_03-sime_4
+g_list_04-sime_4
+g_list_05-sime_4
+g_list_06-sime_4
+g_list_08-sime_4
+wa_vbrp4-wavwr.
+ENDIF.
+ENDLOOP.
+
+ENDFORM.                    " f_sum_seikyu
+*&---------------------------------------------------------------------*
+*&      Form  F_SUM_ETC
+*&---------------------------------------------------------------------*
+*       その他集計
+*----------------------------------------------------------------------*
+FORM f_sum_etc.
+
+* 売上計計算
+g_list_07-sime_1 = g_list_01-sime_1 + g_list_02-sime_1
++ g_list_03-sime_1 + g_list_04-sime_1
++ g_list_05-sime_1 + g_list_06-sime_1.
+g_list_07-sime_2 = g_list_01-sime_2 + g_list_02-sime_2
++ g_list_03-sime_2 + g_list_04-sime_2
++ g_list_05-sime_2 + g_list_06-sime_2.
+g_list_07-sime_3 = g_list_01-sime_3 + g_list_02-sime_3
++ g_list_03-sime_3 + g_list_04-sime_3
++ g_list_05-sime_3 + g_list_06-sime_3.
+g_list_07-sime_4 = g_list_01-sime_4 + g_list_02-sime_4
++ g_list_03-sime_4 + g_list_04-sime_4
++ g_list_05-sime_4 + g_list_06-sime_4.
+* 税込計計算
+g_list_09-sime_1 = g_list_07-sime_1 + g_list_08-sime_1.
+g_list_09-sime_2 = g_list_07-sime_2 + g_list_08-sime_2.
+g_list_09-sime_3 = g_list_07-sime_3 + g_list_08-sime_3.
+g_list_09-sime_4 = g_list_07-sime_4 + g_list_08-sime_4.
+* 粗利計算
+g_list_10-sime_1 = ( g_list_07-sime_1 - wa_vbrp1-wavwr ).
+g_list_10-sime_2 = ( g_list_07-sime_2 - wa_vbrp2-wavwr ).
+g_list_10-sime_3 = ( g_list_07-sime_3 - wa_vbrp3-wavwr ).
+g_list_10-sime_4 = ( g_list_07-sime_4 - wa_vbrp4-wavwr ).
+
+ENDFORM.                    " F_SUM_ETC
+*&---------------------------------------------------------------------*
+*&      Form  f_list_out
+*&---------------------------------------------------------------------*
+*       帳票出力処理処理
+*----------------------------------------------------------------------*
+FORM f_list_out.
+
+
+FORMAT COLOR COL_NORMAL ON.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '売　　　　　　　　　上',
+031  g_list_01-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_01-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_01-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_01-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '返　　　　　　　　　品',
+031  g_list_02-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_02-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_02-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_02-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '値　　　　引　　　　き',
+031  g_list_03-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_03-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_03-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_03-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '値　　　　増　　　　し',
+031  g_list_04-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_04-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_04-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_04-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '請　求　取　り　消　し',
+031  g_list_05-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_05-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_05-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_05-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+
+WRITE : 002 'クレジットメモ取り消し',
+031  g_list_06-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_06-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_06-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_06-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+FORMAT COLOR OFF.
+
+FORMAT COLOR COL_TOTAL ON INTENSIFIED OFF.
+
+WRITE : 002 '売　　　　上　　　　計',
+031  g_list_07-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_07-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_07-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_07-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+
+WRITE : 002 '消　　　　費　　　　税',
+031  g_list_08-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_08-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_08-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_08-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+FORMAT COLOR OFF.
+
+FORMAT COLOR COL_TOTAL ON INTENSIFIED.
+
+WRITE : 002 '税　　　　込　　　　計',
+031  g_list_09-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_09-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_09-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_09-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+FORMAT COLOR OFF.
+
+FORMAT COLOR COL_NORMAL ON.
+
+WRITE : 002 '粗　　　　　　　　　利',
+031  g_list_10-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_10-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_10-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_10-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_uline.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '現     金     入    金',
+031  g_list_11-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_11-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_11-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_11-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '手     形     入    金',
+031  g_list_12-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_12-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_12-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_12-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+
+WRITE : 002 '相     殺     入    金',
+031  g_list_13-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_13-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_13-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_13-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+
+*他入金を再計算する（子勘定からの振替分対応）
+PERFORM f_list_out_14.
+
+WRITE : 002 '他　　　　入　　　　金',
+031  g_list_14-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_14-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_14-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_14-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+WRITE : 002 '他　　　　調　　　　整',
+031  g_list_20-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_20-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_20-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_20-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+
+FORMAT COLOR OFF.
+
+FORMAT COLOR COL_TOTAL ON INTENSIFIED.
+
+WRITE : 002 '入　　　　金　　　　計',
+031  g_list_15-sime_1 CURRENCY wa_knvv-waers,
+051  g_list_15-sime_2 CURRENCY wa_knvv-waers,
+071  g_list_15-sime_3 CURRENCY wa_knvv-waers,
+091  g_list_15-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_uline.
+PERFORM frm_sy_vline_left.
+FORMAT COLOR OFF.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_vline_left.
+FORMAT COLOR COL_TOTAL ON INTENSIFIED.
+
+WRITE : 002 '　売 掛 金　合　計　'.
+* 前々月より前の金額すべてを累計する。
+WRITE : 031  g_list_18-sime_1 CURRENCY wa_knvv-waers.
+* 前々月の金額を累計する。
+WRITE : 051  g_list_18-sime_2 CURRENCY wa_knvv-waers.
+* 前月の金額を累計する。
+WRITE : 071  g_list_18-sime_3 CURRENCY wa_knvv-waers.
+* 当月の金額を累計する。
+WRITE : 091  g_list_18-sime_4 CURRENCY wa_knvv-waers.
+
+PERFORM frm_sy_vline_right.
+PERFORM frm_sy_uline.
+
+ENDFORM.                    " f_list_out
+*&---------------------------------------------------------------------*
+*&      Form  FRM_DATA_FOR_PERIOD_CLOSING
+*&---------------------------------------------------------------------*
+*       締め日を算出する
+*----------------------------------------------------------------------*
+FORM frm_data_for_period_closing.
+
+CALL FUNCTION 'Z_FDATA_FOR_PERIOD_CLOSING'
+EXPORTING
+year              = p_year
+mon               = p_month
+day               = t052-zfael
+IMPORTING
+thr_months_before = g_zfbdt1-low
+two_months_before = g_zfbdt1-high
+one_month_before  = g_zfbdt2-high
+this_month        = g_zfbdt3-high
+next_month        = g_zfbdt4-high
+EXCEPTIONS
+month_error       = 1
+OTHERS            = 2.
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+
+ENDFORM.                    " FRM_DATA_FOR_PERIOD_CLOSING
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MON_SUM_VBRP
+*&---------------------------------------------------------------------*
+*       月の請求関連集計
+*----------------------------------------------------------------------*
+* --> PF_VBRP:請求伝票明細情報
+* <-> P_LIST01:売上
+* <-> P_LIST02:返品
+* <-> P_LIST03:値引き
+* <-> P_LIST04:値増し
+* <-> P_LIST05:請求取消
+* <-> P_LIST06:クレジットメモ取消
+* <-> P_LIST08:消費税
+* <-> P_WAVWR:原価
+*----------------------------------------------------------------------*
+FORM frm_mon_sum_vbrp USING pf_vbrp  LIKE wa_vbrp
+p_list01
+p_list02
+p_list03
+p_list04
+p_list05
+p_list06
+p_list08
+p_wavwr.
+* 請求タイプごとの集計
+CASE pf_vbrp-fkart.
+*   売上
+WHEN 'F2'.
+*     売上集計
+p_list01 = p_list01 + pf_vbrp-netwr.
+*   返品
+WHEN 'RE'.
+*     返品集計
+p_list02 = p_list02 + pf_vbrp-netwr.
+*   値引き
+WHEN 'G2'.
+*     値引集計
+p_list03 = p_list03 + pf_vbrp-netwr.
+*   値増し
+WHEN 'L2'.
+*     値増集計
+p_list04 = p_list04 + pf_vbrp-netwr.
+*   請求取消
+WHEN 'S1'.
+*     請求取消集計
+p_list05 = p_list05 + pf_vbrp-netwr.
+*   クレジットメモ取消
+WHEN 'S2'.
+*     クレジットメモ取消集計
+p_list06 = p_list06 + pf_vbrp-netwr.
+WHEN OTHERS.
+ENDCASE.
+
+*     消費税減額集計と原価集計
+p_list08 = p_list08 + pf_vbrp-mwsbp.
+p_wavwr = p_wavwr + pf_vbrp-wavwr.
+
+ENDFORM.                    " FRM_MON_SUM_VBRP
+*&---------------------------------------------------------------------*
+*&      Form  frm_diff_account
+*&---------------------------------------------------------------------*
+*       金種別集計
+*----------------------------------------------------------------------*
+*      -->P_LIST11 帳票用変数：現金入金
+*      -->P_LIST12 帳票用変数：手形入金
+*      -->P_LIST13 帳票用変数：相殺入金
+*      -->P_LIST14 帳票用変数：他入金
+*      -->P_HKONT  Ｇ/Ｌ勘定
+*      -->P_DMBTR  金額
+*----------------------------------------------------------------------*
+FORM frm_diff_account
+TABLES    p_augbl11 p_augbl12 p_augbl13 p_augbl14
+USING     p_hkont .
+
+g_augbl-sign   = 'I'  .
+g_augbl-option = 'EQ' .
+
+* 現金入金
+IF p_hkont IN s_genkin .
+g_augbl-low = wa_bseg-belnr .
+INSERT g_augbl INTO TABLE p_augbl11 .
+ENDIF.
+* 手形入金
+IF p_hkont IN s_tegata.
+g_augbl-low = wa_bseg-belnr .
+INSERT g_augbl INTO TABLE p_augbl12 .
+ENDIF.
+* 相殺入金
+IF p_hkont IN s_sousai.
+g_augbl-low = wa_bseg-belnr .
+INSERT g_augbl INTO TABLE p_augbl13 .
+ENDIF.
+* 他入金
+IF p_hkont IN s_tanyu.
+g_augbl-low = wa_bseg-belnr .
+INSERT g_augbl INTO TABLE p_augbl14 .
+ENDIF.
+
+ENDFORM.                    " frm_diff_account
+*&---------------------------------------------------------------------*
+*&      Form  F_SUM_MONEY_RECEIVED
+*&---------------------------------------------------------------------*
+*       入金集計
+*----------------------------------------------------------------------*
+FORM f_sum_money_received.
+
+* 現金入金集計処理
+PERFORM f_sum_genkin_sub .
+
+FREE: g_tab_bseg,g_tab_bseg.
+* 入金計計算
+g_list_15-sime_1 = g_list_11-sime_1 + g_list_12-sime_1
++ g_list_13-sime_1 + g_list_14-sime_1.
+g_list_15-sime_2 = g_list_11-sime_2 + g_list_12-sime_2
++ g_list_13-sime_2 + g_list_14-sime_2.
+g_list_15-sime_3 = g_list_11-sime_3 + g_list_12-sime_3
++ g_list_13-sime_3 + g_list_14-sime_3.
+g_list_15-sime_4 = g_list_11-sime_4 + g_list_12-sime_4
++ g_list_13-sime_4 + g_list_14-sime_4.
+
+ENDFORM.                    " F_SUM_MONEY_RECEIVED
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_MONTH
+*&---------------------------------------------------------------------*
+*       月の入力チェック
+*----------------------------------------------------------------------*
+FORM f_check_month.
+IF NOT ( p_month >= 1 AND p_month <= 12 ).
+*   &を指定することはできません
+MESSAGE e615(z1) WITH cns_msg.
+ENDIF.
+ENDFORM.                    " F_CHECK_MONTH
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_KNVP
+*&---------------------------------------------------------------------*
+*       親勘定取得
+*----------------------------------------------------------------------*
+* 指定得意先コードが親会社か子会社かを判断し親会社の得意先を取得する
+*----------------------------------------------------------------------*
+FORM f_get_knvp.
+
+SELECT SINGLE kunn2
+FROM knvp INTO (g_parentage)
+*--modify start 2010/06/14 m.murata
+*                where kunnr = p_kunnr
+WHERE kunnr = st_kna1-kunnr
+*--modify end   2010/06/14 m.murata
+AND vkorg = p_vkorg
+AND vtweg = p_vtweg
+AND spart = p_spart
+AND parvw = 'Y3' .
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_knvp sy-subrc.
+ENDCASE.
+
+ENDFORM.                    " F_GET_KNVP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SY_VLINE_RIGHT
+*&---------------------------------------------------------------------*
+*       右端の縦線を引く
+*----------------------------------------------------------------------*
+FORM frm_sy_vline_right.
+WRITE : 120(1) sy-vline.
+ENDFORM.                    " FRM_SY_VLINE_RIGHT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SY_ULINE
+*&---------------------------------------------------------------------*
+*       下の横線を引く
+*----------------------------------------------------------------------*
+FORM frm_sy_uline.
+WRITE : /1(119) sy-uline,
+120(1)   sy-vline.
+ENDFORM.                    " FRM_SY_ULINE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SY_VLINE_LEFT
+*&---------------------------------------------------------------------*
+*       左端の縦線を引く
+*----------------------------------------------------------------------*
+FORM frm_sy_vline_left.
+WRITE : /1(1) sy-vline.
+ENDFORM.                    " FRM_SY_VLINE_LEFT
+*&---------------------------------------------------------------------*
+*&      Form  F_LIST_OUT_14.
+*&---------------------------------------------------------------------*
+*       他入金を再計算する
+*----------------------------------------------------------------------*
+FORM f_list_out_14.
+
+* 他調整 = 売掛金合計(前月)
+*        + 税込計(今月)
+*        - 現金入金(今月)
+*        - 手形入金(今月)
+*        - 相殺入金(今月)
+*        - 他入金(今月)
+*        - 売掛金合計(今月)
+* 入金計 = 現金入金(今月)
+*        + 手形入金(今月)
+*        + 相殺入金(今月)
+*        + 他入金(今月)
+*        + 他調整(今月)
+
+* 前々月の計算
+g_list_20-sime_1 = g_list_18_sime_0
++ g_list_09-sime_1
+- g_list_11-sime_1
+- g_list_12-sime_1
+- g_list_13-sime_1
+- g_list_14-sime_1
+- g_list_18-sime_1 .
+g_list_15-sime_1 = g_list_11-sime_1
++ g_list_12-sime_1
++ g_list_13-sime_1
++ g_list_14-sime_1
++ g_list_20-sime_1 .
+*前月の計算
+g_list_20-sime_2 = g_list_18-sime_1
++ g_list_09-sime_2
+- g_list_11-sime_2
+- g_list_12-sime_2
+- g_list_13-sime_2
+- g_list_14-sime_2
+- g_list_18-sime_2 .
+g_list_15-sime_2 = g_list_11-sime_2
++ g_list_12-sime_2
++ g_list_13-sime_2
++ g_list_14-sime_2
++ g_list_20-sime_2 .
+*当月の計算
+g_list_20-sime_3 = g_list_18-sime_2
++ g_list_09-sime_3
+- g_list_11-sime_3
+- g_list_12-sime_3
+- g_list_13-sime_3
+- g_list_14-sime_3
+- g_list_18-sime_3 .
+g_list_15-sime_3 = g_list_11-sime_3
++ g_list_12-sime_3
++ g_list_13-sime_3
++ g_list_14-sime_3
++ g_list_20-sime_3 .
+*翌月の計算
+g_list_20-sime_4 = g_list_18-sime_3
++ g_list_09-sime_4
+- g_list_11-sime_4
+- g_list_12-sime_4
+- g_list_13-sime_4
+- g_list_14-sime_4
+- g_list_18-sime_4 .
+g_list_15-sime_4 = g_list_11-sime_4
++ g_list_12-sime_4
++ g_list_13-sime_4
++ g_list_14-sime_4
++ g_list_20-sime_4 .
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_URIKAKE
+*&---------------------------------------------------------------------*
+*       標準コピープログラム(ZF011000_RFDOPO00)より
+*       売掛金合計の取得
+*----------------------------------------------------------------------*
+FORM frm_get_urikake.
+
+CLEAR : g_list_18 , l_dmshb .
+
+* ３ヶ月前
+SUBMIT zf011000_rfdopo00
+*--modify start 2010/06/14 m.murata
+*          with dd_kunnr eq p_kunnr   sign 'I'
+WITH dd_kunnr EQ st_kna1-kunnr   SIGN 'I'
+*--modify end   2010/06/14 m.murata
+WITH dd_bukrs EQ p_bukrs   SIGN 'I'
+WITH dd_stida EQ g_zfbdt0-high SIGN 'I'
+AND RETURN  .
+IMPORT l_dmshb FROM MEMORY ID 'HK'.
+g_list_18_sime_0 = l_dmshb / 100 .
+* 前々月
+SUBMIT zf011000_rfdopo00
+*--modify start 2010/06/14 m.murata
+*          with dd_kunnr eq p_kunnr   sign 'I'
+WITH dd_kunnr EQ st_kna1-kunnr   SIGN 'I'
+*--modify end   2010/06/14 m.murata
+WITH dd_bukrs EQ p_bukrs   SIGN 'I'
+WITH dd_stida EQ g_zfbdt1-high SIGN 'I'
+AND RETURN  .
+IMPORT l_dmshb FROM MEMORY ID 'HK'.
+g_list_18-sime_1 = l_dmshb / 100 .
+* 前月
+SUBMIT zf011000_rfdopo00
+*--modify start 2010/06/14 m.murata
+*          with dd_kunnr eq p_kunnr   sign 'I'
+WITH dd_kunnr EQ st_kna1-kunnr   SIGN 'I'
+*--modify end   2010/06/14 m.murata
+WITH dd_bukrs EQ p_bukrs   SIGN 'I'
+WITH dd_stida EQ g_zfbdt2-high SIGN 'I'
+AND RETURN  .
+IMPORT l_dmshb FROM MEMORY ID 'HK'.
+g_list_18-sime_2 = l_dmshb / 100 .
+* 今月
+SUBMIT zf011000_rfdopo00
+*--modify start 2010/06/14 m.murata
+*          with dd_kunnr eq p_kunnr   sign 'I'
+WITH dd_kunnr EQ st_kna1-kunnr   SIGN 'I'
+*--modify end   2010/06/14 m.murata
+WITH dd_bukrs EQ p_bukrs   SIGN 'I'
+WITH dd_stida EQ g_zfbdt3-high SIGN 'I'
+AND RETURN  .
+IMPORT l_dmshb FROM MEMORY ID 'HK'.
+g_list_18-sime_3 = l_dmshb / 100 .
+* 翌月
+SUBMIT zf011000_rfdopo00
+*--modify start 2010/06/14 m.murata
+*          with dd_kunnr eq p_kunnr   sign 'I'
+WITH dd_kunnr EQ st_kna1-kunnr   SIGN 'I'
+*--modify end   2010/06/14 m.murata
+WITH dd_bukrs EQ p_bukrs   SIGN 'I'
+WITH dd_stida EQ g_zfbdt4-high SIGN 'I'
+AND RETURN  .
+IMPORT l_dmshb FROM MEMORY ID 'HK'.
+g_list_18-sime_4 = l_dmshb / 100 .
+
+ENDFORM.                    " FRM_GET_URIKAKE
+*&---------------------------------------------------------------------*
+*&      Form  F_SUMNYUKIN_SUB
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM f_sumnyukin_sub.
+
+DATA : l_tab_bsad     LIKE STANDARD TABLE OF zf011000_typ_bsad .
+
+SELECT  budat gjahr augbl augdt shkzg dmbtr hkont zfbdt belnr
+FROM bsad
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bsad
+WHERE bukrs =  p_bukrs        " 会社コード
+*--modify start 2010/06/14 m.murata
+*                        and kunnr =  p_kunnr        " 得意先コード
+AND kunnr =  st_kna1-kunnr  " 得意先コード
+*--modify end   2010/06/14 m.murata
+AND blart IN s_blart        " 伝票タイプ
+AND hkont IN s_uyotei       " 売掛金入金予定
+AND augdt IN s_zfbdt        " 支払基準日と転記日
+AND bschl IN s_bschl .      " 転記キー
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+EXIT.
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_011 sy-subrc.
+ENDCASE.
+
+LOOP AT l_tab_bsad INTO wa_bsad .
+*  insert 2006/04/18 MIKAMI {
+PERFORM change_gjahr USING wa_bsad-augdt
+CHANGING wa_bsad-gjahr.
+* }insert 2006/04/18 MIKAMI
+APPEND wa_bsad TO g_tab_bsad .
+IF wa_bsad-augbl <> wa_bsad-belnr AND wa_bsad-belnr <> space .
+***
+*      SELECT * FROM BSAD WHERE  BUKRS =  P_BUKRS    " 会社コード
+*                           AND  KUNNR =  P_KUNNR    " 得意先コード
+*                           AND  BLART IN S_BLART    " 伝票タイプ
+*                           AND  HKONT IN S_UYOTEI   " 売掛金入金予定
+*                           AND  BSCHL IN S_BSCHL    " 転記キー
+*                           AND  AUGBL =  WA_BSAD-BELNR .
+*      ENDSELECT .
+*      IF SY-SUBRC = 0 AND BSAD-AUGDT IN S_ZFBDT .
+***
+IF wa_bsad-budat IN s_zfbdt .
+wa_bsad-augbl = wa_bsad-belnr .
+APPEND wa_bsad TO g_tab_bsad .
+ENDIF .
+ENDIF .
+ENDLOOP .
+
+* 会計伝票抽出処理
+LOOP AT g_tab_bsad INTO wa_bsad.
+SELECT gjahr buzei belnr shkzg hkont dmbtr zfbdt augbl FROM bseg
+INTO CORRESPONDING FIELDS OF wa_bseg
+WHERE  bukrs =  p_bukrs        " 会社コード
+AND   belnr =  wa_bsad-augbl  " 決済伝票番号
+AND   gjahr =  wa_bsad-gjahr  " 会計年度
+AND ( hkont IN s_genkin       " 現金勘定
+OR hkont IN s_tegata       " 手形勘定
+OR hkont IN s_tanyu        " 他入金勘定
+OR hkont IN s_sousai       " 相殺勘定
+OR hkont IN s_uyotei ) .   " 売掛勘定
+wa_bseg-augdt = wa_bsad-augdt.
+APPEND wa_bseg TO g_tab_bseg.
+ENDSELECT.
+ENDLOOP.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+EXIT.
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_011 sy-subrc.
+ENDCASE.
+
+* 相殺処理を行った会計伝票番号を取得
+LOOP AT g_tab_bsad INTO wa_bsad.
+SELECT gjahr buzei belnr shkzg hkont dmbtr zfbdt FROM bseg
+INTO CORRESPONDING FIELDS OF wa_bseg
+WHERE bukrs = p_bukrs        " 会社コード
+AND   belnr = wa_bsad-augbl  " 決済伝票番号
+AND   gjahr = wa_bsad-gjahr  " 会計年度
+AND   hkont IN s_sousai  .   " 相殺勘定
+APPEND wa_bsad TO g_tab_bsad_sosai.
+ENDSELECT.
+ENDLOOP.
+* 相殺処理を行った会計伝票の明細を取得する
+DATA : g_tab_bseg_sosai TYPE SORTED TABLE OF zf011000_typ_bseg
+WITH UNIQUE KEY belnr gjahr buzei .
+LOOP AT g_tab_bsad_sosai INTO wa_bsad.
+SELECT gjahr buzei belnr shkzg hkont dmbtr zfbdt FROM bseg
+INTO CORRESPONDING FIELDS OF wa_bseg
+WHERE bukrs =  p_bukrs        " 会社コード
+*--modify start 2010/06/14 m.murata
+*                        and   kunnr =  p_kunnr        " 得意先コード
+AND   kunnr =  st_kna1-kunnr  " 得意先コード
+*--modify end   2010/06/14 m.murata
+AND   belnr =  wa_bsad-augbl  " 伝票番号
+AND   gjahr =  wa_bsad-gjahr  " 会計年度
+AND ( hkont IN s_sousai       " 相殺勘定
+OR hkont IN s_uyotei ) .   " 売掛勘定
+wa_bseg-augdt = wa_bsad-budat.
+INSERT wa_bseg INTO TABLE g_tab_bseg_sosai.
+ENDSELECT.
+ENDLOOP.
+* 相殺金額の集計
+g_sousai_1 = 0.
+g_yotei_1  = 0.
+LOOP AT g_tab_bseg_sosai INTO wa_bseg.
+AT NEW belnr.
+g_sousai = 0.
+g_yotei  = 0.
+ENDAT.
+g_augdt = wa_bseg-augdt.
+IF wa_bseg-shkzg = 'H'.
+wa_bseg-dmbtr = wa_bseg-dmbtr * -1.
+ENDIF.
+IF wa_bseg-hkont IN s_sousai.
+g_sousai = g_sousai + wa_bseg-dmbtr.
+ENDIF.
+IF wa_bseg-hkont IN s_uyotei.
+g_yotei = g_yotei + wa_bseg-dmbtr.
+ENDIF.
+AT END OF belnr.
+g_sousai_1 = g_sousai_1 + g_sousai.
+g_yotei_1  = g_yotei_1  + g_yotei.
+ENDAT.
+ENDLOOP.
+* 得意先毎の合計から実相殺額を求める.
+IF g_sousai_1 < 0.
+g_sousai_1 = g_sousai_1 * -1.
+ENDIF.
+IF g_yotei_1 < 0.
+g_yotei_1  = g_yotei_1 * -1.
+ENDIF.
+wa_bseg-hkont = c_yotei .
+IF g_sousai > g_yotei .
+wa_bseg-dmbtr = g_yotei .
+ELSE .
+wa_bseg-dmbtr = g_sousai .
+ENDIF.
+wa_bseg-augdt = g_augdt .
+* 相殺額を抽出し構造テーブルに出力する
+APPEND wa_bseg TO g_tab_bseg.
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_012 sy-subrc.
+ENDCASE.
+
+ENDFORM.                    " F_SUMNYUKIN_SUB
+*&---------------------------------------------------------------------*
+*&      Form  f_sum_genkin
+*&---------------------------------------------------------------------*
+*       現金入金集計処理
+*----------------------------------------------------------------------*
+FORM f_sum_genkin_sub .
+
+DATA: lt_bseg TYPE SORTED TABLE OF zf011000_typ_bseg
+WITH UNIQUE KEY belnr gjahr buzei .
+
+DATA : l_11_1t LIKE STANDARD TABLE OF g_augbl ,
+l_11_2t LIKE STANDARD TABLE OF g_augbl ,
+l_11_3t LIKE STANDARD TABLE OF g_augbl ,
+l_11_4t LIKE STANDARD TABLE OF g_augbl ,
+l_12_1t LIKE STANDARD TABLE OF g_augbl ,
+l_12_2t LIKE STANDARD TABLE OF g_augbl ,
+l_12_3t LIKE STANDARD TABLE OF g_augbl ,
+l_12_4t LIKE STANDARD TABLE OF g_augbl ,
+l_13_1t LIKE STANDARD TABLE OF g_augbl ,
+l_13_2t LIKE STANDARD TABLE OF g_augbl ,
+l_13_3t LIKE STANDARD TABLE OF g_augbl ,
+l_13_4t LIKE STANDARD TABLE OF g_augbl ,
+l_14_1t LIKE STANDARD TABLE OF g_augbl ,
+l_14_2t LIKE STANDARD TABLE OF g_augbl ,
+l_14_3t LIKE STANDARD TABLE OF g_augbl ,
+l_14_4t LIKE STANDARD TABLE OF g_augbl .
+
+* 重複データ削除
+LOOP AT g_tab_bseg INTO wa_bseg.
+IF wa_bseg-shkzg = 'H'.
+wa_bseg-dmbtr = wa_bseg-dmbtr * -1.
+ENDIF.
+INSERT wa_bseg INTO TABLE lt_bseg.
+ENDLOOP.
+g_tab_bseg = lt_bseg.
+
+* 売掛金の集計
+LOOP AT g_tab_bsad INTO wa_bsad.
+LOOP AT g_tab_bseg INTO wa_bseg
+WHERE belnr =  wa_bsad-augbl .
+*   前々月の場合
+IF    wa_bseg-augdt >= g_zfbdt1-low
+AND wa_bseg-augdt <= g_zfbdt1-high.
+PERFORM frm_diff_account
+TABLES   l_11_1t l_12_1t l_13_1t l_14_1t
+USING    wa_bseg-hkont .
+ENDIF.
+*   前月の場合
+IF    wa_bseg-augdt >= g_zfbdt2-low
+AND wa_bseg-augdt <= g_zfbdt2-high.
+PERFORM frm_diff_account
+TABLES   l_11_2t l_12_2t l_13_2t l_14_2t
+USING    wa_bseg-hkont .
+ENDIF.
+*   当月の場合
+IF    wa_bseg-augdt >= g_zfbdt3-low
+AND wa_bseg-augdt <= g_zfbdt3-high.
+PERFORM frm_diff_account
+TABLES   l_11_3t l_12_3t l_13_3t l_14_3t
+USING    wa_bseg-hkont .
+ENDIF.
+*   翌月の場合
+IF    wa_bseg-augdt >= g_zfbdt4-low
+AND wa_bseg-augdt <= g_zfbdt4-high.
+PERFORM frm_diff_account
+TABLES   l_11_4t l_12_4t l_13_4t l_14_4t
+USING    wa_bseg-hkont .
+ENDIF.
+CLEAR : wa_bseg .
+ENDLOOP .
+CLEAR : wa_bsad .
+ENDLOOP .
+
+*金額の比較＆確定処理
+*// 前々月の場合 //*
+* 現金
+PERFORM frm_kingaku_taihi TABLES   l_11_1t  s_genkin
+USING    space
+CHANGING g_list_11-sime_1 .
+* 手形
+PERFORM frm_kingaku_taihi TABLES   l_12_1t  s_tegata
+USING    space
+CHANGING g_list_12-sime_1 .
+* 相殺
+PERFORM frm_kingaku_taihi TABLES   l_13_1t  s_sousai
+USING    space
+CHANGING g_list_13-sime_1 .
+* 他入金
+PERFORM frm_kingaku_taihi TABLES   l_14_1t  s_tanyu
+USING    space
+CHANGING g_list_14-sime_1 .
+*// 前月の場合 //*
+* 現金
+PERFORM frm_kingaku_taihi TABLES   l_11_2t  s_genkin
+USING    space
+CHANGING g_list_11-sime_2 .
+* 手形
+PERFORM frm_kingaku_taihi TABLES   l_12_2t  s_tegata
+USING    space
+CHANGING g_list_12-sime_2 .
+* 相殺
+PERFORM frm_kingaku_taihi TABLES   l_13_2t  s_sousai
+USING    space
+CHANGING g_list_13-sime_2 .
+* 他入金
+PERFORM frm_kingaku_taihi TABLES   l_14_2t  s_tanyu
+USING    space
+CHANGING g_list_14-sime_2 .
+*// 今月 //*
+* 現金
+PERFORM frm_kingaku_taihi TABLES   l_11_3t  s_genkin
+USING    space
+CHANGING g_list_11-sime_3 .
+* 手形
+PERFORM frm_kingaku_taihi TABLES   l_12_3t  s_tegata
+USING    space
+CHANGING g_list_12-sime_3 .
+* 相殺
+PERFORM frm_kingaku_taihi TABLES   l_13_3t  s_sousai
+USING    space
+CHANGING g_list_13-sime_3 .
+* 他入金
+PERFORM frm_kingaku_taihi TABLES   l_14_3t  s_tanyu
+USING    space
+CHANGING g_list_14-sime_3 .
+*// 翌月 //*
+* 現金
+PERFORM frm_kingaku_taihi TABLES   l_11_4t  s_genkin
+USING    space
+CHANGING g_list_11-sime_4 .
+* 手形
+PERFORM frm_kingaku_taihi TABLES   l_12_4t  s_tegata
+USING    space
+CHANGING g_list_12-sime_4 .
+* 相殺
+PERFORM frm_kingaku_taihi TABLES   l_13_4t  s_sousai
+USING    space
+CHANGING g_list_13-sime_4 .
+* 他入金
+PERFORM frm_kingaku_taihi TABLES   l_14_4t  s_tanyu
+USING    space
+CHANGING g_list_14-sime_4 .
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_BSEG
+*&---------------------------------------------------------------------*
+FORM frm_select_bseg TABLES   pt_augbl
+USING    p_sime_sum .
+
+CLEAR : p_sime_sum , g_augbl .
+DATA  : l_rec    TYPE p          ,   " 伝票カウント
+l_shkzg  LIKE bsad-shkzg ,   " 貸借フラグ
+l_dmbtr  LIKE bseg-dmbtr .
+
+DESCRIBE TABLE pt_augbl LINES l_rec.
+IF l_rec <> 0 .
+*-- 会計伝票の集計
+SELECT dmbtr shkzg
+INTO (l_dmbtr,l_shkzg) FROM bseg
+WHERE bukrs =  p_bukrs     "会社コード
+AND belnr IN pt_augbl    "
+*--modify start 2010/06/14 m.murata
+*                      and kunnr =  p_kunnr     "得意先コード
+AND kunnr =  st_kna1-kunnr  "得意先コード
+*--modify end   2010/06/14 m.murata
+AND hkont =  '0001107004' .
+IF sy-subrc = 0 .
+IF l_shkzg = 'S' .
+l_dmbtr = l_dmbtr * -1 .
+ENDIF .
+p_sime_sum = p_sime_sum + l_dmbtr .
+ENDIF .
+ENDSELECT .
+ENDIF .
+
+ENDFORM.                    " FRM_SELECT_BSAD
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_BSAD
+*&---------------------------------------------------------------------*
+FORM frm_select_bsad TABLES   pt_augbl p_hkont
+USING    p_sime_sum .
+
+CLEAR : p_sime_sum , g_augbl .
+DATA  : l_rec     TYPE p          ,  " 伝票カウント
+l_sum1    LIKE bseg-dmbtr ,  " 合計
+l_sum2    LIKE bseg-dmbtr ,  " 合計
+l_shkzg   LIKE bsad-shkzg ,  " 貸借フラグ
+l_kunnr   LIKE bsad-kunnr ,  " 得意先コード(取得用)
+l_kunnr_2 LIKE bsad-kunnr ,  " 得意先コード(退避用)
+l_flg     TYPE c          ,  " フラグ
+l_dmbtr   LIKE bseg-dmbtr .  " 金額(取得用)
+
+
+DESCRIBE TABLE pt_augbl LINES l_rec.
+IF l_rec <> 0 .
+LOOP AT g_tab_bseg INTO wa_bseg
+WHERE belnr IN pt_augbl     " 伝票番号
+AND hkont IN p_hkont   .  " 勘定コード
+l_sum1 = l_sum1 + wa_bseg-dmbtr .
+ENDLOOP.
+ENDIF .
+*-- ①入金予定and得意先以外
+SELECT dmbtr shkzg kunnr
+INTO (l_dmbtr,l_shkzg,l_kunnr) FROM bsad
+WHERE bukrs =  p_bukrs       "会社コード
+*--modify start 2010/06/14 m.murata
+*                      and kunnr <> p_kunnr       "得意先コード
+AND kunnr <> st_kna1-kunnr "得意先コード
+*--modify end   2010/06/14 m.murata
+AND hkont =  '0001107004'  "勘定コード
+AND augbl IN pt_augbl      "決済伝票番号
+AND blart IN s_blart       "伝票タイプ
+AND zfbdt IN s_zfbdt       "支払基準日
+AND bschl IN s_bschl .     "転記キー
+IF sy-subrc = 0 .
+IF l_kunnr_2 <> space AND l_kunnr_2 <> l_kunnr .
+l_flg = 'X' .
+p_sime_sum = l_sum1 * -1 .
+EXIT .
+ENDIF .
+IF l_shkzg = 'S' .
+l_dmbtr = l_dmbtr * -1 .
+ENDIF .
+l_sum2    = l_sum2 + l_dmbtr .
+l_kunnr_2 = l_kunnr .
+ENDIF .
+ENDSELECT .
+IF l_flg = space .
+p_sime_sum = ( l_sum2 - l_sum1 ) .
+ENDIF .
+
+ENDFORM.                    " FRM_SELECT_BSEG
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SELECT_TAIHI
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM frm_kingaku_taihi TABLES   p_tab  p_hkont
+USING    p_flg
+CHANGING p_list .
+
+DATA : l_sime_bsad LIKE bseg-dmbtr ,
+l_sime_bseg LIKE bseg-dmbtr .
+
+PERFORM frm_select_bseg TABLES p_tab
+USING  l_sime_bseg .
+PERFORM frm_select_bsad TABLES p_tab   p_hkont
+USING  l_sime_bsad .
+*-  手形以外の場合
+IF p_flg = space .
+IF l_sime_bsad < 0 .
+l_sime_bsad = l_sime_bsad * -1 .
+ENDIF .
+IF l_sime_bseg < 0 .
+l_sime_bseg = l_sime_bseg * -1 .
+ENDIF .
+ENDIF .
+*-  対比
+IF l_sime_bsad > l_sime_bseg .
+p_list = l_sime_bseg .
+ELSE .
+p_list = l_sime_bsad .
+ENDIF .
+*-  手形の場合
+IF p_flg = 'X' .
+IF p_list < 0 .
+p_list = p_list * -1 .
+ENDIF .
+ENDIF .
+
+ENDFORM.                    " FRM_SELECT_TAIHI
+*  insert 2006/04/21 MIKAMI {
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_PERIV
+*&---------------------------------------------------------------------*
+*       会計年度バリアント取得
+*----------------------------------------------------------------------*
+FORM f_get_periv.
+
+CLEAR:g_periv.
+
+SELECT SINGLE periv                           "会計年度バリアント
+INTO g_periv
+FROM t001
+WHERE bukrs = p_bukrs.
+
+IF sy-subrc <> 0.
+MESSAGE s400(z1) WITH '会計年度バリアントが取得できません'.
+STOP.
+ENDIF.
+
+ENDFORM.                    " F_GET_PERIV
+
+*&---------------------------------------------------------------------*
+*&      Form  change_GJAHR
+*&---------------------------------------------------------------------*
+*       決済日付を元に会計年度を決済伝票の年度に変更
+*----------------------------------------------------------------------*
+FORM change_gjahr USING p_date
+CHANGING p_gjahr.
+
+CALL FUNCTION 'DATE_TO_PERIOD_CONVERT'
+EXPORTING
+i_date         = p_date
+i_periv        = g_periv
+IMPORTING
+*            E_BUPER        = WK_POPER  "会計期間
+e_gjahr        = p_gjahr  "転記日付(年度)
+EXCEPTIONS
+input_false    = 1
+t009_notfound  = 2
+t009b_notfound = 3
+OTHERS         = 4.
+
+ENDFORM.                    " change_GJAHR
+* }insert 2006/04/21 MIKAMI
+*2006/07 J.CB ADD_START
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_UKURS
+*&---------------------------------------------------------------------*
+*      換算レートを取得
+*----------------------------------------------------------------------*
+*2007/04/20 DEL START
+*FORM F_GET_UKURS.
+*
+*  REFRESH : G_TAB_TCURR, G_TAB_TYPES_TCURR.
+*
+*  SELECT UKURS GDATU FROM TCURR
+*         INTO CORRESPONDING FIELDS OF WA_TCURR
+*         WHERE KURST = 'M'               "換算レートタイプ
+*           AND FCURR = WA_KNVV-WAERS     "換算前通貨
+*           AND TCURR = C_JPY .           "換算後通貨
+**           ORDER BY GDATU ASCENDING.
+*  CASE SY-SUBRC.
+*    WHEN 0.
+*    WHEN 4."対象データなし
+*    WHEN OTHERS.
+*      MESSAGE A603 WITH SY-REPID C_TBL_TCURR SY-SUBRC.
+*  ENDCASE.
+**   INVERTED-DATE型をDATE型に変更
+*    CONVERT INVERTED-DATE WA_TCURR-GDATU INTO DATE WA_TYPES_TCURR-BUDAT
+*.
+*    WA_TYPES_TCURR-UKURS = WA_TCURR-UKURS.
+*    APPEND WA_TYPES_TCURR TO G_TAB_TYPES_TCURR.
+*  ENDSELECT.
+*  CLEAR : WA_TYPES_TCURR,WA_TCURR.
+*
+*  SORT G_TAB_TYPES_TCURR DESCENDING BY BUDAT.
+*
+*ENDFORM.
+*2007/04/20 DEL END
+*&---------------------------------------------------------------------*
+*&      Form  F_CHANGE_WRBTR_AR
+*&---------------------------------------------------------------------*
+*       伝票の通貨コードが得意先通貨コードと違う場合：伝票通貨額を
+*　　　 換算レートを介して変更
+*----------------------------------------------------------------------*
+FORM f_change_wrbtr_ar USING p_belnr      "会計伝票番号
+p_gjahr      "会計年度
+CHANGING p_wrbtr.     "伝票通貨額
+
+DATA: temp_waers LIKE bkpf-waers,    "伝票通貨コード
+temp_budat LIKE bkpf-budat.    "伝票転記日付
+
+*2007/04/20 MOD START
+CLEAR : temp_waers , temp_budat.
+*  CLEAR : WA_TCURR , TEMP_WAERS , TEMP_BUDAT.
+*2007/04/20 MOD END
+
+* 伝票の通貨コードと転記日を取得
+SELECT SINGLE waers budat INTO (temp_waers,temp_budat) FROM bkpf
+WHERE bukrs = p_bukrs     "会社コード
+AND belnr = p_belnr     "伝票番号
+AND gjahr = p_gjahr.    "会計年度
+
+IF sy-subrc = 0 .
+*    伝票通貨コードが対象以外の場合、フラグ設定
+IF temp_waers = wa_knvv-waers.
+EXIT.
+ELSEIF temp_waers <> wa_knvv-waers AND temp_waers <> c_jpy .
+*      対象以外の外貨分が含まれるフラグ設定
+g_change_wrbtr_flg = '1'.
+CLEAR: p_wrbtr.
+*    伝票通貨コードが得意先通貨コードを違う場合
+ELSEIF temp_waers <> wa_knvv-waers .
+*      換算レート取得
+*2007/04/20 MOD START
+PERFORM convert_to_local_currency USING    temp_budat
+CHANGING wa_types_tcurr-ukurs.
+
+IF wa_types_tcurr-ukurs <> '' OR wa_types_tcurr-ukurs <> 0.
+p_wrbtr = p_wrbtr * 100 / wa_types_tcurr-ukurs."金額換算
+*　　   対象以外のフラグが設定されない場合、レート換算ありフラグを設定
+IF g_change_wrbtr_flg <> '1'.
+g_change_wrbtr_flg = '2'.
+ENDIF.
+ENDIF.
+
+*      LOOP AT G_TAB_TYPES_TCURR INTO WA_TYPES_TCURR
+*                           WHERE BUDAT < TEMP_BUDAT.
+*          IF WA_TYPES_TCURR-UKURS <> '' OR WA_TYPES_TCURR-UKURS <> 0.
+*            P_WRBTR = P_WRBTR * 100 / WA_TYPES_TCURR-UKURS."金額換算
+**　　対象以外のフラグが設定されない場合、レート換算ありフラグを設定
+*            IF G_CHANGE_WRBTR_FLG <> '1'.
+*              G_CHANGE_WRBTR_FLG = '2'.
+*            ENDIF.
+*          ENDIF.
+*          EXIT.
+*      ENDLOOP.
+*2007/04/20 MOD END
+ENDIF.
+ENDIF.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_CHANGE_WRBTR
+*&---------------------------------------------------------------------*
+*       伝票の通貨コードが得意先通貨コードと違う場合：伝票通貨額を
+*　　　 換算レートを介して変更
+*----------------------------------------------------------------------*
+FORM f_change_wrbtr USING p_belnr      "会計伝票番号
+p_augdt      "決済日付
+p_augbl      "決済伝票番号
+p_waers      "通貨コード
+CHANGING p_wrbtr.     "伝票通貨額
+
+DATA: temp_waers LIKE bkpf-waers,    "伝票通貨コード
+temp_wrbtr LIKE bsad-wrbtr,    "伝票通貨額
+temp_budat LIKE bkpf-budat.    "伝票転記日付
+
+*2007/04/20 MOD START
+CLEAR : temp_waers , temp_wrbtr , temp_budat.
+*  CLEAR : WA_TCURR , TEMP_WAERS , TEMP_WRBTR , TEMP_BUDAT.
+*2007/04/20 MOD END
+
+*    伝票通貨コードが対象以外の場合、フラグ設定
+IF p_waers <> c_jpy .
+*      対象以外の外貨分が含まれるフラグ設定
+g_change_wrbtr_flg = '1'.
+CLEAR : p_wrbtr.
+ELSE.
+SELECT SINGLE waers wrbtr budat INTO
+(temp_waers,temp_wrbtr,temp_budat) FROM bsad
+WHERE bukrs = p_bukrs     "会社コード
+*--modify start 2010/06/14 m.murata
+*           and kunnr = p_kunnr     "得意先コード
+AND kunnr = st_kna1-kunnr     "得意先コード
+*--modify end   2010/06/14 m.murata
+AND augbl = p_augbl     "決済伝票番号
+AND augdt = p_augdt     "決済日付
+AND belnr <> p_belnr.   "伝票番号
+IF sy-subrc = 0 .
+*通貨コードが得意先通過コードと同じ場合
+IF temp_waers = wa_knvv-waers.
+p_wrbtr = temp_wrbtr.
+*通貨コードがJPYの場合
+ELSEIF temp_waers = c_jpy.
+*      換算レート取得
+*2007/04/20 MOD START
+PERFORM convert_to_local_currency USING    temp_budat
+CHANGING wa_types_tcurr-ukurs.
+
+IF wa_types_tcurr-ukurs <> '' OR wa_types_tcurr-ukurs <> 0.
+p_wrbtr = p_wrbtr * 100 / wa_types_tcurr-ukurs .  "金額換算
+ENDIF.
+
+*        LOOP AT G_TAB_TYPES_TCURR INTO WA_TYPES_TCURR
+*                             WHERE BUDAT < TEMP_BUDAT.
+*          IF WA_TYPES_TCURR-UKURS <> '' OR WA_TYPES_TCURR-UKURS <> 0.
+*            P_WRBTR = P_WRBTR * 100 / WA_TYPES_TCURR-UKURS .  "金額換算
+*          ENDIF.
+*          EXIT.
+*        ENDLOOP.
+*2007/04/20 MOD END
+*　　対象以外のフラグが設定されない場合、レート換算ありフラグを設定
+IF g_change_wrbtr_flg <> '1'.
+g_change_wrbtr_flg = '2'.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDIF.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_MONEY_RECEIVED
+*&---------------------------------------------------------------------*
+*       入金集計
+*----------------------------------------------------------------------*
+FORM f_money_received.
+* 現金、手形、相殺、他入金集計処理
+PERFORM f_sum_nyukin .
+
+FREE: g_tab_bseg,g_tab_bseg.
+* 入金計計算
+g_list_15-sime_1 = g_list_11-sime_1 + g_list_12-sime_1
++ g_list_13-sime_1 + g_list_14-sime_1.
+g_list_15-sime_2 = g_list_11-sime_2 + g_list_12-sime_2
++ g_list_13-sime_2 + g_list_14-sime_2.
+g_list_15-sime_3 = g_list_11-sime_3 + g_list_12-sime_3
++ g_list_13-sime_3 + g_list_14-sime_3.
+g_list_15-sime_4 = g_list_11-sime_4 + g_list_12-sime_4
++ g_list_13-sime_4 + g_list_14-sime_4.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_SUM_NYUKIN
+*&---------------------------------------------------------------------*
+*       現金、手形、相殺、他入金集計処理
+*----------------------------------------------------------------------*
+FORM f_sum_nyukin.
+
+* 入力得意先の入金予定情報を取得
+PERFORM f_tokui_yotei.
+* 現金、手形、相殺、他入金の情報を取得
+PERFORM f_nyukin.
+* 現金、手形、相殺、他入金集計
+PERFORM f_nyukin_sum.
+* 入金予定情報取得
+PERFORM f_yotei.
+* 各締め日において、現金、手形、相殺、他入金を集計
+PERFORM f_kingaku_taihi.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_YOTEI_NYUKI
+*&---------------------------------------------------------------------*
+*       入力得意先の入金予定情報を取得
+*----------------------------------------------------------------------*
+FORM f_tokui_yotei.
+
+DATA : l_tab_bsad     LIKE STANDARD TABLE OF zf011000_typ_bsad .
+
+*入力得意先の入金予定情報を取得
+SELECT DISTINCT belnr gjahr FROM bsad
+INTO CORRESPONDING FIELDS OF TABLE g_tab_bsad
+WHERE bukrs =  p_bukrs        " 会社コード
+*--modify start 2010/06/14 m.murata
+*                        and kunnr =  p_kunnr        " 得意先コード
+AND kunnr =  st_kna1-kunnr  " 得意先コード
+*--modify end   2010/06/14 m.murata
+AND hkont IN s_uyotei       " 売掛金入金予定
+AND augdt IN s_zfbdt        " 支払基準日と転記日
+AND bschl IN s_bschl .      " 転記キー
+
+CASE sy-subrc.
+WHEN 0.
+WHEN 4."対象データなし
+EXIT.
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_011 sy-subrc.
+ENDCASE.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_NYUKI
+*&---------------------------------------------------------------------*
+*       現金、手形、相殺、他入金の情報を取得
+*----------------------------------------------------------------------*
+FORM f_nyukin.
+
+DATA:
+l_tab_bseg_genkin LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+l_tab_bseg_tegata LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+l_tab_bseg_sousai LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+l_tab_bseg_tanyu  LIKE STANDARD TABLE OF zf011000_typ_bseg .
+
+LOOP AT g_tab_bsad INTO wa_bsad.
+*  　現金入金情報取得
+SELECT gjahr belnr shkzg hkont wrbtr augbl dmbtr FROM bseg
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bseg_genkin
+WHERE  bukrs =  p_bukrs            " 会社コード
+AND   belnr =  wa_bsad-belnr      " 会計伝票番号
+AND   gjahr =  wa_bsad-gjahr      " 会計年度
+AND   hkont IN s_genkin .         " 現金勘定
+IF sy-subrc = 0.
+LOOP AT l_tab_bseg_genkin INTO wa_bseg_genkin.
+*       伝票の通貨コードと転記日を取得
+PERFORM f_get_waers_budat USING wa_bseg_genkin-belnr
+wa_bseg_genkin-gjahr
+CHANGING wa_bseg_genkin-waers
+wa_bseg_genkin-budat.
+APPEND wa_bseg_genkin TO g_tab_bseg_genkin.
+ENDLOOP.
+ELSEIF sy-subrc <> 4.
+MESSAGE a603 WITH sy-repid c_tbl_012 sy-subrc.
+ENDIF.
+*      ソート内部テーブル
+SORT g_tab_bseg_genkin BY belnr gjahr.
+CLEAR: wa_bseg_genkin.
+REFRESH: l_tab_bseg_genkin.
+
+*  　手形入金情報取得
+SELECT gjahr belnr shkzg hkont wrbtr augbl dmbtr FROM bseg
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bseg_tegata
+WHERE  bukrs =  p_bukrs            " 会社コード
+AND   belnr =  wa_bsad-belnr      " 決済伝票番号
+AND   gjahr =  wa_bsad-gjahr      " 会計年度
+AND   hkont IN s_tegata.          " 手形勘定
+IF sy-subrc = 0.
+LOOP AT l_tab_bseg_tegata INTO wa_bseg_tegata.
+*       伝票の通貨コードと転記日を取得
+PERFORM f_get_waers_budat USING wa_bseg_tegata-belnr
+wa_bseg_tegata-gjahr
+CHANGING wa_bseg_tegata-waers
+wa_bseg_tegata-budat.
+APPEND wa_bseg_tegata TO g_tab_bseg_tegata.
+ENDLOOP.
+ELSEIF sy-subrc <> 4.
+MESSAGE a603 WITH sy-repid c_tbl_012 sy-subrc.
+ENDIF.
+*      ソート内部テーブル
+SORT g_tab_bseg_tegata BY belnr gjahr.
+CLEAR: wa_bseg_tegata.
+REFRESH: l_tab_bseg_tegata.
+
+*  　相殺入金情報取得
+SELECT gjahr belnr shkzg hkont wrbtr augbl dmbtr FROM bseg
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bseg_sousai
+WHERE  bukrs =  p_bukrs            " 会社コード
+AND   belnr =  wa_bsad-belnr      " 決済伝票番号
+AND   gjahr =  wa_bsad-gjahr      " 会計年度
+AND   hkont IN s_sousai.          " 相殺勘定
+IF sy-subrc = 0.
+LOOP AT l_tab_bseg_sousai INTO wa_bseg_sousai.
+*       伝票の通貨コードと転記日を取得
+PERFORM f_get_waers_budat USING wa_bseg_sousai-belnr
+wa_bseg_sousai-gjahr
+CHANGING wa_bseg_sousai-waers
+wa_bseg_sousai-budat.
+APPEND wa_bseg_sousai TO g_tab_bseg_sousai.
+ENDLOOP.
+ELSEIF sy-subrc <> 4.
+MESSAGE a603 WITH sy-repid c_tbl_012 sy-subrc.
+ENDIF.
+*      ソート内部テーブル
+SORT g_tab_bseg_sousai BY belnr gjahr.
+CLEAR: wa_bseg_sousai.
+REFRESH: l_tab_bseg_sousai.
+
+*  　他入金情報取得
+SELECT gjahr belnr shkzg hkont wrbtr augbl dmbtr FROM bseg
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bseg_tanyu
+WHERE  bukrs =  p_bukrs            " 会社コード
+AND   belnr =  wa_bsad-belnr      " 決済伝票番号
+AND   gjahr =  wa_bsad-gjahr      " 会計年度
+AND   hkont IN s_tanyu.           " 他入金勘定
+IF sy-subrc = 0.
+LOOP AT l_tab_bseg_tanyu INTO wa_bseg_tanyu.
+*       伝票の通貨コードと転記日を取得
+PERFORM f_get_waers_budat USING wa_bseg_tanyu-belnr
+wa_bseg_tanyu-gjahr
+CHANGING wa_bseg_tanyu-waers
+wa_bseg_tanyu-budat.
+APPEND wa_bseg_tanyu TO g_tab_bseg_tanyu.
+ENDLOOP.
+ELSEIF sy-subrc <> 4.
+MESSAGE a603 WITH sy-repid c_tbl_012 sy-subrc.
+ENDIF.
+*      ソート内部テーブル
+SORT g_tab_bseg_tanyu BY belnr gjahr.
+CLEAR: wa_bseg_tanyu.
+REFRESH: l_tab_bseg_tanyu.
+ENDLOOP.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_BUDAT
+*&---------------------------------------------------------------------*
+*         伝票の転記日付を取得
+*----------------------------------------------------------------------*
+FORM f_get_budat USING p_belnr  "会計伝票番号
+p_gjahr  "会計年度
+CHANGING p_budat. "転記日
+
+DATA: temp_budat TYPE bkpf-budat.    "伝票の転記日
+SELECT SINGLE budat FROM bkpf
+INTO temp_budat
+WHERE bukrs = p_bukrs  "会社コード
+AND belnr = p_belnr  "会計伝票番号
+AND gjahr = p_gjahr. "会計年度
+CASE sy-subrc.
+WHEN 0.
+p_budat = temp_budat.                  "伝票の転記日を取得
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_bkpf sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_WAERS_BUDAT
+*&---------------------------------------------------------------------*
+*         伝票の通貨コードと転記日を取得
+*----------------------------------------------------------------------*
+FORM f_get_waers_budat USING p_belnr  "会計伝票番号
+p_gjahr  "会計年度
+CHANGING p_waers  "通貨コード
+p_budat. "転記日
+DATA: temp_waers TYPE bkpf-waers.    "伝票の通貨コード
+DATA: temp_budat TYPE bkpf-budat.    "伝票の転記日
+SELECT SINGLE waers budat FROM bkpf
+INTO (temp_waers, temp_budat)
+WHERE bukrs = p_bukrs  "会社コード
+AND belnr = p_belnr  "会計伝票番号
+AND gjahr = p_gjahr. "会計年度
+CASE sy-subrc.
+WHEN 0.
+p_waers = temp_waers.                  "伝票の通貨コードを取得
+p_budat = temp_budat.                  "伝票の転記日を取得
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_bkpf sy-subrc.
+ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_NYUKIN_SUM
+*&---------------------------------------------------------------------*
+*       入金集計
+*----------------------------------------------------------------------*
+FORM f_nyukin_sum.
+
+* 現金入金の情報を伝票毎に伝票通貨額を集計
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_genkin
+g_tab_bseg_genkin_sum.
+* 手形入金の情報を伝票毎に伝票通貨額を集計
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_tegata
+g_tab_bseg_tegata_sum.
+* 相殺の情報を伝票毎に伝票通貨額を集計
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_sousai
+g_tab_bseg_sousai_sum.
+* 他入金の情報を伝票毎に伝票通貨額を集計
+*2007/04/20 ADD START
+g_tanyu_flg = cns_1.
+*2007/04/20 ADD END
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_tanyu
+g_tab_bseg_tanyu_sum.
+*2007/04/20 ADD START
+CLEAR g_tanyu_flg.
+*2007/04/20 ADD END
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_NYUKIN_SUM
+*&---------------------------------------------------------------------*
+*       入金集計SUB
+*----------------------------------------------------------------------*
+FORM f_nyukin_sum_sub TABLES
+p_tab1 "現金、手形、相殺、他入金、入金予定情報
+p_tab2. "金額集計後情報
+
+DATA : l_tab_bseg_temp LIKE STANDARD TABLE OF zf011000_typ_bseg.
+DATA : wa_tab_temp     LIKE zf011000_typ_bseg  VALUE IS INITIAL,
+wa_tab1         LIKE zf011000_typ_bseg  VALUE IS INITIAL,
+wa_tab2         LIKE zf011000_typ_bseg  VALUE IS INITIAL.
+DATA : g_kingaku       LIKE knkk-klimk.  "伝票毎の金額集計用
+*2007/04/20 ADD START
+DATA : l_ukurs         TYPE tcurr-ukurs. "換算レート
+*2007/04/20 ADD END
+REFRESH:l_tab_bseg_temp.
+
+* 現金、手形、相殺、他入金、入金予定情報の内部テーブルをコピー
+LOOP AT p_tab1 INTO wa_tab_temp.
+APPEND wa_tab_temp TO l_tab_bseg_temp.
+ENDLOOP.
+* 現金、手形、相殺、他入金、入金予定情報を伝票毎に集計
+LOOP AT l_tab_bseg_temp INTO wa_tab1.
+wa_tab2-belnr = wa_tab1-belnr.
+wa_tab2-gjahr = wa_tab1-gjahr.
+wa_tab2-budat = wa_tab1-budat.
+wa_tab2-waers = wa_tab1-waers.
+AT NEW gjahr.
+g_kingaku = 0.
+ENDAT.
+IF wa_knvv-waers = c_jpy.
+IF wa_tab1-shkzg = 'H'.
+wa_tab1-dmbtr = wa_tab1-dmbtr * -1.
+ENDIF.
+g_kingaku = g_kingaku + wa_tab1-dmbtr.
+ELSE.
+IF wa_tab1-shkzg = 'H'.
+wa_tab1-wrbtr = wa_tab1-wrbtr * -1.
+ENDIF.
+g_kingaku = g_kingaku + wa_tab1-wrbtr.
+ENDIF.
+AT END OF gjahr.
+IF wa_knvv-waers = c_jpy.
+wa_tab2-dmbtr = g_kingaku.
+ELSE.
+wa_tab2-wrbtr = g_kingaku.
+*2007/04/20 ADD START
+*       得意先通貨が外貨・入金伝票通貨がJPYで、他入金の場合のみ、
+*       入金の伝票通貨をレート換算する
+IF wa_tab2-waers = c_jpy AND
+g_tanyu_flg   = cns_1.
+PERFORM convert_to_local_currency USING    wa_tab2-budat
+CHANGING l_ukurs.
+wa_tab2-wrbtr  = wa_tab2-wrbtr * 100 / l_ukurs.
+ENDIF.
+*2007/04/20 ADD END
+ENDIF.
+APPEND wa_tab2 TO p_tab2.
+ENDAT.
+ENDLOOP.
+CLEAR: wa_tab_temp,wa_tab1,wa_tab2.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_YOTEI
+*&---------------------------------------------------------------------*
+*       入金予定情報取得
+*----------------------------------------------------------------------*
+FORM f_yotei.
+
+* 現金入金に対して、入金予定情報を取得
+PERFORM f_yotei_sub TABLES g_tab_bseg_genkin_sum
+g_tab_bseg_genkin_yo.
+* 手形入金に対して、入金予定情報を取得
+PERFORM f_yotei_sub TABLES g_tab_bseg_tegata_sum
+g_tab_bseg_tegata_yo.
+* 相殺に対して、入金予定情報を取得
+PERFORM f_yotei_sub TABLES g_tab_bseg_sousai_sum
+g_tab_bseg_sousai_yo.
+* 他入金に対して、入金予定情報を取得
+g_tanyu_flg = cns_1.    "他入金フラグを設定
+PERFORM f_yotei_sub TABLES g_tab_bseg_tanyu_sum
+g_tab_bseg_tanyu_yo.
+CLEAR: g_tanyu_flg.    "他入金フラグ設定をクリア
+
+* 現金入金の情報に対して、入金予定の伝票毎に伝票通貨額を集計
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_genkin_yo
+g_tab_bseg_genkin_yo_sum.
+* 手形入金の情報に対して、入金予定の伝票毎に伝票通貨額を集計
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_tegata_yo
+g_tab_bseg_tegata_yo_sum.
+* 相殺入金の情報に対して、入金予定の伝票毎に伝票通貨額を集計
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_sousai_yo
+g_tab_bseg_sousai_yo_sum.
+* 他入金の情報に対して、入金予定の伝票毎に伝票通貨額を集計
+PERFORM f_nyukin_sum_sub TABLES g_tab_bseg_tanyu_yo
+g_tab_bseg_tanyu_yo_sum.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_YOTEI_SUB
+*&---------------------------------------------------------------------*
+*       入金予定情報取得SUB
+*----------------------------------------------------------------------*
+FORM f_yotei_sub TABLES p_tab1  "現金、手形、相殺、他入金
+p_tab2. "入金予定情報
+
+DATA:
+l_tab_bseg_nyukin LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+l_tab_bseg_yotei1 LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+l_tab_bseg_yotei2 LIKE STANDARD TABLE OF zf011000_typ_bseg ,
+wa_l_bseg LIKE zf011000_typ_bseg  VALUE IS INITIAL,
+wa_l_yotei LIKE zf011000_typ_bseg  VALUE IS INITIAL,
+wa_tab1 LIKE zf011000_typ_bseg  VALUE IS INITIAL,
+wa_tab2 LIKE zf011000_typ_bseg  VALUE IS INITIAL.
+REFRESH: l_tab_bseg_nyukin,l_tab_bseg_yotei1,l_tab_bseg_yotei2.
+
+* 現金、手形、相殺、他入金テーブルコピー
+LOOP AT p_tab1 INTO wa_l_bseg.
+APPEND wa_l_bseg TO l_tab_bseg_nyukin.
+ENDLOOP.
+*  L_TAB_BSEG_NYUKIN = P_TAB1.
+
+LOOP AT l_tab_bseg_nyukin INTO wa_tab1.
+*  　現金、手形、相殺、他入金に対して、入金予定情報取得
+SELECT gjahr belnr shkzg hkont wrbtr augdt augbl dmbtr FROM bseg
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bseg_yotei1
+WHERE  bukrs = p_bukrs                " 会社コード
+*--modify start 2010/06/14 m.murata
+*                and    kunnr = p_kunnr                 "得意先コード
+AND    kunnr = st_kna1-kunnr           "得意先コード
+*--modify end   2010/06/14 m.murata
+AND    belnr = wa_tab1-belnr           " 会計伝票番号
+AND    gjahr = wa_tab1-gjahr           " 会計年度
+AND   hkont IN s_uyotei.               " 売掛金入金予定
+
+LOOP AT l_tab_bseg_yotei1 INTO wa_tab2.
+wa_tab2-waers = wa_tab1-waers.
+wa_tab2-budat = wa_tab1-budat.
+*    伝票の通貨コードが得意先の通貨コードと違う場合：金額換算換算処理
+IF wa_tab2-waers <> wa_knvv-waers AND wa_knvv-waers <> c_jpy.
+*       他入金以外の金額換算換算処理
+IF g_tanyu_flg <> cns_1.  "他入金ではない場合
+PERFORM f_change_wrbtr USING wa_tab2-belnr
+wa_tab2-augdt
+wa_tab2-augbl
+wa_tab2-waers
+CHANGING wa_tab2-wrbtr.
+ELSEIF wa_knvv-waers <> c_jpy.
+*       他入金の金額換算換算処理
+PERFORM f_change_wrbtr_ar USING wa_tab2-belnr
+wa_tab2-gjahr
+CHANGING  wa_tab2-wrbtr.
+ENDIF.
+ENDIF.
+APPEND wa_tab2 TO l_tab_bseg_yotei2.
+ENDLOOP.
+*      ソート内部テーブル
+SORT l_tab_bseg_yotei2 BY belnr gjahr.
+*      入金予定情報をコピー
+LOOP AT l_tab_bseg_yotei2 INTO wa_l_yotei.
+APPEND wa_l_yotei TO p_tab2.
+ENDLOOP.
+*      P_TAB2 = L_TAB_BSEG_YOTEI2.
+CLEAR: wa_tab2,wa_l_yotei,wa_l_bseg.
+REFRESH: l_tab_bseg_yotei1,l_tab_bseg_yotei2.
+ENDLOOP.
+CLEAR : wa_l_bseg,wa_l_yotei,wa_tab1,wa_tab1.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_KINGAKU_TAIHI
+*&---------------------------------------------------------------------*
+*       各締め日において、現金、手形、相殺、他入金を集計
+*----------------------------------------------------------------------*
+FORM f_kingaku_taihi.
+
+* 現金集計処理
+PERFORM f_kingaku_taihi_sub TABLES g_tab_bseg_genkin_sum
+g_tab_bseg_genkin_yo_sum
+USING g_list_11-sime_1
+g_list_11-sime_2
+g_list_11-sime_3
+g_list_11-sime_4.
+* 手形集計処理
+PERFORM f_kingaku_taihi_sub TABLES g_tab_bseg_tegata_sum
+g_tab_bseg_tegata_yo_sum
+USING g_list_12-sime_1
+g_list_12-sime_2
+g_list_12-sime_3
+g_list_12-sime_4.
+* 相殺集計処理
+PERFORM f_kingaku_taihi_sub TABLES g_tab_bseg_sousai_sum
+g_tab_bseg_sousai_yo_sum
+USING g_list_13-sime_1
+g_list_13-sime_2
+g_list_13-sime_3
+g_list_13-sime_4.
+* 他入金集計処理
+g_tanyu_flg = cns_1.    "他入金フラグを設定
+PERFORM f_kingaku_taihi_sub TABLES g_tab_bseg_tanyu_sum
+g_tab_bseg_tanyu_yo_sum
+USING g_list_14-sime_1
+g_list_14-sime_2
+g_list_14-sime_3
+g_list_14-sime_4.
+CLEAR: g_tanyu_flg.    "他入金フラグ設定をクリア
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  F_KINGAKU_TAIHI_SUB
+*&---------------------------------------------------------------------*
+*       各締め日において、現金、手形、相殺、他入金を集計
+*----------------------------------------------------------------------*
+FORM f_kingaku_taihi_sub
+TABLES p_tab_hkont_sum    "現金、手形、相殺、他入金
+p_tab_yotei_sum    "入金予定
+USING  p_sime_sum1        "前前月
+p_sime_sum2        "前月
+p_sime_sum3        "今月
+p_sime_sum4.       "来月
+
+DATA : l_tab_yotei_sum LIKE STANDARD TABLE OF zf011000_typ_bseg.
+DATA : wa_l_yotei TYPE zf011000_typ_bseg ,
+wa_hkont TYPE zf011000_typ_bseg ,
+*   modify 2009/06/01 S.MIKAMI {
+*         WA_YOTEI_1 TYPE ZF011000_TYP_BSEG ,
+*         WA_YOTEI_2 TYPE ZF011000_TYP_BSEG ,
+*         WA_YOTEI_3 TYPE ZF011000_TYP_BSEG ,
+*         WA_YOTEI_4 TYPE ZF011000_TYP_BSEG .
+wa_yotei_1 TYPE zf011000_typ_bseg .
+* } modify 2009/06/01 S.MIKAMI
+DATA : g_hkont_kingaku LIKE knkk-klimk.
+DATA : g_nyukin_kingaku LIKE knkk-klimk.
+*   insert 2009/06/01 S.MIKAMI {
+DATA : l_hkont  TYPE knkk-klimk.
+DATA : l_nyukin TYPE knkk-klimk.
+* } insert 2009/06/01 S.MIKAMI
+
+
+* 入金予定集計情報をコピー
+LOOP AT p_tab_yotei_sum INTO wa_l_yotei.
+APPEND wa_l_yotei TO l_tab_yotei_sum.
+ENDLOOP.
+*  L_TAB_YOTEI_SUM = P_TAB_YOTEI_SUM.
+
+*   modify 2009/06/01 S.MIKAMI {
+LOOP AT p_tab_hkont_sum INTO wa_hkont.
+
+* ↓共通処理～ここから
+*   現金、手形、相殺、他入金伝票毎の金額
+IF wa_knvv-waers = c_jpy.
+g_hkont_kingaku = wa_hkont-dmbtr.
+ELSE.
+g_hkont_kingaku = wa_hkont-wrbtr.
+ENDIF.
+*   入金予定伝票毎の金額を取得
+READ TABLE l_tab_yotei_sum INTO wa_yotei_1
+WITH KEY belnr = wa_hkont-belnr
+gjahr = wa_hkont-gjahr.
+
+*   入金予定伝票毎の金額
+IF wa_knvv-waers = c_jpy.
+g_nyukin_kingaku = wa_yotei_1-dmbtr.
+ELSE.
+g_nyukin_kingaku = wa_yotei_1-wrbtr.
+ENDIF.
+*   金額を比較用項目で絶対値に変更
+l_hkont  = g_hkont_kingaku.
+l_nyukin = g_nyukin_kingaku.
+IF g_hkont_kingaku < 0.
+l_hkont = g_hkont_kingaku * -1.
+ENDIF.
+IF g_nyukin_kingaku < 0.
+l_nyukin = g_nyukin_kingaku * -1.
+ENDIF.
+* ↑共通処理～ここまで
+
+* ↓月毎の処理～ここから
+*   前前月の現金、手形、相殺、他入金集計
+IF wa_hkont-budat >= g_zfbdt1-low AND
+wa_hkont-budat <= g_zfbdt1-high.
+*     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+IF wa_yotei_1-waers <> wa_knvv-waers AND g_tanyu_flg <> cns_1 .
+p_sime_sum1 = p_sime_sum1 + g_nyukin_kingaku.
+ELSE.
+*      伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+*  　　少ない金額を取得して集計
+IF l_nyukin > l_hkont.
+p_sime_sum1 = p_sime_sum1 + g_hkont_kingaku.
+ELSE.
+p_sime_sum1 = p_sime_sum1 - g_nyukin_kingaku.
+ENDIF.
+ENDIF.
+ENDIF.
+
+*   前月の現金、手形、相殺、他入金集計
+IF wa_hkont-budat >= g_zfbdt2-low AND
+wa_hkont-budat <= g_zfbdt2-high.
+*     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+IF wa_yotei_1-waers <> wa_knvv-waers AND g_tanyu_flg <> cns_1 .
+p_sime_sum2 = p_sime_sum2 + g_nyukin_kingaku.
+ELSE.
+*    伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+*　　少ない金額を取得して集計
+IF l_nyukin > l_hkont.
+p_sime_sum2 = p_sime_sum2 + g_hkont_kingaku.
+ELSE.
+p_sime_sum2 = p_sime_sum2 - g_nyukin_kingaku.
+ENDIF.
+ENDIF.
+ENDIF.
+
+*   今月の現金、手形、相殺、他入金集計
+IF wa_hkont-budat >= g_zfbdt3-low AND
+wa_hkont-budat <= g_zfbdt3-high.
+*     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+IF wa_yotei_1-waers <> wa_knvv-waers AND g_tanyu_flg <> cns_1 .
+p_sime_sum3 = p_sime_sum3 + g_nyukin_kingaku.
+ELSE.
+*    伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+*　　少ない金額を取得して集計
+IF l_nyukin > l_hkont.
+p_sime_sum3 = p_sime_sum3 + g_hkont_kingaku.
+ELSE.
+p_sime_sum3 = p_sime_sum3 - g_nyukin_kingaku.
+ENDIF.
+ENDIF.
+ENDIF.
+
+*   来月の現金、手形、相殺、他入金集計
+IF wa_hkont-budat >= g_zfbdt4-low AND
+wa_hkont-budat <= g_zfbdt4-high.
+*     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+IF wa_yotei_1-waers <> wa_knvv-waers AND g_tanyu_flg <> cns_1 .
+p_sime_sum4 = p_sime_sum4 + g_nyukin_kingaku.
+ELSE.
+*    伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+*　　少ない金額を取得して集計
+IF l_nyukin > l_hkont.
+p_sime_sum4 = p_sime_sum4 + g_hkont_kingaku.
+ELSE.
+p_sime_sum4 = p_sime_sum4 - g_nyukin_kingaku.
+ENDIF.
+ENDIF.
+ENDIF.
+* ↑月毎の処理～ここまで
+
+CLEAR : g_hkont_kingaku , g_nyukin_kingaku .
+CLEAR : l_hkont , l_nyukin .
+
+ENDLOOP.
+CLEAR: wa_hkont,wa_l_yotei.
+REFRESH: l_tab_yotei_sum.
+
+*  LOOP AT P_TAB_HKONT_SUM INTO WA_HKONT.
+**   前前月の現金、手形、相殺、他入金集計
+*    IF WA_HKONT-BUDAT >= G_ZFBDT1-LOW AND
+*       WA_HKONT-BUDAT <= G_ZFBDT1-HIGH.
+*
+**      現金、手形、相殺、他入金伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_HKONT_KINGAKU = WA_HKONT-DMBTR.
+*      ELSE.
+*        G_HKONT_KINGAKU = WA_HKONT-WRBTR.
+*      ENDIF.
+**     入金予定伝票毎の金額を取得
+*      READ TABLE L_TAB_YOTEI_SUM INTO WA_YOTEI_1
+*                         WITH KEY BELNR = WA_HKONT-BELNR
+*                                  GJAHR = WA_HKONT-GJAHR.
+*
+**     入金予定伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_1-DMBTR.
+*      ELSE.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_1-WRBTR.
+*      ENDIF.
+**     金額を絶対値に変更
+*      IF G_HKONT_KINGAKU < 0.
+*        G_HKONT_KINGAKU = G_HKONT_KINGAKU * -1.
+*      ENDIF.
+*      IF G_NYUKIN_KINGAKU < 0.
+*        G_NYUKIN_KINGAKU = G_NYUKIN_KINGAKU * -1.
+*      ENDIF.
+**     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+*      IF WA_YOTEI_1-WAERS <> WA_KNVV-WAERS AND G_TANYU_FLG <> CNS_1 .
+*        P_SIME_SUM1 = P_SIME_SUM1 + G_NYUKIN_KINGAKU.
+*      ELSE.
+**      伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+**  　　少ない金額を取得して集計
+*        IF G_NYUKIN_KINGAKU > G_HKONT_KINGAKU.
+*          P_SIME_SUM1 = P_SIME_SUM1 + G_HKONT_KINGAKU.
+*        ELSE.
+*          P_SIME_SUM1 = P_SIME_SUM1 + G_NYUKIN_KINGAKU.
+*        ENDIF.
+*      ENDIF.
+*      CLEAR : G_HKONT_KINGAKU , G_NYUKIN_KINGAKU .
+*    ENDIF.
+*
+**   前月の現金、手形、相殺、他入金集計
+*    IF WA_HKONT-BUDAT >= G_ZFBDT2-LOW AND
+*       WA_HKONT-BUDAT <= G_ZFBDT2-HIGH.
+*
+**      現金、手形、相殺、他入金伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_HKONT_KINGAKU = WA_HKONT-DMBTR.
+*      ELSE.
+*        G_HKONT_KINGAKU = WA_HKONT-WRBTR.
+*      ENDIF.
+**     入金予定伝票毎の金額を取得
+*      READ TABLE L_TAB_YOTEI_SUM INTO WA_YOTEI_2
+*                         WITH KEY BELNR = WA_HKONT-BELNR
+*                                  GJAHR = WA_HKONT-GJAHR.
+**     入金予定伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_2-DMBTR.
+*      ELSE.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_2-WRBTR.
+*      ENDIF.
+**     金額を絶対値に変更
+*      IF G_HKONT_KINGAKU < 0.
+*        G_HKONT_KINGAKU = G_HKONT_KINGAKU * -1.
+*      ENDIF.
+*      IF G_NYUKIN_KINGAKU < 0.
+*        G_NYUKIN_KINGAKU = G_NYUKIN_KINGAKU * -1.
+*      ENDIF.
+**     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+*      IF WA_YOTEI_2-WAERS <> WA_KNVV-WAERS AND G_TANYU_FLG <> CNS_1 .
+*        P_SIME_SUM2 = P_SIME_SUM2 + G_NYUKIN_KINGAKU.
+*      ELSE.
+**    伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+**　　少ない金額を取得して集計
+*        IF G_NYUKIN_KINGAKU > G_HKONT_KINGAKU.
+*          P_SIME_SUM2 = P_SIME_SUM2 + G_HKONT_KINGAKU.
+*        ELSE.
+*          P_SIME_SUM2 = P_SIME_SUM2 + G_NYUKIN_KINGAKU.
+*        ENDIF.
+*      ENDIF.
+*      CLEAR : G_HKONT_KINGAKU , G_NYUKIN_KINGAKU .
+*    ENDIF.
+*
+**   今月の現金、手形、相殺、他入金集計
+*    IF WA_HKONT-BUDAT >= G_ZFBDT3-LOW AND
+*       WA_HKONT-BUDAT <= G_ZFBDT3-HIGH.
+*
+**      現金、手形、相殺、他入金伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_HKONT_KINGAKU = WA_HKONT-DMBTR.
+*      ELSE.
+*        G_HKONT_KINGAKU = WA_HKONT-WRBTR.
+*      ENDIF.
+**     入金予定伝票毎の金額を取得
+*      READ TABLE L_TAB_YOTEI_SUM INTO WA_YOTEI_3
+*                         WITH KEY BELNR = WA_HKONT-BELNR
+*                                  GJAHR = WA_HKONT-GJAHR.
+**     入金予定伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_3-DMBTR.
+*      ELSE.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_3-WRBTR.
+*      ENDIF.
+**     金額を絶対値に変更
+*      IF G_HKONT_KINGAKU < 0.
+*        G_HKONT_KINGAKU = G_HKONT_KINGAKU * -1.
+*      ENDIF.
+*      IF G_NYUKIN_KINGAKU < 0.
+*        G_NYUKIN_KINGAKU = G_NYUKIN_KINGAKU * -1.
+*      ENDIF.
+**     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+*      IF WA_YOTEI_3-WAERS <> WA_KNVV-WAERS AND G_TANYU_FLG <> CNS_1 .
+*        P_SIME_SUM3 = P_SIME_SUM3 + G_NYUKIN_KINGAKU.
+*      ELSE.
+**    伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+**　　少ない金額を取得して集計
+*        IF G_NYUKIN_KINGAKU > G_HKONT_KINGAKU.
+*          P_SIME_SUM3 = P_SIME_SUM3 + G_HKONT_KINGAKU.
+*        ELSE.
+*          P_SIME_SUM3 = P_SIME_SUM3 + G_NYUKIN_KINGAKU.
+*        ENDIF.
+*      ENDIF.
+*      CLEAR : G_HKONT_KINGAKU , G_NYUKIN_KINGAKU .
+*    ENDIF.
+**   来月の現金、手形、相殺、他入金集計
+*    IF WA_HKONT-BUDAT >= G_ZFBDT4-LOW AND
+*       WA_HKONT-BUDAT <= G_ZFBDT4-HIGH.
+*
+**      現金、手形、相殺、他入金伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_HKONT_KINGAKU = WA_HKONT-DMBTR.
+*      ELSE.
+*        G_HKONT_KINGAKU = WA_HKONT-WRBTR.
+*      ENDIF.
+**     入金予定伝票毎の金額を取得
+*      READ TABLE L_TAB_YOTEI_SUM INTO WA_YOTEI_4
+*                         WITH KEY BELNR = WA_HKONT-BELNR
+*                                  GJAHR = WA_HKONT-GJAHR.
+**     入金予定伝票毎の金額
+*      IF WA_KNVV-WAERS = C_JPY.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_4-DMBTR.
+*      ELSE.
+*        G_NYUKIN_KINGAKU = WA_YOTEI_4-WRBTR.
+*      ENDIF.
+**     金額を絶対値に変更
+*      IF G_HKONT_KINGAKU < 0.
+*        G_HKONT_KINGAKU = G_HKONT_KINGAKU * -1.
+*      ENDIF.
+*      IF G_NYUKIN_KINGAKU < 0.
+*        G_NYUKIN_KINGAKU = G_NYUKIN_KINGAKU * -1.
+*      ENDIF.
+**     通貨コードが得意先の通貨コードと違う場合入金予定金額にする
+*      IF WA_YOTEI_4-WAERS <> WA_KNVV-WAERS AND G_TANYU_FLG <> CNS_1 .
+*        P_SIME_SUM4 = P_SIME_SUM4 + G_NYUKIN_KINGAKU.
+*      ELSE.
+**    伝票毎に現金、手形、相殺、他入金と入金予定を比較して、
+**　　少ない金額を取得して集計
+*        IF G_NYUKIN_KINGAKU > G_HKONT_KINGAKU.
+*          P_SIME_SUM4 = P_SIME_SUM4 + G_HKONT_KINGAKU.
+*        ELSE.
+*          P_SIME_SUM4 = P_SIME_SUM4 + G_NYUKIN_KINGAKU.
+*        ENDIF.
+*      ENDIF.
+*      CLEAR : G_HKONT_KINGAKU , G_NYUKIN_KINGAKU .
+*    ENDIF.
+*
+*  ENDLOOP.
+*  CLEAR: WA_HKONT,WA_L_YOTEI,WA_YOTEI_1,
+*         WA_YOTEI_2,WA_YOTEI_3,WA_YOTEI_4.
+*  REFRESH: L_TAB_YOTEI_SUM.
+* } modify 2009/06/01 S.MIKAMI
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_AR
+*&---------------------------------------------------------------------*
+*       各月の売掛金合計
+*----------------------------------------------------------------------*
+FORM f_get_ar.
+
+CLEAR : g_list_18.
+
+* 前前月の売掛金合計を取得
+PERFORM f_get_ar_sub USING g_zfbdt0-high
+g_list_18_sime_0.
+* 前前月の売掛金合計を取得
+PERFORM f_get_ar_sub USING g_zfbdt1-high
+g_list_18-sime_1.
+* 前月の売掛金合計を取得
+PERFORM f_get_ar_sub USING g_zfbdt2-high
+g_list_18-sime_2.
+* 今月の売掛金合計を取得
+PERFORM f_get_ar_sub USING g_zfbdt3-high
+g_list_18-sime_3.
+* 来月の売掛金合計を取得
+PERFORM f_get_ar_sub USING g_zfbdt4-high
+g_list_18-sime_4.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_AR_SUB
+*&---------------------------------------------------------------------*
+*       各月の売掛金合計
+*----------------------------------------------------------------------*
+FORM f_get_ar_sub USING p_date      "各月の締め日
+p_month_ar. "各月の売掛金合計
+
+DATA:  l_tab_bsid_ar     LIKE STANDARD TABLE OF zf011000_typ_bsid ,
+l_tab_bsad_ar     LIKE STANDARD TABLE OF zf011000_typ_bsad ,
+wa_l_bsid_ar      TYPE zf011000_typ_bsid  VALUE IS INITIAL ,
+wa_l_bsad_ar      TYPE zf011000_typ_bsad  VALUE IS INITIAL .
+DATA:  g_no_gesai TYPE bseg-dmbtr,
+g_gesai    TYPE bseg-dmbtr.
+CLEAR: g_no_gesai, g_gesai,wa_l_bsid_ar,wa_l_bsad_ar.
+REFRESH: l_tab_bsid_ar,l_tab_bsad_ar.
+
+*  各締めにおける未決済金額集計
+SELECT  budat gjahr belnr shkzg wrbtr augdt dmbtr FROM bsid
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bsid_ar
+WHERE bukrs =  p_bukrs        " 会社コード
+*--modify start 2010/06/14 m.murata
+*                        and kunnr =  p_kunnr        " 得意先コード
+AND kunnr =  st_kna1-kunnr   " 得意先コード
+*--modify end   2010/06/14 m.murata
+AND umskz = ' '              " 特殊仕訳コード
+AND budat <= p_date . " 各締め日年月日
+CASE sy-subrc.
+WHEN 0.
+LOOP AT l_tab_bsid_ar INTO wa_l_bsid_ar.
+*       金額換算換算処理
+IF wa_knvv-waers <> c_jpy .
+PERFORM f_change_wrbtr_ar USING wa_l_bsid_ar-belnr
+wa_l_bsid_ar-gjahr
+CHANGING wa_l_bsid_ar-wrbtr.
+ENDIF.
+IF wa_knvv-waers = c_jpy .
+IF wa_l_bsid_ar-shkzg = 'H'.
+wa_l_bsid_ar-dmbtr = wa_l_bsid_ar-dmbtr * -1.
+ENDIF.
+*          未決済金額集計
+g_no_gesai = g_no_gesai + wa_l_bsid_ar-dmbtr.
+ELSE.
+IF wa_l_bsid_ar-shkzg = 'H'.
+wa_l_bsid_ar-wrbtr = wa_l_bsid_ar-wrbtr * -1.
+ENDIF.
+*          未決済金額集計
+g_no_gesai = g_no_gesai + wa_l_bsid_ar-wrbtr.
+ENDIF.
+ENDLOOP.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_010 sy-subrc.
+ENDCASE.
+*  各締め日以降の決済金額集計
+SELECT  budat gjahr belnr shkzg wrbtr augdt dmbtr FROM bsad
+INTO CORRESPONDING FIELDS OF TABLE l_tab_bsad_ar
+WHERE bukrs =  p_bukrs        " 会社コード
+*--modify start 2010/06/14 m.murata
+*                        and kunnr =  p_kunnr        " 得意先コード
+AND kunnr =  st_kna1-kunnr  " 得意先コード
+*--modify end   2010/06/14 m.murata
+AND umskz =  ' '             " 特殊仕訳コード
+AND budat <= p_date         " 伝票の転記日
+AND augdt < '9999/12/31'
+AND augdt > p_date .        " 決済日付
+CASE sy-subrc.
+WHEN 0.
+LOOP AT l_tab_bsad_ar INTO wa_l_bsad_ar.
+*       金額換算換算処理
+IF wa_knvv-waers <> c_jpy .
+PERFORM f_change_wrbtr_ar USING wa_l_bsad_ar-belnr
+wa_l_bsad_ar-gjahr
+CHANGING wa_l_bsad_ar-wrbtr.
+ENDIF.
+IF wa_knvv-waers = c_jpy .
+IF wa_l_bsad_ar-shkzg = 'H'.
+wa_l_bsad_ar-dmbtr = wa_l_bsad_ar-dmbtr * -1.
+ENDIF.
+*          決済金額集計
+g_gesai = g_gesai + wa_l_bsad_ar-dmbtr.
+ELSE.
+IF wa_l_bsad_ar-shkzg = 'H'.
+wa_l_bsad_ar-wrbtr = wa_l_bsad_ar-wrbtr * -1.
+ENDIF.
+*          決済金額集計
+g_gesai = g_gesai + wa_l_bsad_ar-wrbtr.
+ENDIF.
+ENDLOOP.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_011 sy-subrc.
+ENDCASE.
+
+*  各月の売上金合計
+p_month_ar = g_no_gesai + g_gesai.
+ENDFORM.
+*2006/07 J.CB ADD_END
+*&---------------------------------------------------------------------*
+*&      Form  CONVERT_TO_LOCAL_CURRENCY
+*&---------------------------------------------------------------------*
+*       換算レート取得
+*----------------------------------------------------------------------*
+*      -->P_BUDAT  伝票転記日付
+*      <--P_UKURS  換算レート
+*----------------------------------------------------------------------*
+FORM convert_to_local_currency USING    p_budat
+CHANGING p_ukurs.
+
+DATA : l_amount(8) TYPE p DECIMALS 2.
+
+CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+EXPORTING
+date             = p_budat
+foreign_amount   = l_amount
+foreign_currency = wa_knvv-waers
+local_currency   = c_jpy
+type_of_rate     = 'M'
+IMPORTING
+exchange_rate    = p_ukurs
+EXCEPTIONS
+no_rate_found    = 1
+overflow         = 2
+no_factors_found = 3
+no_spread_found  = 4
+derived_2_times  = 5
+OTHERS           = 6.
+
+IF sy-subrc <> 0.
+MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+ENDIF.
+
+ENDFORM.                    " CONVERT_TO_LOCAL_CURRENCY
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_KUNNR
+*&---------------------------------------------------------------------*
+*       得意先から必要情報取得処理
+*----------------------------------------------------------------------*
+FORM f_get_kunnr.
+
+GET PARAMETER ID 'KKB' FIELD s067-kkber.
+SELECT SINGLE grupp FROM knkk
+INTO  (knkk-grupp)
+*--modify start 2010/06/14 m.murata
+*                    where kunnr = p_kunnr     "得意先コード
+WHERE kunnr = st_kna1-kunnr     "得意先コード
+*--modify end   2010/06/14 m.murata
+AND kkber = s067-kkber. "与信管理領域
+CASE sy-subrc.
+WHEN 0.
+IF NOT knkk-grupp IS INITIAL.
+REFRESH:g_tab_kunnr.
+SELECT kunnr FROM knkk
+INTO TABLE g_tab_kunnr
+WHERE grupp = knkk-grupp.
+g_group_flg = '0'.
+ELSE.
+CLEAR:wa_kunnr.
+*--modify start 2010/06/14 m.murata
+*        wa_kunnr-kunnr = p_kunnr.
+wa_kunnr-kunnr = st_kna1-kunnr.
+*--modify end   2010/06/14 m.murata
+APPEND wa_kunnr TO g_tab_kunnr.
+g_group_flg = '1'.
+ENDIF.
+WHEN 4."対象データなし
+WHEN OTHERS.
+MESSAGE a603 WITH sy-repid c_tbl_009 sy-subrc.
+ENDCASE.
+ENDFORM.                    " F_GET_KUNNR
+*&---------------------------------------------------------------------*
+*&      Form  get_cust_code
+*&---------------------------------------------------------------------*
+*       得意先コード抽出
+*----------------------------------------------------------------------*
+FORM get_cust_code.
+REFRESH it_kna1.
+SELECT kunnr
+name1
+FROM kna1 INTO TABLE it_kna1
+WHERE kunnr IN s_kunnr.
+ENDFORM.                    " get_cust_code
+*&---------------------------------------------------------------------*
+*&      Form  set_common_item
+*&---------------------------------------------------------------------*
+*       共通項目の設定
+*----------------------------------------------------------------------*
+FORM set_common_item.
+CLEAR: wk_spmon, wk_time.
+* 年月
+wk_spmon+0(4) = p_year.
+wk_spmon+4(2) = p_month.
+* 出力日時
+wk_time+0(8)  = sy-datum.
+wk_time+8(6)  = sy-uzeit.
+ENDFORM.                    " set_common_item
+*&---------------------------------------------------------------------*
+*&      Form  insert_table
+*&---------------------------------------------------------------------*
+*       入金実績テーブル(ZF0001)に格納
+*----------------------------------------------------------------------*
+FORM insert_table.
+* local
+DATA l_exist TYPE c.
+
+* 他入金を再計算する（子勘定からの振替分対応）
+PERFORM f_list_out_14.
+
+* 構造にデータ格納
+PERFORM set_data.
+* 存在確認
+PERFORM check_data_exist CHANGING l_exist.
+
+*---格納
+IF l_exist = space.
+INSERT zf0001 FROM st_zf0001.
+IF sy-subrc = 0.
+wk_ins_cnt = wk_ins_cnt + 1.
+ELSE.
+wk_err_cnt = wk_err_cnt + 1.
+*     エラー格納
+st_err = st_zf0001.
+st_err-text1 = text-006.
+APPEND st_err TO it_err.
+ENDIF.
+ELSE.
+*   更新
+UPDATE zf0001 FROM st_zf0001.
+IF sy-subrc = 0.
+wk_upd_cnt = wk_upd_cnt + 1.
+ELSE.
+wk_err_cnt = wk_err_cnt + 1.
+*     エラー格納
+st_err = st_zf0001.
+st_err-text1 = text-007.
+APPEND st_err TO it_err.
+ENDIF.
+ENDIF.
+ENDFORM.                    " insert_table
+*&---------------------------------------------------------------------*
+*&      Form  set_data
+*&---------------------------------------------------------------------*
+*       構造へデータ格納
+*----------------------------------------------------------------------*
+FORM set_data.
+* 会社コード
+st_zf0001-bukrs      = p_bukrs.
+* 販売組織
+st_zf0001-vkorg      = p_vkorg.
+* 流通チャネル
+st_zf0001-vtweg      = p_vtweg.
+* 製品部門
+st_zf0001-spart      = p_spart.
+* 得意先コード
+st_zf0001-kunnr      = st_kna1-kunnr.
+* 指定年月(締め)
+st_zf0001-spmon      = wk_spmon.
+* 通貨
+st_zf0001-waers      = wa_knvv-waers.
+* 得意先テキスト
+st_zf0001-name1      = st_kna1-name1.
+* 支払条件
+CONCATENATE wa_knvv-zterm	
+wa_t052u-text1
+INTO st_zf0001-text1
+SEPARATED BY space.
+* 他の支払条件
+CONCATENATE g_zterm-sonota1	
+g_zterm-sonota2
+g_zterm-sonota3
+g_zterm-sonota4
+g_zterm-sonota5
+INTO st_zf0001-text2
+SEPARATED BY space.
+* 現在受注残
+st_zf0001-zsobk      = g_genzan.
+* 手形決済残
+st_zf0001-zbillbk    = g_tegatazan.
+* 与信残高額
+st_zf0001-zcrebk     = g_yosinzan.
+* 売掛金合計
+st_zf0001-zapsum     = g_uritotal.
+* 与信限度額
+st_zf0001-klimk      = g_yosinmax.
+* グループ現在受注残
+st_zf0001-zgrpsobk   = g_genzan_g.
+* グループ手形決済残
+st_zf0001-zgrpbillbk = g_tegatazan_g.
+* グループ与信残高額
+st_zf0001-zgrpcrebk  = g_yosinzan_g.
+* グループ売掛金合計
+st_zf0001-zgrpapsum  = g_uritotal_g.
+* グループ与信限度額
+st_zf0001-zgrpklimk  = g_yosinmax_g.
+* 売上(前々月締め)
+st_zf0001-zsale1     = g_list_01-sime_1.
+* 売上(前月締め)
+st_zf0001-zsale2     = g_list_01-sime_2.
+* 売上(当月締め)
+st_zf0001-zsale3     = g_list_01-sime_3.
+* 売上(翌月締め)
+st_zf0001-zsale4     = g_list_01-sime_4.
+* 返品(前々月締め)
+st_zf0001-zreturn1   = g_list_02-sime_1.
+* 返品(前月締め)
+st_zf0001-zreturn2   = g_list_02-sime_2.
+* 返品(当月締め)
+st_zf0001-zreturn3   = g_list_02-sime_3.
+* 返品(翌月締め)
+st_zf0001-zreturn4   = g_list_02-sime_4.
+* 値引(前々月締め)
+st_zf0001-zcredit1   = g_list_03-sime_1.
+* 値引(前月締め)
+st_zf0001-zcredit2   = g_list_03-sime_2.
+* 値引(当月締め)
+st_zf0001-zcredit3   = g_list_03-sime_3.
+* 値引(翌月締め)
+st_zf0001-zcredit4   = g_list_03-sime_4.
+* 値増(前々月締め)
+st_zf0001-zdebit1    = g_list_04-sime_1.
+* 値増(前月締め)
+st_zf0001-zdebit2    = g_list_04-sime_2.
+* 値増(当月締め)
+st_zf0001-zdebit3    = g_list_04-sime_3.
+* 値増(翌月締め)
+st_zf0001-zdebit4    = g_list_04-sime_4.
+* 請求取消(前々月締め)
+st_zf0001-zcaninv1   = g_list_05-sime_1.
+* 請求取消(前月締め)
+st_zf0001-zcaninv2   = g_list_05-sime_2.
+* 請求取消(当月締め)
+st_zf0001-zcaninv3   = g_list_05-sime_3.
+* 請求取消(翌月締め)
+st_zf0001-zcaninv4   = g_list_05-sime_4.
+* クレジットメモ取消(前々月締め)
+st_zf0001-zcancre1   = g_list_06-sime_1.
+* クレジットメモ取消(前月締め)
+st_zf0001-zcancre2   = g_list_06-sime_2.
+* クレジットメモ取消(当月締め)
+st_zf0001-zcancre3   = g_list_06-sime_3.
+* クレジットメモ取消(翌月締め)
+st_zf0001-zcancre4   = g_list_06-sime_4.
+* 売上計(前々月締め)
+st_zf0001-zsalesum1  = g_list_07-sime_1.
+* 売上計(前月締め)
+st_zf0001-zsalesum2  = g_list_07-sime_2.
+* 売上計(当月締め)
+st_zf0001-zsalesum3  = g_list_07-sime_3.
+* 売上計(翌月締め)
+st_zf0001-zsalesum4  = g_list_07-sime_4.
+* 消費税(前々月締め)
+st_zf0001-zvat1      = g_list_08-sime_1.
+* 消費税(前月締め)
+st_zf0001-zvat2      = g_list_08-sime_2.
+* 消費税(当月締め)
+st_zf0001-zvat3      = g_list_08-sime_3.
+* 消費税(翌月締め)
+st_zf0001-zvat4      = g_list_08-sime_4.
+* 税込計(前々月締め)
+st_zf0001-zincltax1  = g_list_09-sime_1.
+* 税込計(前月締め)
+st_zf0001-zincltax2  = g_list_09-sime_2.
+* 税込計(当月締め)
+st_zf0001-zincltax3  = g_list_09-sime_3.
+* 税込計(翌月締め)
+st_zf0001-zincltax4  = g_list_09-sime_4.
+* 粗利(前々月締め)
+st_zf0001-zgroprf1   = g_list_10-sime_1.
+* 粗利(前月締め)
+st_zf0001-zgroprf2   = g_list_10-sime_2.
+* 粗利(当月締め)
+st_zf0001-zgroprf3   = g_list_10-sime_3.
+* 粗利(翌月締め)
+st_zf0001-zgroprf4   = g_list_10-sime_4.
+* 現金入金(前々月締め)
+st_zf0001-zrecash1   = g_list_11-sime_1.
+* 現金入金(前月締め)
+st_zf0001-zrecash2   = g_list_11-sime_2.
+* 現金入金(当月締め)
+st_zf0001-zrecash3   = g_list_11-sime_3.
+* 現金入金(翌月締め)
+st_zf0001-zrecash4   = g_list_11-sime_4.
+* 手形入金(前々月締め)
+st_zf0001-zrebill1   = g_list_12-sime_1.
+* 手形入金(前月締め)
+st_zf0001-zrebill2   = g_list_12-sime_2.
+* 手形入金(当月締め)
+st_zf0001-zrebill3   = g_list_12-sime_3.
+* 手形入金(翌月締め)
+st_zf0001-zrebill4   = g_list_12-sime_4.
+* 相殺入金(前々月締め)
+st_zf0001-zoffset1   = g_list_13-sime_1.
+* 相殺入金(前月締め)
+st_zf0001-zoffset2   = g_list_13-sime_2.
+* 相殺入金(当月締め)
+st_zf0001-zoffset3   = g_list_13-sime_3.
+* 相殺入金(翌月締め)
+st_zf0001-zoffset4   = g_list_13-sime_4.
+* 他入金(前々月締め)
+st_zf0001-zreothr1   = g_list_14-sime_1.
+* 他入金(前月締め)
+st_zf0001-zreothr2   = g_list_14-sime_2.
+* 他入金(当月締め)
+st_zf0001-zreothr3   = g_list_14-sime_3.
+* 他入金(翌月締め)
+st_zf0001-zreothr4   = g_list_14-sime_4.
+* 他調整(前々月締め)
+st_zf0001-zadjoth1   = g_list_20-sime_1.
+* 他調整(前月締め)
+st_zf0001-zadjoth2   = g_list_20-sime_2.
+* 他調整(当月締め)
+st_zf0001-zadjoth3   = g_list_20-sime_3.
+* 他調整(翌月締め)
+st_zf0001-zadjoth4   = g_list_20-sime_4.
+* 入金計(前々月締め)
+st_zf0001-zrecsum1   = g_list_15-sime_1.
+* 入金計(前月締め)
+st_zf0001-zrecsum2   = g_list_15-sime_2.
+* 入金計(当月締め)
+st_zf0001-zrecsum3   = g_list_15-sime_3.
+* 入金計(翌月締め)
+st_zf0001-zrecsum4   = g_list_15-sime_4.
+* 売掛金合計(前々月締め)
+st_zf0001-zsumap1    = g_list_18-sime_1.
+* 売掛金合計(前月締め)
+st_zf0001-zsumap2    = g_list_18-sime_2.
+* 売掛金合計(当月締め)
+st_zf0001-zsumap3    = g_list_18-sime_3.
+* 売掛金合計(翌月締め)
+st_zf0001-zsumap4    = g_list_18-sime_4.
+* 出力日時
+st_zf0001-ztime      = wk_time.
+ENDFORM.                    " set_data
+*&---------------------------------------------------------------------*
+*&      Form  init_val
+*&---------------------------------------------------------------------*
+*       変数初期化
+*----------------------------------------------------------------------*
+FORM init_val.
+REFRESH: s_zfbdt_past,
+s_zfbdt,
+g_tab_knkk,
+g_tab_knvv,
+g_tab_kna1,
+g_tab_kunnr,
+g_tab_bseg_genkin,
+g_tab_bseg_tegata,
+g_tab_bseg_sousai,
+g_tab_bseg_tanyu,
+g_tab_bseg_genkin_sum,
+g_tab_bseg_tegata_sum,
+g_tab_bseg_sousai_sum,
+g_tab_bseg_tanyu_sum,
+g_tab_bseg_genkin_yo,
+g_tab_bseg_tegata_yo,
+g_tab_bseg_sousai_yo,
+g_tab_bseg_tanyu_yo,
+g_tab_bseg_genkin_yo_sum,
+g_tab_bseg_tegata_yo_sum,
+g_tab_bseg_sousai_yo_sum,
+g_tab_bseg_tanyu_yo_sum,
+g_tab_bseg,
+g_tab_bseg2,
+g_tab_bsid,
+g_tab_bsid_p,
+g_tab_bsad_p,
+g_tab_bsid2,
+g_tab_bsad,
+g_tab_vbrk,
+g_tab_bsad_sosai,
+g_tab_vbrp,
+g_tab_vbrp2.
+
+CLEAR: st_zf0001,
+wa_knvv,
+g_zterm,
+wa_t052u,
+t052,
+g_change_wrbtr_flg,
+g_zfbdt1,
+g_zfbdt2,
+g_zfbdt3,
+g_zfbdt4,
+g_zfbdt0,
+s_zfbdt_past,
+s_zfbdt,
+g_simemd1,
+g_simemd2,
+g_simemd3,
+g_simemd4,
+knc3,
+knkk,
+g_genzan,
+g_genzan_g,
+g_tegatazan_g,
+g_yosinzan_g,
+g_uritotal_g,
+g_yosinmax_g,
+g_tegatazan,
+g_uritotal,
+g_yosinmax,
+g_yosinzan,
+g_group_flg,
+wa_vbrk,
+wa_vbrp,
+wa_vbrp1,
+wa_vbrp2,
+wa_vbrp3,
+wa_vbrp4,
+g_list_01,
+g_list_02,
+g_list_03,
+g_list_04,
+g_list_05,
+g_list_06,
+g_list_07,
+g_list_08,
+g_list_09,
+g_list_10,
+g_list_11,
+g_list_12,
+g_list_13,
+g_list_14,
+g_list_15,
+g_list_18,
+g_list_19,
+g_list_20,
+wa_bsad,
+wa_bseg,
+wa_tmp_knvv,
+wa_t052u,
+wa_bseg,
+wa_bseg_genkin,
+wa_bseg_tegata,
+wa_bseg_sousai,
+wa_bseg_tanyu,
+wa_bseg_genkin_sum,
+wa_bseg_tegata_sum,
+wa_bseg_sousai_sum,
+wa_bseg_tanyu_sum,
+wa_bseg_genkin_yo,
+wa_bseg_tegata_yo,
+wa_bseg_sousai_yo,
+wa_bseg_tanyu_yo,
+wa_bseg_genkin_yo_sum,
+wa_bseg_tegata_yo_sum,
+wa_bseg_sousai_yo_sum,
+wa_bseg_tanyu_yo_sum,
+wk_skip.  "後続処理スキップ
+
+ENDFORM.                    " init_val
+*&---------------------------------------------------------------------*
+*&      Form  check_data_exist
+*&---------------------------------------------------------------------*
+*       データ存在確認
+*----------------------------------------------------------------------*
+*      <--O_EXIST 存在、不在フラグ(X:存在；SPACE：不在)
+*----------------------------------------------------------------------*
+FORM check_data_exist CHANGING o_exist.
+* local
+DATA l_tmp TYPE zf0001-bukrs.
+
+SELECT SINGLE bukrs
+FROM zf0001 INTO l_tmp
+WHERE bukrs = st_zf0001-bukrs
+AND vkorg = st_zf0001-vkorg
+AND vtweg = st_zf0001-vtweg
+AND spart = st_zf0001-spart
+AND kunnr = st_zf0001-kunnr
+AND spmon = st_zf0001-spmon
+AND waers = st_zf0001-waers.
+IF sy-subrc = 0.
+o_exist = 'X'.
+ENDIF.
+ENDFORM.                    " check_data_exist
+*&---------------------------------------------------------------------*
+*&      Form  output_result
+*&---------------------------------------------------------------------*
+*       処理結果出力
+*----------------------------------------------------------------------*
+FORM output_result.
+* local
+DATA: l_datum(10) TYPE c,
+l_uzeit(8)  TYPE c.
+
+WRITE wk_time+0(8) TO l_datum USING EDIT MASK '____/__/__'.
+WRITE wk_time+8(6) TO l_uzeit USING EDIT MASK '__:__:__'.
+WRITE:/001 l_datum,
+012 l_uzeit.
+SKIP 1.
+WRITE /001 '<<< 処理結果 >>>'.
+SKIP 1.
+WRITE:/001 '登録件数',
+015 wk_ins_cnt,
+/001 '更新件数',
+015 wk_upd_cnt,
+/001 '失敗件数',
+015 wk_err_cnt.
+
+MESSAGE s619 WITH wk_upd_cnt wk_ins_cnt.
+
+CHECK wk_err_cnt <> 0.
+SKIP 1.
+PERFORM err_header.
+ULINE.
+LOOP AT it_err INTO st_err.
+WRITE:/ st_err-bukrs UNDER text-e01,
+st_err-vkorg UNDER text-e02,
+st_err-vtweg UNDER text-e03,
+st_err-spart UNDER text-e04,
+st_err-spmon UNDER text-e05,
+st_err-waers UNDER text-e06,
+st_err-kunnr UNDER text-e07,
+st_err-name1 UNDER text-e08,
+st_err-text1 UNDER text-e09.
+ENDLOOP.
+
+ENDFORM.                    " output_result
+*&---------------------------------------------------------------------*
+*&      Form  err_header
+*&---------------------------------------------------------------------*
+*       エラー内容ヘッダ
+*----------------------------------------------------------------------*
+FORM err_header.
+WRITE:/001 text-e01,
+013 text-e02,
+023 text-e03,
+037 text-e04,
+047 text-e05,
+057 text-e06,
+064 text-e07,
+078 text-e08,
+090 text-e09.
+ENDFORM.                    " err_header

@@ -1,0 +1,2175 @@
+************************************************************************
+* [プログラム名]
+*   ZE010400      EDI送信データチェック/送信止めリスト
+*
+* [処理概要]
+*  ・EDIデータ送信時に必要となる、納入場所コードを受注伝票よりセット
+*    する
+*
+* [改定履歴]
+*　YYYY/MM/DD   Programar         Description
+*  2002/02/05   PSD M.Arai        新規開発
+*  2002/03/28   PSD T.SAITOH      指定納入先設定不具合対応
+*  2002/03/29   PSD M.ARAI        同上
+*  2002/03/29   PSD M.ARAI        スプールの切り分け処理
+*  2002/07/08   NDSC 発注送信対象絞込みロジック追加
+*  2002/08/03   NDSC              NAST更新タイミング変更
+*  2002/08/07   NDSC              IDOC File 存在チェック追加
+*  2002/08/08   カットオーバー ---------------------------------------*
+*  2002/08/08   PSD T.SAITOH      バックグラウンド時ごみ発生バグ対応
+*  2002/08/08   PSD T.SAITOH      オンライン時のみプラントチェック追加
+*  2002/08/08   PSD T.SAITOH      即時印刷パラメータ追加
+*  2002/09/17   NDSC 仕入先品目チェック追加(3M対応)
+*  2002/11/21   NDSC 入庫されたものは送信止めリストには出力しない
+*  2005/03/11   DMC A.MASUDA      NASTの取得条件追加
+*  2010/02/22   SOLFIS S.IWAKI    EDIリスト複数出力先対応
+*  2010/04/02   SOLFIS S.KURATA   仕入先品目チェックロジック不具合修正
+*  2010/05/12   SOLFIS R.HATA     無効化対象除外対応
+*  2010/06/09   SOLFIS R.HATA     在庫発注時チェック対応
+*  2012/05/08   SOLFIS H.JO       DMW4028の対応
+*                       ・処理済の発注に発注請書が登録されている場合
+*                         媒体を「8 EDI送信止め」に更新いないように修正
+*                       ・入庫済みの送信止めデータを「処理済」ステータス
+*                         に変更する処理削除
+*  2012/08/13   SOLFIS S.TOHTAKE
+*  　　　　　　　出力タイプ：NEU固定を、ZM01～ZM05も対応できるように変更
+*  2012/08/30   SOLFIS S.TOHTAKE
+*  　　　　　　　NASTに対するロックエントリが、一覧表示時に解除されない
+*                障害に対する対応
+*  2012/09/05   SOLFIS S.TOHTAKE
+*  　　　　　　　テキスト：EDI備考(購買発注テキスト)に対して
+*                更新を行うロジックの無効化
+*& 2012/10/15   ISID              ES-UP
+*  2013/01/07   GSL S.TOHTAKE
+*  　　　　　　　午後のEDI送信処理において処理対象データが存在しない件に
+*                ついて修正
+*  2014/02/24   GSL
+*                連絡票DMW6151対応
+*                FRM_SET_SIIRE（指定納入先の設定）関数における
+*                指定納入先エラー処理を削除（８：送信止めを防止）
+************************************************************************
+REPORT  ZE010400 NO STANDARD PAGE HEADING
+LINE-SIZE  170
+LINE-COUNT 58
+.
+TABLES: NAST,
+T001W,
+T024,
+LFA1,
+ADRC,
+EKPO,
+* Mod ES-UP 2012/10/15 -->
+*        EKKO,
+** Add 2005.03.29 --->
+*        TVARV .
+EKKO .
+* Mod ES-UP 2012/10/15 <--
+* Add 2005.03.29 <---
+
+TYPE-POOLS SLIS.
+
+************************************************************************
+* TYPES
+************************************************************************
+* NAST情報
+TYPES: BEGIN OF TYP_NAST,
+OBJKY TYPE NAST-OBJKY,
+***2012.08.13 add >>>
+KSCHL TYPE NAST-kschl,
+***2012.08.13 add <<<
+END   OF TYP_NAST.
+
+* 購買伝票明細
+TYPES: BEGIN OF TYP_EKPO,
+EBELN    TYPE EKPO-EBELN,
+EBELP    TYPE EKPO-EBELP,
+MATNR    TYPE EKPO-MATNR,
+TXZ01    TYPE EKPO-TXZ01,
+IDNLF    TYPE EKPO-IDNLF,
+MENGE    TYPE EKPO-MENGE,
+MEINS    TYPE EKPO-MEINS,
+NETPR    TYPE EKPO-NETPR,
+PEINH    TYPE EKPO-PEINH,
+KNTTP    TYPE EKPO-KNTTP,
+EVERS    TYPE EKPO-EVERS,
+ADRN2    TYPE EKPO-ADRN2,
+ADRNR    TYPE EKPO-ADRNR,
+WERKS    TYPE EKPO-WERKS,
+LIFNR    TYPE EKKO-LIFNR,
+EKGRP    TYPE EKKO-EKGRP,
+BEDAT    TYPE EKKO-BEDAT,
+WAERS    TYPE EKKO-WAERS,
+BSART    type ekko-bsart,
+reswk    type ekko-reswk,
+* 2005.05.25 Add --->
+LABNR    Type EKPO-LABNR,
+* 2005.05.25 Add <---
+END   OF TYP_EKPO.
+* 2012/05/08 DEL START
+**入庫データ取得  2002.11.21 ADD
+*DATA:BEGIN OF T_MSEG OCCURS 0,
+*       EBELN LIKE MSEG-EBELN,
+*       EBELP LIKE MSEG-EBELP,
+*       MATNR LIKE MSEG-MATNR,
+*     END OF T_MSEG.
+* 2012/05/08 DEL END
+* アドレス
+TYPES: BEGIN OF TYP_ADRC,
+NAME2    TYPE ADRC-NAME2,
+END   OF  TYP_ADRC.
+***2010/02/22 add >>>
+* 出力先
+TYPES: BEGIN OF TYP_ADR10,
+WERKS      TYPE T001W-WERKS,
+ADRNR      TYPE T001W-ADRNR,
+PRINT_DEST TYPE ADR10-PRINT_DEST,
+END   OF  TYP_ADR10.
+***2010/02/22 add <<<
+
+************************************************************************
+* DATA
+************************************************************************
+* 内部TBL
+* NAST情報
+DATA: GF_NAST TYPE TYP_NAST,
+GT_NAST LIKE TABLE OF GF_NAST.
+
+* 購買伝票
+DATA: GF_EKPO TYPE TYP_EKPO,
+GT_EKPO LIKE TABLE OF GF_EKPO.
+
+* 帳票用
+data: gF_write TYPE ZE0104,
+GT_WRITE LIKE TABLE OF GF_WRITE.
+
+* テキスト
+DATA: GF_LINE  TYPE TLINE,
+GT_LINE  LIKE TABLE OF GF_LINE.
+
+* 単項目
+* テキスト取得用伝票番号
+DATA: G_NAME TYPE THEAD-TDNAME.
+
+* メッセージ送信媒体
+DATA: G_NACHA TYPE NAST-NACHA.
+DATA:W_NAME_F05I like THEAD-TDNAME,
+W_NAME_F05O like THEAD-TDNAME,
+W_TJUCHU(10),
+W_TSHUKA(10),
+W_HBIKOU(100).
+*
+DATA : BEGIN OF W_TEXT_O OCCURS 0 .
+INCLUDE STRUCTURE TLINE .
+DATA : END OF W_TEXT_O .
+*
+DATA : BEGIN OF W_TEXT_I OCCURS 0 .
+INCLUDE STRUCTURE TLINE .
+DATA : END OF W_TEXT_I .
+
+DATA : G_PRINT_DEST TYPE TSP03-PADEST.
+
+* 汎用モジュール'READ_TEXT'用
+DATA: w_NAME like THEAD-TDNAME,
+itab_NAME like TABLE OF TLINE,
+wa_NAME like TLINE.
+***
+data:enduser(08) type c.
+* 汎用モジュール'CREATE_TEXT'用
+DATA: w_FNAME like THEAD-TDNAME,
+itab_FNAME like TABLE OF TLINE,
+wa_FNAME like TLINE,
+e_flg(1) TYPE c VALUE 0.
+
+* 2005/03/11 APPEND DMC A.MASUDA START -->
+DATA:
+W_UHRVR_B LIKE NAST-UHRVR, "前回EDI出力実行時間取得用
+W_UHRVR_A LIKE NAST-UHRVR. "今回EDI出力実行時間更新用
+* 2005/03/11 APPEND DMC A.MASUDA END   <--
+* Add 2005.03.29 --->
+Data : W_TNAME Type TVARV-NAME .
+* Add 2005.03.29 <---
+***2010/02/22 add >>>
+* 出力先
+DATA: GF_ADR10 TYPE TYP_ADR10,
+GT_ADR10 LIKE TABLE OF GF_ADR10.
+***2010/02/22 add <<<
+* Add ES-UP 2012/11/05 -->
+data g_conv type ref to zcl_conv_to_sjis.
+* Add ES-UP 2012/11/05 <--
+************************************************************************
+* CONSTANTS
+************************************************************************
+CONSTANTS: CNS_0(1)            TYPE C VALUE '0',
+CNS_1(1)            TYPE C VALUE '1',
+CNS_2(1)            TYPE C VALUE '2',
+CNS_6(1)            TYPE C VALUE '6',
+CNS_8(1)            TYPE C VALUE '8',
+CNS_A(1)            TYPE C VALUE 'A',
+CNS_0X6(6)          TYPE C VALUE '000000',
+CNS_0001(4)         TYPE C VALUE '0001',
+CNS_J(1)            TYPE C VALUE 'J',
+CNS_X(1)            TYPE C VALUE 'X',
+CNS_EF(2)           TYPE C VALUE 'EF',
+CNS_NEU(3)          TYPE C VALUE 'NEU',
+CNS_NAST(4)         TYPE C VALUE 'NAST',
+CNS_EKPO(10)        TYPE C VALUE 'EKPO EKKO',
+CNS_EKET(4)         TYPE C VALUE 'EKET',
+CNS_T001W(5)        TYPE C VALUE 'T001W',
+CNS_T024(4)         TYPE C VALUE 'T024',
+CNS_LFA1(4)         TYPE C VALUE 'LFA1',
+CNS_ADRC(4)         TYPE C VALUE 'ADRC',
+CNS_ZEDI02(6)       TYPE C VALUE 'ZEDI02',
+CNS_F05(3)          TYPE C VALUE 'F05',
+CNS_READ_TEXT(9)    TYPE C VALUE 'READ_TEXT',
+CNS_CREATE_TEXT(11) TYPE C VALUE 'CREATE_TEXT',
+CNS_AG(2)           TYPE C VALUE 'AG',
+CNS_WE(2)           TYPE C VALUE 'WE',
+CNS_TOP_OF_PAGE(16) TYPE C VALUE 'TOP_OF_PAGE',
+CNS_FRM_TOP(16)     TYPE C VALUE 'FORM_TOP_OF_PAGE',
+cns_space(3)        type c value '   ',
+CNS_M               TYPE C VALUE 'M',
+cns_ub(2)           type c value 'UB'.  "営業所間移動
+* Add ES-UP 2012/10/15 -->
+CONSTANTS CNS_SJIS TYPE STRING VALUE `shift_jis`.
+* Add ES-UP 2012/10/15 <--
+***2013.01.07 upd >>>
+CONSTANTS CNS_INTIAL_TIME TYPE NAST-UHRVR VALUE '000000'.
+***2013.01.07 upd <<<
+
+************************************************************************
+* 選択画面定義
+************************************************************************
+*---APPEND START PSD T.SAITOH 2002/08/08 ---------------------------*
+* 即時印刷チェックボックス
+PARAMETERS P_IMMED AS CHECKBOX.
+*---APPEND END   PSD T.SAITOH 2002/08/08 ---------------------------*
+PARAMETERS P_R1 TYPE C RADIOBUTTON GROUP RDIO.
+PARAMETERS P_R2 TYPE C RADIOBUTTON GROUP RDIO.
+PARAMETERS P_R3 TYPE C RADIOBUTTON GROUP RDIO.
+
+SELECT-OPTIONS P_WERKS FOR  T001W-WERKS.
+SELECT-OPTIONS P_EKGRP FOR  T024-EKGRP.
+SELECT-OPTIONS P_LIFNR FOR  LFA1-LIFNR.
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN POSITION 35.
+PARAMETERS: P_VSTAT TYPE NAST-VSTAT DEFAULT CNS_1 OBLIGATORY.
+SELECTION-SCREEN COMMENT 1(20) TEXT-001 FOR FIELD P_VSTAT.
+SELECTION-SCREEN COMMENT 40(20) TEXT-002.
+SELECTION-SCREEN END   OF LINE.
+
+*---MODIFY START PSD T.SAITOH 2002/08/08 ---------------------------*
+* SELECT-OPTIONS P_BEDAT FOR  EKKO-BEDAT.
+SELECT-OPTIONS P_BEDAT FOR  EKKO-BEDAT DEFAULT SY-DATUM.
+*---MODIFY END   PSD T.SAITOH 2002/08/08 ---------------------------*
+PARAMETERS P_MEMO      TYPE N default cns_1.
+***
+SELECTION-SCREEN SKIP.
+SELECTION-SCREEN COMMENT 1(30) TEXT-200.
+select-options S_LIFNR FOR LFA1-LIFNR NO INTERVALS .
+***2002.09.17 add >>>
+SELECTION-SCREEN SKIP.
+SELECTION-SCREEN COMMENT 1(30) TEXT-210.
+select-options S_LIFNR2 FOR LFA1-LIFNR NO INTERVALS .
+***2002.09.17 add <<<
+***2012.08.13 add >>>
+SELECTION-SCREEN SKIP.
+SELECT-OPTIONS S_KSCHL FOR NAST-KSCHL NO INTERVALS.
+***2012.08.13 add <<<
+
+************************************************************************
+* AT SELECTION-SCREEN
+************************************************************************
+AT SELECTION-SCREEN.
+
+* 送信区分チェック
+IF P_VSTAT <> CNS_0 AND
+P_VSTAT <> CNS_1.
+MESSAGE E009(Z1) WITH TEXT-001.
+ENDIF.
+
+* メッセージ送信媒体設定
+IF P_R1 = CNS_X.
+IF P_VSTAT = '1'.
+G_NACHA = CNS_A.
+ELSE.
+G_NACHA = CNS_6.   "EDI
+ENDIF.
+ELSEIF P_R2 = CNS_X.
+G_NACHA = CNS_8.   "EDI送信止め
+ELSEIF P_R3 = CNS_X.
+G_NACHA = CNS_6.
+ENDIF.
+
+************************************************************************
+* START-OF-SELECTION
+************************************************************************
+START-OF-SELECTION.
+
+* 2005/03/11 APPEND DMC A.MASUDA START -->
+* 今回実行時間取得
+W_UHRVR_A = SY-UZEIT.
+* 2005/03/11 APPEND DMC A.MASUDA END   <--
+* Add ES-UP 2012/11/05 -->
+create object g_conv.
+* Add ES-UP 2012/11/05 <--
+*---APPEND START PSD T.SAITOH 2002/08/08 ---------------------------*
+* オンライン時のみチェックする
+IF SY-BATCH <> 'X'.
+*    プラントチェック
+IF P_WERKS IS INITIAL.
+MESSAGE S006(Z1) WITH TEXT-009.
+stop.
+ENDIF.
+PERFORM FRM_CHECK_T001W.
+***2002.09.17 ADD >>>
+ELSE.
+IF P_BEDAT-LOW = '00000000' AND P_VSTAT = '1'.
+REFRESH P_BEDAT.
+CLEAR:P_BEDAT.
+P_BEDAT-LOW = SY-DATUM.
+P_BEDAT-OPTION = 'EQ'.
+P_BEDAT-SIGN = 'I'.
+APPEND P_BEDAT.
+CLEAR:P_BEDAT.
+ENDIF.
+***2002.09.17 ADD <<<
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/08/08 ---------------------------*
+
+* 対象データ取得
+PERFORM FRM_GET_INFO.
+
+* 帳票出力項目の設定
+PERFORM FRM_MAKE_ITAB.
+
+* 帳票出力
+* Edit 2002.08.07 >>>
+If P_R3 NE 'X' .
+PERFORM FRM_WRITE.
+* ↓ 2002/03/29 ADD
+* 印刷
+PERFORM FRM_PRINT.
+*---APPEND START PSD T.SAITOH 2002/08/08 ---------------------------*
+* オンライン時は最後に改ページする
+IF SY-BATCH <> 'X'.
+*---APPEND END   PSD T.SAITOH 2002/08/08 ---------------------------*
+NEW-PAGE PRINT OFF.
+*---APPEND START PSD T.SAITOH 2002/08/08 ---------------------------*
+ENDIF.
+*---APPEND END   PSD T.SAITOH 2002/08/08 ---------------------------*
+* ↑
+EndIf .
+If P_R3 EQ 'X' .
+Perform File_Check .
+EndIf .
+* Edit 2002.08.07 <<<
+
+* 2005/03/11 APPEND DMC A.MASUDA START -->
+* バッチインプット処理の場合のみ
+IF SY-BATCH = 'X' And P_R1 EQ 'X' .
+*   EDI出力実行時間の更新処理
+PERFORM FRM_UPDATE_TVARV.
+ENDIF.
+* 2005/03/11 APPEND DMC A.MASUDA END   <--
+
+************************************************************************
+* END-OF-SELECTION
+***********************************************************************
+END-OF-SELECTION.
+* ロック解除
+LOOP AT GT_EKPO INTO GF_EKPO.
+***2012.08.30 add >>>
+LOOP AT GT_NAST INTO GF_NAST
+WHERE OBJKY+0(10) = GF_EKPO-EBELN.
+***2012.08.30 add <<<
+
+PERFORM DEQUEUE_NAST.
+***2012.08.30 add >>>
+ENDLOOP.
+***2012.08.30 add <<<
+ENDLOOP.
+************************************************************************
+* TOP-OF-PAGE
+***********************************************************************
+TOP-OF-PAGE.
+
+IF G_NACHA = CNS_8.
+WRITE: 50      TEXT-102.
+ELSE.
+WRITE: 50      TEXT-101.
+ENDIF.
+
+WRITE:  110(8)    TEXT-103,
+125       SY-DATUM DD/MM/YY,
+134       SY-UZEIT+0(2),
+136       ':',
+137       SY-UZEIT+2(2).
+
+IF P_VSTAT = CNS_0.
+WRITE /61       TEXT-004.
+ELSE.
+WRITE /61       TEXT-005.
+ENDIF.
+
+WRITE:  70          TEXT-104, P_MEMO,
+110(4)      TEXT-106,
+115(4)      GF_WRITE-WERKS,
+120(16)     GF_WRITE-WERKST,
+138(6)      TEXT-107,
+145(3)      GF_WRITE-EKGRP,
+149(18)     GF_WRITE-EKNAM,
+/115(21)     SY-ULINE,
+145(22)     SY-ULINE.
+SKIP 1.
+
+WRITE: /1           TEXT-108,
+11          TEXT-109,
+***2012.08.13 del >>>
+*          21          TEXT-110.
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+21          TEXT-110,
+39          TEXT-211.
+***2012.08.13 add <<<
+if g_nacha = cns_6.
+***2012.08.13 del >>>
+*   write: 39          TEXT-111.
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+write: 44          TEXT-111.
+***2012.08.13 add <<<
+else.
+***2012.08.13 del >>>
+*   write: 39          text-105.
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+write: 44          text-105.
+***2012.08.13 add <<<
+endif.
+
+write:   68          TEXT-112,
+102         TEXT-113,
+111         TEXT-114,
+120         TEXT-115,
+135         TEXT-116,
+140         TEXT-117,
+145         TEXT-118,
+156         TEXT-119.
+
+IF G_NACHA = CNS_6.
+write: 167         TEXT-120.
+ENDIF.
+
+ULINE.
+
+
+*  PERFORM FRM_MEISAI_HEADER.
+
+************************************************************************
+* FORM
+***********************************************************************
+*&---------------------------------------------------------------------
+*&      Form  FRM_GET_INFO
+*&---------------------------------------------------------------------
+*       処理対象データの取得
+*----------------------------------------------------------------------
+
+form FRM_GET_INFO.
+
+If SY-BATCH EQ 'X' .
+* 2005/03/11 APPEND DMC A.MASUDA START -->
+* 前回EDI出力実行時間の取得
+PERFORM FRM_GET_TVARV.
+* 2005/03/11 APPEND DMC A.MASUDA END   <--
+EndIf .
+* NAST情報の取得
+PERFORM GET_NAST.
+
+* 購買伝票情報の取得
+PERFORM GET_EKPO.
+
+endform.                    " FRM_GET_INFO
+*&---------------------------------------------------------------------
+*&      Form  FRM_WRITE
+*&---------------------------------------------------------------------
+*       結果出力
+*----------------------------------------------------------------------
+
+form FRM_WRITE.
+
+DATA: TMP_WRITE LIKE GF_WRITE.
+
+* 表示対象なし
+if gt_write is initial.
+MESSAGE S616(Z1).
+STOP.
+endif.
+
+* ソート
+sort gt_write ascending by werks
+ekgrp
+ztehai
+eindt
+bedat
+ZHBANGO
+***2012.08.13 add >>>
+KSCHL
+***2012.08.13 add <<<
+.
+
+READ TABLE GT_WRITE INTO GF_WRITE
+INDEX 1.
+TMP_WRITE = GF_WRITE.
+* 明細ヘッダ出力
+PERFORM FRM_MEISAI_HEADER.
+
+loop at gt_write into gf_write.
+* プラント/購買グループ ブレイク
+if gf_write-werks <> tmp_write-werks or
+gf_write-EKGRP <> tmp_write-EKGRP.
+new-page.
+endif.
+
+* 明細ヘッダ出力
+IF ( GF_WRITE-WERKS <> TMP_WRITE-WERKS OR
+GF_WRITE-EKGRP <> TMP_WRITE-EKGRP OR
+GF_WRITE-ztehai <> TMP_WRITE-ztehai ).
+PERFORM FRM_MEISAI_HEADER.
+ENDIF.
+
+* 明細出力
+PERFORM FRM_WRITE_MEISAI.
+
+TMP_WRITE = GF_WRITE.
+
+endloop.
+
+endform.                    " FRM_WRITE
+*&---------------------------------------------------------------------
+*&      Form  GET_NAST
+*&---------------------------------------------------------------------
+*       NAST情報の取得
+*----------------------------------------------------------------------
+form GET_NAST.
+IF P_R2 = CNS_X.
+***2012.08.13 del >>>
+*    SELECT OBJKY FROM NAST
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+SELECT OBJKY KSCHL FROM NAST
+***2012.08.13 add <<<
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST
+WHERE KAPPL = CNS_EF
+***2012.08.13 del >>>
+*      AND   KSCHL = CNS_NEU
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+AND   KSCHL IN  S_KSCHL
+***2012.08.13 add <<<
+AND   PARNR IN P_LIFNR
+AND   NACHA = G_NACHA
+AND   VSTAT = P_VSTAT
+* Add 2010/05/12 --->
+AND   AKTIV NE 'X'
+* Add 2010/05/12 <---
+AND   ERDAT IN P_BEDAT .
+* 2005/03/11 APPEND DMC A.MASUDA START -->
+ELSEIF P_R1 = CNS_X .
+***2012.08.13 del >>>
+*    SELECT OBJKY
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+SELECT OBJKY KSCHL
+***2012.08.13 add <<<
+FROM NAST
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST
+WHERE KAPPL = CNS_EF
+***2012.08.13 del >>>
+*      AND   KSCHL = CNS_NEU
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+AND   KSCHL IN  S_KSCHL
+***2012.08.13 add <<<
+AND   PARNR IN P_LIFNR
+AND   NACHA = G_NACHA
+AND   VSTAT = P_VSTAT
+* Add 2010/05/12 --->
+AND   AKTIV NE 'X'
+* Add 2010/05/12 <---
+AND   DATVR IN P_BEDAT
+AND ( UHRVR => W_UHRVR_B
+***2013.01.07 upd >>>
+*      Or    UHRVR Is Null )
+Or    UHRVR =  CNS_INTIAL_TIME )
+***2013.01.07 upd <<<
+.
+* 2005/03/11 APPEND DMC A.MASUDA END   <--
+ELSE.
+***2012.08.13 del >>>
+*    SELECT OBJKY FROM NAST
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+SELECT OBJKY KSCHL FROM NAST
+***2012.08.13 add <<<
+INTO CORRESPONDING FIELDS OF TABLE GT_NAST
+WHERE KAPPL = CNS_EF
+***2012.08.13 del >>>
+*      AND   KSCHL = CNS_NEU
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+AND   KSCHL IN  S_KSCHL
+***2012.08.13 add <<<
+AND   PARNR IN P_LIFNR
+AND   NACHA = G_NACHA
+AND   VSTAT = P_VSTAT
+* Add 2010/05/12 --->
+AND   AKTIV NE 'X'
+* Add 2010/05/12 <---
+AND   DATVR IN P_BEDAT .
+ENDIF.
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S616(Z1).
+STOP.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_NAST SY-SUBRC.
+ENDCASE.
+
+endform.                    " GET_NAST
+*&---------------------------------------------------------------------
+*&      Form  GET_EKPO
+*&---------------------------------------------------------------------
+*       購買伝票情報の取得
+*----------------------------------------------------------------------
+
+form GET_EKPO.
+* 2012/05/08 DEL START
+*  REFRESH:T_MSEG.
+* 2012/05/08 DEL END
+
+SELECT A~EBELN A~EBELP A~MATNR A~TXZ01
+A~IDNLF A~MENGE A~MEINS A~NETPR
+A~PEINH A~KNTTP A~EVERS A~ADRNR
+A~ADRN2 A~WERKS
+B~EKGRP B~BEDAT B~LIFNR B~WAERS
+b~bsart b~reswk A~LABNR
+INTO CORRESPONDING FIELDS OF TABLE GT_EKPO
+FROM EKPO AS A INNER JOIN EKKO AS B
+ON   A~EBELN =  B~EBELN
+FOR ALL ENTRIES IN GT_NAST
+WHERE A~EBELN =  GT_NAST-OBJKY+0(10)
+AND   A~WERKS IN P_WERKS
+and   b~ekgrp in p_ekgrp
+and   b~lifnr in p_lifnr
+AND   A~LOEKZ   =  ''.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S616(Z1).
+STOP.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_EKPO SY-SUBRC.
+ENDCASE.
+* 2012/05/08 DEL START
+****2002/11/21 ADD >>>
+*  IF P_R2 = 'X'.
+*    CLEAR:T_MSEG.
+*    SELECT EBELN EBELP
+*    INTO CORRESPONDING FIELDS OF TABLE T_MSEG
+*    FROM MSEG
+*    FOR ALL ENTRIES IN GT_NAST
+*    WHERE EBELN = GT_NAST-OBJKY+0(10)
+****2003/02/21 EDIT >>>
+**   AND   BWART = '101'
+*    AND   BWART IN ('101' , '161')
+****2003/02/21 EDIT <<<
+*    AND   WERKS IN P_WERKS
+*    AND   LIFNR IN P_LIFNR.
+*  ENDIF.
+****2002/11/21 ADD <<<
+* 2012/05/08 DEL END
+endform.                    " GET_EKPO
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MAKE_ITAB
+*&---------------------------------------------------------------------*
+*       帳票出力内部TBLの設定
+*----------------------------------------------------------------------*
+form FRM_MAKE_ITAB.
+* 2012/05/08 DEL START
+****2002/11/21 ADD >>>
+*  CLEAR:GF_EKPO, T_MSEG.
+*  IF P_R2 = 'X'.
+*    LOOP AT T_MSEG.
+*      DELETE GT_EKPO
+*      WHERE EBELN = T_MSEG-EBELN
+*      AND   EBELP = T_MSEG-EBELP.
+*      IF SY-SUBRC = 0.
+****TABLE LOCK
+*        PERFORM FRM_ENQUEUE_NAST.
+****NAST UPDATE
+*        UPDATE NAST SET VSTAT = '1'
+*        WHERE KAPPL = CNS_EF
+*        AND   KSCHL = CNS_NEU
+*        AND   OBJKY = T_MSEG-EBELN
+*        AND   SPRAS = CNS_J
+*        AND   NACHA = G_NACHA.
+****ERROR MESSAGE
+*        IF SY-SUBRC <> 0.
+*          ROLLBACK WORK.
+*          MESSAGE S753(Z1) WITH CNS_NAST.
+*          STOP.
+*        ENDIF.
+****UNLOCK
+*        PERFORM DEQUEUE_NAST.
+*      ENDIF.
+*    ENDLOOP.
+*  ENDIF.
+****2002/11/21 ADD <<<
+* 2012/05/08 DEL END
+* Add ES-UP 2012/11/05 -->
+data l_rts type abap_bool.
+* Add ES-UP 2012/11/05 <--
+LOOP AT GT_EKPO INTO GF_EKPO.
+***2012.08.13 add >>>
+LOOP AT GT_NAST INTO GF_NAST
+WHERE OBJKY+0(10) = GF_EKPO-EBELN.
+***2012.08.13 add <<<
+
+* NASTロック処理
+PERFORM FRM_ENQUEUE_NAST.
+
+* 名称共通項目の設定
+MOVE-CORRESPONDING GF_EKPO TO GF_WRITE.
+***2012.08.13 add >>>
+GF_WRITE-KSCHL = GF_NAST-KSCHL.
+***2012.08.13 add <<<
+
+* 発注番号の設定
+PERFORM FRM_SET_ZHBANGO.
+
+* 発注納期の設定
+PERFORM FRM_SET_EINDT.
+
+* プラント名の設定
+PERFORM FRM_SET_WERKS.
+
+* 手配先名の設定
+PERFORM FRM_SET_LIFNR.
+
+* 購買グループの設定
+PERFORM FRM_SET_EKGRP.
+
+* 発注単価の設定
+PERFORM FRM_SET_TANKA.
+
+* 区分の設定
+PERFORM FRM_SET_KUBUN.
+
+* 指定得意先の設定
+PERFORM FRM_SET_TOKUI.
+* Add ES-UP 2012/11/05 -->
+* EDI送信のみチェック
+* 名称
+if g_conv->convert_check( GF_WRITE-WERKST ) = abap_false.
+if GF_WRITE-ZERROR = space and P_VSTAT = CNS_0.
+PERFORM FRM_UPDATE_NAST USING 'Z'.  " NAST更新
+endif.
+GF_WRITE-Zwarning = 'Z'.
+GF_WRITE-ZERROR = 'Z'.              "SJIS変換エラー
+endif.
+* 購買グループテキスト
+if g_conv->convert_check( GF_WRITE-EKNAM ) = abap_false.
+if GF_WRITE-ZERROR = space and P_VSTAT = CNS_0.
+PERFORM FRM_UPDATE_NAST USING 'Z'.  " NAST更新
+endif.
+GF_WRITE-Zwarning = 'Z'.
+GF_WRITE-ZERROR = 'Z'.              "SJIS変換エラー
+endif.
+* 手配名
+if g_conv->convert_check( GF_WRITE-ZTEHAIT ) = abap_false.
+if GF_WRITE-ZERROR = space and P_VSTAT = CNS_0.
+PERFORM FRM_UPDATE_NAST USING 'Z'.  " NAST更新
+endif.
+GF_WRITE-Zwarning = 'Z'.
+GF_WRITE-ZERROR = 'Z'.              "SJIS変換エラー
+endif.
+* 品目コード
+if g_conv->convert_check( GF_WRITE-MATNR ) = abap_false.
+if GF_WRITE-ZERROR = space and P_VSTAT = CNS_0.
+PERFORM FRM_UPDATE_NAST USING 'Z'.  " NAST更新
+endif.
+GF_WRITE-Zwarning = 'Z'.
+GF_WRITE-ZERROR = 'Z'.              "SJIS変換エラー
+endif.
+* テキスト短
+if g_conv->convert_check( GF_WRITE-TXZ01 ) = abap_false.
+if GF_WRITE-ZERROR = space and P_VSTAT = CNS_0.
+PERFORM FRM_UPDATE_NAST USING 'Z'.  " NAST更新
+endif.
+GF_WRITE-Zwarning = 'Z'.
+GF_WRITE-ZERROR = 'Z'.              "SJIS変換エラー
+endif.
+* 仕入先品目コード
+if g_conv->convert_check( GF_WRITE-IDNLF ) = abap_false.
+if GF_WRITE-ZERROR = space and P_VSTAT = CNS_0.
+PERFORM FRM_UPDATE_NAST USING 'Z'.  " NAST更新
+endif.
+GF_WRITE-Zwarning = 'Z'.
+GF_WRITE-ZERROR = 'Z'.              "SJIS変換エラー
+endif.
+* 注文書備考(購買発注テキスト)チェック
+if GF_WRITE-ZERROR = space.
+perform ltext_check using GF_EKPO-EBELN
+GF_EKPO-ebelp
+'F02'.
+endif.
+* EDI備考(購買発注テキスト)チェック
+if GF_WRITE-ZERROR = space.
+perform ltext_check using GF_EKPO-EBELN
+GF_EKPO-ebelp
+'F05'.
+endif.
+* EDI送信用(その他)チェック
+if GF_WRITE-ZERROR = space.
+perform ltext_check using GF_EKPO-EBELN
+GF_EKPO-ebelp
+'F06'.
+endif.
+* 住電試験書区分チェック
+if GF_WRITE-ZERROR = space.
+perform ltext_check using GF_EKPO-EBELN
+GF_EKPO-ebelp
+'F07'.
+endif.
+* エンドユーザー注文番号チェック
+if GF_WRITE-ZERROR = space.
+perform ltext_check using GF_EKPO-EBELN
+GF_EKPO-ebelp
+'F08'.
+endif.
+* Add ES-UP 2012/11/05 <--
+* 指定納入先の設定
+PERFORM FRM_SET_SIIRE.
+* アペンド
+APPEND GF_WRITE TO GT_WRITE.
+CLEAR GF_WRITE.
+***2012.08.13 add >>>
+ENDLOOP.
+***2012.08.13 add <<<
+
+ENDLOOP.
+endform.                    " FRM_MAKE_ITAB
+* Add ES-UP 2012/11/05 -->
+*&---------------------------------------------------------------------*
+*&      Form  ltext_check
+*&---------------------------------------------------------------------*
+form ltext_check using p_ebeln type ekpo-ebeln
+p_ebelp type ekpo-ebelp
+p_tdid  type clike.
+data: l_thead type thead,
+i_tline type table of tline,
+i_line  type tdtab_c132,
+l_line  type line of tdtab_c132,
+l_rts   type abap_bool.
+l_rts = abap_true.
+* SAPscript: テキスト読込
+l_thead-tdid = p_tdid.
+l_thead-tdspras = sy-langu.
+concatenate p_ebeln p_ebelp into l_thead-tdname.
+l_thead-tdobject = 'EKPO'.
+*
+call function 'READ_TEXT'
+exporting
+id       = l_thead-tdid
+language = l_thead-tdspras
+name     = l_thead-tdname
+object   = l_thead-tdobject
+tables
+lines    = i_tline
+exceptions
+others   = 0.
+*
+if lines( i_tline ) = 0.
+return.
+endif.
+* ITF (SAPscript 形式) から ASCII へのテキスト変換
+call function 'CONVERT_ITF_TO_ASCII'
+importing
+c_datatab = i_line
+tables
+itf_lines = i_tline
+exceptions
+others    = 0.
+* SJIS変換可能チェック
+loop at i_line into l_line.
+if g_conv->convert_check( l_line ) = abap_false.
+l_rts = abap_false.
+exit.
+endif.
+endloop.
+* NAST更新
+IF l_rts = abap_false.
+if GF_WRITE-Zwarning = space and P_VSTAT = CNS_0.
+PERFORM FRM_UPDATE_NAST USING p_tdid.  " NAST更新
+endif.
+GF_WRITE-Zwarning = p_tdid.
+GF_WRITE-ZERROR = 'Z'.                 "SJIS変換エラー
+ENDIF.
+endform.                    "ltext_check
+* Add ES-UP 2012/11/05 <--
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_EINDT
+*&---------------------------------------------------------------------*
+*       発注納期の設定
+*----------------------------------------------------------------------*
+form FRM_SET_EINDT.
+
+SELECT SINGLE EINDT FROM EKET
+INTO CORRESPONDING FIELDS OF GF_WRITE
+WHERE EBELN = GF_EKPO-EBELN
+AND   EBELP = GF_EKPO-EBELP
+AND   ETENR = CNS_0001.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_EKET SY-SUBRC.
+ENDCASE.
+
+endform.                    " FRM_SET_EINDT
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_LIFNR
+*&---------------------------------------------------------------------*
+*       仕入先名の設定
+*----------------------------------------------------------------------*
+form FRM_SET_LIFNR.
+
+* 営業所間移動の場合
+if gf_ekpo-bsart = cns_ub.
+gf_write-ztehai  = gf_ekpo-reswk.
+
+select single name1 from t001w
+into gf_write-ztehait
+where werks = gf_ekpo-reswk.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_t001w SY-SUBRC.
+ENDCASE.
+
+
+else.
+* 他
+GF_WRITE-ZTEHAI = GF_EKPO-LIFNR.
+
+SELECT SINGLE NAME1 FROM LFA1
+INTO GF_WRITE-ztehait
+WHERE LIFNR = GF_EKPO-LIFNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_LFA1 SY-SUBRC.
+ENDCASE.
+endif.
+
+endform.                    " FRM_SET_LIFNR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_WERKS
+*&---------------------------------------------------------------------*
+*       プラント名の設定
+*----------------------------------------------------------------------*
+form FRM_SET_WERKS.
+
+SELECT SINGLE NAME1 FROM T001W
+INTO GF_WRITE-WERKST
+WHERE WERKS = GF_EKPO-WERKS.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_T001W SY-SUBRC.
+ENDCASE.
+
+endform.                    " FRM_SET_WERKS
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_EKGRP
+*&---------------------------------------------------------------------*
+*       購買グループの設定
+*----------------------------------------------------------------------*
+form FRM_SET_EKGRP.
+
+SELECT SINGLE EKNAM FROM T024
+INTO GF_WRITE-EKNAM
+WHERE EKGRP = GF_EKPO-EKGRP.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_T024 SY-SUBRC.
+ENDCASE.
+
+endform.                    " FRM_SET_EKGRP
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_TANKA
+*&---------------------------------------------------------------------*
+*       発注単価の設定
+*----------------------------------------------------------------------*
+form FRM_SET_TANKA.
+
+DATA: L_RET(256)  TYPE C,
+L_NETPR(12) TYPE P DECIMALS 2.
+
+* 価格変換
+CALL FUNCTION 'CURRENCY_AMOUNT_SAP_TO_IDOC'
+EXPORTING
+CURRENCY    = GF_EKPO-WAERS
+SAP_AMOUNT  = GF_EKPO-NETPR
+IMPORTING
+IDOC_AMOUNT = L_RET
+EXCEPTIONS
+OTHERS      = 1.
+IF SY-SUBRC <> 1.
+L_NETPR = L_RET.
+ENDIF.
+
+* 単価算出
+IF GF_EKPO-PEINH = 0.
+GF_WRITE-ZTANKA = 0.
+ELSE.
+GF_WRITE-ZTANKA = L_NETPR / GF_EKPO-PEINH.
+ENDIF.
+
+endform.                    " FRM_SET_TANKA
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_KUBUN
+*&---------------------------------------------------------------------*
+*       区分の設定
+*----------------------------------------------------------------------*
+form FRM_SET_KUBUN.
+
+IF GF_ekpo-knttp is initial.
+GF_WRITE-ZKUBUN = TEXT-006.
+ELSE.
+GF_WRITE-ZKUBUN = TEXT-007.
+ENDIF.
+
+endform.                    " FRM_SET_KUBUN
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_TOKUI
+*&---------------------------------------------------------------------*
+*       指定得意先の設定
+*----------------------------------------------------------------------*
+form FRM_SET_TOKUI.
+data:   l_space(1) type x.
+CLEAR:  G_NAME,
+GF_LINE.
+REFRESH GT_LINE.
+
+l_space = '20'.
+
+* 検索用伝票番号設定
+CONCATENATE GF_EKPO-EBELN
+GF_EKPO-EBELP
+INTO      G_NAME.
+
+call function 'READ_TEXT'
+exporting
+id                            = 'F05'
+language                      = 'J'
+name                          = G_NAME
+object                        = 'EKPO'
+tables
+lines                         = GT_LINE
+EXCEPTIONS
+ID                            = 1
+LANGUAGE                      = 2
+NAME                          = 3
+NOT_FOUND                     = 4
+OBJECT                        = 5
+REFERENCE_CHECK               = 6
+WRONG_ACCESS_TO_ARCHIVE       = 7
+OTHERS                        = 8
+.
+
+CASE SY-SUBRC.
+WHEN 0.
+READ TABLE GT_LINE INTO GF_LINE INDEX 1.
+*---APPEND START PSD T.SAITOH 2002/03/28 ---------------------------*
+*     先頭がスペースの場合は指定得意先は存在しない
+if gf_line-tdline+0(1) = SPACE.
+*       存在しないがスペースは詰める
+condense gf_line-tdline.
+exit.
+endif.
+*---APPEND END   PSD T.SAITOH 2002/03/28 ---------------------------*
+* ↓ modify 2002.02.25 psd m.arai 指定得意先設定条件変更対応
+condense gf_line-tdline.
+perform frm_set_fdpos using gf_line-tdline.
+if sy-fdpos <> 0.
+gf_write-ztokui = gf_line-tdline+0(SY-FDPOS).
+sy-fdpos = sy-fdpos + 1.
+gf_line-tdline = gf_line-tdline+sy-fdpos.
+endif.
+*      GF_WRITE-ZTOKUI = GF_LINE-TDLINE+0(10).
+* ↑
+WHEN OTHERS.
+ENDCASE.
+
+endform.                    " FRM_SET_TOKUI
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_SIIRE
+*&---------------------------------------------------------------------*
+*       指定納入先の設定
+*----------------------------------------------------------------------*
+form FRM_SET_SIIRE.
+
+DATA: L_RET TYPE C.
+
+* ↓ append 2002.02.25 指定納入先設定条件の変更
+* 納入先住所設定チェック
+* perform frm_set_fdpos using gf_line-tdline.
+* if sy-fdpos <> 0.
+*   gf_write-zsiire = gf_line-tdline+0(SY-FDPOS).
+* endif.
+* 納入先が設定されている場合
+* if not gf_write-zsiire is initial.
+*   if g_nacha = cns_6.
+*     perform frm_check_error using    '002'
+*                             changing l_ret. "エラーチェック
+*     PERFORM FRM_UPDATE_NAST USING '002'.    " NAST更新
+*   endif.
+*   if not l_ret is initial.
+*     if gf_write-evers is initial.
+*       gf_write-zerror = cns_1.
+*     else.
+*       gf_write-zerror = cns_2.
+*     endif.
+*   endif.
+*   exit.
+* endif.
+* ↑
+***2002.09.17 add >>>
+IF G_NACHA = CNS_6 AND P_VSTAT = 0 AND
+GF_EKPO-LIFNR IN S_LIFNR2.
+IF GF_EKPO-IDNLF = SPACE.
+PERFORM FRM_UPDATE_NAST USING '009'.    " NAST更新
+L_RET = 'X'.
+GF_WRITE-ZERROR = '9'.                "仕入先品目エラー
+*2010/04/02 ADD START
+EXIT.
+*2010/04/02 ADD END
+ENDIF.
+ENDIF.
+* 2005.05.25 <--- Add
+IF GF_EKPO-LABNR NE SPACE.
+* 2012/05/08 ADD START
+IF P_VSTAT = 0.
+* 2012/05/08 ADD END
+PERFORM FRM_UPDATE_NAST USING '009'.    " NAST更新
+* 2012/05/08 ADD START
+ENDIF.
+* 2012/05/08 ADD END
+L_RET = 'X'.
+GF_WRITE-ZERROR = 'R'.                "注文請け書エラー
+EXIT .
+ENDIF.
+* 2005.05.25 <--- Add
+
+***2002.09.17. add <<<
+* 納入先住所が設定されていない場合
+IF NOT GF_EKPO-ADRN2 IS INITIAL.
+***2002.03.28 add >>>
+Clear:ADRC.
+SELECT NAME2 FROM ADRC
+INTO ADRC-NAME2
+WHERE ADDRNUMBER = GF_EKPO-ADRN2.
+Exit.
+ENDSELECT.
+GF_WRITE-ZSIIRE = ADRC-Name2.
+***2002.03.28 add <<<
+*   GF_WRITE-ZSIIRE = GF_EKPO-ADRN2.
+
+IF G_NACHA = CNS_6.
+* 2014/02/24 DEL START
+*      PERFORM FRM_CHECK_ERROR USING    '002'
+*                              CHANGING L_RET. " エラーチェック
+* 2014/02/24 DEL END
+***2002.09.17 DEL >>>
+*    ELSE.
+*      PERFORM FRM_UPDATE_NAST_SOUSIN.
+***2002.09.17 DEL <<<
+* Del 2002/10/09 >>>
+*   ENDIF.
+* Del 2002/10/09 <<<
+*       エラー処理
+***2002.09.17 ADD >>>
+* 2014/02/24 DEL START
+*    IF NOT L_RET IS INITIAL.
+*      IF GF_WRITE-ZERROR = '9'.
+*        gf_write-zerror = 'A'.                " 指定納入先エラー
+*      ELSE.
+*        gf_write-zerror = cns_1.                " 指定納入先エラー
+*        PERFORM FRM_UPDATE_NAST USING '002'.    " NAST更新
+*      ENDIF.
+****2002.09.17 ADD <<<
+*    ELSE.
+* 2014/02/24 DEL END
+PERFORM FRM_UPDATE_NAST_SOUSIN.
+* Del 2012.09.05 --->
+*****2002.03.13 ADD >>>
+******発注伝票のテキストへADRN2をセットし更新する
+*      REFRESH:W_TEXT_O,W_TEXT_I.
+*      CLEAR:W_TEXT_O,W_TEXT_I,W_NAME_F05O.
+*      CONCATENATE GF_EKPO-EBELN GF_EKPO-EBELP INTO W_NAME_F05O.
+*      CALL FUNCTION 'READ_TEXT'
+*      EXPORTING
+**   CLIENT                        = SY-MANDT
+*        ID                            = 'F05'
+*        LANGUAGE                      = 'J'
+*        NAME                          = W_NAME_F05O
+*        OBJECT                        = 'EKPO'
+**       ARCHIVE_HANDLE                = 0
+**       LOCAL_CAT                     = ' '
+**     IMPORTING
+**       HEADER                        =
+*      TABLES
+*        LINES                         =  W_TEXT_O
+*      EXCEPTIONS
+*        ID                            = 1
+*         LANGUAGE                      = 2
+*         NAME                          = 3
+*         NOT_FOUND                     = 4
+*         OBJECT                        = 5
+*         REFERENCE_CHECK               = 6
+*         WRONG_ACCESS_TO_ARCHIVE       = 7
+*         OTHERS                        = 8            .
+*      IF SY-SUBRC <> 0 and SY-SUBRC <> 4.
+*        MESSAGE a001(Z1) WITH 'READ_TEXT' SY-SUBRC.
+*      ENDIF.
+*      READ TABLE W_TEXT_O INDEX 1.
+*      W_HBIKOU = W_TEXT_O-TDLINE.
+****2002.09.05 add >>>
+*      IF W_HBIKOU+0(02) = '00' AND W_HBIKOU+8(01) <> SPACE.
+*        W_TJUCHU = W_HBIKOU+2(8).
+*      ELSEIF W_HBIKOU+8(2) = ' 0'.
+*        W_TJUCHU = W_HBIKOU+0(8).
+*      ELSE.
+*        W_TJUCHU = W_HBIKOU+0(10).
+*      ENDIF.
+**     W_TSHUKA = GF_EKPO-ADRN2.
+*      W_TSHUKA = ADRC-Name2.
+*      CLEAR:W_HBIKOU.
+*      CONCATENATE W_TJUCHU W_TSHUKA INTO W_HBIKOU SEPARATED BY ' '.
+**
+*      W_TEXT_I-TDLINE = W_HBIKOU.
+*      APPEND W_TEXT_I.
+**
+*      CALL FUNCTION 'CREATE_TEXT'
+*        EXPORTING
+*          FID               = 'F05'
+*          FLANGUAGE         = 'J'
+*          FNAME             = W_NAME_F05O
+*          FOBJECT           = 'EKPO'
+**         SAVE_DIRECT       = 'X'
+**         FFORMAT           = '*'
+*        TABLES
+*          FLINES            = W_TEXT_I
+**       EXCEPTIONS
+**         NO_INIT           = 1
+**         NO_SAVE           = 2
+**         OTHERS            = 3
+*                .
+*      IF SY-SUBRC <> 0.
+*      ENDIF.
+*
+*****2002.03.13 ADD <<<
+* Del 2012.09.05 <---
+
+* 2014/02/24 DEL START
+*    ENDIF.
+* 2014/02/24 DEL END
+* Add 2002/10/09 >>>
+EndIf .
+* Add 2002/10/09 <<<
+ELSE.
+*   直送区分が設定されている場合
+IF NOT GF_EKPO-EVERS IS INITIAL.
+*     勘定設定カテゴリが‘M’：在庫の場合
+IF GF_EKPO-KNTTP = CNS_M.
+
+* ↓ modify 2002.02.25 psd m.arai 指定納入先設定条件の変更
+*---MODIFY START PSD T.SAITOH 2002/03/28 ---------------------------*
+*         GF_WRITE-ZSIIRE = GF_LINE-TDLINE+14(10).
+GF_WRITE-ZSIIRE = GF_LINE-TDLINE+0(10).
+*---MODIFY END   PSD T.SAITOH 2002/03/28 ---------------------------*
+
+IF G_NACHA = CNS_6.
+PERFORM FRM_CHECK_ERROR USING    '002'
+CHANGING L_RET. " エラーチェック
+***2002.09.17 DEL >>>
+*         ELSE.
+*           PERFORM FRM_UPDATE_NAST_SOUSIN.
+***2002.09.17 DEL <<<
+ENDIF.
+*       GF_WRITE-ZWARNING = '001'.
+*       l_ret = cns_x.
+* ↑
+
+*       エラー処理
+***2002.09.17 ADD >>>
+IF NOT L_RET IS INITIAL.
+IF GF_WRITE-ZERROR = '9'.
+gf_write-zerror = 'B'.      " 直送区分 指定納入先エラー
+ELSE.
+gf_write-zerror = cns_2.      " 直送区分 指定納入先エラー
+PERFORM FRM_UPDATE_NAST USING '001'.    " NAST更新
+ENDIF.
+***2002.09.17 ADD <<<
+ELSE.
+PERFORM FRM_UPDATE_NAST_SOUSIN.
+ENDIF.
+
+ELSE.
+*       住所がブランクの場合
+IF GF_EKPO-ADRNR IS INITIAL.
+* ↓ 2002/03/29 PSD M.ARAI 指定納入先設定対応
+*          GF_WRITE-ZSIIRE = ''.
+GF_WRITE-ZSIIRE = GF_LINE-TDLINE+0(10).
+* ↑
+
+* ↓ modify 2002.02.25 psd m.arai 指定納入先設定条件の変更
+IF G_NACHA = CNS_6.
+PERFORM FRM_CHECK_ERROR USING    '003'
+CHANGING L_RET. " エラーチェック
+***2002.09.17 DEL >>>
+*          ELSE.
+*            PERFORM FRM_UPDATE_NAST_SOUSIN.
+***2002.09.17 DEL <<<
+ENDIF.
+*          GF_WRITE-ZWARNING = '003'.
+*          l_ret = cns_x.
+* ↑
+*         エラー処理
+**2002.09.17 ADD >>>
+IF NOT L_RET IS INITIAL.
+IF GF_WRITE-ZERROR = '9'.
+gf_write-zerror = 'B'.      " 直送区分 指定納入先エラー
+ELSE.
+gf_write-zerror = cns_2.      " 直送区分 指定納入先エラー
+PERFORM FRM_UPDATE_NAST USING '003'.    " NAST更新
+ENDIF.
+**2002.09.17 ADD <<<
+ELSE.
+PERFORM FRM_UPDATE_NAST_SOUSIN.
+ENDIF.
+
+ELSE.
+
+PERFORM FRM_GET_ADRC.
+
+IF G_NACHA = CNS_6.
+PERFORM FRM_CHECK_ERROR USING    '002'
+CHANGING L_RET. " エラーチェック
+***2002.09.17 DEL >>>
+*          ELSE.
+*            PERFORM FRM_UPDATE_NAST_SOUSIN.
+***2002.09.17 DEL <<<
+ENDIF.
+
+*         エラー処理
+***2002.09.17 ADD >>>
+IF NOT L_RET IS INITIAL.
+IF GF_WRITE-ZERROR = '9'.
+gf_write-zerror = 'B'.      " 直送区分 指定納入先エラー
+ELSE.
+gf_write-zerror = cns_2.      " 直送区分 指定納入先エラー
+PERFORM FRM_UPDATE_NAST USING '002'.    " NAST更新
+ENDIF.
+***2002.09.17 ADD <<<
+ELSE.
+PERFORM FRM_UPDATE_NAST_SOUSIN.
+ENDIF.
+
+ENDIF.
+
+ENDIF.
+
+ELSE.
+* 勘定設定カテゴリがブランクの場合
+* 2010/06/09 Del --->
+*      IF GF_EKPO-KNTTP IS INITIAL.
+*        GF_WRITE-ZSIIRE = GF_EKPO-WERKS.
+*        PERFORM FRM_UPDATE_NAST_SOUSIN.
+*      ELSE.
+* 2010/06/09 Del <---
+
+GF_WRITE-ZSIIRE = GF_EKPO-WERKS.
+
+IF G_NACHA = CNS_6.
+PERFORM FRM_CHECK_ERROR USING    '005'
+CHANGING L_RET. " エラーチェック
+*        ELSE.
+*          PERFORM FRM_UPDATE_NAST_SOUSIN.
+ENDIF.
+*       エラー処理
+***2002.09.17 ADD >>>
+IF NOT L_RET IS INITIAL.
+IF GF_WRITE-ZERROR = '9'.
+gf_write-zerror = 'A'.    " 指定納入先エラー2002.03.28add
+ELSE.
+gf_write-zerror = cns_1.    " 指定納入先エラー2002.03.28add
+PERFORM FRM_UPDATE_NAST USING '005'.    " NAST更新
+ENDIF.
+***2002.09.17 ADD <<<
+ELSE.
+PERFORM FRM_UPDATE_NAST_SOUSIN.
+ENDIF.
+* 2010/06/09 Del --->
+*      ENDIF.
+* 2010/06/09 Del <---
+ENDIF.
+
+ENDIF.
+
+endform.                    " FRM_SET_SIIRE
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_ERROR
+*&---------------------------------------------------------------------*
+*       納入先存在チェック
+*----------------------------------------------------------------------*
+form FRM_CHECK_ERROR using    value(P_TYPE)
+changing P_RET.
+
+DATA: L_NOUNYU TYPE ZEDI02-NOUNYU.
+***2002.07.26>>>
+IF GF_EKPO-LIFNR IN S_LIFNR.
+ELSE.
+SELECT SINGLE NOUNYU FROM ZEDI02
+INTO L_NOUNYU
+WHERE LIFNR  = GF_EKPO-LIFNR
+AND   NOUNYU = GF_WRITE-ZSIIRE
+.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+GF_WRITE-ZWARNING = P_TYPE.
+P_RET = CNS_X.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_ZEDI02 SY-SUBRC.
+ENDCASE.
+ENDIF.
+***2002.07.26 <<<
+endform.                    " FRM_CHECK_ERROR
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPDATE_NAST
+*&---------------------------------------------------------------------*
+*       NASTの更新
+*----------------------------------------------------------------------*
+form FRM_UPDATE_NAST using    value(P_TYPE).
+
+UPDATE NAST SET NACHA = CNS_8
+WHERE KAPPL = CNS_EF
+***2012.08.13 del >>>
+*   AND   KSCHL = CNS_NEU
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+AND   KSCHL = GF_NAST-KSCHL
+***2012.08.13 add <<<
+AND   OBJKY = GF_EKPO-EBELN
+AND   SPRAS = CNS_J
+*    AND   NACHA = G_NACHA
+AND   VSTAT = P_VSTAT.
+
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+MESSAGE S753(Z1) WITH CNS_NAST.
+STOP.
+ENDIF.
+endform.                    " FRM_UPDATE_NAST
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPDATE_NAST
+*&---------------------------------------------------------------------*
+*       NASTの更新
+*----------------------------------------------------------------------*
+form FRM_UPDATE_NAST_SOUSIN .
+IF G_NACHA <> CNS_8
+* Add 2002.08.03 >>>
+And P_R3 EQ CNS_X
+* Add 2002.08.03 <<<
+.
+UPDATE NAST SET NACHA = CNS_A
+WHERE KAPPL = CNS_EF
+***2012.08.13 del >>>
+*    AND   KSCHL = CNS_NEU
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+AND   KSCHL = GF_NAST-KSCHL
+***2012.08.13 add <<<
+AND   OBJKY = GF_EKPO-EBELN
+AND   SPRAS = CNS_J
+*   AND   NACHA = G_NACHA
+AND   VSTAT = P_VSTAT.
+IF SY-SUBRC <> 0.
+ROLLBACK WORK.
+MESSAGE S753(Z1) WITH CNS_NAST.
+STOP.
+ENDIF.
+ENDIF.
+
+endform.                    " FRM_UPDATE_NAST
+
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_ADRC
+*&---------------------------------------------------------------------*
+*       住所取得
+*----------------------------------------------------------------------*
+form FRM_GET_ADRC.
+
+DATA: L_NAME TYPE ADRC-NAME2.
+
+SELECT SINGLE NAME2 FROM ADRC
+INTO L_NAME
+WHERE ADDRNUMBER = GF_EKPO-ADRNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+GF_WRITE-ZSIIRE = L_NAME.
+WHEN 4.
+WHEN OTHERS.
+MESSAGE a603(Z1) WITH SY-REPID CNS_ADRC SY-SUBRC.
+ENDCASE.
+
+endform.                    " FRM_GET_ADRC
+*&---------------------------------------------------------------------*
+*&      Form  FRM_MEISAI_HEADER
+*&---------------------------------------------------------------------*
+*       明細ヘッダ出力
+*----------------------------------------------------------------------*
+form FRM_MEISAI_HEADER.
+
+WRITE: /1       TEXT-100,
+9(8)    GF_WRITE-ztehai,
+18(34)  GF_WRITE-ztehait.
+
+endform.                    " FRM_MEISAI_HEADER
+*&---------------------------------------------------------------------*
+*&      Form  FRM_WRITE_MEISAI
+*&---------------------------------------------------------------------*
+*       明細行出力
+*----------------------------------------------------------------------*
+form FRM_WRITE_MEISAI.
+
+WRITE: /1        GF_WRITE-EINDT   DD/MM/YY,
+11       GF_WRITE-BEDAT   DD/MM/YY,
+21       GF_WRITE-ZHBANGO,
+***2012.08.13 del >>>
+*          39       GF_WRITE-MATNR,
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+39(4)    GF_WRITE-KSCHL,
+44       GF_WRITE-MATNR,
+***2012.08.13 add <<<
+68(30)   GF_WRITE-TXZ01,
+99(11)   GF_WRITE-MENGE DECIMALS 2,
+111(3)   GF_WRITE-MEINS,
+115(18)  GF_WRITE-ZTANKA,
+135(4)   GF_WRITE-ZKUBUN,
+140(2)   GF_WRITE-EVERS,
+145(10)  GF_WRITE-ZTOKUI,
+156(10)  GF_WRITE-ZSIIRE.
+
+IF G_NACHA = CNS_6.
+WRITE: 167(3)   GF_WRITE-ZWARNING.
+ENDIF.
+
+***2012.08.13 del >>>
+*  WRITE: /39      GF_WRITE-IDNLF.
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+WRITE: /44      GF_WRITE-IDNLF.
+***2012.08.13 add <<<
+* ↓ modify 2002.02.27 psd m.arai エラー結果変更対応
+if gf_write-zerror = cns_2.
+write:  140(2)  '**'.
+endif.
+if not gf_write-zerror is initial.
+IF GF_WRITE-zerror = 'A'.
+WRITE: /39(35) '***********************************'.
+write:  156(10) '**********'.
+ELSEIF GF_WRITE-zerror = 'B'.
+WRITE: /39(35) '***********************************'.
+write:  140(2)  '**'.
+write:  156(10) '**********'.
+ELSEIF GF_WRITE-zerror = '9'.
+WRITE: /39(35) '***********************************'.
+ELSEif gf_write-zerror = 'R' .
+write:  156(10) '請書受領済'.
+ELSE.
+write:  156(10) '**********'.
+ENDIF.
+ENDIF.
+*            140(2)  GF_WRITE-EVERS,
+*            156(10) GF_WRITE-ZSIIRE.
+* ↑
+endform.                    " FRM_WRITE_MEISAI
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_ZHBANGO
+*&---------------------------------------------------------------------*
+*       発注番号の設定
+*----------------------------------------------------------------------*
+form FRM_SET_ZHBANGO.
+
+CONCATENATE GF_EKPO-WERKS+1(2)
+GF_EKPO-EBELN
+* ↓ modify 2002.02.25 psd m.arai 発注明細変更対応
+*              GF_EKPO-EBELP+2(3)
+gf_ekpo-ebelp+3(1)
+* ↑
+INTO GF_WRITE-ZHBANGO
+SEPARATED BY '-'.
+endform.                    " FRM_SET_ZHBANGO
+*&---------------------------------------------------------------------*
+*&      Form  FRM_ENQUEUE_NAST
+*&---------------------------------------------------------------------*
+*       NASTロック処理
+*----------------------------------------------------------------------*
+form FRM_ENQUEUE_NAST.
+
+data: lf_nast type nast.
+IF P_R2 = 'X'.
+* 2012/05/08 DEL START
+*    lf_nast-objky = T_MSEG-EBELN.
+* 2012/05/08 DEL END
+ELSE.
+lf_nast-objky = gf_ekpo-ebeln.
+ENDIF.
+lf_nast-kappl = cns_ef.
+***2012.08.13 del >>>
+*  lf_nast-kschl = cns_neu.
+***2012.08.13 del <<<
+***2012.08.13 add >>>
+lf_nast-kschl =  gf_NAST-kschl.
+***2012.08.13 add <<<
+
+lf_nast-spras = cns_j.
+
+call function 'ENQUEUE_EZNAST'
+EXPORTING
+MODE_NAST            = 'E'
+MANDT                = SY-MANDT
+KAPPL                = lf_nast-kappl
+OBJKY                = lf_nast-objky
+KSCHL                = lf_nast-kschl
+SPRAS                = lf_nast-spras
+*      PARNR                =
+*      PARVW                =
+*      ERDAT                =
+*      ERUHR                =
+*      X_KAPPL              = ' '
+*      X_OBJKY              = ' '
+*      X_KSCHL              = ' '
+*      X_SPRAS              = ' '
+*      X_PARNR              = ' '
+*      X_PARVW              = ' '
+*      X_ERDAT              = ' '
+*      X_ERUHR              = ' '
+*      _SCOPE               = '2'
+*      _WAIT                = ' '
+*      _COLLECT             = ' '
+EXCEPTIONS
+FOREIGN_LOCK         = 1
+SYSTEM_FAILURE       = 2
+OTHERS               = 3
+.
+if sy-subrc <> 0.
+ROLLBACK WORK.
+MESSAGE S617(Z1) WITH CNS_NAST.
+STOP.
+endif.
+
+endform.                    " FRM_ENQUEUE_NAST
+*&---------------------------------------------------------------------*
+*&      Form  DEQUEUE_NAST
+*&---------------------------------------------------------------------*
+*       ロック解除
+*----------------------------------------------------------------------*
+form DEQUEUE_NAST.
+
+data: lf_nast type nast.
+IF P_R2 = 'X'.
+* 2012/05/08 DEL START
+*    lf_nast-objky = t_mseg-ebeln.
+* 2012/05/08 DEL END
+ELSE.
+lf_nast-objky = gf_ekpo-ebeln.
+ENDIF.
+lf_nast-kappl = cns_ef.
+***2012.08.13 del >>>
+*  lf_nast-kschl = cns_neu.
+***2012.08.13 del <<<
+lf_nast-spras = cns_j.
+***2012.08.13 add >>>
+***2012.08.30 del >>>
+*  LOOP AT S_KSCHL.
+***2012.08.30 del <<<
+***2012.08.30 del >>>
+*    lf_nast-kschl =  S_KSCHL.
+***2012.08.30 del <<<
+***2012.08.30 add >>>
+lf_nast-kschl =  GF_NAST-KSCHL.
+***2012.08.30 add <<<
+
+***2012.08.13 add <<<
+call function 'DEQUEUE_EZNAST'
+EXPORTING
+MODE_NAST       = 'E'
+MANDT           = SY-MANDT
+KAPPL           = lf_nast-kappl
+OBJKY           = lf_nast-objky
+KSCHL           = lf_nast-kschl
+SPRAS           = lf_nast-spras
+*        PARNR           =
+*        PARVW           =
+*        ERDAT           =
+*        ERUHR           =
+*        X_KAPPL         = ' '
+*        X_OBJKY         = ' '
+*        X_KSCHL         = ' '
+*        X_SPRAS         = ' '
+*        X_PARNR         = ' '
+*        X_PARVW         = ' '
+*        X_ERDAT         = ' '
+*        X_ERUHR         = ' '
+*        _SCOPE          = '3'
+*        _SYNCHRON       = ' '
+*        _COLLECT        = ' '
+.
+***2012.08.13 add >>>
+***2012.08.30 del >>>
+*  ENDLOOP.
+***2012.08.30 del <<<
+***2012.08.13 add <<<
+
+endform.                    " DEQUEUE_NAST
+*&---------------------------------------------------------------------*
+*&      Form  frm_check_address
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+form frm_check_address.
+
+endform.                    " frm_check_address
+*&---------------------------------------------------------------------*
+*&      Form  frm_set_fdpos
+*&---------------------------------------------------------------------*
+*       スーペース位置取得
+*----------------------------------------------------------------------*
+form frm_set_fdpos using    p_line.
+
+data: l_len  type p,
+c_loop type p.
+
+clear sy-fdpos.
+l_len = strlen( p_line ).
+
+do l_len times.
+if p_line+c_loop(1) is initial.
+exit.
+endif.
+c_loop = c_loop + 1.
+sy-fdpos = c_loop.
+enddo.
+
+endform.                    " frm_set_fdpos
+*&---------------------------------------------------------------------*
+*&      Form  FRM_PRINT
+*&---------------------------------------------------------------------*
+*       印刷
+*----------------------------------------------------------------------*
+form FRM_PRINT.
+
+DATA: TMP_WRITE LIKE GF_WRITE.
+DATA: FLG_NO_PRINT.
+***2010/02/22 add >>>
+DATA: FLG_FIRST.
+***2010/02/22 add <<<
+
+* 表示対象なし
+if gt_write is initial.
+MESSAGE S616(Z1).
+STOP.
+endif.
+
+* ソート
+sort gt_write ascending by werks
+ekgrp
+ztehai
+eindt
+bedat
+ZHBANGO
+.
+
+***2010/02/22 del >>>
+*  READ TABLE GT_WRITE INTO GF_WRITE
+*    INDEX 1.
+*  TMP_WRITE = GF_WRITE.
+*
+** 印刷設定
+*  PERFORM FRM_SET_PRINT_PARAMETER.
+*  IF SY-SUBRC <> 0.
+*    FLG_NO_PRINT = CNS_X.   " 当プラントを出力しない
+*  ELSE.
+** 明細ヘッダ出力
+*    PERFORM FRM_MEISAI_HEADER.
+*  ENDIF.
+*
+*  loop at gt_write into gf_write.
+** 印刷設定
+*    IF GF_WRITE-WERKS <> TMP_WRITE-WERKS.
+*      PERFORM FRM_SET_PRINT_PARAMETER.
+*      IF SY-SUBRC <> 0.
+*        FLG_NO_PRINT = CNS_X.   " 当プラントを出力しない
+*      ELSE.
+*        CLEAR FLG_NO_PRINT.
+*      ENDIF.
+*    ENDIF.
+*
+*    IF NOT FLG_NO_PRINT IS INITIAL.
+*      CONTINUE.
+*      TMP_WRITE = GF_WRITE.
+*    ENDIF.
+*
+** プラント/購買グループ ブレイク
+*    if gf_write-werks <> tmp_write-werks or
+*       gf_write-EKGRP <> tmp_write-EKGRP.
+*      new-page.
+*    endif.
+***2010/02/22 del <<<
+***2010/02/22 add >>>
+PERFORM FRM_GET_PRINT_DEST.
+
+loop at gt_adr10 into gf_adr10.
+CLEAR FLG_FIRST.
+loop at gt_write into gf_write
+where WERKS = gf_adr10-WERKS.
+IF FLG_FIRST IS INITIAL.
+*     印刷設定
+PERFORM FRM_SET_PRINT_PARAMETER.
+ENDIF.
+IF NOT FLG_FIRST IS INITIAL.
+* プラント/購買グループ ブレイク
+if gf_write-werks <> tmp_write-werks or
+gf_write-EKGRP <> tmp_write-EKGRP.
+new-page.
+endif.
+ENDIF.
+
+FLG_FIRST = CNS_X.
+***2010/02/22 add <<<
+
+* 明細ヘッダ出力
+IF ( GF_WRITE-WERKS <> TMP_WRITE-WERKS OR
+GF_WRITE-EKGRP <> TMP_WRITE-EKGRP OR
+GF_WRITE-ztehai <> TMP_WRITE-ztehai ).
+PERFORM FRM_MEISAI_HEADER.
+ENDIF.
+
+* 明細出力
+PERFORM FRM_WRITE_MEISAI.
+
+TMP_WRITE = GF_WRITE.
+
+endloop.
+***2010/02/22 add >>>
+endloop.
+***2010/02/22 add <<<
+
+endform.                    " FRM_PRINT
+
+************************************************************************
+*      Form  FRM_GET_PRINT_PARAMETERS
+************************************************************************
+*      プリンタアドレス取得
+***********************************************************************
+FORM FRM_ADR10.
+
+***ローカルＤＡＴＡ
+DATA: L_ADRNR      TYPE ADRC-ADDRNUMBER. "T001W-ADRNR. 020726 DEL
+
+SELECT SINGLE  ADRNR FROM T001W
+INTO  L_ADRNR
+WHERE WERKS = GF_WRITE-WERKS.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S021(Z1) WITH GF_WRITE-WERKS.
+EXIT.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH CNS_T001W SY-REPID SY-SUBRC.
+ENDCASE.
+
+***出力プリンタの取得
+SELECT SINGLE PRINT_DEST FROM ADR10
+INTO G_PRINT_DEST
+WHERE ADDRNUMBER = L_ADRNR.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S812(Z1).
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH 'ADR10' SY-REPID SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                                                    " FRM_ADR10
+*&---------------------------------------------------------------------*
+*&      Form  FRM_SET_PRINT_PARAMETER
+*&---------------------------------------------------------------------*
+*       印刷設定
+*----------------------------------------------------------------------*
+form FRM_SET_PRINT_PARAMETER.
+
+***2010/02/22 del >>>
+** 出力デバイス取得
+*  PERFORM FRM_ADR10.
+*
+*  IF SY-SUBRC <> 0.
+*    EXIT.
+*  ENDIF.
+***2010/02/22 del <<<
+
+* 印刷パラメータ設定
+PERFORM FRM_NEW_PAGE_PRINT_ON.
+
+endform.                    " FRM_SET_PRINT_PARAMETER
+
+************************************************************************
+*      Form  FRM_NEW_PAGE_PRINT_ON
+************************************************************************
+*     モニタリストスプール処理(プラント毎にページ出力)
+************************************************************************
+FORM FRM_NEW_PAGE_PRINT_ON.
+
+DATA: L_LISTTEXT TYPE PRI_PARAMS-PRTXT.
+
+***ＳＰＯＯＬ表題
+CONCATENATE TEXT-019 '(' GF_WRITE-WERKST ')'
+INTO L_LISTTEXT.
+
+***2010/02/22 add >>>
+***出力先
+G_PRINT_DEST = gf_adr10-PRINT_DEST.
+***2010/02/22 add <<<
+
+NEW-PAGE PRINT ON
+DESTINATION   G_PRINT_DEST
+COVER TEXT    L_LISTTEXT
+*---MODIFY START PSD T.SAITOH 2002/08/08 ---------------------------*
+*                   IMMEDIATELY   CNS_X
+IMMEDIATELY   P_IMMED
+*---MODIFY END   PSD T.SAITOH 2002/08/08 ---------------------------*
+KEEP IN SPOOL CNS_X
+LINE-COUNT    '58'
+LINE-SIZE     '170'
+LAYOUT        'X_58_170'
+RECEIVER      SY-UNAME
+NEW-SECTION
+NO DIALOG.
+
+ENDFORM.                    " FRM_NEW_PAGE_PRINT_ON
+********************************************
+* EDI OutputFile Check
+********************************************
+Form File_Check .
+Tables : EDP13 ,
+EDIPOD .
+
+Data : W_FILE(60) Type C ,
+W_RCVPOR Like EDP13-RCVPOR ,
+W_OUTPUTDIR Like EDIPOD-OUTPUTDIR ,
+W_OUTPUTFILE Like EDIPOD-OUTPUTFILE .
+* Mod ES-UP 2012/10/15 -->
+DATA L_CODEPAGE TYPE ABAP_ENCODING.
+L_CODEPAGE = CL_ABAP_CODEPAGE=>SAP_CODEPAGE( CNS_SJIS ).
+* Mod ES-UP 2012/10/15 <--
+Select RCVPOR From EDP13
+Into W_RCVPOR
+Where RCVPRT EQ 'LI'
+And  MESTYP EQ 'ORDERS'
+.
+Select Single OUTPUTDIR
+OUTPUTFILE
+From  EDIPOD
+Into (W_OUTPUTDIR,W_OUTPUTFILE)
+Where  PORT EQ W_RCVPOR
+.
+Concatenate W_OUTPUTDIR W_OUTPUTFILE
+Into W_FILE
+.
+* Mod ES-UP 2012/10/15 -->
+*    Open Dataset W_FILE For INPUT .
+Open Dataset W_FILE For INPUT
+IN LEGACY TEXT MODE CODE PAGE L_CODEPAGE
+IGNORING CONVERSION ERRORS.
+* Mod ES-UP 2012/10/15 <--
+If SY-SUBRC EQ 0 .
+Close Dataset W_FILE .
+Message E401(Y1) With W_FILE 'が存在するので処理を続行できません'
+.
+EndIf .
+EndSelect .
+
+EndForm .
+*&---------------------------------------------------------------------*
+*&      Form  FRM_CHECK_T001W
+*&---------------------------------------------------------------------*
+*       プラントチェック
+*----------------------------------------------------------------------*
+FORM FRM_CHECK_T001W.
+
+DATA: GT_T001W LIKE TABLE OF T001W.
+
+SELECT WERKS
+INTO CORRESPONDING FIELDS OF TABLE GT_T001W
+FROM T001W
+WHERE WERKS IN P_WERKS
+AND SPRAS = 'J'.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE E606(Z1) WITH TEXT-009.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'T001W' SY-SUBRC.
+ENDCASE.
+
+ENDFORM.                    " FRM_CHECK_T001W
+* 2005/03/11 APPEND DMC A.MASUDA START -->
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_TVARV
+*&---------------------------------------------------------------------*
+*       前回EDI出力実行時間の取得処理
+*----------------------------------------------------------------------*
+FORM FRM_GET_TVARV.
+
+DATA:
+LW_TVARV_VAL(45) TYPE C,
+* Add 2005.03.29 --->
+LW_LIFNR Type EKKO-LIFNR .
+
+Read Table P_LIFNR Index 1 .
+Move P_LIFNR-LOW To LW_LIFNR .
+Concatenate LW_LIFNR '_EDI_TIME'
+Into   W_TNAME .
+* Add 2005.03.29 <---
+
+SELECT SINGLE LOW
+INTO LW_TVARV_VAL
+* Mod ES-UP 2012/10/15 -->
+*    FROM TVARV
+FROM TVARVC
+* Mod ES-UP 2012/10/15 <--
+* Mod 2005.03.29 --->
+*  WHERE NAME = 'LIFNR_EDI_TIME'.
+Where NAME EQ W_TNAME .
+* Mod 2005.03.29 <---
+
+IF NOT LW_TVARV_VAL IS INITIAL.
+MOVE LW_TVARV_VAL TO W_UHRVR_B.
+IF W_UHRVR_B > W_UHRVR_A.
+CLEAR:
+W_UHRVR_B.
+ENDIF.
+ENDIF.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  FRM_UPDATE_TVARV
+*&---------------------------------------------------------------------*
+*       前回EDI出力実行時間の更新処理
+*----------------------------------------------------------------------*
+FORM FRM_UPDATE_TVARV.
+* Mod ES-UP 2012/10/15 -->
+** Add 2005.03.29 --->
+*   Data : LW_TVARV Type TVARV .
+** Add 2005.03.29 <---
+Data : LW_TVARV Type TVARVC .
+* Mod ES-UP 2012/10/15 <--
+* 今回実行時間に１分足し込む
+W_UHRVR_A = W_UHRVR_A + 000060.
+
+* Add 2005.03.29 --->
+SELECT SINGLE LOW
+INTO LW_TVARV
+* Mod ES-UP 2012/10/15 -->
+*    FROM TVARV
+FROM TVARVC
+* Mod ES-UP 2012/10/15 <--
+Where NAME EQ W_TNAME .
+
+If SY-SUBRC EQ 0 .
+* Add 2005.03.29 <---
+
+*   ﾊﾞﾘｱﾝﾄ変数の更新
+* Mod ES-UP 2012/10/15 -->
+*    UPDATE TVARV
+UPDATE TVARVC
+* Mod ES-UP 2012/10/15 <--
+SET LOW  = W_UHRVR_A
+* Mod 2005.03.29 --->
+*     WHERE NAME = 'LIFNR_EDI_TIME'.
+Where NAME EQ W_TNAME .
+* Mod 2005.03.29 <---
+
+* Add 2005.03.29 --->
+Else .
+Move : W_TNAME To LW_TVARV-NAME ,
+'P'     To LW_TVARV-TYPE ,
+W_UHRVR_A To LW_TVARV-LOW .
+* Mod ES-UP 2012/10/15 -->
+*    Insert Into TVARV Values LW_TVARV .
+Insert Into TVARVC Values LW_TVARV .
+* Mod ES-UP 2012/10/15 <--
+EndIf .
+* Add 2005.03.29 <---
+ENDFORM.
+* 2005/03/11 APPEND DMC A.MASUDA END   <--
+***2010/02/22 add >>>
+*&---------------------------------------------------------------------*
+*&      Form  FRM_GET_PRINT_DEST
+*&---------------------------------------------------------------------*
+*       プラント毎の出力先を取得
+*----------------------------------------------------------------------*
+FORM FRM_GET_PRINT_DEST.
+
+SELECT A~WERKS A~ADRNR B~PRINT_DEST
+INTO TABLE GT_ADR10
+FROM T001W AS A INNER JOIN ADR10 AS B
+ON   A~ADRNR =  B~ADDRNUMBER
+FOR ALL ENTRIES IN GT_WRITE
+WHERE A~WERKS =  GT_WRITE-WERKS.
+
+CASE SY-SUBRC.
+WHEN 0.
+WHEN 4.
+MESSAGE S812(Z1).
+STOP.
+WHEN OTHERS.
+MESSAGE A603(Z1) WITH SY-REPID 'ADR10' SY-SUBRC.
+ENDCASE.
+
+SORT GT_ADR10 BY WERKS.
+
+ENDFORM.                    " FRM_GET_PRINT_DEST
+***2010/02/22 add <<<
